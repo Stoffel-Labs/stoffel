@@ -2701,6 +2701,7 @@ where
     .map_err(|error| format!("Failed to start AVSS node RPC server: {error}"))?;
 
     if as_leader {
+        coord.reset_coord().await.map_err(|e| e.to_string())?;
         coord
             .start_preprocessing()
             .await
@@ -3986,12 +3987,14 @@ async fn main() {
                 // Phase 1: Coordinator preprocessing trigger
                 if let Some(ref mut coord) = coord_opt {
                     if as_leader {
+                        coord.reset_coord().await.unwrap();
                         coord.start_preprocessing().await.unwrap();
                     }
                     coord.wait_for_round(Round::Preprocessing).await.unwrap();
                 }
                 if let Some(ref mut coord) = on_chain_coord_opt {
                     if as_leader {
+                        coord.reset_coord().await.unwrap();
                         coord.start_preprocessing().await.unwrap();
                     }
                     coord.wait_for_round(Round::Preprocessing).await.unwrap();
