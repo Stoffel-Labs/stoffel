@@ -67,6 +67,10 @@ pub type Curve25519HoneyBadgerMpcEngine =
     HoneyBadgerMpcEngine<ark_curve25519::Fr, ark_curve25519::EdwardsProjective>;
 pub type Ed25519HoneyBadgerMpcEngine =
     HoneyBadgerMpcEngine<ark_ed25519::Fr, ark_ed25519::EdwardsProjective>;
+pub type Secp256k1HoneyBadgerMpcEngine =
+    HoneyBadgerMpcEngine<ark_secp256k1::Fr, ark_secp256k1::Projective>;
+pub type P256HoneyBadgerMpcEngine =
+    HoneyBadgerMpcEngine<ark_secp256r1::Fr, ark_secp256r1::Projective>;
 
 impl<F, G> HoneyBadgerMpcEngine<F, G>
 where

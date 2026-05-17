@@ -276,6 +276,10 @@ where
             MpcCurveConfig::Curve25519
         } else if TypeId::of::<G>() == TypeId::of::<ark_ed25519::EdwardsProjective>() {
             MpcCurveConfig::Ed25519
+        } else if TypeId::of::<G>() == TypeId::of::<ark_secp256k1::Projective>() {
+            MpcCurveConfig::Secp256k1
+        } else if TypeId::of::<G>() == TypeId::of::<ark_secp256r1::Projective>() {
+            MpcCurveConfig::Secp256r1
         } else {
             F::CURVE_CONFIG
         }

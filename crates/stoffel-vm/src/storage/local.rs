@@ -1,10 +1,16 @@
 //! Interface for persistent storage local to a single server/peer using redb.
 
+use super::value_codec::{
+    decode_value, decode_value_with_context, encode_value, encode_value_with_context,
+    PersistentValueContext, PersistentValueError,
+};
 use redb::{Database, TableDefinition};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use stoffel_vm_types::core_types::{TableMemory, Value};
 
 pub type LocalStorageResult<T> = Result<T, LocalStorageError>;
+pub type LocalStorageValueResult<T> = Result<T, LocalStorageValueError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LocalStorageError {
@@ -33,6 +39,20 @@ impl From<LocalStorageError> for String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LocalStorageValueError {
+    #[error(transparent)]
+    Storage(#[from] LocalStorageError),
+    #[error(transparent)]
+    Codec(#[from] PersistentValueError),
+}
+
+impl From<LocalStorageValueError> for String {
+    fn from(error: LocalStorageValueError) -> Self {
+        error.to_string()
+    }
+}
+
 /// Trait defining operations for local data persistence.
 pub trait LocalStorage: Send + Sync {
     /// Stores data associated with a key. Overwrites if the key exists.
@@ -47,6 +67,58 @@ pub trait LocalStorage: Send + Sync {
     /// Checks if a key exists.
     fn exists(&self, key: &[u8]) -> LocalStorageResult<bool>;
 }
+
+/// Value-oriented extension methods for [`LocalStorage`] implementations.
+pub trait LocalStorageValues: LocalStorage {
+    fn store_value(
+        &mut self,
+        key: &[u8],
+        value: &Value,
+        memory: &mut dyn TableMemory,
+    ) -> LocalStorageValueResult<()> {
+        self.store_value_with_context(key, value, memory, None)
+    }
+
+    fn store_value_with_context(
+        &mut self,
+        key: &[u8],
+        value: &Value,
+        memory: &mut dyn TableMemory,
+        context: Option<&PersistentValueContext>,
+    ) -> LocalStorageValueResult<()> {
+        let encoded = match context {
+            Some(context) => encode_value_with_context(value, memory, Some(context))?,
+            None => encode_value(value, memory)?,
+        };
+        self.store(key, &encoded)?;
+        Ok(())
+    }
+
+    fn retrieve_value(
+        &self,
+        key: &[u8],
+        memory: &mut dyn TableMemory,
+    ) -> LocalStorageValueResult<Option<Value>> {
+        self.retrieve_value_with_context(key, memory, None)
+    }
+
+    fn retrieve_value_with_context(
+        &self,
+        key: &[u8],
+        memory: &mut dyn TableMemory,
+        context: Option<&PersistentValueContext>,
+    ) -> LocalStorageValueResult<Option<Value>> {
+        self.retrieve(key)?
+            .map(|bytes| match context {
+                Some(context) => decode_value_with_context(&bytes, memory, Some(context)),
+                None => decode_value(&bytes, memory),
+            })
+            .transpose()
+            .map_err(LocalStorageValueError::from)
+    }
+}
+
+impl<T> LocalStorageValues for T where T: LocalStorage + ?Sized {}
 
 // Define the table for storing key-value pairs
 const DATA_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("data_kv_store");
@@ -182,7 +254,12 @@ impl LocalStorage for RedbLocalStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalStorage, RedbLocalStorage};
+    use super::{LocalStorage, LocalStorageValues, RedbLocalStorage};
+    use crate::storage::PersistentShareContext;
+    use crate::storage::PersistentValueContext;
+    use stoffel_vm_types::core_types::{
+        ObjectStore, ShareData, ShareType, TableMemory, TableRef, Value,
+    };
 
     #[test]
     fn redb_storage_round_trips_values() {
@@ -227,6 +304,85 @@ mod tests {
         assert_eq!(
             storage.retrieve(b"key").expect("retrieve"),
             Some(b"value".to_vec())
+        );
+    }
+
+    #[test]
+    fn redb_storage_round_trips_vm_values() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("local.redb");
+        let mut memory = ObjectStore::new();
+        let object_ref = memory.create_object_ref().expect("object");
+        memory
+            .set_table_field(
+                TableRef::from(object_ref),
+                Value::String("secret".to_owned()),
+                Value::Share(
+                    ShareType::secret_int(64),
+                    ShareData::Feldman {
+                        data: vec![1, 2, 3],
+                        commitments: vec![vec![4], vec![5, 6]],
+                    },
+                ),
+            )
+            .expect("object field");
+
+        {
+            let mut storage = RedbLocalStorage::new(&path).expect("open storage");
+            let context = PersistentValueContext::with_share_context(PersistentShareContext::new(
+                "avss-mpc",
+                "bls12-381",
+                "bls12-381-fr",
+                7,
+                0,
+                5,
+                1,
+                b"state",
+            ));
+            storage
+                .store_value_with_context(
+                    b"state",
+                    &Value::from(object_ref),
+                    &mut memory,
+                    Some(&context),
+                )
+                .expect("store value");
+        }
+
+        let storage = RedbLocalStorage::new(&path).expect("reopen storage");
+        let context = PersistentValueContext::with_share_context(PersistentShareContext::new(
+            "avss-mpc",
+            "bls12-381",
+            "bls12-381-fr",
+            7,
+            0,
+            5,
+            1,
+            b"state",
+        ));
+        let stored_value = storage
+            .retrieve_value_with_context(b"state", &mut memory, Some(&context))
+            .expect("retrieve value")
+            .expect("stored value");
+        let stored_object_ref = match stored_value {
+            Value::Object(object_ref) => object_ref,
+            other => panic!("expected object, got {other:?}"),
+        };
+
+        assert_eq!(
+            memory
+                .read_table_field(
+                    TableRef::from(stored_object_ref),
+                    &Value::String("secret".to_owned())
+                )
+                .expect("read decoded field"),
+            Some(Value::Share(
+                ShareType::secret_int(64),
+                ShareData::Feldman {
+                    data: vec![1, 2, 3],
+                    commitments: vec![vec![4], vec![5, 6]],
+                },
+            ))
         );
     }
 }

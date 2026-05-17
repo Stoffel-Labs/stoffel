@@ -524,6 +524,9 @@ fn exponent_generator_resolves_supported_curve_names() {
         ("bn254-g1", MpcExponentGroup::Bn254G1),
         ("curve25519-edwards", MpcExponentGroup::Curve25519Edwards),
         ("ed25519-edwards", MpcExponentGroup::Ed25519Edwards),
+        ("secp256k1", MpcExponentGroup::Secp256k1),
+        ("p-256", MpcExponentGroup::P256),
+        ("secp256r1", MpcExponentGroup::P256),
     ];
 
     for (name, expected_group) in cases {

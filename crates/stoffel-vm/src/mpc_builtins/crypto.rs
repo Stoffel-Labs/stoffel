@@ -82,6 +82,14 @@ fn register_curve_builtins(vm: &mut VirtualMachine) -> VirtualMachineResult<()> 
                 let field_elem = ark_curve25519::Fr::from_le_bytes_mod_order(&hash_bytes);
                 serialize_field_element(field_elem)?
             }
+            MpcCurveConfig::Secp256k1 => {
+                let field_elem = ark_secp256k1::Fr::from_be_bytes_mod_order(&hash_bytes);
+                serialize_field_element(field_elem)?
+            }
+            MpcCurveConfig::Secp256r1 => {
+                let field_elem = ark_secp256r1::Fr::from_be_bytes_mod_order(&hash_bytes);
+                serialize_field_element(field_elem)?
+            }
         };
 
         ctx.create_byte_array(&out_bytes)

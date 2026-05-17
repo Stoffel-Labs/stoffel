@@ -2,6 +2,7 @@ mod arguments;
 mod context;
 mod error;
 mod function;
+mod local_storage;
 mod mpc;
 mod services;
 mod share_objects;

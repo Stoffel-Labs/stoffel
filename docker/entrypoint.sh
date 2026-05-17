@@ -34,6 +34,7 @@ echo "Program: ${STOFFEL_PROGRAM}"
 echo "Entry: ${STOFFEL_ENTRY}"
 echo "Coordinator: ${STOFFEL_COORD_ADDR:-N/A}"
 echo "Preproc Store: ${STOFFEL_PREPROC_STORE:-none}"
+echo "Local Store: ${STOFFEL_LOCAL_STORE:-none}"
 echo "Auth Token: $( [ -n "${STOFFEL_AUTH_TOKEN:-}" ] && echo "configured" || echo "not set" )"
 echo "=========================================="
 
@@ -90,6 +91,12 @@ build_command() {
         if [ -n "${STOFFEL_CLIENT_INDEX:-}" ]; then
             cmd="${cmd} --client-index ${STOFFEL_CLIENT_INDEX}"
         fi
+        if [ -n "${STOFFEL_MPC_BACKEND:-}" ]; then
+            cmd="${cmd} --mpc-backend ${STOFFEL_MPC_BACKEND}"
+        fi
+        if [ -n "${STOFFEL_MPC_CURVE:-}" ]; then
+            cmd="${cmd} --mpc-curve ${STOFFEL_MPC_CURVE}"
+        fi
         echo "$cmd"
         return
     fi
@@ -135,6 +142,10 @@ build_command() {
 
     if [ -n "${STOFFEL_PREPROC_STORE:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
         cmd="${cmd} --preproc-store ${STOFFEL_PREPROC_STORE}"
+    fi
+
+    if [ -n "${STOFFEL_LOCAL_STORE:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+        cmd="${cmd} --local-store ${STOFFEL_LOCAL_STORE}"
     fi
 
     # Add MPC backend if specified

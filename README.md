@@ -263,7 +263,27 @@ Notes:
 - `STOFFEL_AUTH_TOKEN` is required for authenticated discovery in bootnode, leader, and party flows
 - The CLI accepts any file path; this repository conventionally stores compiled fixtures as `.stflb`
 - `--mpc-backend` supports `honeybadger` and `avss`
-- `--mpc-curve` supports `bls12-381`, `bn254`, `curve25519`, and `ed25519`
+- `--mpc-curve` supports `bls12-381`, `bn254`, `curve25519`, `ed25519`, `secp256k1`, and `p-256` (`secp256r1`) for AVSS
+
+## Docker Flows
+
+The API/coordinator topology is runnable with the reserve-index compose stack:
+
+```bash
+STOFFEL_AUTH_TOKEN=replace-with-random-secret \
+docker compose -f docker-compose.coordinator.reserve-index.yml up --build
+```
+
+That coordinator path currently runs through the HoneyBadger/BLS12-381 VM path. The AVSS compose stack is separate and is the persistence testbed for AVSS curves and local share storage:
+
+```bash
+STOFFEL_AUTH_TOKEN=replace-with-random-secret \
+docker compose -f docker-compose.avss.yml up --build
+```
+
+`docker-compose.avss.yml` mounts a per-party local data volume and forwards `STOFFEL_LOCAL_STORE` to `stoffel-run`.
+
+For the AVSS certificate-signing path, run `/app/programs/avss_certificate_keygen.stflb` once to persist each party's CA signing share, then run `/app/programs/avss_certificate_sign.stflb` to produce raw `R || s || pk` signature material over the placeholder TBS digest. The signing fixture is ready for a future CA bridge that supplies real TBS digests to AVSS runs.
 
 ## C Foreign Function Interface
 

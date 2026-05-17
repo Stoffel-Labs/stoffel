@@ -1,7 +1,8 @@
 # Persistent preprocessing override for the reserve-index coordinator stack.
 #
 # Use with docker-compose.coordinator.reserve-index.yml to keep each party's
-# HoneyBadger preprocessing material in a named LMDB volume across runs.
+# HoneyBadger preprocessing material in a named LMDB volume across runs. This
+# is separate from AVSS local-store persistence in docker-compose.avss.yml.
 
 services:
   party0:

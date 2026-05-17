@@ -269,6 +269,10 @@ pub type Curve25519AvssMpcEngine =
 /// Type alias for Ed25519 AVSS engine.
 ///
 /// Note: `ark_ed25519::Fr` is a re-export of `ark_curve25519::Fr`, so
-/// `curve_config()` will report `MpcCurveConfig::Curve25519`. The group
-/// type (`EdwardsProjective`) is distinct.
+/// field-only metadata is shared with Curve25519. The group type
+/// (`EdwardsProjective`) preserves the configured curve identity.
 pub type Ed25519AvssMpcEngine = AvssMpcEngine<ark_ed25519::Fr, ark_ed25519::EdwardsProjective>;
+/// Type alias for secp256k1 AVSS engine.
+pub type Secp256k1AvssMpcEngine = AvssMpcEngine<ark_secp256k1::Fr, ark_secp256k1::Projective>;
+/// Type alias for NIST P-256 (secp256r1) AVSS engine.
+pub type P256AvssMpcEngine = AvssMpcEngine<ark_secp256r1::Fr, ark_secp256r1::Projective>;

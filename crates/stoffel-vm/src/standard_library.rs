@@ -1,4 +1,5 @@
 use crate::core_vm::VirtualMachine;
+use crate::foreign_functions::{ForeignFunctionCallbackResult, ForeignFunctionContext};
 use crate::net::client_store::{ClientInputIndex, ClientOutputShareCount, ClientShareIndex};
 use crate::runtime_hooks::HookEvent;
 use crate::value_conversions::{usize_to_vm_i64, value_to_usize};
@@ -15,6 +16,11 @@ pub(crate) const FUNCTION_NAMES: &[&str] = &[
     "ClientStore.get_number_clients",
     "ClientStore.take_share",
     "ClientStore.take_share_fixed",
+    "LocalStorage.store",
+    "LocalStorage.load",
+    "LocalStorage.retrieve",
+    "LocalStorage.delete",
+    "LocalStorage.exists",
     "MpcOutput.send_to_client",
     "create_closure",
     "call_closure",
@@ -169,6 +175,57 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         )?)
     });
 
+    register_standard_builtin!("LocalStorage.store", |mut ctx| {
+        let (key_value, stored_value) = {
+            let args = ctx.named_args("LocalStorage.store");
+            args.require_exact(2, "2 arguments: key and value")?;
+            (args.cloned(0)?, args.cloned(1)?)
+        };
+        let key = local_storage_key(&mut ctx, key_value)?;
+        ctx.local_storage_store_value(&key, &stored_value)?;
+        Ok(Value::Bool(true))
+    });
+
+    register_standard_builtin!("LocalStorage.load", |mut ctx| {
+        let key_value = {
+            let args = ctx.named_args("LocalStorage.load");
+            args.require_exact(1, "1 argument: key")?;
+            args.cloned(0)?
+        };
+        let key = local_storage_key(&mut ctx, key_value)?;
+        Ok(ctx.local_storage_load_value(&key)?.unwrap_or(Value::Unit))
+    });
+
+    register_standard_builtin!("LocalStorage.retrieve", |mut ctx| {
+        let key_value = {
+            let args = ctx.named_args("LocalStorage.retrieve");
+            args.require_exact(1, "1 argument: key")?;
+            args.cloned(0)?
+        };
+        let key = local_storage_key(&mut ctx, key_value)?;
+        Ok(ctx.local_storage_load_value(&key)?.unwrap_or(Value::Unit))
+    });
+
+    register_standard_builtin!("LocalStorage.delete", |mut ctx| {
+        let key_value = {
+            let args = ctx.named_args("LocalStorage.delete");
+            args.require_exact(1, "1 argument: key")?;
+            args.cloned(0)?
+        };
+        let key = local_storage_key(&mut ctx, key_value)?;
+        Ok(Value::Bool(ctx.local_storage_delete(&key)?))
+    });
+
+    register_standard_builtin!("LocalStorage.exists", |mut ctx| {
+        let key_value = {
+            let args = ctx.named_args("LocalStorage.exists");
+            args.require_exact(1, "1 argument: key")?;
+            args.cloned(0)?
+        };
+        let key = local_storage_key(&mut ctx, key_value)?;
+        Ok(Value::Bool(ctx.local_storage_exists(&key)?))
+    });
+
     register_standard_builtin!("MpcOutput.send_to_client", |mut ctx| {
         let (client_id, share_value) = {
             let args = ctx.named_args("MpcOutput.send_to_client");
@@ -260,12 +317,26 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     Ok(())
 }
 
+fn local_storage_key(
+    ctx: &mut ForeignFunctionContext<'_>,
+    key_value: Value,
+) -> ForeignFunctionCallbackResult<Vec<u8>> {
+    match key_value {
+        Value::String(key) => Ok(key.into_bytes()),
+        key_value => ctx.read_byte_array(&key_value),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::curve::{MpcCurveConfig, MpcFieldKind};
+    use crate::net::mpc_engine::{MpcEngine, MpcEngineError, MpcEngineResult, MpcSessionTopology};
     use crate::output::{VmOutputResult, VmOutputSink};
+    use crate::storage::RedbLocalStorage;
     use parking_lot::Mutex;
     use std::sync::Arc;
+    use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData};
 
     #[derive(Clone, Default)]
     struct RecordingOutputSink {
@@ -276,6 +347,52 @@ mod tests {
         fn write_line(&self, line: &str) -> VmOutputResult<()> {
             self.lines.lock().push(line.to_owned());
             Ok(())
+        }
+    }
+
+    struct StorageTestEngine;
+
+    impl MpcEngine for StorageTestEngine {
+        fn protocol_name(&self) -> &'static str {
+            "avss-mpc"
+        }
+
+        fn topology(&self) -> MpcSessionTopology {
+            MpcSessionTopology::try_new(7, 0, 5, 1).expect("valid topology")
+        }
+
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        fn start(&self) -> MpcEngineResult<()> {
+            Ok(())
+        }
+
+        fn input_share(&self, _clear: ClearShareInput) -> MpcEngineResult<ShareData> {
+            Err(MpcEngineError::operation_failed(
+                "storage_test",
+                "input_share is not used",
+            ))
+        }
+
+        fn open_share(
+            &self,
+            _ty: ShareType,
+            _share_bytes: &[u8],
+        ) -> MpcEngineResult<ClearShareValue> {
+            Err(MpcEngineError::operation_failed(
+                "storage_test",
+                "open_share is not used",
+            ))
+        }
+
+        fn curve_config(&self) -> MpcCurveConfig {
+            MpcCurveConfig::Bls12_381
+        }
+
+        fn field_kind(&self) -> MpcFieldKind {
+            MpcFieldKind::Bls12_381Fr
         }
     }
 
@@ -314,5 +431,77 @@ mod tests {
             .expect("print should use cloned VM output sink");
 
         assert_eq!(lines.lock().as_slice(), &["clone"]);
+    }
+
+    #[test]
+    fn local_storage_builtins_persist_vm_values() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("local.redb");
+        let stored = Value::Share(
+            ShareType::secret_int(64),
+            ShareData::Feldman {
+                data: vec![1, 2, 3],
+                commitments: vec![vec![4, 5], vec![6]],
+            },
+        );
+
+        {
+            let storage = RedbLocalStorage::new(&path).expect("open storage");
+            let mut vm = VirtualMachine::builder()
+                .with_local_storage(storage)
+                .with_mpc_engine(Arc::new(StorageTestEngine))
+                .try_build()
+                .expect("build VM");
+
+            assert_eq!(
+                vm.execute_with_args(
+                    "LocalStorage.store",
+                    &[Value::String("share".to_owned()), stored.clone()]
+                )
+                .expect("store value"),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                vm.execute_with_args("LocalStorage.exists", &[Value::String("share".to_owned())])
+                    .expect("exists"),
+                Value::Bool(true)
+            );
+
+            let mut cloned = vm
+                .try_clone_with_independent_state()
+                .expect("clone VM with storage");
+            assert_eq!(
+                cloned
+                    .execute_with_args("LocalStorage.load", &[Value::String("share".to_owned())])
+                    .expect("load from clone"),
+                stored.clone()
+            );
+        }
+
+        let storage = RedbLocalStorage::new(&path).expect("reopen storage");
+        let mut vm = VirtualMachine::builder()
+            .with_local_storage(storage)
+            .with_mpc_engine(Arc::new(StorageTestEngine))
+            .try_build()
+            .expect("build VM");
+
+        assert_eq!(
+            vm.execute_with_args("LocalStorage.load", &[Value::String("share".to_owned())])
+                .expect("load value"),
+            stored
+        );
+        assert_eq!(
+            vm.execute_with_args("LocalStorage.delete", &[Value::String("share".to_owned())])
+                .expect("delete value"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            vm.execute_with_args(
+                "LocalStorage.retrieve",
+                &[Value::String("share".to_owned())]
+            )
+            .expect("load missing"),
+            Value::Unit
+        );
     }
 }

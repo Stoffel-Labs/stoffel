@@ -20,7 +20,9 @@ use crate::program::{CallTarget, Program};
 use crate::reveal_destination::FrameDepth;
 use crate::runtime_hooks::{HookManager, InstructionCursor};
 use crate::runtime_instruction::RuntimeFunction;
+use crate::storage::LocalStorage;
 use mpc_runtime::MpcRuntimeState;
+use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::sync::Arc;
 #[cfg(test)]
@@ -36,6 +38,7 @@ mod foreign_objects;
 mod frame;
 mod hooks;
 mod instructions;
+mod local_storage;
 mod mpc;
 mod mpc_operation;
 mod mpc_runtime;
@@ -52,6 +55,7 @@ pub(crate) struct VMStateConfig {
     register_layout: RegisterLayout,
     mpc_engine: Option<Arc<dyn MpcEngine>>,
     output_sink: Arc<dyn VmOutputSink>,
+    local_storage: Option<Arc<Mutex<Box<dyn LocalStorage>>>>,
 }
 
 impl Default for VMStateConfig {
@@ -61,6 +65,7 @@ impl Default for VMStateConfig {
             register_layout: RegisterLayout::default(),
             mpc_engine: None,
             output_sink: Arc::new(StdoutOutputSink),
+            local_storage: None,
         }
     }
 }
@@ -83,6 +88,14 @@ impl VMStateConfig {
 
     pub(crate) fn with_output_sink(mut self, output_sink: Arc<dyn VmOutputSink>) -> Self {
         self.output_sink = output_sink;
+        self
+    }
+
+    pub(crate) fn with_shared_local_storage(
+        mut self,
+        local_storage: Arc<Mutex<Box<dyn LocalStorage>>>,
+    ) -> Self {
+        self.local_storage = Some(local_storage);
         self
     }
 }
@@ -126,6 +139,8 @@ pub(crate) struct VMState {
     register_layout: RegisterLayout,
     /// Runtime output boundary used by standard-library print.
     output_sink: Arc<dyn VmOutputSink>,
+    /// Persistent local storage configured for VM programs.
+    local_storage: Option<Arc<Mutex<Box<dyn LocalStorage>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,14 +211,18 @@ impl VMState {
             mpc_runtime,
             register_layout: config.register_layout,
             output_sink: config.output_sink,
+            local_storage: config.local_storage,
         }
     }
 
     pub(crate) fn try_clone_with_independent_runtime(&self) -> VmResult<Self> {
-        let config = VMStateConfig::default()
+        let mut config = VMStateConfig::default()
             .with_table_memory(self.table_memory.try_clone_empty()?)
             .with_register_layout(self.register_layout)
             .with_output_sink(Arc::clone(&self.output_sink));
+        if let Some(local_storage) = &self.local_storage {
+            config = config.with_shared_local_storage(Arc::clone(local_storage));
+        }
 
         let mut cloned = Self::from_config(config);
         cloned.program = self.program.clone();

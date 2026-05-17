@@ -1,8 +1,10 @@
 use super::VirtualMachine;
 use crate::net::mpc_engine::MpcEngine;
 use crate::output::VmOutputSink;
+use crate::storage::LocalStorage;
 use crate::vm_state::{VMState, VMStateConfig};
 use crate::VirtualMachineResult;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use stoffel_vm_types::core_types::TableMemory;
 use stoffel_vm_types::registers::RegisterLayout;
@@ -70,6 +72,7 @@ pub struct VirtualMachineBuilder {
     register_layout: RegisterLayout,
     table_memory: Option<Box<dyn TableMemory>>,
     output_sink: Option<Arc<dyn VmOutputSink>>,
+    local_storage: Option<Arc<Mutex<Box<dyn LocalStorage>>>>,
 }
 
 impl Default for VirtualMachineBuilder {
@@ -81,6 +84,7 @@ impl Default for VirtualMachineBuilder {
             register_layout: RegisterLayout::default(),
             table_memory: None,
             output_sink: None,
+            local_storage: None,
         }
     }
 }
@@ -132,6 +136,19 @@ impl VirtualMachineBuilder {
         self
     }
 
+    pub fn with_local_storage<S>(mut self, local_storage: S) -> Self
+    where
+        S: LocalStorage + 'static,
+    {
+        self.local_storage = Some(Arc::new(Mutex::new(Box::new(local_storage))));
+        self
+    }
+
+    pub fn with_boxed_local_storage(mut self, local_storage: Box<dyn LocalStorage>) -> Self {
+        self.local_storage = Some(Arc::new(Mutex::new(local_storage)));
+        self
+    }
+
     pub fn try_build(self) -> VirtualMachineResult<VirtualMachine> {
         let mut state_config = VMStateConfig::default().with_register_layout(self.register_layout);
         if let Some(table_memory) = self.table_memory {
@@ -142,6 +159,9 @@ impl VirtualMachineBuilder {
         }
         if let Some(output_sink) = self.output_sink {
             state_config = state_config.with_output_sink(output_sink);
+        }
+        if let Some(local_storage) = self.local_storage {
+            state_config = state_config.with_shared_local_storage(local_storage);
         }
         let mut vm = VirtualMachine::empty_with_state_config(state_config);
 

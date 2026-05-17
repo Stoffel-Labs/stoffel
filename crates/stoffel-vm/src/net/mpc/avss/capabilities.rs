@@ -477,6 +477,10 @@ where
             MpcExponentGroup::Curve25519Edwards
         } else if TypeId::of::<G>() == TypeId::of::<ark_ed25519::EdwardsProjective>() {
             MpcExponentGroup::Ed25519Edwards
+        } else if TypeId::of::<G>() == TypeId::of::<ark_secp256k1::Projective>() {
+            MpcExponentGroup::Secp256k1
+        } else if TypeId::of::<G>() == TypeId::of::<ark_secp256r1::Projective>() {
+            MpcExponentGroup::P256
         } else {
             MpcExponentGroup::native_for_curve(self.curve_config())
         }

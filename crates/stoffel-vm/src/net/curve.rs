@@ -54,7 +54,7 @@ impl fmt::Display for MpcCurveError {
         match self {
             MpcCurveError::UnknownCurve { name } => write!(
                 f,
-                "Unknown MPC curve '{name}'. Supported curves: bls12-381, bn254, curve25519, ed25519"
+                "Unknown MPC curve '{name}'. Supported curves: bls12-381, bn254, curve25519, ed25519, secp256k1, p-256"
             ),
             MpcCurveError::BackendCurveUnsupported { curve, backend } => write!(
                 f,
@@ -106,9 +106,8 @@ impl From<MpcCurveError> for String {
 /// Ed25519 and Curve25519 share the same scalar field (`ark_curve25519::Fr`).
 /// At the type level `ark_ed25519::Fr` is a re-export of `ark_curve25519::Fr`,
 /// so `SupportedMpcField` is implemented once and covers both curves.
-/// `curve_config()` on an Ed25519 engine will report `Curve25519` because the
-/// field is identical; use the server / CLI `--mpc-curve` flag to distinguish
-/// intent.
+/// Engine implementations use the group type to preserve the configured curve
+/// identity where the field alone is ambiguous.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MpcCurveConfig {
     #[default]
@@ -118,6 +117,9 @@ pub enum MpcCurveConfig {
     /// Ed25519 uses the same scalar field as Curve25519.
     /// See enum-level docs for details.
     Ed25519,
+    Secp256k1,
+    /// NIST P-256, also known as secp256r1.
+    Secp256r1,
 }
 
 impl std::str::FromStr for MpcCurveConfig {
@@ -130,6 +132,8 @@ impl std::str::FromStr for MpcCurveConfig {
             "bn254" => Ok(Self::Bn254),
             "curve25519" | "curve-25519" => Ok(Self::Curve25519),
             "ed25519" | "ed-25519" => Ok(Self::Ed25519),
+            "secp256k1" | "secp256-k1" => Ok(Self::Secp256k1),
+            "p-256" | "p256" | "nist-p256" | "secp256r1" | "secp256-r1" => Ok(Self::Secp256r1),
             other => Err(MpcCurveError::UnknownCurve {
                 name: other.to_string(),
             }),
@@ -144,6 +148,8 @@ impl MpcCurveConfig {
             Self::Bn254 => "bn254",
             Self::Curve25519 => "curve25519",
             Self::Ed25519 => "ed25519",
+            Self::Secp256k1 => "secp256k1",
+            Self::Secp256r1 => "p-256",
         }
     }
 
@@ -154,14 +160,25 @@ impl MpcCurveConfig {
             Self::Curve25519 => MpcFieldKind::Curve25519Fr,
             // Ed25519 uses the same scalar field as curve25519.
             Self::Ed25519 => MpcFieldKind::Curve25519Fr,
+            Self::Secp256k1 => MpcFieldKind::Secp256k1Fr,
+            Self::Secp256r1 => MpcFieldKind::Secp256r1Fr,
         }
     }
 
     /// Validate that this curve is compatible with the given backend.
-    ///
-    /// Currently all curves are supported by all backends. This is an extension
-    /// point for future backend-specific restrictions.
-    pub fn validate_for_backend(self, _backend: MpcBackendKind) -> MpcCurveResult<()> {
+    pub fn validate_for_backend(self, backend: MpcBackendKind) -> MpcCurveResult<()> {
+        #[cfg(feature = "honeybadger")]
+        if matches!(backend, MpcBackendKind::HoneyBadger)
+            && matches!(self, Self::Secp256k1 | Self::Secp256r1)
+        {
+            return Err(MpcCurveError::BackendCurveUnsupported {
+                curve: self,
+                backend,
+            });
+        }
+        #[cfg(not(feature = "honeybadger"))]
+        let _ = backend;
+
         Ok(())
     }
 }
@@ -172,6 +189,8 @@ pub enum MpcFieldKind {
     Bls12_381Fr,
     Bn254Fr,
     Curve25519Fr,
+    Secp256k1Fr,
+    Secp256r1Fr,
 }
 
 impl MpcFieldKind {
@@ -180,6 +199,8 @@ impl MpcFieldKind {
             Self::Bls12_381Fr => "bls12-381-fr",
             Self::Bn254Fr => "bn254-fr",
             Self::Curve25519Fr => "curve25519-fr",
+            Self::Secp256k1Fr => "secp256k1-fr",
+            Self::Secp256r1Fr => "p-256-fr",
         }
     }
 }
@@ -204,6 +225,14 @@ impl SupportedMpcField for ark_bn254::Fr {
 
 impl SupportedMpcField for ark_curve25519::Fr {
     const CURVE_CONFIG: MpcCurveConfig = MpcCurveConfig::Curve25519;
+}
+
+impl SupportedMpcField for ark_secp256k1::Fr {
+    const CURVE_CONFIG: MpcCurveConfig = MpcCurveConfig::Secp256k1;
+}
+
+impl SupportedMpcField for ark_secp256r1::Fr {
+    const CURVE_CONFIG: MpcCurveConfig = MpcCurveConfig::Secp256r1;
 }
 
 /// Convert an `i64` to a field element.
@@ -370,6 +399,18 @@ mod tests {
         assert_eq!(
             MpcCurveConfig::from_str("ed25519").unwrap(),
             MpcCurveConfig::Ed25519
+        );
+        assert_eq!(
+            MpcCurveConfig::from_str("secp256k1").unwrap(),
+            MpcCurveConfig::Secp256k1
+        );
+        assert_eq!(
+            MpcCurveConfig::from_str("p-256").unwrap(),
+            MpcCurveConfig::Secp256r1
+        );
+        assert_eq!(
+            MpcCurveConfig::from_str("secp256r1").unwrap(),
+            MpcCurveConfig::Secp256r1
         );
         // Also works via str::parse()
         assert_eq!(
@@ -553,5 +594,37 @@ mod tests {
         assert!(MpcCurveConfig::Curve25519
             .validate_for_backend(MpcBackendKind::Avss)
             .is_ok());
+        assert!(MpcCurveConfig::Ed25519
+            .validate_for_backend(MpcBackendKind::Avss)
+            .is_ok());
+        assert!(MpcCurveConfig::Secp256k1
+            .validate_for_backend(MpcBackendKind::Avss)
+            .is_ok());
+        assert!(MpcCurveConfig::Secp256r1
+            .validate_for_backend(MpcBackendKind::Avss)
+            .is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "honeybadger")]
+    fn honeybadger_rejects_avss_only_weierstrass_curves() {
+        assert_eq!(
+            MpcCurveConfig::Secp256k1
+                .validate_for_backend(MpcBackendKind::HoneyBadger)
+                .unwrap_err(),
+            MpcCurveError::BackendCurveUnsupported {
+                curve: MpcCurveConfig::Secp256k1,
+                backend: MpcBackendKind::HoneyBadger,
+            }
+        );
+        assert_eq!(
+            MpcCurveConfig::Secp256r1
+                .validate_for_backend(MpcBackendKind::HoneyBadger)
+                .unwrap_err(),
+            MpcCurveError::BackendCurveUnsupported {
+                curve: MpcCurveConfig::Secp256r1,
+                backend: MpcBackendKind::HoneyBadger,
+            }
+        );
     }
 }

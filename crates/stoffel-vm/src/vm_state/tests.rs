@@ -343,6 +343,8 @@ impl AsyncOpenEngine {
             MpcFieldKind::Bls12_381Fr => MpcCurveConfig::Bls12_381,
             MpcFieldKind::Bn254Fr => MpcCurveConfig::Bn254,
             MpcFieldKind::Curve25519Fr => MpcCurveConfig::Curve25519,
+            MpcFieldKind::Secp256k1Fr => MpcCurveConfig::Secp256k1,
+            MpcFieldKind::Secp256r1Fr => MpcCurveConfig::Secp256r1,
         };
         Self::with_curve_config_and_field_kind(instance_id, curve_config, field_kind)
     }

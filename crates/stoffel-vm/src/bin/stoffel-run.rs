@@ -51,6 +51,7 @@ use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 use stoffel_vm::runtime_hooks::{HookContext, HookEvent};
 #[cfg(feature = "honeybadger")]
 use stoffel_vm::storage::preproc::LmdbPreprocStore;
+use stoffel_vm::storage::RedbLocalStorage;
 use stoffel_vm_types::compiled_binary::CompiledBinary;
 use stoffel_vm_types::core_types::Value;
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
@@ -901,6 +902,10 @@ async fn run_hb_client_for_curve(
             )
             .await
         }
+        MpcCurveConfig::Secp256k1 | MpcCurveConfig::Secp256r1 => Err(format!(
+            "client mode with honeybadger backend does not support curve {}",
+            curve_config.name()
+        )),
     }
 }
 
@@ -1910,6 +1915,7 @@ async fn main() {
     let mut contract_addr: Option<String> = None;
     let mut coordinator_client_index: Option<u64> = None;
     let mut preproc_store_path: Option<String> = None;
+    let mut local_store_path: Option<String> = None;
 
     for arg in &raw_args {
         if arg == "-h" || arg == "--help" {
@@ -1952,6 +1958,7 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--expected-clients") {
         } else if let Some(_rest) = arg.strip_prefix("--client-index") {
         } else if let Some(_rest) = arg.strip_prefix("--preproc-store") {
+        } else if let Some(_rest) = arg.strip_prefix("--local-store") {
         }
     }
 
@@ -2120,6 +2127,11 @@ async fn main() {
             "--preproc-store" => {
                 if let Some(v) = args_iter.next() {
                     preproc_store_path = Some(v);
+                }
+            }
+            "--local-store" => {
+                if let Some(v) = args_iter.next() {
+                    local_store_path = Some(v);
                 }
             }
             "--expected-clients" => {
@@ -2630,7 +2642,18 @@ async fn main() {
     }
 
     // Initialize VM
-    let mut vm = VirtualMachine::new();
+    let mut vm_builder = VirtualMachine::builder();
+    if let Some(path) = &local_store_path {
+        let storage = match RedbLocalStorage::new(path) {
+            Ok(storage) => storage,
+            Err(err) => {
+                eprintln!("Error: failed to open local storage: {}", err);
+                exit(3);
+            }
+        };
+        vm_builder = vm_builder.with_local_storage(storage);
+    }
+    let mut vm = vm_builder.build();
 
     // Register all functions
     for f in functions {
@@ -3217,6 +3240,13 @@ async fn main() {
                         MpcCurveConfig::Ed25519 => {
                             setup_hb!(ark_ed25519::Fr, ark_ed25519::EdwardsProjective)
                         }
+                        MpcCurveConfig::Secp256k1 | MpcCurveConfig::Secp256r1 => {
+                            eprintln!(
+                                "Error: curve {} is not supported by honeybadger backend",
+                                curve_config.name()
+                            );
+                            exit(2);
+                        }
                     }
                 }
 
@@ -3265,6 +3295,12 @@ async fn main() {
                     }
                     MpcCurveConfig::Ed25519 => {
                         setup_avss!(ark_ed25519::Fr, ark_ed25519::EdwardsProjective)
+                    }
+                    MpcCurveConfig::Secp256k1 => {
+                        setup_avss!(ark_secp256k1::Fr, ark_secp256k1::Projective)
+                    }
+                    MpcCurveConfig::Secp256r1 => {
+                        setup_avss!(ark_secp256r1::Fr, ark_secp256r1::Projective)
                     }
                 }
 
@@ -3435,7 +3471,8 @@ Flags:
   --n-parties <usize>     Number of parties for MPC (required in party/leader/client mode)
   --threshold <usize>     Threshold t (default: 1)
   --mpc-backend <name>    MPC backend: honeybadger (default) or avss
-  --mpc-curve <name>      MPC curve: bls12-381 (default), bn254, curve25519, ed25519
+  --mpc-curve <name>      MPC curve: bls12-381 (default), bn254, curve25519, ed25519;
+                          AVSS also supports secp256k1 and p-256
   --inputs <values>       Comma-separated input values (client mode)
   --servers <addrs>       Comma-separated server addresses (client mode)
   --wait-for-clients <n>
@@ -3453,6 +3490,7 @@ Flags:
   --timestamp <u64>       Coordinator session timestamp (off-chain)
   --client-index <u64>    Reserved coordinator input index (coordinator client mode)
   --preproc-store <path>  Persistent HoneyBadger preprocessing store directory
+  --local-store <path>    Persistent VM local storage database
   --expected-clients <cert-paths-or-addrs>
                           Comma-separated client cert paths for off-chain or addresses for on-chain mode
   -h, --help              Show this help
