@@ -132,12 +132,8 @@ async fn main() {
         "curve25519" => {
             start_for_curve::<ark_curve25519::Fr, ark_curve25519::EdwardsProjective>(args).await
         }
-        "ed25519" => {
-            start_for_curve::<ark_ed25519::Fr, ark_ed25519::EdwardsProjective>(args).await
-        }
-        "secp256k1" => {
-            start_for_curve::<ark_secp256k1::Fr, ark_secp256k1::Projective>(args).await
-        }
+        "ed25519" => start_for_curve::<ark_ed25519::Fr, ark_ed25519::EdwardsProjective>(args).await,
+        "secp256k1" => start_for_curve::<ark_secp256k1::Fr, ark_secp256k1::Projective>(args).await,
         "p-256" | "p256" | "secp256r1" => {
             start_for_curve::<ark_secp256r1::Fr, ark_secp256r1::Projective>(args).await
         }

@@ -5106,6 +5106,7 @@ dependencies = [
 [[package]]
 name = "stoffel-mpc-coordinator"
 version = "0.1.0"
+source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=dev#a74c8426263aa491bd2258c3c515f55b97d2b68a"
 dependencies = [
  "alloy",
  "alloy-primitives",
