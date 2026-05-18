@@ -84,10 +84,15 @@ build_command() {
         cmd="${cmd} --servers ${STOFFEL_SERVERS}"
         cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
         cmd="${cmd} --threshold ${STOFFEL_THRESHOLD:-1}"
-        cmd="${cmd} --off-chain-coord ${STOFFEL_COORD_ADDR}"
-        cmd="${cmd} --cert ${STOFFEL_CERT}"
-        cmd="${cmd} --key ${STOFFEL_KEY}"
-        cmd="${cmd} --timestamp ${STOFFEL_TIMESTAMP:-0}"
+        if [ -n "${STOFFEL_OUTPUTS:-}" ]; then
+            cmd="${cmd} --outputs ${STOFFEL_OUTPUTS}"
+        fi
+        if [ -n "${STOFFEL_COORD_ADDR:-}" ]; then
+            cmd="${cmd} --off-chain-coord ${STOFFEL_COORD_ADDR}"
+            cmd="${cmd} --cert ${STOFFEL_CERT}"
+            cmd="${cmd} --key ${STOFFEL_KEY}"
+            cmd="${cmd} --timestamp ${STOFFEL_TIMESTAMP:-0}"
+        fi
         if [ -n "${STOFFEL_CLIENT_INDEX:-}" ]; then
             cmd="${cmd} --client-index ${STOFFEL_CLIENT_INDEX}"
         fi
@@ -138,6 +143,10 @@ build_command() {
 
     if [ -n "${STOFFEL_EXPECTED_CLIENTS:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
         cmd="${cmd} --expected-clients ${STOFFEL_EXPECTED_CLIENTS}"
+    fi
+
+    if [ -n "${STOFFEL_WAIT_FOR_CLIENTS:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+        cmd="${cmd} --wait-for-clients ${STOFFEL_WAIT_FOR_CLIENTS}"
     fi
 
     if [ -n "${STOFFEL_PREPROC_STORE:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then

@@ -5,11 +5,13 @@ use crate::foreign_functions::{
     ForeignFunctionContext, ForeignFunctionError, MpcOnlineBuiltin,
 };
 use crate::mpc_values::clear_share_input;
+use crate::net::client_store::ClientOutputShareCount;
 use crate::net::mpc_engine::{AbaSessionId, MpcExponentGenerator, MpcPartyId};
 use crate::net::share_runtime::ensure_matching_share_data_format;
 use crate::program::{CallTarget, VmCallTarget};
 use crate::runtime_hooks::{HookCallTarget, HookEvent};
 use crate::runtime_instruction::RuntimeRegister;
+use crate::standard_library::encode_output_share_list;
 use crate::value_conversions::value_to_usize;
 use crate::vm_state::mpc_operation::{
     PendingMpcBuiltinCall, PendingMpcBuiltinOperation, PendingMpcOperation,
@@ -422,8 +424,46 @@ impl VMState {
                 let (_share_type, share_data) = self.extract_share_data(&share_value)?;
                 let client_id = value_to_usize(&client_id_value, "client_id")?;
                 Ok(PendingMpcBuiltinOperation::SendToClient {
-                    share_data,
                     client_id,
+                    share_bytes: share_data.as_bytes().to_vec(),
+                    output_share_count: ClientOutputShareCount::one(),
+                })
+            }
+            MpcOnlineBuiltin::OutputSendToClient => {
+                args.require_exact(2, "2 arguments: client_id, share_value")?;
+                let client_id = args.usize(0, "client_id")?;
+                let output_value = args.cloned(1)?;
+
+                let (share_bytes, output_share_count) = match &output_value {
+                    Value::Array(_) => {
+                        let Some((_share_type, share_data)) = self
+                            .extract_homogeneous_share_array(
+                                &output_value,
+                                "MpcOutput.send_to_client share_value",
+                            )?
+                        else {
+                            return Err(
+                                "MpcOutput.send_to_client requires at least one output share"
+                                    .into(),
+                            );
+                        };
+                        let output_share_count = ClientOutputShareCount::try_new(share_data.len())
+                            .map_err(|error| error.to_string())?;
+                        (encode_output_share_list(&share_data)?, output_share_count)
+                    }
+                    _ => {
+                        let (_share_type, share_data) = self.extract_share_data(&output_value)?;
+                        (
+                            share_data.as_bytes().to_vec(),
+                            ClientOutputShareCount::one(),
+                        )
+                    }
+                };
+
+                Ok(PendingMpcBuiltinOperation::SendToClient {
+                    client_id,
+                    share_bytes,
+                    output_share_count,
                 })
             }
             MpcOnlineBuiltin::OpenExp => {

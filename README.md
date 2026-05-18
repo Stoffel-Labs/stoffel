@@ -258,6 +258,18 @@ Run in client mode to submit inputs to the party servers:
   --n-parties 5
 ```
 
+AVSS output-client mode can reconstruct private field outputs:
+
+```bash
+./target/release/stoffel-run --client \
+  --mpc-backend avss \
+  --mpc-curve secp256k1 \
+  --inputs 0x<sha256-tbs-digest-hex> \
+  --outputs 2 \
+  --servers 127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004 \
+  --n-parties 5
+```
+
 Notes:
 
 - `STOFFEL_AUTH_TOKEN` is required for authenticated discovery in bootnode, leader, and party flows
@@ -283,7 +295,23 @@ docker compose -f docker-compose.avss.yml up --build
 
 `docker-compose.avss.yml` mounts a per-party local data volume and forwards `STOFFEL_LOCAL_STORE` to `stoffel-run`.
 
-For the AVSS certificate-signing path, run `/app/programs/avss_certificate_keygen.stflb` once to persist each party's CA signing share, then run `/app/programs/avss_certificate_sign.stflb` to produce raw `R || s || pk` signature material over the placeholder TBS digest. The signing fixture is ready for a future CA bridge that supplies real TBS digests to AVSS runs.
+The AVSS threshold ECDSA examples mirror the existing threshold signature fixtures:
+
+```bash
+STOFFEL_AUTH_TOKEN=replace-with-random-secret \
+STOFFEL_PROGRAM=/app/programs/threshold_ecdsa_secp256k1.stflb \
+STOFFEL_MPC_CURVE=secp256k1 \
+docker compose -f docker-compose.avss.yml up --build
+
+STOFFEL_AUTH_TOKEN=replace-with-random-secret \
+STOFFEL_PROGRAM=/app/programs/threshold_ecdsa_p256.stflb \
+STOFFEL_MPC_CURVE=p-256 \
+docker compose -f docker-compose.avss.yml up --build
+```
+
+The Stoffel source for these programs lives in `examples/stfl/threshold_ecdsa_secp256k1.stfl` and `examples/stfl/threshold_ecdsa_p256.stfl`. The VM only provides primitive helpers for field inversion, converting an opened curve point to `x mod q`, and formatting the final ECDSA output. The threshold ECDSA protocol itself is expressed in the Stoffel program. The returned layout is fixed-width big-endian `r(32) || s(32) || sec1_compressed_pk(33)`, so callers can DER-encode `(r, s)` directly.
+
+For the AVSS certificate-signing path, run `/app/programs/avss_certificate_keygen.stflb` with `STOFFEL_MPC_CURVE=secp256k1` or `STOFFEL_MPC_CURVE=p-256` to persist each party's CA signing share. Keygen is idempotent: it loads the existing share if the storage key already exists and only generates on first use. Then run `/app/programs/avss_certificate_sign.stflb` with `STOFFEL_WAIT_FOR_CLIENTS=1`; the client submits the real SHA-256 TBS digest and reconstructs fixed-width threshold ECDSA `r || s` material with `--outputs 2`. The corresponding Stoffel source lives in `examples/stfl/avss_certificate_keygen.stfl` and `examples/stfl/avss_certificate_sign.stfl`.
 
 ## C Foreign Function Interface
 

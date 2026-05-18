@@ -1,5 +1,5 @@
 use std::env;
-#[cfg(feature = "honeybadger")]
+#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use std::fs;
 use std::net::SocketAddr;
 use std::process::exit;
@@ -12,7 +12,7 @@ use alloy_primitives::Address;
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
 use ark_ec::{CurveGroup, PrimeGroup};
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
-use ark_ff::PrimeField;
+use ark_ff::{BigInteger, PrimeField};
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
 use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
@@ -20,17 +20,17 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(feature = "honeybadger")]
+#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffel_mpc_coordinator::off_chain::node_rpc::{
     NodeRPCClient as OffChainNodeRPCClient, NodeRPCServer as OffChainNodeRPCServer,
 };
-#[cfg(feature = "honeybadger")]
+#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffel_mpc_coordinator::off_chain::OffChainCoordinatorClient;
 #[cfg(feature = "honeybadger")]
 use stoffel_mpc_coordinator::on_chain;
 #[cfg(feature = "honeybadger")]
 use stoffel_mpc_coordinator::on_chain::node_rpc::NodeRPCClient as OnChainNodeRPCClient;
-#[cfg(feature = "honeybadger")]
+#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffel_mpc_coordinator::{Coordinator, Round};
 use stoffel_vm::core_vm::VirtualMachine;
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
@@ -54,9 +54,13 @@ use stoffel_vm::storage::preproc::LmdbPreprocStore;
 use stoffel_vm::storage::RedbLocalStorage;
 use stoffel_vm_types::compiled_binary::CompiledBinary;
 use stoffel_vm_types::core_types::Value;
+#[cfg(feature = "avss")]
+use stoffelmpc_mpc::avss_mpc::{AvssMPCClient, AvssSessionId};
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
+#[cfg(feature = "avss")]
+use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
+#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::common::MPCProtocol;
 #[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -70,7 +74,7 @@ use stoffelnet::network_utils::Network;
 use stoffelnet::transports::quic::{NetworkManager, QuicNetworkManager};
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
 use tokio::sync::mpsc;
-#[cfg(feature = "honeybadger")]
+#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use x509_parser::prelude::*;
 
 #[cfg(feature = "honeybadger")]
@@ -86,7 +90,16 @@ type HbOffChainNodeRpcServer = OffChainNodeRPCServer<HbCoordinatorField, HbCoord
 #[cfg(feature = "honeybadger")]
 type HbOnChainNodeRpcClient = OnChainNodeRPCClient<HbCoordinatorField, HbCoordinatorShare>;
 
-#[cfg(feature = "honeybadger")]
+#[cfg(feature = "avss")]
+type AvssCoordinatorShare<F, G> = FeldmanShamirShare<F, G>;
+#[cfg(feature = "avss")]
+type AvssOffChainCoordinator<F, G> = OffChainCoordinatorClient<F, AvssCoordinatorShare<F, G>>;
+#[cfg(feature = "avss")]
+type AvssOffChainNodeRpcClient<F, G> = OffChainNodeRPCClient<F, AvssCoordinatorShare<F, G>>;
+#[cfg(feature = "avss")]
+type AvssOffChainNodeRpcServer<F, G> = OffChainNodeRPCServer<F, AvssCoordinatorShare<F, G>>;
+
+#[cfg(any(feature = "honeybadger", feature = "avss"))]
 fn extract_pubkey_from_cert(cert_der: &[u8]) -> Vec<u8> {
     let (_, parsed) = X509Certificate::from_der(cert_der).expect("parse X.509 cert");
     parsed
@@ -159,6 +172,58 @@ fn store_reserved_client_inputs<F, I>(
         if let Err(error) = vm.try_store_client_input(reserved_index, shares) {
             eprintln!(
                 "Failed to store input shares for reserved client index {}: {}",
+                reserved_index, error
+            );
+            exit(13);
+        }
+    }
+}
+
+#[cfg(feature = "avss")]
+fn store_reserved_client_inputs_feldman<F, G, I>(
+    vm: &mut VirtualMachine,
+    client_to_index: &std::collections::HashMap<I, u64>,
+    client_inputs: std::collections::HashMap<I, Vec<FeldmanShamirShare<F, G>>>,
+) where
+    F: SupportedMpcField,
+    G: CurveGroup<ScalarField = F>,
+    I: Eq + std::hash::Hash + std::fmt::Debug,
+{
+    let mut seen_reserved_indices = std::collections::HashSet::new();
+
+    for (client_id, shares) in client_inputs {
+        let reserved_index = match client_to_index.get(&client_id).copied() {
+            Some(index) => index,
+            None => {
+                eprintln!(
+                    "Coordinator returned input for client {:?} without a reserved index",
+                    client_id
+                );
+                exit(13);
+            }
+        };
+
+        let reserved_index = if reserved_index > usize::MAX as u64 {
+            eprintln!(
+                "Coordinator reserved index {} exceeds local usize range",
+                reserved_index
+            );
+            exit(13);
+        } else {
+            reserved_index as usize
+        };
+
+        if !seen_reserved_indices.insert(reserved_index) {
+            eprintln!(
+                "Coordinator assigned duplicate reserved index {} while collecting inputs",
+                reserved_index
+            );
+            exit(13);
+        }
+
+        if let Err(error) = vm.try_store_client_input_feldman(reserved_index, shares) {
+            eprintln!(
+                "Failed to store AVSS input shares for reserved client index {}: {}",
                 reserved_index, error
             );
             exit(13);
@@ -252,14 +317,14 @@ where
 /// The client's QuicNetworkManager includes the client's own public key in the
 /// sorted key list, creating n+1 entries. The MPC protocol expects n parties.
 /// This wrapper adjusts send() to skip the client's own position.
-#[cfg(feature = "honeybadger")]
+#[cfg(any(feature = "honeybadger", feature = "avss"))]
 struct ClientNetworkAdapter {
     inner: QuicNetworkManager,
     /// The client's position in the (n+1)-key sorted list
     local_position: usize,
 }
 
-#[cfg(feature = "honeybadger")]
+#[cfg(any(feature = "honeybadger", feature = "avss"))]
 #[async_trait::async_trait]
 impl Network for ClientNetworkAdapter {
     type NodeType = <QuicNetworkManager as Network>::NodeType;
@@ -488,6 +553,18 @@ fn parse_inputs_as_field<F: PrimeField>(inputs_str: &str) -> Vec<F> {
         .split(',')
         .map(|s| {
             let s = s.trim();
+            if let Some(hex_value) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                let mut hex_value = hex_value.to_owned();
+                if hex_value.len() % 2 == 1 {
+                    hex_value.insert(0, '0');
+                }
+                let bytes = hex::decode(&hex_value).unwrap_or_else(|error| {
+                    eprintln!("Invalid hex input value '{}': {}", s, error);
+                    exit(2);
+                });
+                return F::from_be_bytes_mod_order(&bytes);
+            }
+
             let val: i64 = s.parse().unwrap_or_else(|_| {
                 eprintln!("Invalid input value: {}", s);
                 exit(2);
@@ -495,6 +572,42 @@ fn parse_inputs_as_field<F: PrimeField>(inputs_str: &str) -> Vec<F> {
             stoffel_vm::net::field_from_i64::<F>(val)
         })
         .collect()
+}
+
+#[cfg(any(feature = "honeybadger", feature = "avss"))]
+fn field_outputs_to_hex<F: PrimeField>(outputs: &[F], curve_config: MpcCurveConfig) -> String {
+    let mut bytes = Vec::new();
+    for output in outputs {
+        if matches!(
+            curve_config,
+            MpcCurveConfig::Secp256k1 | MpcCurveConfig::Secp256r1
+        ) {
+            bytes.extend_from_slice(&fixed_width_be_bytes(
+                &output.into_bigint().to_bytes_be(),
+                32,
+            ));
+        } else {
+            ark_serialize::CanonicalSerialize::serialize_compressed(output, &mut bytes)
+                .expect("field serialization to Vec cannot fail");
+        }
+    }
+    hex::encode(bytes)
+}
+
+#[cfg(any(feature = "honeybadger", feature = "avss"))]
+fn fixed_width_be_bytes(bytes: &[u8], width: usize) -> Vec<u8> {
+    let significant = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .map(|idx| &bytes[idx..])
+        .unwrap_or(&[]);
+    if significant.len() >= width {
+        significant[significant.len() - width..].to_vec()
+    } else {
+        let mut out = vec![0u8; width - significant.len()];
+        out.extend_from_slice(significant);
+        out
+    }
 }
 
 /// Connect to all MPC servers with retry logic, spawning a receive loop per connection.
@@ -775,6 +888,17 @@ struct HbClientProtocolConfig {
     local_position: usize,
 }
 
+#[cfg(feature = "avss")]
+struct AvssClientProtocolConfig {
+    n: usize,
+    t: usize,
+    output_len: usize,
+    instance_id: u64,
+    client_index: u8,
+    local_position: usize,
+    curve_config: MpcCurveConfig,
+}
+
 #[cfg(feature = "honeybadger")]
 async fn run_hb_client_protocol_for_curve<F: PrimeField>(
     config: HbClientProtocolConfig,
@@ -857,6 +981,136 @@ async fn run_hb_client_protocol_for_curve<F: PrimeField>(
     Ok(())
 }
 
+#[cfg(feature = "avss")]
+async fn run_avss_client_protocol_for_curve<F, G>(
+    config: AvssClientProtocolConfig,
+    inputs_str: &str,
+    network_for_process: Arc<tokio::sync::Mutex<QuicNetworkManager>>,
+    mut msg_rx: mpsc::Receiver<(usize, Vec<u8>)>,
+) -> Result<(), String>
+where
+    F: PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    let mpc_cid = config.client_index as usize;
+    let instance_id = u32::try_from(config.instance_id)
+        .map_err(|_| format!("AVSS instance id {} exceeds u32 range", config.instance_id))?;
+    let mut mpc_client = AvssMPCClient::<F, Avid<AvssSessionId>, G>::new(
+        mpc_cid,
+        config.n,
+        config.t,
+        instance_id,
+        parse_inputs_as_field::<F>(inputs_str),
+        config.output_len,
+    )
+    .map_err(|e| format!("Failed to create AVSS MPC client: {:?}", e))?;
+
+    let mut messages_processed = 0usize;
+    while let Some((sender_id, data)) = msg_rx.recv().await {
+        if data.len() == 13 && data.starts_with(b"INST") {
+            eprintln!(
+                "[client {}] Skipping extra INST from sender {}",
+                mpc_cid, sender_id
+            );
+            continue;
+        }
+
+        let adapter = {
+            let guard = network_for_process.lock().await;
+            ClientNetworkAdapter {
+                inner: (*guard).clone(),
+                local_position: config.local_position,
+            }
+        };
+
+        match mpc_client.process(sender_id, data, Arc::new(adapter)).await {
+            Ok(()) => {
+                messages_processed += 1;
+                if let Some(outputs) = mpc_client.output.get_output() {
+                    let output_hex = field_outputs_to_hex(&outputs, config.curve_config);
+                    println!("Client output: field[{}] 0x{}", outputs.len(), output_hex);
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[client {}] Failed to process AVSS message from {}: {:?}",
+                    mpc_cid, sender_id, e
+                );
+            }
+        }
+    }
+
+    Err(format!(
+        "AVSS client receiver closed before output reconstruction (processed {} messages)",
+        messages_processed
+    ))
+}
+
+#[cfg(feature = "avss")]
+async fn run_avss_client_for_curve(
+    curve_config: MpcCurveConfig,
+    config: AvssClientProtocolConfig,
+    inputs_str: &str,
+    network_for_process: Arc<tokio::sync::Mutex<QuicNetworkManager>>,
+    msg_rx: mpsc::Receiver<(usize, Vec<u8>)>,
+) -> Result<(), String> {
+    match curve_config {
+        MpcCurveConfig::Bls12_381 => {
+            run_avss_client_protocol_for_curve::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>(
+                config,
+                inputs_str,
+                network_for_process,
+                msg_rx,
+            )
+            .await
+        }
+        MpcCurveConfig::Bn254 => {
+            run_avss_client_protocol_for_curve::<ark_bn254::Fr, ark_bn254::G1Projective>(
+                config,
+                inputs_str,
+                network_for_process,
+                msg_rx,
+            )
+            .await
+        }
+        MpcCurveConfig::Curve25519 => {
+            run_avss_client_protocol_for_curve::<
+                ark_curve25519::Fr,
+                ark_curve25519::EdwardsProjective,
+            >(config, inputs_str, network_for_process, msg_rx)
+            .await
+        }
+        MpcCurveConfig::Ed25519 => {
+            run_avss_client_protocol_for_curve::<ark_ed25519::Fr, ark_ed25519::EdwardsProjective>(
+                config,
+                inputs_str,
+                network_for_process,
+                msg_rx,
+            )
+            .await
+        }
+        MpcCurveConfig::Secp256k1 => {
+            run_avss_client_protocol_for_curve::<ark_secp256k1::Fr, ark_secp256k1::Projective>(
+                config,
+                inputs_str,
+                network_for_process,
+                msg_rx,
+            )
+            .await
+        }
+        MpcCurveConfig::Secp256r1 => {
+            run_avss_client_protocol_for_curve::<ark_secp256r1::Fr, ark_secp256r1::Projective>(
+                config,
+                inputs_str,
+                network_for_process,
+                msg_rx,
+            )
+            .await
+        }
+    }
+}
+
 #[cfg(feature = "honeybadger")]
 async fn run_hb_client_for_curve(
     curve_config: MpcCurveConfig,
@@ -909,13 +1163,14 @@ async fn run_hb_client_for_curve(
     }
 }
 
-#[cfg(feature = "honeybadger")]
+#[cfg(any(feature = "honeybadger", feature = "avss"))]
 async fn run_as_client(
     n_parties: Option<usize>,
     threshold: Option<usize>,
     mpc_backend: Option<&str>,
     mpc_curve: Option<&str>,
     client_inputs: Option<String>,
+    client_outputs: Option<usize>,
     server_addrs: Vec<SocketAddr>,
 ) {
     let n = n_parties.unwrap_or_else(|| {
@@ -924,25 +1179,25 @@ async fn run_as_client(
     });
     let t = threshold.unwrap_or(1);
 
-    if let Some(backend_name) = mpc_backend {
-        let parsed_backend = MpcBackendKind::from_str(backend_name).unwrap_or_else(|e| {
+    let backend_kind = if let Some(backend_name) = mpc_backend {
+        MpcBackendKind::from_str(backend_name).unwrap_or_else(|e| {
             eprintln!("Error: {}", e);
             exit(2);
-        });
-        if !matches!(parsed_backend, MpcBackendKind::HoneyBadger) {
-            eprintln!(
-                "Error: client mode only supports honeybadger backend (got {})",
-                parsed_backend.name()
-            );
-            exit(2);
-        }
-    }
+        })
+    } else {
+        MpcBackendKind::default_backend()
+    };
 
     let inputs_str = client_inputs.unwrap_or_else(|| {
         eprintln!("Error: --inputs is required in client mode (comma-separated values)");
         exit(2);
     });
     let input_len = inputs_str.split(',').count();
+    let output_len = client_outputs.unwrap_or(input_len);
+    if output_len == 0 {
+        eprintln!("Error: --outputs must be greater than zero in client mode");
+        exit(2);
+    }
 
     if server_addrs.is_empty() {
         eprintln!("Error: --servers is required in client mode (comma-separated addresses)");
@@ -967,12 +1222,19 @@ async fn run_as_client(
         MpcCurveConfig::default()
     };
 
+    if let Err(e) = curve_config.validate_for_backend(backend_kind) {
+        eprintln!("Error: {}", e);
+        exit(2);
+    }
+
     eprintln!(
-        "[client] Client mode (curve={}, n={}, t={}, {} inputs, {} servers)",
+        "[client] Client mode (backend={}, curve={}, n={}, t={}, {} inputs, {} outputs, {} servers)",
+        backend_kind.name(),
         curve_config.name(),
         n,
         t,
         input_len,
+        output_len,
         server_addrs.len()
     );
 
@@ -999,20 +1261,22 @@ async fn run_as_client(
     eprintln!("[client {}] Derived transport client ID", cid);
 
     // Read INST message from servers: [b"INST" | instance_id:u64 | client_index:u8]
-    let (instance_id, client_index) = {
+    let (instance_id, client_index, pending_messages) = {
         let timeout_dur = Duration::from_secs(600);
         let mut result: Option<(u64, u8)> = None;
+        let mut pending_messages = Vec::new();
         let deadline = tokio::time::Instant::now() + timeout_dur;
         while result.is_none() {
             match tokio::time::timeout_at(deadline, msg_rx.recv()).await {
-                Ok(Some((_sender, data))) => {
+                Ok(Some((sender, data))) => {
                     if data.len() == 13 && &data[0..4] == b"INST" {
                         let id_bytes: [u8; 8] = data[4..12].try_into().unwrap();
                         let inst_id = u64::from_le_bytes(id_bytes);
                         let idx = data[12];
                         result = Some((inst_id, idx));
+                    } else {
+                        pending_messages.push((sender, data));
                     }
-                    // If not an INST message, discard
                 }
                 Ok(None) => {
                     eprintln!("[client {}] Channel closed before receiving INST", cid);
@@ -1029,7 +1293,7 @@ async fn run_as_client(
             "[client {}] Received INST: instance_id={}, client_index={}",
             cid, id, idx
         );
-        (id, idx)
+        (id, idx, pending_messages)
     };
 
     eprintln!(
@@ -1048,26 +1312,77 @@ async fn run_as_client(
         cid, local_position
     );
 
+    let msg_rx = if pending_messages.is_empty() {
+        msg_rx
+    } else {
+        eprintln!(
+            "[client {}] Replaying {} protocol messages received before INST",
+            cid,
+            pending_messages.len()
+        );
+        let (replay_tx, replay_rx) = mpsc::channel::<(usize, Vec<u8>)>(1000);
+        tokio::spawn(async move {
+            for message in pending_messages {
+                if replay_tx.send(message).await.is_err() {
+                    return;
+                }
+            }
+            while let Some(message) = msg_rx.recv().await {
+                if replay_tx.send(message).await.is_err() {
+                    return;
+                }
+            }
+        });
+        replay_rx
+    };
+
     let network_for_process = network.clone();
     let inputs_for_task = inputs_str.clone();
-    let protocol_config = HbClientProtocolConfig {
-        n,
-        t,
-        input_len,
-        instance_id,
-        client_index,
-        local_position,
+    let process_handle = match backend_kind {
+        #[cfg(feature = "honeybadger")]
+        MpcBackendKind::HoneyBadger => {
+            let protocol_config = HbClientProtocolConfig {
+                n,
+                t,
+                input_len,
+                instance_id,
+                client_index,
+                local_position,
+            };
+            tokio::spawn(async move {
+                run_hb_client_for_curve(
+                    curve_config,
+                    protocol_config,
+                    &inputs_for_task,
+                    network_for_process,
+                    msg_rx,
+                )
+                .await
+            })
+        }
+        #[cfg(feature = "avss")]
+        MpcBackendKind::Avss => {
+            let protocol_config = AvssClientProtocolConfig {
+                n,
+                t,
+                output_len,
+                instance_id,
+                client_index,
+                local_position,
+                curve_config,
+            };
+            tokio::spawn(async move {
+                run_avss_client_for_curve(
+                    curve_config,
+                    protocol_config,
+                    &inputs_for_task,
+                    network_for_process,
+                    msg_rx,
+                )
+                .await
+            })
+        }
     };
-    let process_handle = tokio::spawn(async move {
-        run_hb_client_for_curve(
-            curve_config,
-            protocol_config,
-            &inputs_for_task,
-            network_for_process,
-            msg_rx,
-        )
-        .await
-    });
 
     let timeout_duration = Duration::from_secs(600);
     match tokio::time::timeout(timeout_duration, process_handle).await {
@@ -1091,6 +1406,226 @@ async fn run_as_client(
                 cid
             );
             exit(23);
+        }
+    }
+}
+
+#[cfg(feature = "avss")]
+async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
+    curve_config: MpcCurveConfig,
+    client_inputs: Option<String>,
+    client_outputs: Option<usize>,
+    server_addrs: Vec<SocketAddr>,
+    coord_addr: (String, u16),
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+    timestamp: u64,
+    threshold: Option<usize>,
+    coordinator_client_index: Option<u64>,
+) where
+    F: SupportedMpcField,
+    G: CurveGroup<ScalarField = F> + Send + Sync + 'static,
+{
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls crypto");
+
+    let t = threshold.unwrap_or(1);
+    let input_str = client_inputs.unwrap_or_else(|| {
+        eprintln!("Error: --inputs required in coordinator client mode");
+        exit(2);
+    });
+    let input_values = parse_inputs_as_field::<F>(&input_str);
+    if input_values.len() != 1 {
+        eprintln!(
+            "Error: coordinator client mode currently supports exactly one input value; got {}",
+            input_values.len()
+        );
+        exit(2);
+    }
+    let output_len = client_outputs.unwrap_or(input_values.len());
+    if output_len == 0 {
+        eprintln!("Error: --outputs must be greater than zero in coordinator client mode");
+        exit(2);
+    }
+    let reserved_index = coordinator_client_index.unwrap_or_else(|| {
+        eprintln!(
+            "Error: coordinator client mode requires --client-index to claim a reserved input slot"
+        );
+        exit(2);
+    });
+
+    let mut coord: AvssOffChainCoordinator<F, G> =
+        AvssOffChainCoordinator::<F, G>::start_rpc_client(
+            &coord_addr.0,
+            coord_addr.1,
+            timestamp,
+            t as u64,
+            output_len as u64,
+            cert_der.clone(),
+            key_der.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Failed to connect to AVSS off-chain coordinator: {error}");
+            exit(13);
+        });
+
+    coord.wait_for_round(Round::Preprocessing).await.unwrap();
+    coord
+        .wait_for_round(Round::InputMaskReservation)
+        .await
+        .unwrap();
+    coord.reserve_mask_index(reserved_index).await.unwrap();
+
+    let rpc_addrs: Vec<(String, u16)> = server_addrs
+        .iter()
+        .map(|addr| (addr.ip().to_string(), addr.port()))
+        .collect();
+    let node_rpc_client: AvssOffChainNodeRpcClient<F, G> =
+        AvssOffChainNodeRpcClient::<F, G>::start_rpc_client(t, rpc_addrs, cert_der, key_der)
+            .await
+            .unwrap_or_else(|error| {
+                eprintln!("Failed to connect to AVSS node RPC servers: {error}");
+                exit(13);
+            });
+    let mask = node_rpc_client.receive_mask().await.unwrap();
+
+    coord.wait_for_round(Round::InputCollection).await.unwrap();
+    coord
+        .send_masked_input(mask + input_values[0], reserved_index)
+        .await
+        .unwrap();
+
+    coord.wait_for_round(Round::MPCExecution).await.unwrap();
+    coord
+        .wait_for_round(Round::OutputDistribution)
+        .await
+        .unwrap();
+    let outputs = coord.obtain_outputs().await.unwrap();
+    let output_hex = field_outputs_to_hex(&outputs, curve_config);
+    println!("Client output: field[{}] 0x{}", outputs.len(), output_hex);
+}
+
+#[cfg(feature = "avss")]
+async fn run_avss_offchain_coordinator_client(
+    curve_config: MpcCurveConfig,
+    client_inputs: Option<String>,
+    client_outputs: Option<usize>,
+    server_addrs: Vec<SocketAddr>,
+    coord_addr: (String, u16),
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+    timestamp: u64,
+    threshold: Option<usize>,
+    coordinator_client_index: Option<u64>,
+) {
+    match curve_config {
+        MpcCurveConfig::Bls12_381 => {
+            run_avss_offchain_coordinator_client_for_curve::<
+                ark_bls12_381::Fr,
+                ark_bls12_381::G1Projective,
+            >(
+                curve_config,
+                client_inputs,
+                client_outputs,
+                server_addrs,
+                coord_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                threshold,
+                coordinator_client_index,
+            )
+            .await
+        }
+        MpcCurveConfig::Bn254 => run_avss_offchain_coordinator_client_for_curve::<
+            ark_bn254::Fr,
+            ark_bn254::G1Projective,
+        >(
+            curve_config,
+            client_inputs,
+            client_outputs,
+            server_addrs,
+            coord_addr,
+            cert_der,
+            key_der,
+            timestamp,
+            threshold,
+            coordinator_client_index,
+        )
+        .await,
+        MpcCurveConfig::Curve25519 => {
+            run_avss_offchain_coordinator_client_for_curve::<
+                ark_curve25519::Fr,
+                ark_curve25519::EdwardsProjective,
+            >(
+                curve_config,
+                client_inputs,
+                client_outputs,
+                server_addrs,
+                coord_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                threshold,
+                coordinator_client_index,
+            )
+            .await
+        }
+        MpcCurveConfig::Ed25519 => {
+            run_avss_offchain_coordinator_client_for_curve::<
+                ark_ed25519::Fr,
+                ark_ed25519::EdwardsProjective,
+            >(
+                curve_config,
+                client_inputs,
+                client_outputs,
+                server_addrs,
+                coord_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                threshold,
+                coordinator_client_index,
+            )
+            .await
+        }
+        MpcCurveConfig::Secp256k1 => {
+            run_avss_offchain_coordinator_client_for_curve::<
+                ark_secp256k1::Fr,
+                ark_secp256k1::Projective,
+            >(
+                curve_config,
+                client_inputs,
+                client_outputs,
+                server_addrs,
+                coord_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                threshold,
+                coordinator_client_index,
+            )
+            .await
+        }
+        MpcCurveConfig::Secp256r1 => {
+            run_avss_offchain_coordinator_client_for_curve::<
+                ark_secp256r1::Fr,
+                ark_secp256r1::Projective,
+            >(
+                curve_config,
+                client_inputs,
+                client_outputs,
+                server_addrs,
+                coord_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                threshold,
+                coordinator_client_index,
+            )
+            .await
         }
     }
 }
@@ -1423,10 +1958,10 @@ where
                 .find(|(i, _)| *i == idx)
                 .map(|(_, tid)| *tid)
                 .unwrap_or(idx);
-            vm.try_store_client_input(transport_cid, shares)?;
+            vm.try_store_client_input(idx, shares)?;
             eprintln!(
-                "[party {}] Stored inputs for client {} (index {})",
-                my_id, transport_cid, idx
+                "[party {}] Stored inputs for client index {} (transport {})",
+                my_id, idx, transport_cid
             );
         }
     }
@@ -1443,7 +1978,7 @@ async fn setup_avss_party_for_curve<F, G>(
     t: usize,
     instance_id: u64,
     expected_client_count: Option<usize>,
-) -> Result<(), String>
+) -> Result<Arc<stoffel_vm::net::avss_engine::AvssMpcEngine<F, G>>, String>
 where
     F: SupportedMpcField,
     G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
@@ -1660,6 +2195,7 @@ where
     let engine = AvssMpcEngine::<F, G>::from_config(AvssEngineConfig::new(session, sk_i, pk_map))
         .await
         .map_err(|e| format!("Failed to create AVSS engine: {}", e))?;
+    engine.set_client_output_id_map(input_ids.clone()).await;
 
     engine
         .start_async()
@@ -1862,16 +2398,327 @@ where
                 .find(|(i, _)| *i == idx)
                 .map(|(_, tid)| *tid)
                 .unwrap_or(idx);
-            vm.try_store_client_input_feldman(transport_cid, shares)?;
+            vm.try_store_client_input_feldman(idx, shares)?;
             eprintln!(
-                "[party {}] Stored inputs for client {} (index {})",
-                my_id, transport_cid, idx
+                "[party {}] Stored inputs for client index {} (transport {})",
+                my_id, idx, transport_cid
             );
         }
     }
 
-    vm.set_mpc_engine(engine);
+    vm.set_mpc_engine(engine.clone());
+    Ok(engine)
+}
+
+#[cfg(feature = "avss")]
+#[allow(clippy::too_many_arguments)]
+async fn run_avss_coordinated_party_for_curve<F, G>(
+    vm: &mut VirtualMachine,
+    net: Arc<QuicNetworkManager>,
+    my_id: usize,
+    n: usize,
+    t: usize,
+    instance_id: u64,
+    coord_addr: (String, u16),
+    rpc_addr: (String, u16),
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+    timestamp: u64,
+    expected_clients: &[String],
+    as_leader: bool,
+    agreed_entry: &str,
+) -> Result<(), String>
+where
+    F: SupportedMpcField,
+    G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
+{
+    if expected_clients.is_empty() {
+        return Err("--expected-clients is required for AVSS coordinator mode".to_owned());
+    }
+
+    let input_ids: Vec<Vec<u8>> = expected_clients
+        .iter()
+        .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
+        .collect();
+
+    let coord: AvssOffChainCoordinator<F, G> = AvssOffChainCoordinator::<F, G>::start_rpc_client(
+        &coord_addr.0,
+        coord_addr.1,
+        timestamp,
+        t as u64,
+        2,
+        cert_der.clone(),
+        key_der.clone(),
+    )
+    .await
+    .map_err(|error| format!("Failed to connect to AVSS off-chain coordinator: {error}"))?;
+
+    let mut node_rpc: AvssOffChainNodeRpcServer<F, G> = AvssOffChainNodeRpcServer::<F, G>::start(
+        &rpc_addr.0,
+        rpc_addr.1,
+        cert_der.clone(),
+        key_der.clone(),
+    )
+    .await
+    .map_err(|error| format!("Failed to start AVSS node RPC server: {error}"))?;
+
+    if as_leader {
+        coord
+            .start_preprocessing()
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    coord
+        .wait_for_round(Round::Preprocessing)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let engine =
+        setup_avss_party_for_curve::<F, G>(vm, net, my_id, n, t, instance_id, None).await?;
+    engine.enable_client_output_capture().await;
+
+    let mut mask_shares = Vec::with_capacity(input_ids.len());
+    {
+        let node = engine.node_handle().lock().await;
+        for idx in 0..input_ids.len() {
+            let local_shares = node
+                .preprocessing_material
+                .lock()
+                .await
+                .take_v_random_shares(1)
+                .map_err(|e| format!("Not enough AVSS random shares for client {idx}: {:?}", e))?;
+            let share = local_shares
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("AVSS random share batch for client {idx} was empty"))?;
+            node_rpc
+                .add_mask_share(idx as u64, &share)
+                .await
+                .map_err(|e| format!("add_mask_share: {:?}", e))?;
+            mask_shares.push(share);
+        }
+    }
+
+    if as_leader {
+        coord
+            .reserve_input_masks()
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    coord
+        .wait_for_round(Round::InputMaskReservation)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let client_to_index = coord
+        .wait_for_indices(input_ids.len() as u64)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    for (cid, idx) in &client_to_index {
+        node_rpc
+            .add_reserved_index(cid.clone(), *idx)
+            .await
+            .map_err(|e| format!("add_reserved_index: {:?}", e))?;
+    }
+
+    if as_leader {
+        coord.collect_inputs().await.map_err(|e| e.to_string())?;
+    }
+    coord
+        .wait_for_round(Round::InputCollection)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let client_inputs = coord
+        .wait_for_inputs(input_ids.len() as u64, mask_shares)
+        .await
+        .map_err(|e| e.to_string())?;
+    store_reserved_client_inputs_feldman::<F, G, _>(vm, &client_to_index, client_inputs);
+
+    if as_leader {
+        coord.start_mpc().await.map_err(|e| e.to_string())?;
+    }
+    coord
+        .wait_for_round(Round::MPCExecution)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    eprintln!("Starting VM execution of '{}'...", agreed_entry);
+    let result = vm
+        .execute(agreed_entry)
+        .map_err(|err| format!("Execution error in '{}': {}", agreed_entry, err))?;
+
+    let captured_outputs = engine.drain_client_output_records().await;
+    if !captured_outputs.is_empty() {
+        if as_leader {
+            coord.send_output().await.map_err(|e| e.to_string())?;
+        }
+        coord
+            .wait_for_round(Round::OutputDistribution)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        for record in captured_outputs {
+            let client_key = input_ids.get(record.client_id).ok_or_else(|| {
+                format!(
+                    "AVSS output client index {} has no matching coordinator client identity",
+                    record.client_id
+                )
+            })?;
+            coord
+                .send_output_shares(client_key.clone(), client_key.clone(), record.shares)
+                .await
+                .map_err(|e| format!("send_output_shares: {e}"))?;
+        }
+
+        if as_leader {
+            coord.finalize().await.map_err(|e| e.to_string())?;
+        }
+    }
+
+    print_vm_result(vm, result);
     Ok(())
+}
+
+#[cfg(feature = "avss")]
+#[allow(clippy::too_many_arguments)]
+async fn run_avss_coordinated_party(
+    curve_config: MpcCurveConfig,
+    vm: &mut VirtualMachine,
+    net: Arc<QuicNetworkManager>,
+    my_id: usize,
+    n: usize,
+    t: usize,
+    instance_id: u64,
+    coord_addr: (String, u16),
+    rpc_addr: (String, u16),
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+    timestamp: u64,
+    expected_clients: &[String],
+    as_leader: bool,
+    agreed_entry: &str,
+) -> Result<(), String> {
+    match curve_config {
+        MpcCurveConfig::Bls12_381 => {
+            run_avss_coordinated_party_for_curve::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>(
+                vm,
+                net,
+                my_id,
+                n,
+                t,
+                instance_id,
+                coord_addr,
+                rpc_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                expected_clients,
+                as_leader,
+                agreed_entry,
+            )
+            .await
+        }
+        MpcCurveConfig::Bn254 => {
+            run_avss_coordinated_party_for_curve::<ark_bn254::Fr, ark_bn254::G1Projective>(
+                vm,
+                net,
+                my_id,
+                n,
+                t,
+                instance_id,
+                coord_addr,
+                rpc_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                expected_clients,
+                as_leader,
+                agreed_entry,
+            )
+            .await
+        }
+        MpcCurveConfig::Curve25519 => {
+            run_avss_coordinated_party_for_curve::<
+                ark_curve25519::Fr,
+                ark_curve25519::EdwardsProjective,
+            >(
+                vm,
+                net,
+                my_id,
+                n,
+                t,
+                instance_id,
+                coord_addr,
+                rpc_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                expected_clients,
+                as_leader,
+                agreed_entry,
+            )
+            .await
+        }
+        MpcCurveConfig::Ed25519 => {
+            run_avss_coordinated_party_for_curve::<ark_ed25519::Fr, ark_ed25519::EdwardsProjective>(
+                vm,
+                net,
+                my_id,
+                n,
+                t,
+                instance_id,
+                coord_addr,
+                rpc_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                expected_clients,
+                as_leader,
+                agreed_entry,
+            )
+            .await
+        }
+        MpcCurveConfig::Secp256k1 => {
+            run_avss_coordinated_party_for_curve::<ark_secp256k1::Fr, ark_secp256k1::Projective>(
+                vm,
+                net,
+                my_id,
+                n,
+                t,
+                instance_id,
+                coord_addr,
+                rpc_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                expected_clients,
+                as_leader,
+                agreed_entry,
+            )
+            .await
+        }
+        MpcCurveConfig::Secp256r1 => {
+            run_avss_coordinated_party_for_curve::<ark_secp256r1::Fr, ark_secp256r1::Projective>(
+                vm,
+                net,
+                my_id,
+                n,
+                t,
+                instance_id,
+                coord_addr,
+                rpc_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                expected_clients,
+                as_leader,
+                agreed_entry,
+            )
+            .await
+        }
+    }
 }
 
 // Use a Tokio runtime for async operations
@@ -1898,6 +2745,7 @@ async fn main() {
     let mut n_parties: Option<usize> = None;
     let mut threshold: Option<usize> = None;
     let mut client_inputs: Option<String> = None;
+    let mut client_outputs: Option<usize> = None;
     let mut expected_client_count: Option<usize> = None;
     let mut _enable_nat: bool = false;
     let mut _stun_servers: Vec<SocketAddr> = Vec::new();
@@ -1942,6 +2790,7 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--n-parties") {
         } else if let Some(_rest) = arg.strip_prefix("--threshold") {
         } else if let Some(_rest) = arg.strip_prefix("--inputs") {
+        } else if let Some(_rest) = arg.strip_prefix("--outputs") {
         } else if let Some(_rest) = arg.strip_prefix("--wait-for-clients") {
         } else if let Some(_rest) = arg.strip_prefix("--stun-servers") {
         } else if let Some(_rest) = arg.strip_prefix("--servers") {
@@ -2028,6 +2877,11 @@ async fn main() {
             "--inputs" => {
                 if let Some(v) = args_iter.next() {
                     client_inputs = Some(v);
+                }
+            }
+            "--outputs" => {
+                if let Some(v) = args_iter.next() {
+                    client_outputs = Some(v.parse().expect("Invalid --outputs"));
                 }
             }
             "--wait-for-clients" => {
@@ -2146,6 +3000,7 @@ async fn main() {
     #[cfg(not(feature = "honeybadger"))]
     let _ = (
         &client_inputs,
+        &client_outputs,
         &server_addrs,
         &rpc_addr,
         &key_der,
@@ -2177,6 +3032,44 @@ async fn main() {
 
     // Client mode: connect to MPC servers and provide inputs
     if as_client {
+        #[cfg(feature = "avss")]
+        if coord_addr.is_some()
+            && contract_addr.is_none()
+            && mpc_backend.as_deref().is_some_and(|backend| {
+                backend.eq_ignore_ascii_case("avss") || backend.eq_ignore_ascii_case("adkg")
+            })
+        {
+            let curve_config = if let Some(ref name) = mpc_curve {
+                match MpcCurveConfig::from_str(name) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        exit(2);
+                    }
+                }
+            } else {
+                MpcCurveConfig::default()
+            };
+            if let Err(e) = curve_config.validate_for_backend(MpcBackendKind::Avss) {
+                eprintln!("Error: {}", e);
+                exit(2);
+            }
+            run_avss_offchain_coordinator_client(
+                curve_config,
+                client_inputs,
+                client_outputs,
+                server_addrs,
+                coord_addr.clone().unwrap(),
+                cert_der.clone().expect("--cert required in client mode"),
+                key_der.clone().expect("--key required in client mode"),
+                timestamp.expect("--timestamp required in client mode"),
+                threshold,
+                coordinator_client_index,
+            )
+            .await;
+            return;
+        }
+
         // Coordinator-based client mode
         if contract_addr.is_some() || coord_addr.is_some() {
             #[cfg(not(feature = "honeybadger"))]
@@ -2193,10 +3086,7 @@ async fn main() {
 
                 let t = threshold.unwrap_or(1);
                 let input_str = client_inputs.expect("--inputs required in client mode");
-                let input_values: Vec<i64> = input_str
-                    .split(',')
-                    .map(|s| s.trim().parse().expect("invalid input value"))
-                    .collect();
+                let input_values = parse_inputs_as_field::<HbCoordinatorField>(&input_str);
                 if input_values.len() != 1 {
                     eprintln!(
                     "Error: coordinator client mode currently supports exactly one input value; got {}",
@@ -2263,7 +3153,7 @@ async fn main() {
                         .unwrap();
 
                     coord.wait_for_round(Round::InputCollection).await.unwrap();
-                    let masked = mask + ark_bls12_381::Fr::from(input_values[0] as u64);
+                    let masked = mask + input_values[0];
                     coord
                         .send_masked_input(masked, reserved_index)
                         .await
@@ -2319,7 +3209,7 @@ async fn main() {
                     let mask = node_rpc_client.receive_mask().await.unwrap();
 
                     coord.wait_for_round(Round::InputCollection).await.unwrap();
-                    let masked = mask + ark_bls12_381::Fr::from(input_values[0] as u64);
+                    let masked = mask + input_values[0];
                     coord
                         .send_masked_input(masked, reserved_index)
                         .await
@@ -2338,7 +3228,7 @@ async fn main() {
         }
 
         // Direct client mode (no coordinator)
-        #[cfg(feature = "honeybadger")]
+        #[cfg(any(feature = "honeybadger", feature = "avss"))]
         {
             run_as_client(
                 n_parties,
@@ -2346,14 +3236,15 @@ async fn main() {
                 mpc_backend.as_deref(),
                 mpc_curve.as_deref(),
                 client_inputs,
+                client_outputs,
                 server_addrs,
             )
             .await;
             return;
         }
-        #[cfg(not(feature = "honeybadger"))]
+        #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
         {
-            eprintln!("Error: client mode requires the 'honeybadger' feature");
+            eprintln!("Error: client mode requires an MPC backend feature");
             exit(2);
         }
     }
@@ -2831,37 +3722,37 @@ async fn main() {
     #[cfg(feature = "honeybadger")]
     let mut on_chain_output_clients: Vec<(Vec<u8>, Address)> = Vec::new();
 
-    #[cfg(not(feature = "honeybadger"))]
+    #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
     if coord_addr.is_some() || contract_addr.is_some() {
-        eprintln!("Error: coordinator mode requires the 'honeybadger' feature");
+        eprintln!("Error: coordinator mode requires an MPC backend feature");
         exit(2);
     }
 
     #[cfg(feature = "honeybadger")]
-    let mut on_chain_coord_opt = if let Some(ref contract) = contract_addr {
-        let eth_node = eth_node_addr
-            .as_deref()
-            .expect("--eth-node required in on-chain coordinator mode");
-        let wallet_sk = wallet_sk_str
-            .as_deref()
-            .expect("--wallet-sk required in on-chain coordinator mode");
-        let eth = on_chain::ws_connect(eth_node, wallet_sk).await;
-        let contract = Address::from_str(contract).expect("Invalid --on-chain-coord address");
-        on_chain_input_ids = expected_clients
-            .iter()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| Address::from_str(s.trim()).expect("Invalid on-chain client address"))
-            .collect();
-        Some(
-            on_chain::setup_coord::<_, HbCoordinatorField, HbCoordinatorShare>(
-                eth,
-                contract,
-                session_threshold.unwrap_or(1) as u64,
-                1,
-                None,
+    let mut on_chain_coord_opt = if matches!(backend_kind, MpcBackendKind::HoneyBadger) {
+        if let Some(ref contract) = contract_addr {
+            let eth_node = eth_node_addr
+                .as_deref()
+                .expect("--eth-node required in on-chain coordinator mode");
+            let wallet_sk = wallet_sk_str
+                .as_deref()
+                .expect("--wallet-sk required in on-chain coordinator mode");
+            let eth = on_chain::ws_connect(eth_node, wallet_sk).await;
+            let contract = Address::from_str(contract).expect("Invalid --on-chain-coord address");
+            on_chain_input_ids = parse_on_chain_client_addresses(&node_ids, &expected_clients);
+            Some(
+                on_chain::setup_coord::<_, HbCoordinatorField, HbCoordinatorShare>(
+                    eth,
+                    contract,
+                    session_threshold.unwrap_or(1) as u64,
+                    1,
+                    None,
+                )
+                .await,
             )
-            .await,
-        )
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -2885,41 +3776,43 @@ async fn main() {
     };
 
     #[cfg(feature = "honeybadger")]
-    if let Some(ref ca) = coord_addr {
-        let coord = HbOffChainCoordinator::start_rpc_client(
-            &ca.0,
-            ca.1,
-            timestamp.expect("--timestamp required"),
-            session_threshold.unwrap_or(1) as u64,
-            1,
-            cert_der.clone().expect("--cert required"),
-            key_der.clone().expect("--key required"),
-        )
-        .await
-        .unwrap_or_else(|error| {
-            eprintln!("Failed to connect to off-chain coordinator: {error}");
-            exit(13);
-        });
-        coord_opt = Some(coord);
-
-        input_ids = expected_clients
-            .iter()
-            .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
-            .collect();
-
-        if let Some(ref rpc) = rpc_addr {
-            let node_rpc = HbOffChainNodeRpcServer::start(
-                &rpc.0,
-                rpc.1,
-                cert_der.clone().unwrap(),
-                key_der.clone().unwrap(),
+    if matches!(backend_kind, MpcBackendKind::HoneyBadger) {
+        if let Some(ref ca) = coord_addr {
+            let coord = HbOffChainCoordinator::start_rpc_client(
+                &ca.0,
+                ca.1,
+                timestamp.expect("--timestamp required"),
+                session_threshold.unwrap_or(1) as u64,
+                1,
+                cert_der.clone().expect("--cert required"),
+                key_der.clone().expect("--key required"),
             )
             .await
             .unwrap_or_else(|error| {
-                eprintln!("Failed to start node RPC server: {error}");
+                eprintln!("Failed to connect to off-chain coordinator: {error}");
                 exit(13);
             });
-            node_rpc_opt = Some(node_rpc);
+            coord_opt = Some(coord);
+
+            input_ids = expected_clients
+                .iter()
+                .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
+                .collect();
+
+            if let Some(ref rpc) = rpc_addr {
+                let node_rpc = HbOffChainNodeRpcServer::start(
+                    &rpc.0,
+                    rpc.1,
+                    cert_der.clone().unwrap(),
+                    key_der.clone().unwrap(),
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!("Failed to start node RPC server: {error}");
+                    exit(13);
+                });
+                node_rpc_opt = Some(node_rpc);
+            }
         }
     }
 
@@ -3264,6 +4157,48 @@ async fn main() {
                     curve_config.name()
                 );
 
+                if let Some(coord) = coord_addr.clone() {
+                    let rpc = rpc_addr.clone().unwrap_or_else(|| {
+                        eprintln!("Error: --rpc-bind is required with AVSS coordinator mode");
+                        exit(2);
+                    });
+                    let cert = cert_der.clone().unwrap_or_else(|| {
+                        eprintln!("Error: --cert is required with AVSS coordinator mode");
+                        exit(2);
+                    });
+                    let key = key_der.clone().unwrap_or_else(|| {
+                        eprintln!("Error: --key is required with AVSS coordinator mode");
+                        exit(2);
+                    });
+                    let ts = timestamp.unwrap_or_else(|| {
+                        eprintln!("Error: --timestamp is required with AVSS coordinator mode");
+                        exit(2);
+                    });
+                    if let Err(e) = run_avss_coordinated_party(
+                        curve_config,
+                        &mut vm,
+                        net.clone(),
+                        my_id,
+                        n,
+                        t,
+                        instance_id,
+                        coord,
+                        rpc,
+                        cert,
+                        key,
+                        ts,
+                        &expected_clients,
+                        as_leader,
+                        &agreed_entry,
+                    )
+                    .await
+                    {
+                        eprintln!("[party {}] AVSS coordinator execution failed: {}", my_id, e);
+                        exit(13);
+                    }
+                    return;
+                }
+
                 macro_rules! setup_avss {
                     ($F:ty, $G:ty) => {{
                         if let Err(e) = setup_avss_party_for_curve::<$F, $G>(
@@ -3474,6 +4409,7 @@ Flags:
   --mpc-curve <name>      MPC curve: bls12-381 (default), bn254, curve25519, ed25519;
                           AVSS also supports secp256k1 and p-256
   --inputs <values>       Comma-separated input values (client mode)
+  --outputs <n>           Number of output field elements to reconstruct (client mode)
   --servers <addrs>       Comma-separated server addresses (client mode)
   --wait-for-clients <n>
                           Number of client inputs to collect before starting computation
@@ -3565,7 +4501,8 @@ Examples:
 
 #[cfg(all(test, any(feature = "honeybadger", feature = "avss")))]
 mod tests {
-    use super::format_coordinator_outputs;
+    use super::{field_outputs_to_hex, format_coordinator_outputs};
+    use stoffel_vm::net::MpcCurveConfig;
 
     #[test]
     fn formats_negative_field_outputs_as_signed_i64s() {
@@ -3577,5 +4514,17 @@ mod tests {
     fn formats_positive_field_outputs_as_signed_i64s() {
         let outputs = vec![ark_bls12_381::Fr::from(10u64)];
         assert_eq!(format_coordinator_outputs(&outputs), "[10]");
+    }
+
+    #[test]
+    fn avss_client_output_hex_concatenates_fixed_width_ecdsa_scalars() {
+        let outputs = vec![ark_secp256k1::Fr::from(1u64), ark_secp256k1::Fr::from(2u64)];
+        let output_hex = field_outputs_to_hex(&outputs, MpcCurveConfig::Secp256k1);
+
+        assert_eq!(output_hex.len(), 128);
+        assert_eq!(
+            output_hex,
+            format!("{}{}", "0".repeat(63) + "1", "0".repeat(63) + "2")
+        );
     }
 }

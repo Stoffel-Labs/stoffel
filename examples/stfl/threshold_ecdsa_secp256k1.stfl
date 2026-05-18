@@ -1,0 +1,38 @@
+# Threshold ECDSA signature over secp256k1.
+#
+# This keeps the protocol in Stoffel source and uses only small VM primitives
+# for field inversion and extracting x(R) mod q.
+#
+# Result layout: r(32-byte big-endian) || s(32-byte big-endian) ||
+# SEC1 compressed pk(33).
+
+main main() -> bytes:
+  var secret_key = Share.random()
+  var public_key = Share.get_commitment(secret_key, 0)
+
+  var message = Bytes.from_string("stoffel-avss-threshold-ecdsa-demo-message-v1")
+  var message_hash = Crypto.sha256(message)
+  var message_field = Crypto.hash_to_field(message_hash, "secp256k1")
+
+  var gamma = Share.random()
+  var nonce = Share.random()
+  var delta_share = Share.mul(gamma, nonce)
+  var delta = Share.open_field(delta_share)
+  var delta_inverse = Crypto.field_inv(delta, "secp256k1")
+  var nonce_inverse = Share.mul_field(gamma, delta_inverse)
+
+  var nonce_point = Share.open_exp(nonce, "secp256k1")
+  var r = Crypto.point_x_to_field(nonce_point, "secp256k1")
+
+  var secret_over_nonce = Share.mul(secret_key, nonce_inverse)
+  var message_over_nonce = Share.mul_field(nonce_inverse, message_field)
+  var scaled_secret = Share.mul_field(secret_over_nonce, r)
+  var response_share = Share.add(message_over_nonce, scaled_secret)
+  var response = Share.open_field(response_share)
+
+  var r_bytes = Crypto.field_to_scalar_bytes(r, "secp256k1")
+  var s_bytes = Crypto.field_to_scalar_bytes(response, "secp256k1")
+  var public_key_bytes = Crypto.point_to_sec1(public_key, "secp256k1")
+
+  var signature = Bytes.concat(r_bytes, s_bytes)
+  return Bytes.concat(signature, public_key_bytes)

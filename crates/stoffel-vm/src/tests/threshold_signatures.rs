@@ -50,10 +50,29 @@ use tracing::{error, info, warn};
 
 use crate::core_vm::VirtualMachine;
 use crate::net::avss_engine::{AvssEngineConfig, AvssMpcEngine};
+use crate::net::curve::SupportedMpcField;
 use crate::net::MpcSessionConfig;
+use crate::tests::avss_certificate_programs::{
+    build_threshold_ecdsa_program, THRESHOLD_ECDSA_DEMO_MESSAGE_INPUT,
+};
 use crate::tests::test_utils::{
     init_crypto_provider, read_vm_table_byte_array, setup_test_tracing,
 };
+
+#[derive(Clone, Copy)]
+enum EcdsaThirdPartyVerifier {
+    Secp256k1,
+    P256,
+}
+
+impl EcdsaThirdPartyVerifier {
+    fn verify(self, message_hash: &[u8], public_key: &[u8], r: &[u8; 32], s: &[u8; 32]) {
+        match self {
+            Self::Secp256k1 => verify_secp256k1_ecdsa(message_hash, public_key, r, s),
+            Self::P256 => verify_p256_ecdsa(message_hash, public_key, r, s),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SimplePartyNetwork - party-id-based Network adapter (same as avss_e2e)
@@ -659,6 +678,219 @@ where
         .collect();
 
     results
+}
+
+async fn run_threshold_ecdsa_case<F, G>(
+    curve_name: &str,
+    instance_id: u64,
+    base_port: u16,
+    third_party_verifier: EcdsaThirdPartyVerifier,
+) where
+    F: SupportedMpcField
+        + ark_ff::FftField
+        + PrimeField
+        + UniformRand
+        + CanonicalDeserialize
+        + CanonicalSerialize
+        + Send
+        + Sync
+        + 'static,
+    G: CurveGroup<ScalarField = F>
+        + PrimeGroup
+        + CanonicalSerialize
+        + CanonicalDeserialize
+        + std::ops::Mul<F, Output = G>
+        + Send
+        + Sync
+        + 'static,
+    G::Affine: CanonicalDeserialize + CanonicalSerialize + AffineRepr,
+    AvssMpcEngine<F, G>: crate::net::mpc_engine::MpcEngine,
+{
+    init_crypto_provider();
+    setup_test_tracing();
+
+    let n = 5;
+    let t = 1;
+
+    let mut nodes = setup_test_network::<F, G>(n, base_port)
+        .await
+        .expect("Failed to create test network");
+
+    let pk_maps = exchange_ecdh_keys(&mut nodes)
+        .await
+        .expect("PK exchange failed");
+
+    let mut engines: Vec<Arc<AvssMpcEngine<F, G>>> = Vec::with_capacity(n);
+    for (i, node) in nodes.iter().enumerate() {
+        let session = MpcSessionConfig::try_new(
+            instance_id,
+            node.node_id,
+            n,
+            t,
+            node.network.clone().unwrap(),
+        )
+        .expect("test topology should be valid");
+        let engine = AvssMpcEngine::from_config(AvssEngineConfig::new(
+            session,
+            node.sk_i,
+            pk_maps[i].clone(),
+        ))
+        .await
+        .expect("Failed to create engine");
+        engine.start_async().await.expect("Failed to start engine");
+        engines.push(engine);
+    }
+
+    spawn_message_processors(&mut nodes, &engines);
+
+    let (program, _) = build_threshold_ecdsa_program(curve_name);
+    info!(
+        "Running ECDSA signing program on {} parties for {}...",
+        n, curve_name
+    );
+    let mut results = run_program_on_all_parties(&engines, program, 16).await;
+
+    let mut byte_results: Vec<Vec<u8>> = Vec::new();
+    for (vm, result) in &mut results {
+        byte_results.push(extract_vm_byte_array(vm, result));
+    }
+
+    for i in 1..n {
+        assert_eq!(
+            byte_results[0], byte_results[i],
+            "Party 0 and party {} produced different ECDSA results",
+            i
+        );
+    }
+
+    let result = &byte_results[0];
+    let scalar_len = serialized_field_len::<F>();
+    let public_key_len = result
+        .len()
+        .checked_sub(2 * scalar_len)
+        .expect("result must contain r, s, and pk");
+    assert_eq!(scalar_len, 32, "ECDSA scalar fixtures should be 32 bytes");
+    assert_eq!(
+        public_key_len, 33,
+        "ECDSA public keys should be compressed SEC1 points"
+    );
+
+    let r_be: [u8; 32] = result[..scalar_len]
+        .try_into()
+        .expect("ECDSA r should be fixed-width");
+    let s_be: [u8; 32] = result[scalar_len..2 * scalar_len]
+        .try_into()
+        .expect("ECDSA s should be fixed-width");
+    let r_scalar = F::from_be_bytes_mod_order(&r_be);
+    let s_scalar = F::from_be_bytes_mod_order(&s_be);
+    let public_key_sec1 = &result[2 * scalar_len..];
+
+    assert!(!r_scalar.is_zero(), "ECDSA r must be nonzero");
+    assert!(!s_scalar.is_zero(), "ECDSA s must be nonzero");
+
+    let message_hash = sha2::Sha256::digest(THRESHOLD_ECDSA_DEMO_MESSAGE_INPUT.as_bytes());
+    third_party_verifier.verify(&message_hash, public_key_sec1, &r_be, &s_be);
+
+    println!("\n=== Threshold ECDSA Signature ({}) ===", curve_name);
+    println!("  Parties:   {}", n);
+    println!("  Threshold: {}", t);
+    println!("  Message:   \"{}\"", THRESHOLD_ECDSA_DEMO_MESSAGE_INPUT);
+    println!(
+        "  Public Key SEC1 ({} bytes): 0x{}",
+        public_key_len,
+        hex::encode(&result[2 * scalar_len..])
+    );
+    println!(
+        "  r ({} bytes):          0x{}",
+        scalar_len,
+        hex::encode(&result[..scalar_len])
+    );
+    println!(
+        "  s ({} bytes):          0x{}",
+        scalar_len,
+        hex::encode(&result[scalar_len..2 * scalar_len])
+    );
+    println!("  Verification via RustCrypto ECDSA: PASSED");
+    println!("================================================\n");
+}
+
+fn serialized_field_len<F>() -> usize
+where
+    F: Zero + CanonicalSerialize,
+{
+    let mut bytes = Vec::new();
+    F::zero()
+        .serialize_compressed(&mut bytes)
+        .expect("serialize zero scalar");
+    bytes.len()
+}
+
+fn signature_bytes(r: &[u8; 32], s: &[u8; 32]) -> [u8; 64] {
+    let mut bytes = [0u8; 64];
+    bytes[..32].copy_from_slice(r);
+    bytes[32..].copy_from_slice(s);
+    bytes
+}
+
+fn verify_secp256k1_ecdsa(message_hash: &[u8], public_key: &[u8], r: &[u8; 32], s: &[u8; 32]) {
+    use k256::ecdsa::signature::hazmat::PrehashVerifier as _;
+
+    let verifying_key =
+        k256::ecdsa::VerifyingKey::from_sec1_bytes(public_key).expect("valid secp256k1 public key");
+    let signature = k256::ecdsa::Signature::from_slice(&signature_bytes(r, s))
+        .expect("valid secp256k1 ECDSA signature");
+
+    verifying_key
+        .verify_prehash(message_hash, &signature)
+        .expect("secp256k1 signature should verify with RustCrypto");
+}
+
+fn verify_p256_ecdsa(message_hash: &[u8], public_key: &[u8], r: &[u8; 32], s: &[u8; 32]) {
+    use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
+
+    let verifying_key =
+        p256::ecdsa::VerifyingKey::from_sec1_bytes(public_key).expect("valid P-256 public key");
+    let signature = p256::ecdsa::Signature::from_slice(&signature_bytes(r, s))
+        .expect("valid P-256 ECDSA signature");
+
+    verifying_key
+        .verify_prehash(message_hash, &signature)
+        .expect("P-256 signature should verify with RustCrypto");
+}
+
+// ===========================================================================
+// Test 0: ECDSA Threshold Signatures (secp256k1 and P-256)
+// ===========================================================================
+
+/// Threshold ECDSA using the Bar-Ilan/Beaver inversion trick:
+///   [delta] = [gamma] * [k]
+///   [k^-1] = Open([delta])^-1 * [gamma]
+///   R = Open(Convert([k]))
+///   [s] = [e/k] + r * [sk/k]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_threshold_ecdsa_secp256k1() {
+    use ark_secp256k1::{Fr, Projective};
+
+    run_threshold_ecdsa_case::<Fr, Projective>(
+        "secp256k1",
+        900_003,
+        13300,
+        EcdsaThirdPartyVerifier::Secp256k1,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_threshold_ecdsa_p256() {
+    use ark_secp256r1::{Fr, Projective};
+
+    run_threshold_ecdsa_case::<Fr, Projective>(
+        "p-256",
+        900_004,
+        13400,
+        EcdsaThirdPartyVerifier::P256,
+    )
+    .await;
 }
 
 // ===========================================================================

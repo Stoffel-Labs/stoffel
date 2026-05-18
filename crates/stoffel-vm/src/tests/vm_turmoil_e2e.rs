@@ -50,6 +50,7 @@ const INPUT_CLIENT_ID: ClientId = 100;
 const OUTPUT_CLIENT_ID: ClientId = 200;
 const INPUT_VALUE: u64 = 7;
 const INPUT_SQUARE: u64 = INPUT_VALUE * INPUT_VALUE;
+const OUTPUT_SHARE_LIST_MAGIC: &[u8; 5] = b"VMOS1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum TurmoilSenderId {
@@ -605,7 +606,11 @@ impl AsyncMpcEngine for HbTurmoilVmEngine {
         output_share_count: ClientOutputShareCount,
     ) -> MpcEngineResult<()> {
         let input_len = output_share_count.count();
-        let output_shares = if input_len == 1 {
+        let output_shares = if let Some(shares) = decode_hb_output_share_list(shares, input_len)
+            .map_err(|error| MpcEngineError::operation_failed("decode_hb_outputs", error))?
+        {
+            shares
+        } else if input_len == 1 {
             vec![Self::decode_share(shares)
                 .map_err(|error| MpcEngineError::operation_failed("decode_hb_output", error))?]
         } else {
@@ -874,7 +879,12 @@ impl AsyncMpcEngine for AvssTurmoilVmEngine {
         output_share_count: ClientOutputShareCount,
     ) -> MpcEngineResult<()> {
         let input_len = output_share_count.count();
-        let output_shares = if input_len == 1 {
+        let output_shares = if let Some(shares) =
+            decode_avss_output_share_list(shares, input_len)
+                .map_err(|error| MpcEngineError::operation_failed("decode_avss_outputs", error))?
+        {
+            shares
+        } else if input_len == 1 {
             vec![Self::decode_share(shares)
                 .map_err(|error| MpcEngineError::operation_failed("decode_avss_output", error))?]
         } else {
@@ -890,6 +900,87 @@ impl AsyncMpcEngine for AvssTurmoilVmEngine {
                 MpcEngineError::operation_failed("avss_send_output", format!("{error:?}"))
             })
     }
+}
+
+fn decode_hb_output_share_list(
+    payload: &[u8],
+    expected_count: usize,
+) -> Result<Option<Vec<RobustShare<Fr>>>, String> {
+    if !payload.starts_with(OUTPUT_SHARE_LIST_MAGIC) {
+        return Ok(None);
+    }
+
+    decode_output_share_list(payload, expected_count, |bytes| {
+        RobustShare::<Fr>::deserialize_compressed(bytes)
+    })
+}
+
+fn decode_avss_output_share_list(
+    payload: &[u8],
+    expected_count: usize,
+) -> Result<Option<Vec<FeldmanShamirShare<Fr, G1Projective>>>, String> {
+    if !payload.starts_with(OUTPUT_SHARE_LIST_MAGIC) {
+        return Ok(None);
+    }
+
+    decode_output_share_list(payload, expected_count, |bytes| {
+        FeldmanShamirShare::<Fr, G1Projective>::deserialize_compressed(bytes)
+    })
+}
+
+fn decode_output_share_list<T, F>(
+    payload: &[u8],
+    expected_count: usize,
+    mut deserialize: F,
+) -> Result<Option<Vec<T>>, String>
+where
+    F: FnMut(&[u8]) -> Result<T, ark_serialize::SerializationError>,
+{
+    let mut offset = OUTPUT_SHARE_LIST_MAGIC.len();
+    let count = read_output_u32(payload, &mut offset)? as usize;
+    if count != expected_count {
+        return Err(format!(
+            "Output share count mismatch: envelope has {}, expected {}",
+            count, expected_count
+        ));
+    }
+
+    let mut shares = Vec::with_capacity(count);
+    for index in 0..count {
+        let len = read_output_u32(payload, &mut offset)? as usize;
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| "Output share envelope length overflow".to_owned())?;
+        if end > payload.len() {
+            return Err(format!(
+                "Output share envelope truncated at share {}",
+                index
+            ));
+        }
+        let share = deserialize(&payload[offset..end])
+            .map_err(|error| format!("Failed to deserialize output share {index}: {error:?}"))?;
+        shares.push(share);
+        offset = end;
+    }
+
+    if offset != payload.len() {
+        return Err("Output share envelope has trailing bytes".to_owned());
+    }
+
+    Ok(Some(shares))
+}
+
+fn read_output_u32(payload: &[u8], offset: &mut usize) -> Result<u32, String> {
+    let end = offset
+        .checked_add(std::mem::size_of::<u32>())
+        .ok_or_else(|| "Output share envelope offset overflow".to_owned())?;
+    let bytes = payload
+        .get(*offset..end)
+        .ok_or_else(|| "Output share envelope is truncated".to_owned())?;
+    *offset = end;
+    Ok(u32::from_le_bytes(
+        bytes.try_into().expect("u32 byte slice length"),
+    ))
 }
 
 fn share_ty() -> ShareType {
@@ -935,6 +1026,43 @@ fn build_client_square_to_output_vm_function(output_client_id: ClientId) -> VMFu
             Instruction::PUSHARG(0),
             Instruction::PUSHARG(2),
             Instruction::CALL("Share.send_to_client".to_string()),
+            Instruction::RET(0),
+        ],
+        HashMap::new(),
+    )
+}
+
+fn build_client_square_array_to_output_vm_function(output_client_id: ClientId) -> VMFunction {
+    VMFunction::new(
+        "client_square_to_output".to_string(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        5,
+        vec![
+            Instruction::LDI(0, Value::I64(0)),
+            Instruction::PUSHARG(0),
+            Instruction::PUSHARG(0),
+            Instruction::CALL("ClientStore.take_share".to_string()),
+            Instruction::MOV(1, 0),
+            Instruction::PUSHARG(1),
+            Instruction::PUSHARG(1),
+            Instruction::CALL("Share.mul".to_string()),
+            Instruction::MOV(2, 0),
+            Instruction::LDI(4, Value::I64(2)),
+            Instruction::PUSHARG(4),
+            Instruction::CALL("create_array".to_string()),
+            Instruction::MOV(4, 0),
+            Instruction::PUSHARG(4),
+            Instruction::PUSHARG(2),
+            Instruction::CALL("array_push".to_string()),
+            Instruction::PUSHARG(4),
+            Instruction::PUSHARG(1),
+            Instruction::CALL("array_push".to_string()),
+            Instruction::LDI(3, Value::I64(output_client_id as i64)),
+            Instruction::PUSHARG(3),
+            Instruction::PUSHARG(4),
+            Instruction::CALL("MpcOutput.send_to_client".to_string()),
             Instruction::RET(0),
         ],
         HashMap::new(),
@@ -1529,6 +1657,24 @@ fn hb_vm_turmoil_full_client_flow_e2e() {
 
 #[test]
 fn avss_vm_turmoil_full_client_flow_e2e() {
+    run_avss_vm_turmoil_full_client_flow(
+        build_client_square_to_output_vm_function,
+        vec![Fr::from(INPUT_SQUARE)],
+    );
+}
+
+#[test]
+fn avss_vm_turmoil_full_client_flow_two_output_array_e2e() {
+    run_avss_vm_turmoil_full_client_flow(
+        build_client_square_array_to_output_vm_function,
+        vec![Fr::from(INPUT_SQUARE), Fr::from(INPUT_VALUE)],
+    );
+}
+
+fn run_avss_vm_turmoil_full_client_flow(
+    build_vm_function: fn(ClientId) -> VMFunction,
+    expected_output: Vec<Fr>,
+) {
     let mut rng = StdRng::seed_from_u64(0xa001);
     let input_masks = avss_shares(11, &mut rng);
     let triples = avss_triples(1, &mut rng);
@@ -1558,7 +1704,7 @@ fn avss_vm_turmoil_full_client_flow_e2e() {
         tx.clone(),
         done_tx.clone(),
         barrier.clone(),
-        Fr::from(INPUT_SQUARE),
+        expected_output,
     );
 
     for party_id in 0..N_PARTIES {
@@ -1599,8 +1745,7 @@ fn avss_vm_turmoil_full_client_flow_e2e() {
                         router.clone(),
                     ));
                     let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
-                    let vm =
-                        new_vm(runtime_engine, build_client_square_to_output_vm_function(OUTPUT_CLIENT_ID));
+                    let vm = new_vm(runtime_engine, build_vm_function(OUTPUT_CLIENT_ID));
                     barrier.wait().await;
 
                     {
@@ -1846,13 +1991,15 @@ fn install_avss_output_client(
     tx: std::sync::mpsc::Sender<TestResult>,
     done_tx: tokio::sync::broadcast::Sender<()>,
     barrier: Arc<tokio::sync::Barrier>,
-    expected_output: Fr,
+    expected_output: Vec<Fr>,
 ) {
     sim.host(format!("client{OUTPUT_CLIENT_ID}"), move || {
         let inner = inner.clone();
         let tx = tx.clone();
         let done_tx = done_tx.clone();
         let barrier = barrier.clone();
+        let output_len = expected_output.len();
+        let expected_output = expected_output.clone();
 
         async move {
             let report = async {
@@ -1865,7 +2012,7 @@ fn install_avss_output_client(
                     THRESHOLD,
                     INSTANCE_ID as u32,
                     Vec::new(),
-                    1,
+                    output_len,
                 )
                 .map_err(|error| format!("AVSS output client creation failed: {error:?}"))?;
                 barrier.wait().await;
@@ -1879,7 +2026,7 @@ fn install_avss_output_client(
                         .await
                         .map_err(|error| format!("AVSS output client process failed: {error:?}"))?;
                     if let Some(output) = client.output.get_output() {
-                        return if output == vec![expected_output] {
+                        return if output == expected_output {
                             Ok(())
                         } else {
                             Err(format!(

@@ -13,7 +13,8 @@ use stoffel_vm_types::core_types::{
 pub type PersistentValueResult<T> = Result<T, PersistentValueError>;
 
 const MAGIC: &[u8; 8] = b"STFLVAL1";
-const SHARE_ENVELOPE_VERSION: u8 = 1;
+const LEGACY_SHARE_ENVELOPE_VERSION_WITH_SESSION: u8 = 1;
+const SHARE_ENVELOPE_VERSION: u8 = 2;
 pub const MAX_PERSISTENT_VALUE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PERSISTENT_BLOB_BYTES: usize = MAX_PERSISTENT_VALUE_BYTES;
 const MAX_PERSISTENT_TABLE_ENTRIES: usize = 65_536;
@@ -67,7 +68,6 @@ pub struct PersistentShareContext {
     protocol_name: String,
     curve: String,
     field: String,
-    instance_id: u64,
     party_id: usize,
     n_parties: usize,
     threshold: usize,
@@ -79,7 +79,6 @@ impl PersistentShareContext {
         protocol_name: impl Into<String>,
         curve: impl Into<String>,
         field: impl Into<String>,
-        instance_id: u64,
         party_id: usize,
         n_parties: usize,
         threshold: usize,
@@ -89,7 +88,6 @@ impl PersistentShareContext {
             protocol_name: protocol_name.into(),
             curve: curve.into(),
             field: field.into(),
-            instance_id,
             party_id,
             n_parties,
             threshold,
@@ -102,7 +100,6 @@ impl PersistentShareContext {
             info.protocol_name(),
             info.curve_config().name(),
             info.field_kind().name(),
-            info.instance().id(),
             info.party().id(),
             info.party_count().count(),
             info.threshold_param().value(),
@@ -352,7 +349,6 @@ impl Encoder<'_> {
         self.write_string(&context.protocol_name)?;
         self.write_string(&context.curve)?;
         self.write_string(&context.field)?;
-        self.write_u64(context.instance_id);
         self.write_len(context.party_id, "party id")?;
         self.write_len(context.n_parties, "party count")?;
         self.write_len(context.threshold, "threshold")?;
@@ -533,17 +529,26 @@ impl Reader<'_> {
 
     fn read_share_envelope(&mut self) -> PersistentValueResult<ShareEnvelope> {
         let version = self.read_u8()?;
-        if version != SHARE_ENVELOPE_VERSION {
+        if !matches!(
+            version,
+            LEGACY_SHARE_ENVELOPE_VERSION_WITH_SESSION | SHARE_ENVELOPE_VERSION
+        ) {
             return Err(invalid_data(format!(
                 "unsupported persistent share envelope version {version}"
             )));
         }
 
+        let protocol_name = self.read_string()?;
+        let curve = self.read_string()?;
+        let field = self.read_string()?;
+        if version == LEGACY_SHARE_ENVELOPE_VERSION_WITH_SESSION {
+            let _legacy_instance_id = self.read_u64()?;
+        }
+
         Ok(ShareEnvelope {
-            protocol_name: self.read_string()?,
-            curve: self.read_string()?,
-            field: self.read_string()?,
-            instance_id: self.read_u64()?,
+            protocol_name,
+            curve,
+            field,
             party_id: self.read_len("party id")?,
             n_parties: self.read_len("party count")?,
             threshold: self.read_len("threshold")?,
@@ -699,7 +704,6 @@ struct ShareEnvelope {
     protocol_name: String,
     curve: String,
     field: String,
-    instance_id: u64,
     party_id: usize,
     n_parties: usize,
     threshold: usize,
@@ -718,7 +722,6 @@ impl ShareEnvelope {
         self.require_str("backend", &context.protocol_name, &self.protocol_name)?;
         self.require_str("curve", &context.curve, &self.curve)?;
         self.require_str("field", &context.field, &self.field)?;
-        self.require_u64("session", context.instance_id, self.instance_id)?;
         self.require_usize("party_id", context.party_id, self.party_id)?;
         self.require_usize("n_parties", context.n_parties, self.n_parties)?;
         self.require_usize("threshold", context.threshold, self.threshold)?;
@@ -751,22 +754,6 @@ impl ShareEnvelope {
             field,
             expected: expected.to_owned(),
             actual: actual.to_owned(),
-        })
-    }
-
-    fn require_u64(
-        &self,
-        field: &'static str,
-        expected: u64,
-        actual: u64,
-    ) -> PersistentValueResult<()> {
-        if expected == actual {
-            return Ok(());
-        }
-        Err(PersistentValueError::ShareContextMismatch {
-            field,
-            expected: expected.to_string(),
-            actual: actual.to_string(),
         })
     }
 
@@ -822,8 +809,9 @@ fn share_commitment_digest(share_data: &ShareData) -> PersistentValueResult<Opti
 mod tests {
     use super::{
         decode_value, decode_value_with_context, encode_value, encode_value_with_context,
-        PersistentShareContext, PersistentValueContext, PersistentValueError, MAGIC,
-        MAX_PERSISTENT_COMMITMENTS, MAX_PERSISTENT_TABLE_ENTRIES, SHARE_DATA_FELDMAN,
+        PersistentShareContext, PersistentValueContext, PersistentValueError,
+        LEGACY_SHARE_ENVELOPE_VERSION_WITH_SESSION, MAGIC, MAX_PERSISTENT_COMMITMENTS,
+        MAX_PERSISTENT_TABLE_ENTRIES, SHARE_DATA_FELDMAN, SHARE_DATA_OPAQUE,
         SHARE_ENVELOPE_VERSION, SHARE_TYPE_SECRET_INT, TAG_ARRAY, TAG_SHARE,
     };
     use std::sync::Arc;
@@ -837,7 +825,6 @@ mod tests {
             "avss-mpc",
             "bls12-381",
             "bls12-381-fr",
-            7,
             0,
             5,
             1,
@@ -1003,6 +990,40 @@ mod tests {
     }
 
     #[test]
+    fn legacy_share_envelope_session_id_is_not_part_of_durable_context() {
+        let mut memory = ObjectStore::new();
+        let context = test_context(b"share-key");
+        let share_payload = [1u8, 2, 3];
+        let mut bytes = Vec::from(MAGIC.as_slice());
+        bytes.push(TAG_SHARE);
+        bytes.push(LEGACY_SHARE_ENVELOPE_VERSION_WITH_SESSION);
+        write_test_string(&mut bytes, "avss-mpc");
+        write_test_string(&mut bytes, "bls12-381");
+        write_test_string(&mut bytes, "bls12-381-fr");
+        bytes.extend_from_slice(&123_456_789u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&5u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(blake3::hash(b"share-key").as_bytes());
+        bytes.extend_from_slice(blake3::hash(&share_payload).as_bytes());
+        bytes.push(0);
+        bytes.push(SHARE_TYPE_SECRET_INT);
+        bytes.extend_from_slice(&64u64.to_le_bytes());
+        bytes.push(SHARE_DATA_OPAQUE);
+        bytes.extend_from_slice(&(share_payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&share_payload);
+
+        assert_eq!(
+            decode_value_with_context(&bytes, &mut memory, Some(&context))
+                .expect("legacy value decodes across sessions"),
+            Value::Share(
+                ShareType::secret_int(64),
+                ShareData::Opaque(share_payload.to_vec())
+            )
+        );
+    }
+
+    #[test]
     fn decode_rejects_large_array_capacity() {
         let mut memory = ObjectStore::new();
         let mut bytes = Vec::from(MAGIC.as_slice());
@@ -1030,7 +1051,6 @@ mod tests {
         write_test_string(&mut bytes, "avss-mpc");
         write_test_string(&mut bytes, "bls12-381");
         write_test_string(&mut bytes, "bls12-381-fr");
-        bytes.extend_from_slice(&7u64.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
         bytes.extend_from_slice(&5u64.to_le_bytes());
         bytes.extend_from_slice(&1u64.to_le_bytes());
