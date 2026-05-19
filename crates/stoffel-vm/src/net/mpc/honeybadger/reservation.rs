@@ -8,6 +8,26 @@ use std::sync::atomic::Ordering;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelnet::network_utils::ClientId;
 
+impl<F, G> HoneyBadgerMpcEngine<F, G>
+where
+    F: SupportedMpcField,
+    G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
+{
+    async fn persist_reservation_state_if_configured(&self) -> Result<(), String> {
+        let reg_guard = self.reservation.read().await;
+        let Some(reg) = reg_guard.as_ref() else {
+            return Ok(());
+        };
+        let store = self.preproc_store.read().await.clone();
+        if let Some(store) = store {
+            reg.persist(store.as_ref())
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl<F, G> MpcEngineReservation for HoneyBadgerMpcEngine<F, G>
 where
@@ -51,7 +71,10 @@ where
         async {
             let guard = self.reservation.read().await;
             let reg = guard.as_ref().ok_or("reservations not initialized")?;
-            reg.reserve(client_id, n).await.map_err(|e| e.to_string())
+            let grant = reg.reserve(client_id, n).await.map_err(|e| e.to_string())?;
+            drop(guard);
+            self.persist_reservation_state_if_configured().await?;
+            Ok::<ReservationGrant, String>(grant)
         }
         .await
         .map_mpc_engine_operation("reserve_masks")
@@ -77,6 +100,7 @@ where
             .random_share();
             let blob = store.load(&key).await?.ok_or("no random shares stored")?;
             let index = preproc::u32_index(index, "preprocessing random share index")?;
+            store.reserve_at(&key, index, 1).await?;
             let share =
                 preproc::deserialize_one_robust_share::<F>(&blob.data, blob.meta.item_size, index)?;
             Self::encode_share(&share)
@@ -96,7 +120,9 @@ where
             let reg = guard.as_ref().ok_or("reservations not initialized")?;
             reg.submit_masked_input(client_id, index, value)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            drop(guard);
+            self.persist_reservation_state_if_configured().await
         }
         .await
         .map_mpc_engine_operation("submit_masked_input")
@@ -158,6 +184,16 @@ where
                 let reg_guard = self.reservation.read().await;
                 let reg = reg_guard.as_ref().ok_or("reservations not initialized")?;
                 reg.consume(indices).await.map_err(|e| e.to_string())?;
+            }
+            self.persist_reservation_state_if_configured().await?;
+            let all_reserved_slots_consumed = {
+                let reg_guard = self.reservation.read().await;
+                let reg = reg_guard.as_ref().ok_or("reservations not initialized")?;
+                reg.all_reserved_slots_consumed().await
+            };
+            // Keep the mask blob while any allocated slot may still need it for unmasking.
+            if all_reserved_slots_consumed && store.available(&key).await? == 0 {
+                store.delete(&key).await?;
             }
             Ok::<Vec<(u64, Vec<u8>)>, String>(result)
         }

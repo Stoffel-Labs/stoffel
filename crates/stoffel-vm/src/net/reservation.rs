@@ -228,6 +228,7 @@ impl ReservationRegistry {
     /// Mark indices as consumed during MPC execution.
     pub async fn consume(&self, indices: &[u64]) -> Result<(), ReservationError> {
         let mut s = self.state.write().await;
+        let mut consumed = Vec::with_capacity(indices.len());
         for &i in indices {
             if i >= s.capacity {
                 return Err(ReservationError::OutOfBounds(i));
@@ -237,7 +238,11 @@ impl ReservationRegistry {
                 Some(SlotStatus::Consumed(_)) => return Err(ReservationError::AlreadyConsumed(i)),
                 None => return Err(ReservationError::NotReserved(i)),
             };
+            consumed.push((i, client_id));
+        }
+        for (i, client_id) in consumed {
             s.slots.insert(i, SlotStatus::Consumed(client_id));
+            s.masked_inputs.remove(&i);
         }
         Ok(())
     }
@@ -245,6 +250,14 @@ impl ReservationRegistry {
     pub async fn available(&self) -> u64 {
         let s = self.state.read().await;
         s.capacity.saturating_sub(s.next_index)
+    }
+
+    pub async fn all_reserved_slots_consumed(&self) -> bool {
+        let s = self.state.read().await;
+        !s.slots.is_empty()
+            && s.slots
+                .values()
+                .all(|status| matches!(status, SlotStatus::Consumed(_)))
     }
 
     pub async fn get_masked_input(&self, index: u64) -> Option<Vec<u8>> {
@@ -334,6 +347,12 @@ mod tests {
 
         let indices: Vec<u64> = grant.indices().collect();
         reg.consume(&indices).await.unwrap();
+        assert_eq!(
+            reg.get_masked_input(grant.start).await,
+            None,
+            "consumed masked input payload should be evicted"
+        );
+        assert!(reg.all_reserved_slots_consumed().await);
 
         let err = reg.consume(&indices).await.unwrap_err();
         assert!(matches!(err, ReservationError::AlreadyConsumed(_)));

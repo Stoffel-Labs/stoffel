@@ -8,6 +8,17 @@ use stoffelmpc_mpc::common::PreprocessingMPCProtocol;
 use stoffelnet::transports::quic::QuicNetworkManager;
 use tracing::info;
 
+fn ensure_decoded_count(label: &str, actual: usize, expected: u32) -> Result<(), String> {
+    let expected = usize::try_from(expected)
+        .map_err(|_| format!("{label} expected count exceeds usize::MAX"))?;
+    if actual != expected {
+        return Err(format!(
+            "{label} decoded {actual} items, expected {expected}"
+        ));
+    }
+    Ok(())
+}
+
 impl<F, G> AvssMpcEngine<F, G>
 where
     F: SupportedMpcField,
@@ -68,23 +79,52 @@ where
         }
 
         let node = self.clone_avss_node().await;
-        let mut prep = node.preprocessing_material.lock().await;
+        let mut loaded_triples = 0;
+        let mut loaded_randoms = 0;
 
         if let Some(blob) = triples {
-            let decoded = preproc::deserialize_avss_triples::<F, G>(
-                blob.unconsumed_data()?,
-                blob.meta.item_size,
-                0,
-            )?;
-            prep.add(Some(decoded), None);
+            let available = blob.meta.available();
+            if available > 0 {
+                let decoded = preproc::deserialize_avss_triples::<F, G>(
+                    blob.unconsumed_data()?,
+                    blob.meta.item_size,
+                    0,
+                )?;
+                ensure_decoded_count("AVSS triples", decoded.len(), available)?;
+                store
+                    .reserve_at(&base, blob.meta.consumed, available)
+                    .await?;
+                store.delete(&base).await?;
+                loaded_triples = available;
+                node.preprocessing_material
+                    .lock()
+                    .await
+                    .add(Some(decoded), None);
+            }
         }
         if let Some(blob) = randoms {
-            let decoded = preproc::deserialize_feldman_shares::<F, G>(
-                blob.unconsumed_data()?,
-                blob.meta.item_size,
-                0,
-            )?;
-            prep.add(None, Some(decoded));
+            let available = blob.meta.available();
+            if available > 0 {
+                let decoded = preproc::deserialize_feldman_shares::<F, G>(
+                    blob.unconsumed_data()?,
+                    blob.meta.item_size,
+                    0,
+                )?;
+                ensure_decoded_count("AVSS random shares", decoded.len(), available)?;
+                store
+                    .reserve_at(&k_rs, blob.meta.consumed, available)
+                    .await?;
+                store.delete(&k_rs).await?;
+                loaded_randoms = available;
+                node.preprocessing_material
+                    .lock()
+                    .await
+                    .add(None, Some(decoded));
+            }
+        }
+
+        if loaded_triples == 0 && loaded_randoms == 0 {
+            return Ok(false);
         }
 
         info!(

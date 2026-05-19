@@ -1,4 +1,6 @@
 use super::*;
+use crate::net::mpc_engine::MpcEngine;
+use crate::storage::preproc::{self, LmdbPreprocStore, PreprocBlob, PreprocKeyScope, PreprocStore};
 use ark_bls12_381::{Fr, G1Projective as G1};
 use ark_ec::PrimeGroup;
 use ark_ff::UniformRand;
@@ -129,6 +131,61 @@ fn generate_feldman_shares(secret: Fr, n: usize, t: usize) -> Vec<FeldmanShamirS
             FeldmanShamirShare::new(share_value, i, t, commitments.clone()).unwrap()
         })
         .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preprocess_reserves_persistent_avss_random_shares_when_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(LmdbPreprocStore::open(dir.path()).unwrap());
+    let program_hash = [0xC3; 32];
+    let party_id = 0;
+    let n = 4;
+    let t = 1;
+    let scope = PreprocKeyScope::new(
+        program_hash,
+        crate::net::curve::MpcFieldKind::Bls12_381Fr,
+        n,
+        t,
+        party_id,
+    );
+    let key = scope.random_share();
+    let shares = generate_feldman_shares(Fr::from(77u64), 3, t);
+    let (data, item_size) = preproc::serialize_feldman_shares::<Fr, G1>(&shares).unwrap();
+    store
+        .store(
+            &key,
+            &PreprocBlob::try_new(data, item_size, shares.len()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let net = Arc::new(QuicNetworkManager::new());
+    let public_keys = Arc::new(vec![G1::generator(); n]);
+    let session = MpcSessionConfig::try_new(9_000_000, party_id, n, t, net).unwrap();
+    let engine = AvssMpcEngine::<Fr, G1>::from_config(AvssEngineConfig::new(
+        session,
+        Fr::from(5u64),
+        public_keys,
+    ))
+    .await
+    .unwrap();
+    engine
+        .preproc_persistence_ops()
+        .unwrap()
+        .set_preproc_store(store.clone(), program_hash)
+        .unwrap();
+
+    engine.preprocess().await.unwrap();
+
+    assert_eq!(
+        store.available(&key).await.unwrap(),
+        0,
+        "persistent AVSS random shares loaded into the runtime pool must be consumed"
+    );
+    assert!(
+        store.load(&key).await.unwrap().is_none(),
+        "consumed persistent AVSS random shares should be evicted after preload"
+    );
 }
 
 #[test]

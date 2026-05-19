@@ -236,6 +236,8 @@ where
     }
 
     let mut slots: Vec<Option<RobustShare<F>>> = vec![None; capacity];
+    let mut reserved_indices: Vec<u64> = reserved_indices.into_iter().collect();
+    reserved_indices.sort_unstable();
     for reserved_index in reserved_indices {
         let slot = usize::try_from(reserved_index)
             .map_err(|_| format!("reserved index {reserved_index} exceeds usize range"))?;
@@ -3019,24 +3021,20 @@ async fn main() {
                             .expect("--rpc-bind required with coordinator");
 
                         if !input_ids.is_empty() {
-                            let precomputed_mask_shares = if preproc_store_path.is_some() {
-                                None
-                            } else {
-                                Some(
-                                    engine
-                                        .node_handle()
-                                        .lock()
-                                        .await
-                                        .preprocessing_material
-                                        .lock()
-                                        .await
-                                        .take_random_shares(input_ids.len())
-                                        .unwrap_or_else(|e| {
-                                            eprintln!("take_random_shares: {}", e);
-                                            exit(13);
-                                        }),
-                                )
-                            };
+                            let precomputed_mask_shares = Some(
+                                engine
+                                    .node_handle()
+                                    .lock()
+                                    .await
+                                    .preprocessing_material
+                                    .lock()
+                                    .await
+                                    .take_random_shares(input_ids.len())
+                                    .unwrap_or_else(|e| {
+                                        eprintln!("take_random_shares: {}", e);
+                                        exit(13);
+                                    }),
+                            );
 
                             if let Some(ref mask_shares) = precomputed_mask_shares {
                                 for (i, share) in mask_shares.iter().enumerate() {
@@ -3119,24 +3117,20 @@ async fn main() {
                             .expect("--rpc-bind required with on-chain coordinator");
 
                         if !on_chain_input_ids.is_empty() {
-                            let precomputed_mask_shares = if preproc_store_path.is_some() {
-                                None
-                            } else {
-                                Some(
-                                    engine
-                                        .node_handle()
-                                        .lock()
-                                        .await
-                                        .preprocessing_material
-                                        .lock()
-                                        .await
-                                        .take_random_shares(on_chain_input_ids.len())
-                                        .unwrap_or_else(|e| {
-                                            eprintln!("take_random_shares: {}", e);
-                                            exit(13);
-                                        }),
-                                )
-                            };
+                            let precomputed_mask_shares = Some(
+                                engine
+                                    .node_handle()
+                                    .lock()
+                                    .await
+                                    .preprocessing_material
+                                    .lock()
+                                    .await
+                                    .take_random_shares(on_chain_input_ids.len())
+                                    .unwrap_or_else(|e| {
+                                        eprintln!("take_random_shares: {}", e);
+                                        exit(13);
+                                    }),
+                            );
 
                             if let Some(ref mask_shares) = precomputed_mask_shares {
                                 for (i, share) in mask_shares.iter().cloned().enumerate() {

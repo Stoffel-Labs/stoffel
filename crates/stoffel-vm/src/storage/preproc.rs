@@ -32,6 +32,8 @@ pub enum PreprocStoreError {
     NotFound,
     #[error("insufficient material: need {need}, available {available}")]
     Insufficient { need: u32, available: u32 },
+    #[error("preprocessing cursor mismatch: expected consumed {expected}, actual {actual}")]
+    CursorMismatch { expected: u32, actual: u32 },
     #[error("{field} value {value} exceeds u32::MAX")]
     U32Overflow { field: &'static str, value: u64 },
     #[error("task join: {0}")]
@@ -353,6 +355,15 @@ pub trait PreprocStore: Send + Sync + 'static {
     /// Atomically advance the consumed cursor. Returns new consumed count.
     async fn reserve(&self, key: &PreprocKey, n: u32) -> Result<u32, PreprocStoreError>;
 
+    /// Atomically advance the consumed cursor only if it is at `expected_consumed`.
+    /// Returns new consumed count.
+    async fn reserve_at(
+        &self,
+        key: &PreprocKey,
+        expected_consumed: u32,
+        n: u32,
+    ) -> Result<u32, PreprocStoreError>;
+
     /// Items available (count - consumed). Returns 0 if not stored.
     async fn available(&self, key: &PreprocKey) -> Result<u32, PreprocStoreError>;
     async fn exists(&self, key: &PreprocKey) -> Result<bool, PreprocStoreError>;
@@ -369,8 +380,6 @@ pub trait PreprocStore: Send + Sync + 'static {
 // LMDB actor backend
 // ---------------------------------------------------------------------------
 
-type RmwFn = Box<dyn FnOnce(Option<&[u8]>) -> Result<Option<Vec<u8>>, PreprocStoreError> + Send>;
-
 /// Request sent to the LMDB actor thread.
 enum DbRequest {
     PutMulti {
@@ -385,10 +394,11 @@ enum DbRequest {
         keys: Vec<Vec<u8>>,
         reply: tokio::sync::oneshot::Sender<Result<(), PreprocStoreError>>,
     },
-    Rmw {
-        key: Vec<u8>,
-        f: RmwFn,
-        reply: tokio::sync::oneshot::Sender<Result<Option<Vec<u8>>, PreprocStoreError>>,
+    Reserve {
+        meta_key: Vec<u8>,
+        expected_consumed: Option<u32>,
+        n: u32,
+        reply: tokio::sync::oneshot::Sender<Result<u32, PreprocStoreError>>,
     },
 }
 
@@ -475,16 +485,44 @@ impl LmdbPreprocStore {
                     })();
                     let _ = reply.send(r);
                 }
-                DbRequest::Rmw { key, f, reply } => {
+                DbRequest::Reserve {
+                    meta_key,
+                    expected_consumed,
+                    n,
+                    reply,
+                } => {
                     let r = (|| {
                         let mut wtxn = env.write_txn()?;
-                        let current = db.get(&wtxn, &key)?;
-                        let result = f(current)?;
-                        if let Some(new_val) = &result {
-                            db.put(&mut wtxn, &key, new_val)?;
+                        let raw = db
+                            .get(&wtxn, &meta_key)?
+                            .ok_or(PreprocStoreError::NotFound)?;
+                        let mut meta: PreprocMeta = bincode::deserialize(raw)?;
+                        if let Some(expected) = expected_consumed {
+                            if meta.consumed != expected {
+                                return Err(PreprocStoreError::CursorMismatch {
+                                    expected,
+                                    actual: meta.consumed,
+                                });
+                            }
                         }
+                        let consumed =
+                            meta.consumed
+                                .checked_add(n)
+                                .ok_or(PreprocStoreError::U32Overflow {
+                                    field: "preprocessing consumed count",
+                                    value: u64::from(meta.consumed) + u64::from(n),
+                                })?;
+                        if consumed > meta.count {
+                            return Err(PreprocStoreError::Insufficient {
+                                need: n,
+                                available: meta.available(),
+                            });
+                        }
+                        meta.consumed = consumed;
+                        let v = bincode::serialize(&meta)?;
+                        db.put(&mut wtxn, &meta_key, &v)?;
                         wtxn.commit()?;
-                        Ok(result)
+                        Ok(consumed)
                     })();
                     let _ = reply.send(r);
                 }
@@ -534,15 +572,17 @@ impl LmdbPreprocStore {
             .map_err(|_| PreprocStoreError::Lmdb("actor reply dropped".into()))?
     }
 
-    async fn rmw(
+    async fn reserve_keys(
         &self,
-        key: Vec<u8>,
-        f: impl FnOnce(Option<&[u8]>) -> Result<Option<Vec<u8>>, PreprocStoreError> + Send + 'static,
-    ) -> Result<Option<Vec<u8>>, PreprocStoreError> {
+        meta_key: Vec<u8>,
+        expected_consumed: Option<u32>,
+        n: u32,
+    ) -> Result<u32, PreprocStoreError> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        self.send(DbRequest::Rmw {
-            key,
-            f: Box::new(f),
+        self.send(DbRequest::Reserve {
+            meta_key,
+            expected_consumed,
+            n,
             reply: reply_tx,
         })
         .await?;
@@ -577,35 +617,17 @@ impl PreprocStore for LmdbPreprocStore {
     }
 
     async fn reserve(&self, key: &PreprocKey, n: u32) -> Result<u32, PreprocStoreError> {
-        let result = self
-            .rmw(key.meta_key()?, move |raw| {
-                let raw = raw.ok_or(PreprocStoreError::NotFound)?;
-                let mut meta: PreprocMeta = bincode::deserialize(raw)?;
-                let consumed =
-                    meta.consumed
-                        .checked_add(n)
-                        .ok_or(PreprocStoreError::U32Overflow {
-                            field: "preprocessing consumed count",
-                            value: u64::from(meta.consumed) + u64::from(n),
-                        })?;
-                if consumed > meta.count {
-                    return Err(PreprocStoreError::Insufficient {
-                        need: n,
-                        available: meta.available(),
-                    });
-                }
-                meta.consumed = consumed;
-                let v = bincode::serialize(&meta)?;
-                Ok(Some(v))
-            })
-            .await?;
-        // Decode the written-back metadata to return consumed count
-        if let Some(v) = result {
-            let meta: PreprocMeta = bincode::deserialize(&v)?;
-            Ok(meta.consumed)
-        } else {
-            Err(PreprocStoreError::NotFound)
-        }
+        self.reserve_keys(key.meta_key()?, None, n).await
+    }
+
+    async fn reserve_at(
+        &self,
+        key: &PreprocKey,
+        expected_consumed: u32,
+        n: u32,
+    ) -> Result<u32, PreprocStoreError> {
+        self.reserve_keys(key.meta_key()?, Some(expected_consumed), n)
+            .await
     }
 
     async fn available(&self, key: &PreprocKey) -> Result<u32, PreprocStoreError> {
@@ -1173,6 +1195,42 @@ mod tests {
         assert_eq!(store.available(&key).await.unwrap(), 0);
 
         assert!(store.reserve(&key, 1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn lmdb_reserve_at_rejects_stale_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LmdbPreprocStore::open(dir.path()).unwrap();
+
+        let key = PreprocKey::new(
+            [0x04; 32],
+            MpcFieldKind::Bls12_381Fr,
+            3,
+            1,
+            0,
+            MaterialKind::RandomShare,
+        );
+        let blob = PreprocBlob::new(vec![0; 144], 48, 3);
+
+        store.store(&key, &blob).await.unwrap();
+
+        let consumed = store.reserve_at(&key, 0, 1).await.unwrap();
+        assert_eq!(consumed, 1);
+        assert_eq!(store.available(&key).await.unwrap(), 2);
+
+        let err = store.reserve_at(&key, 0, 1).await.unwrap_err();
+        assert!(matches!(
+            err,
+            PreprocStoreError::CursorMismatch {
+                expected: 0,
+                actual: 1
+            }
+        ));
+        assert_eq!(store.available(&key).await.unwrap(), 2);
+
+        let consumed = store.reserve_at(&key, 1, 2).await.unwrap();
+        assert_eq!(consumed, 3);
+        assert_eq!(store.available(&key).await.unwrap(), 0);
     }
 
     #[tokio::test]

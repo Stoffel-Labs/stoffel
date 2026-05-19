@@ -9,6 +9,17 @@ use stoffelmpc_mpc::common::PreprocessingMPCProtocol;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::HoneyBadgerError;
 
+fn ensure_decoded_count(label: &str, actual: usize, expected: u32) -> Result<(), String> {
+    let expected = usize::try_from(expected)
+        .map_err(|_| format!("{label} expected count exceeds usize::MAX"))?;
+    if actual != expected {
+        return Err(format!(
+            "{label} decoded {actual} items, expected {expected}"
+        ));
+    }
+    Ok(())
+}
+
 impl<F, G> HoneyBadgerMpcEngine<F, G>
 where
     F: SupportedMpcField,
@@ -82,56 +93,107 @@ where
         }
 
         let node = self.clone_node().await;
-        let mut prep = node.preprocessing_material.lock().await;
-
-        let loaded_triples = triples
-            .as_ref()
-            .map(|blob| blob.meta.available())
-            .unwrap_or(0);
-        let loaded_randoms = randoms
-            .as_ref()
-            .map(|blob| blob.meta.available())
-            .unwrap_or(0);
-        let loaded_prandbits = prandbits
-            .as_ref()
-            .map(|blob| blob.meta.available())
-            .unwrap_or(0);
-        let loaded_prandints = prandints
-            .as_ref()
-            .map(|blob| blob.meta.available())
-            .unwrap_or(0);
+        let mut loaded_triples = 0;
+        let mut loaded_randoms = 0;
+        let mut loaded_prandbits = 0;
+        let mut loaded_prandints = 0;
 
         if let Some(ref blob) = triples {
-            let decoded = preproc::deserialize_beaver_triples::<F>(
-                blob.unconsumed_data()?,
-                blob.meta.item_size,
-                0,
-            )?;
-            prep.add(Some(decoded), None, None, None);
+            let available = blob.meta.available();
+            if available > 0 {
+                let decoded = preproc::deserialize_beaver_triples::<F>(
+                    blob.unconsumed_data()?,
+                    blob.meta.item_size,
+                    0,
+                )?;
+                ensure_decoded_count("beaver triples", decoded.len(), available)?;
+                store
+                    .reserve_at(&base, blob.meta.consumed, available)
+                    .await?;
+                store.delete(&base).await?;
+                loaded_triples = available;
+                node.preprocessing_material
+                    .lock()
+                    .await
+                    .add(Some(decoded), None, None, None);
+            }
         }
         if let Some(ref blob) = randoms {
-            let decoded = preproc::deserialize_robust_shares::<F>(
-                blob.unconsumed_data()?,
-                blob.meta.item_size,
-                0,
-            )?;
-            prep.add(None, Some(decoded), None, None);
+            let available = blob.meta.available();
+            if available > 0 {
+                let decoded = preproc::deserialize_robust_shares::<F>(
+                    blob.unconsumed_data()?,
+                    blob.meta.item_size,
+                    0,
+                )?;
+                ensure_decoded_count("random shares", decoded.len(), available)?;
+                store
+                    .reserve_at(&k_rs, blob.meta.consumed, available)
+                    .await?;
+                store.delete(&k_rs).await?;
+                loaded_randoms = available;
+                node.preprocessing_material
+                    .lock()
+                    .await
+                    .add(None, Some(decoded), None, None);
+            }
         }
         if let Some(ref blob) = prandbits {
-            let decoded = preproc::deserialize_prandbit_shares::<F>(
-                blob.unconsumed_data()?,
-                blob.meta.item_size,
-                0,
-            )?;
-            prep.add(None, None, Some(decoded), None);
+            let available = blob.meta.available();
+            if available > 0 {
+                let decoded = preproc::deserialize_prandbit_shares::<F>(
+                    blob.unconsumed_data()?,
+                    blob.meta.item_size,
+                    0,
+                )?;
+                ensure_decoded_count("PRandBit shares", decoded.len(), available)?;
+                store
+                    .reserve_at(&k_pb, blob.meta.consumed, available)
+                    .await?;
+                store.delete(&k_pb).await?;
+                loaded_prandbits = available;
+                node.preprocessing_material
+                    .lock()
+                    .await
+                    .add(None, None, Some(decoded), None);
+            }
         }
         if let Some(ref blob) = prandints {
-            let decoded = preproc::deserialize_robust_shares::<F>(
-                blob.unconsumed_data()?,
-                blob.meta.item_size,
-                0,
-            )?;
-            prep.add(None, None, None, Some(decoded));
+            let available = blob.meta.available();
+            if available > 0 {
+                let decoded = preproc::deserialize_robust_shares::<F>(
+                    blob.unconsumed_data()?,
+                    blob.meta.item_size,
+                    0,
+                )?;
+                ensure_decoded_count("PRandInt shares", decoded.len(), available)?;
+                store
+                    .reserve_at(&k_pi, blob.meta.consumed, available)
+                    .await?;
+                store.delete(&k_pi).await?;
+                loaded_prandints = available;
+                node.preprocessing_material
+                    .lock()
+                    .await
+                    .add(None, None, None, Some(decoded));
+            }
+        }
+
+        if loaded_triples == 0
+            && loaded_randoms == 0
+            && loaded_prandbits == 0
+            && loaded_prandints == 0
+        {
+            let msg = format!(
+                "No unconsumed preprocessing material found in store for program {} (party_id={}, n={}, t={})",
+                hex::encode(hash),
+                persistent_party_id,
+                self.topology.n_parties(),
+                self.topology.threshold()
+            );
+            eprintln!("{msg}");
+            tracing::info!("{msg}");
+            return Ok(false);
         }
 
         let msg = format!(
