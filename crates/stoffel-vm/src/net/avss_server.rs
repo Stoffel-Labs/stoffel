@@ -21,13 +21,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use stoffelnet::network_utils::{ClientId, Network, Node};
-use stoffelnet::transports::quic::{NetworkManager, QuicNetworkManager};
+use stoffelnet::transports::quic::{
+    NetworkManager, PeerConnection as QuicPeerConnection, QuicNetworkManager,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use super::avss_engine::{AvssEngineConfig, AvssMpcEngine};
+
+fn is_duplicate_connection_tiebreaker_error(error: &str) -> bool {
+    error.contains("duplicate connection: tie-breaker")
+}
 
 // ============================================================================
 // Type aliases for supported curve configurations
@@ -230,6 +236,49 @@ where
         true
     }
 
+    #[inline]
+    fn connection_party_id(peer_id: usize, conn: &Arc<dyn QuicPeerConnection>) -> usize {
+        conn.remote_party_id().unwrap_or(peer_id)
+    }
+
+    fn assigned_server_party_ids(net: &QuicNetworkManager, n_parties: usize) -> HashSet<usize> {
+        net.get_all_server_connections()
+            .into_iter()
+            .filter_map(|(_peer_id, conn)| conn.remote_party_id())
+            .filter(|party_id| *party_id < n_parties)
+            .collect()
+    }
+
+    async fn finalized_transport_party_id(&self) -> Result<usize, String> {
+        let net = self.network.as_ref().ok_or("Server not started")?;
+        net.ensure_loopback_installed().await;
+
+        let deadline = std::time::Instant::now() + self.config.pk_exchange_timeout;
+        loop {
+            net.assign_party_ids();
+            let assigned_party_ids = Self::assigned_server_party_ids(net, self.n);
+            if let Some(local_party_id) = net.compute_local_party_id() {
+                if local_party_id < self.n
+                    && assigned_party_ids.len() >= self.n
+                    && assigned_party_ids.contains(&local_party_id)
+                {
+                    return Ok(local_party_id);
+                }
+            }
+
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "Timed out finalizing AVSS transport party IDs: assigned {}/{} party IDs",
+                    assigned_party_ids.len(),
+                    self.n
+                ));
+            }
+
+            tokio::time::sleep(remaining.min(Duration::from_millis(20))).await;
+        }
+    }
+
     /// Creates a new AVSS QUIC server.
     ///
     /// Generates a fresh ECDH key pair for this party.
@@ -335,10 +384,17 @@ where
                                 // its own connection handle for send/receive.
                             }
                             Err(e) => {
-                                warn!(
-                                    "[AVSS] Node {} failed to accept connection: {}",
-                                    node_id, e
-                                );
+                                if is_duplicate_connection_tiebreaker_error(&e.to_string()) {
+                                    info!(
+                                        "[AVSS] Node {} ignored duplicate connection close during tie-breaker convergence",
+                                        node_id
+                                    );
+                                } else {
+                                    warn!(
+                                        "[AVSS] Node {} failed to accept connection: {}",
+                                        node_id, e
+                                    );
+                                }
                                 tokio::time::sleep(Duration::from_millis(100)).await;
                             }
                         }
@@ -427,37 +483,46 @@ where
     /// Returns the collected public key map indexed by party ID.
     pub async fn exchange_public_keys(&mut self) -> Result<Arc<Vec<G>>, String> {
         let net = self.network.as_ref().ok_or("Server not started")?.clone();
+        let local_party_id = self.finalized_transport_party_id().await?;
+        if self.node_id != local_party_id {
+            info!(
+                "[AVSS] Finalized party ID from transport identity: {} -> {}",
+                self.node_id, local_party_id
+            );
+            self.node_id = local_party_id;
+        }
 
         info!(
             "[AVSS] Party {} starting public key exchange (n={})",
-            self.node_id, self.n
+            local_party_id, self.n
         );
 
         // Create envelope: [party_id: u32][pk_bytes]
-        let envelope = Self::encode_public_key_envelope(self.node_id, &self.pk_i)
+        let envelope = Self::encode_public_key_envelope(local_party_id, &self.pk_i)
             .map_err(|e| e.to_string())?;
 
         // Send to all peers
         let connections = net.get_all_server_connections();
         for (peer_id, conn) in &connections {
-            if *peer_id == self.node_id {
+            let peer_party_id = Self::connection_party_id(*peer_id, conn);
+            if peer_party_id == local_party_id {
                 continue;
             }
             if let Err(e) = conn.send(&envelope).await {
                 error!(
                     "[AVSS] Party {} failed to send PK to peer {}: {}",
-                    self.node_id, peer_id, e
+                    local_party_id, peer_party_id, e
                 );
             }
         }
 
         // Collect public keys (initialize with our own)
         let mut pk_map = vec![G::default(); self.n];
-        pk_map[self.node_id] = self.pk_i;
+        pk_map[local_party_id] = self.pk_i;
 
         let mut received = 1usize; // Count ourselves
         let mut seen_senders = HashSet::with_capacity(self.n);
-        seen_senders.insert(self.node_id);
+        seen_senders.insert(local_party_id);
         let deadline = std::time::Instant::now() + self.config.pk_exchange_timeout;
 
         // Create a channel for receiving PK exchange messages
@@ -465,10 +530,11 @@ where
 
         // Spawn receive tasks for each peer connection
         for (peer_id, conn) in &connections {
-            if *peer_id == self.node_id {
+            let peer_party_id = Self::connection_party_id(*peer_id, conn);
+            if peer_party_id == local_party_id {
                 continue;
             }
-            let peer_id = *peer_id;
+            let peer_id = peer_party_id;
             let authenticated_peer_id = conn.remote_party_id();
             let tx = pk_tx.clone();
             let conn = conn.clone();
@@ -520,11 +586,14 @@ where
                             received += 1;
                             info!(
                                 "[AVSS] Party {} received PK from party {} ({}/{})",
-                                self.node_id, sender_id, received, self.n
+                                local_party_id, sender_id, received, self.n
                             );
                         }
                         Err(e) => {
-                            warn!("[AVSS] Party {} rejecting PK message: {}", self.node_id, e);
+                            warn!(
+                                "[AVSS] Party {} rejecting PK message: {}",
+                                local_party_id, e
+                            );
                         }
                     }
                 }
@@ -550,7 +619,7 @@ where
 
         info!(
             "[AVSS] Party {} completed PK exchange with all {} parties",
-            self.node_id, self.n
+            local_party_id, self.n
         );
 
         let pk_arc = Arc::new(pk_map);
@@ -605,16 +674,16 @@ where
 
         let connections = net.get_all_server_connections();
         for (peer_id, conn) in &connections {
-            if *peer_id == self.node_id {
+            let authenticated_sender_id = Self::connection_party_id(*peer_id, conn);
+            if authenticated_sender_id == self.node_id || authenticated_sender_id >= self.n {
                 continue;
             }
-            let peer_id = *peer_id;
+            let peer_id = authenticated_sender_id;
             let engine = engine.clone();
             let tx = msg_tx.clone();
             let conn = conn.clone();
             let net_clone = net.clone();
             let shutdown_token = self.shutdown_token.clone();
-            let authenticated_sender_id = conn.remote_party_id().unwrap_or(peer_id);
             let router = router.clone();
 
             tokio::spawn(async move {
@@ -726,16 +795,16 @@ where
         // Server connection receive loops
         let connections = net.get_all_server_connections();
         for (peer_id, conn) in &connections {
-            if *peer_id == self.node_id {
+            let authenticated_sender_id = Self::connection_party_id(*peer_id, conn);
+            if authenticated_sender_id == self.node_id || authenticated_sender_id >= self.n {
                 continue;
             }
-            let peer_id = *peer_id;
+            let peer_id = authenticated_sender_id;
             let engine = engine.clone();
             let tx = server_tx.clone();
             let conn = conn.clone();
             let net_clone = net.clone();
             let shutdown_token = self.shutdown_token.clone();
-            let authenticated_sender_id = conn.remote_party_id().unwrap_or(peer_id);
             let router = router.clone();
 
             tokio::spawn(async move {
