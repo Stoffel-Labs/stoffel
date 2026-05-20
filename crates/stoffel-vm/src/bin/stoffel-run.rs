@@ -1591,11 +1591,22 @@ where
     while received < n {
         let remaining = pk_deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, pk_rx.recv()).await {
-            Ok(Some((_peer_id, data))) => {
+            Ok(Some((peer_id, data))) => {
                 if data.len() < 4 {
                     continue;
                 }
-                let sender_id = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
+                let claimed_id = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
+                // Verify the payload's claimed sender_id against the transport-authenticated
+                // peer_id to prevent a malicious party from registering its key under a
+                // different party's identity.
+                if claimed_id != peer_id {
+                    eprintln!(
+                        "[party {}] AVSS PK exchange: transport sender {} claims to be party {} — ignoring",
+                        my_id, peer_id, claimed_id
+                    );
+                    continue;
+                }
+                let sender_id = claimed_id;
                 if sender_id >= n || !seen.insert(sender_id) {
                     continue;
                 }
