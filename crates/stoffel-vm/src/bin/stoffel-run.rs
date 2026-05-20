@@ -96,24 +96,6 @@ fn extract_pubkey_from_cert(cert_der: &[u8]) -> Vec<u8> {
         .to_vec()
 }
 
-#[cfg(feature = "honeybadger")]
-fn parse_on_chain_client_addresses(
-    node_ids: &[String],
-    expected_clients: &[String],
-) -> Vec<Address> {
-    let raw_ids = if node_ids.is_empty() {
-        expected_clients
-    } else {
-        node_ids
-    };
-
-    raw_ids
-        .iter()
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| Address::from_str(s.trim()).expect("Invalid on-chain client address"))
-        .collect()
-}
-
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
 fn format_coordinator_outputs<F>(outputs: &[F]) -> String
 where
@@ -1915,7 +1897,6 @@ async fn main() {
     let mut eth_node_addr: Option<String> = None;
     let mut wallet_sk_str: Option<String> = None;
     let mut contract_addr: Option<String> = None;
-    let mut node_ids: Vec<String> = Vec::new();
     let mut coordinator_client_index: Option<u64> = None;
     let mut preproc_store_path: Option<String> = None;
 
@@ -1958,7 +1939,6 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--cert") {
         } else if let Some(_rest) = arg.strip_prefix("--timestamp") {
         } else if let Some(_rest) = arg.strip_prefix("--expected-clients") {
-        } else if let Some(_rest) = arg.strip_prefix("--node-ids") {
         } else if let Some(_rest) = arg.strip_prefix("--client-index") {
         } else if let Some(_rest) = arg.strip_prefix("--preproc-store") {
         }
@@ -2091,11 +2071,6 @@ async fn main() {
                     contract_addr = Some(v);
                 }
             }
-            "--node-ids" => {
-                if let Some(v) = args_iter.next() {
-                    node_ids = v.split(',').map(|s| s.trim().to_string()).collect();
-                }
-            }
             "--eth-node" => {
                 if let Some(v) = args_iter.next() {
                     eth_node_addr = Some(v);
@@ -2152,7 +2127,6 @@ async fn main() {
         &contract_addr,
         &eth_node_addr,
         &wallet_sk_str,
-        &node_ids,
         &coordinator_client_index,
         &preproc_store_path,
     );
@@ -2834,7 +2808,11 @@ async fn main() {
             .expect("--wallet-sk required in on-chain coordinator mode");
         let eth = on_chain::ws_connect(eth_node, wallet_sk).await;
         let contract = Address::from_str(contract).expect("Invalid --on-chain-coord address");
-        on_chain_input_ids = parse_on_chain_client_addresses(&node_ids, &expected_clients);
+        on_chain_input_ids = expected_clients
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| Address::from_str(s.trim()).expect("Invalid on-chain client address"))
+            .collect();
         Some(
             on_chain::setup_coord::<_, HbCoordinatorField, HbCoordinatorShare>(
                 eth,
