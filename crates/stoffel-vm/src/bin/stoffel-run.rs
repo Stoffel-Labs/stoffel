@@ -1963,7 +1963,12 @@ async fn main() {
     fail_removed_flag(
         &raw_args,
         "--expected-client-count",
-        "Use `--expected-clients <cert-paths>` instead.",
+        "Use `--expected-clients <cert-paths-or-addrs>` instead.",
+    );
+    fail_removed_flag(
+        &raw_args,
+        "--node-ids",
+        "Use `--expected-clients <client-addrs>` in on-chain coordinator mode instead.",
     );
     fail_removed_flag(
         &raw_args,
@@ -3440,7 +3445,6 @@ Flags:
                           Off-chain coordinator address
   --on-chain-coord <address>
                           On-chain coordinator contract address
-  --node-ids <addrs>      Comma-separated on-chain client addresses
   --eth-node <url>        Ethereum WebSocket RPC endpoint for on-chain coordinator mode
   --wallet-sk <hex>       Ethereum private key for on-chain coordinator transactions
   --rpc-bind <addr:port>  Node RPC server bind address (for mask distribution)
