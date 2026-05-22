@@ -12,9 +12,10 @@
 //! outgoing connections both feed a `(PartyId, Vec<u8>)` channel. A message
 //! processor reads from the channel and dispatches to the engine.
 
+#![allow(clippy::needless_range_loop, clippy::while_let_loop)]
+
 use ark_bls12_381::{Fr, G1Projective as G1};
 use ark_ec::{CurveGroup, PrimeGroup};
-use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::SeedableRng;
 use ark_std::UniformRand;
@@ -22,7 +23,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use stoffel_vm_types::core_types::Value;
+use stoffel_vm_types::core_types::{ObjectRef, Value};
 use stoffel_vm_types::functions::VMFunction;
 use stoffel_vm_types::instructions::Instruction;
 use stoffelnet::network_utils::{Network, Node, VerifiedOrdering};
@@ -33,9 +34,12 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::core_vm::VirtualMachine;
-use crate::mpc_builtins::avss_object;
-use crate::net::avss_engine::AvssMpcEngine;
-use crate::tests::test_utils::{init_crypto_provider, setup_test_tracing};
+use crate::net::avss_engine::{AvssEngineConfig, AvssMpcEngine};
+use crate::net::avss_server::{AvssQuicConfig, AvssQuicServer};
+use crate::net::MpcSessionConfig;
+use crate::tests::test_utils::{
+    init_crypto_provider, read_vm_table_byte_array, setup_test_tracing,
+};
 
 // ---------------------------------------------------------------------------
 // SimplePartyNetwork — party-id-based Network adapter
@@ -559,6 +563,147 @@ async fn exchange_ecdh_keys(nodes: &mut [AvssTestNode]) -> Result<Vec<Arc<Vec<G1
     Ok(all_pk_maps)
 }
 
+// ---------------------------------------------------------------------------
+// Repro: AvssQuicServer full-mesh startup must be self-contained
+// ---------------------------------------------------------------------------
+
+/// Reproduction for the ADKG SDK workaround: `AvssQuicServer` should be able to
+/// run a concurrent full-mesh startup, assign transport party IDs, and exchange
+/// public keys without the downstream SDK owning topology or identity repair.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_avss_full_mesh_concurrent_startup_survives_duplicate_dials() {
+    init_crypto_provider();
+    setup_test_tracing();
+
+    let n = 4usize;
+    let t = 1usize;
+    let instance_id = 900_481;
+    let base_port = 12800u16;
+    let config = AvssQuicConfig {
+        pk_exchange_timeout: Duration::from_secs(5),
+        max_connection_retries: 3,
+        connection_retry_delay: Duration::from_millis(50),
+    };
+
+    let addresses: Vec<SocketAddr> = (0..n)
+        .map(|i| {
+            format!("127.0.0.1:{}", base_port + i as u16)
+                .parse()
+                .unwrap()
+        })
+        .collect();
+
+    let mut managers = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut manager = QuicNetworkManager::with_node_id(i);
+        manager
+            .listen(addresses[i])
+            .await
+            .unwrap_or_else(|e| panic!("node {} listen failed: {}", i, e));
+        managers.push(manager);
+    }
+
+    let derived_ids: Vec<usize> = managers
+        .iter()
+        .map(QuicNetworkManager::local_derived_id)
+        .collect();
+
+    let mut sorted_derived_ids = derived_ids.clone();
+    sorted_derived_ids.sort_unstable();
+    let sorted_party_ids: Vec<usize> = derived_ids
+        .iter()
+        .map(|id| {
+            sorted_derived_ids
+                .iter()
+                .position(|sorted_id| sorted_id == id)
+                .expect("derived ID should be present")
+        })
+        .collect();
+
+    let logical_node_ids: Vec<usize> = sorted_party_ids
+        .iter()
+        .map(|party_id| (party_id + 1) % n)
+        .collect();
+
+    let mut servers = Vec::with_capacity(n);
+    for (i, manager) in managers.into_iter().enumerate() {
+        let mut server = AvssQuicServer::<Fr, G1>::new(
+            logical_node_ids[i],
+            n,
+            t,
+            instance_id,
+            manager,
+            config.clone(),
+        );
+
+        for j in 0..n {
+            if i != j {
+                server.add_peer(derived_ids[j], addresses[j]);
+            }
+        }
+
+        servers.push(server);
+    }
+
+    for server in &mut servers {
+        server.start().expect("AVSS server start failed");
+    }
+
+    let connect_results = futures::future::join_all(
+        servers
+            .iter()
+            .enumerate()
+            .map(|(i, server)| async move { (i, server.connect_to_peers().await) }),
+    )
+    .await;
+
+    for (idx, result) in connect_results {
+        result.unwrap_or_else(|e| panic!("server {} connect_to_peers failed: {}", idx, e));
+    }
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    for (idx, server) in servers.iter().enumerate() {
+        let net = server.network.as_ref().expect("network should be started");
+        let assigned = net.assign_party_ids();
+        assert!(
+            assigned >= n,
+            "server {} assigned only {}/{} party IDs after full-mesh startup",
+            idx,
+            assigned,
+            n
+        );
+    }
+
+    let exchange_results = futures::future::join_all(
+        servers
+            .iter_mut()
+            .enumerate()
+            .map(|(i, server)| async move { (i, server.exchange_public_keys().await) }),
+    )
+    .await;
+
+    let mut pk_maps = Vec::with_capacity(n);
+    for (idx, result) in exchange_results {
+        pk_maps.push(result.unwrap_or_else(|e| {
+            panic!(
+                "server {} public-key exchange failed after full-mesh startup: {}",
+                idx, e
+            )
+        }));
+    }
+
+    for party_id in 0..n {
+        for idx in 1..n {
+            assert_eq!(
+                pk_maps[0][party_id], pk_maps[idx][party_id],
+                "party {} public key differs between server 0 and server {}",
+                party_id, idx
+            );
+        }
+    }
+}
+
 /// Spawn AVSS message processors that read from each node's channel and
 /// dispatch to the engine's `process_wrapped_message_with_network`.
 ///
@@ -645,16 +790,19 @@ async fn test_avss_e2e_distributed_key_generation() {
     info!("Step 3: Creating AVSS engines");
     let mut engines: Vec<Arc<AvssMpcEngine<Fr, G1>>> = Vec::with_capacity(n);
     for (i, node) in nodes.iter().enumerate() {
-        let engine = AvssMpcEngine::new(
+        let session = MpcSessionConfig::try_new(
             instance_id,
-            node.node_id, // sorted-key party ID (set by setup_avss_test_network)
+            node.node_id,
             n,
             t,
             node.network.clone().unwrap(),
+        )
+        .expect("test topology should be valid");
+        let engine = AvssMpcEngine::from_config(AvssEngineConfig::new(
+            session,
             node.sk_i,
             pk_maps[i].clone(),
-            vec![],
-        )
+        ))
         .await
         .expect("Failed to create engine");
         engine.start_async().await.expect("Failed to start engine");
@@ -771,16 +919,19 @@ async fn test_avss_e2e_vm_public_key_extraction() {
     // Create engines
     let mut engines: Vec<Arc<AvssMpcEngine<Fr, G1>>> = Vec::with_capacity(n);
     for (i, node) in nodes.iter().enumerate() {
-        let engine = AvssMpcEngine::new(
+        let session = MpcSessionConfig::try_new(
             instance_id,
             node.node_id,
             n,
             t,
             node.network.clone().unwrap(),
+        )
+        .expect("test topology should be valid");
+        let engine = AvssMpcEngine::from_config(AvssEngineConfig::new(
+            session,
             node.sk_i,
             pk_maps[i].clone(),
-            vec![],
-        )
+        ))
         .await
         .expect("Failed to create engine");
         engine.start_async().await.expect("start engine");
@@ -841,15 +992,14 @@ async fn test_avss_e2e_vm_public_key_extraction() {
             })
             .collect();
 
-        // Create the AVSS share object in the VM's object store
-        let obj_id = avss_object::create_avss_share_object(
-            &mut vm.state.object_store,
-            key_name,
-            share_bytes,
-            commitment_bytes,
-            party_id,
-        )
-        .unwrap();
+        // Create the AVSS share object through the VM boundary.
+        let obj_id = match vm
+            .create_avss_share_object(key_name, share_bytes, commitment_bytes, party_id)
+            .expect("create AVSS share object")
+        {
+            Value::Object(object_ref) => object_ref.id(),
+            other => panic!("Expected AVSS share object, got: {:?}", other),
+        };
 
         // Build a VM program that extracts the public key
         let main_fn = VMFunction::new(
@@ -859,7 +1009,7 @@ async fn test_avss_e2e_vm_public_key_extraction() {
             None,
             4,
             vec![
-                Instruction::LDI(0, Value::Object(obj_id)),
+                Instruction::LDI(0, Value::from(ObjectRef::new(obj_id))),
                 Instruction::LDI(1, Value::I64(0)), // commitment index 0 = public key
                 Instruction::PUSHARG(0),
                 Instruction::PUSHARG(1),
@@ -874,16 +1024,7 @@ async fn test_avss_e2e_vm_public_key_extraction() {
 
         // Extract byte array from the VM result
         let pk_bytes = match result {
-            Value::Array(arr_id) => {
-                let arr = vm.state.object_store.get_array(arr_id).unwrap();
-                let mut bytes = Vec::with_capacity(arr.length());
-                for i in 0..arr.length() {
-                    if let Some(Value::U8(b)) = arr.get(&Value::I64(i as i64)) {
-                        bytes.push(*b);
-                    }
-                }
-                bytes
-            }
+            Value::Array(arr_ref) => read_vm_table_byte_array(&mut vm, arr_ref.id()).unwrap(),
             other => panic!("Party {} VM returned unexpected: {:?}", party_id, other),
         };
 
@@ -946,16 +1087,19 @@ async fn test_avss_e2e_multiple_keys() {
 
     let mut engines: Vec<Arc<AvssMpcEngine<Fr, G1>>> = Vec::with_capacity(n);
     for (i, node) in nodes.iter().enumerate() {
-        let engine = AvssMpcEngine::new(
+        let session = MpcSessionConfig::try_new(
             instance_id,
             node.node_id,
             n,
             t,
             node.network.clone().unwrap(),
+        )
+        .expect("test topology should be valid");
+        let engine = AvssMpcEngine::from_config(AvssEngineConfig::new(
+            session,
             node.sk_i,
             pk_maps[i].clone(),
-            vec![],
-        )
+        ))
         .await
         .expect("Failed to create engine");
         engine.start_async().await.expect("start engine");
