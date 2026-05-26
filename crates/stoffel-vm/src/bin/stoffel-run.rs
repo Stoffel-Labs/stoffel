@@ -2918,22 +2918,21 @@ async fn main() {
     };
 
     #[cfg(feature = "honeybadger")]
-    let mut on_chain_node_rpc_opt = if let (Some(ref rpc), Some(ref coord)) =
-        (rpc_addr.as_ref(), on_chain_coord_opt.as_ref())
-    {
-        Some(
-            on_chain::node_rpc::NodeRPCServer::start(
-                &rpc.0,
-                rpc.1,
-                coord.coord(),
-                cert_der.clone().expect("--cert required"),
-                key_der.clone().expect("--key required"),
+    let mut on_chain_node_rpc_opt =
+        if let (Some(rpc), Some(coord)) = (rpc_addr.as_ref(), on_chain_coord_opt.as_ref()) {
+            Some(
+                on_chain::node_rpc::NodeRPCServer::start(
+                    &rpc.0,
+                    rpc.1,
+                    coord.coord(),
+                    cert_der.clone().expect("--cert required"),
+                    key_der.clone().expect("--key required"),
+                )
+                .await,
             )
-            .await,
-        )
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     #[cfg(feature = "honeybadger")]
     if let Some(ref ca) = coord_addr {
