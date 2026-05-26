@@ -1905,10 +1905,13 @@ async fn main() {
     let mut cert_der: Option<Vec<u8>> = None;
     let mut timestamp: Option<u64> = None;
     let mut expected_clients: Vec<String> = Vec::new();
+    let mut output_clients: Vec<String> = Vec::new();
     let mut eth_node_addr: Option<String> = None;
     let mut wallet_sk_str: Option<String> = None;
     let mut contract_addr: Option<String> = None;
     let mut coordinator_client_index: Option<u64> = None;
+    let mut coordinator_input_only = false;
+    let mut coordinator_output_only = false;
     let mut preproc_store_path: Option<String> = None;
 
     for arg in &raw_args {
@@ -1926,6 +1929,10 @@ async fn main() {
             as_leader = true;
         } else if arg == "--client" {
             as_client = true;
+        } else if arg == "--input-only" {
+            coordinator_input_only = true;
+        } else if arg == "--output-only" {
+            coordinator_output_only = true;
         } else if arg == "--nat" {
             _enable_nat = true;
         } else if let Some(_rest) = arg.strip_prefix("--bind") {
@@ -1950,7 +1957,10 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--cert") {
         } else if let Some(_rest) = arg.strip_prefix("--timestamp") {
         } else if let Some(_rest) = arg.strip_prefix("--expected-clients") {
+        } else if let Some(_rest) = arg.strip_prefix("--output-clients") {
         } else if let Some(_rest) = arg.strip_prefix("--client-index") {
+        } else if let Some(_rest) = arg.strip_prefix("--input-only") {
+        } else if let Some(_rest) = arg.strip_prefix("--output-only") {
         } else if let Some(_rest) = arg.strip_prefix("--preproc-store") {
         }
     }
@@ -2127,6 +2137,11 @@ async fn main() {
                     expected_clients = v.split(',').map(|s| s.trim().to_string()).collect();
                 }
             }
+            "--output-clients" => {
+                if let Some(v) = args_iter.next() {
+                    output_clients = v.split(',').map(|s| s.trim().to_string()).collect();
+                }
+            }
             _ => {}
         }
     }
@@ -2140,10 +2155,13 @@ async fn main() {
         &cert_der,
         &timestamp,
         &expected_clients,
+        &output_clients,
         &contract_addr,
         &eth_node_addr,
         &wallet_sk_str,
         &coordinator_client_index,
+        &coordinator_input_only,
+        &coordinator_output_only,
         &preproc_store_path,
     );
 
@@ -2180,6 +2198,52 @@ async fn main() {
                     .expect("install rustls crypto");
 
                 let t = threshold.unwrap_or(1);
+                if coordinator_input_only && coordinator_output_only {
+                    eprintln!("Error: --input-only and --output-only cannot be used together");
+                    exit(2);
+                }
+
+                if coordinator_output_only {
+                    if contract_addr.is_some() {
+                        eprintln!(
+                            "Error: --output-only is currently supported for off-chain coordinator client mode"
+                        );
+                        exit(2);
+                    }
+
+                    let cert = cert_der
+                        .clone()
+                        .expect("--cert required in output-only client mode");
+                    let key = key_der
+                        .clone()
+                        .expect("--key required in output-only client mode");
+                    let ca = coord_addr
+                        .as_ref()
+                        .expect("--off-chain-coord required in output-only client mode");
+                    let coord: HbOffChainCoordinator = HbOffChainCoordinator::start_rpc_client(
+                        &ca.0,
+                        ca.1,
+                        timestamp.expect("--timestamp required in output-only client mode"),
+                        t as u64,
+                        1,
+                        cert,
+                        key,
+                    )
+                    .await
+                    .unwrap_or_else(|error| {
+                        eprintln!("Failed to connect to off-chain coordinator: {error}");
+                        exit(13);
+                    });
+
+                    coord
+                        .wait_for_round(Round::OutputDistribution)
+                        .await
+                        .unwrap();
+                    let outputs = coord.obtain_outputs().await.unwrap();
+                    println!("outputs: {}", format_coordinator_outputs(&outputs));
+                    return;
+                }
+
                 let input_str = client_inputs.expect("--inputs required in client mode");
                 let input_values: Vec<i64> = input_str
                     .split(',')
@@ -2256,6 +2320,10 @@ async fn main() {
                         .send_masked_input(masked, reserved_index)
                         .await
                         .unwrap();
+                    if coordinator_input_only {
+                        println!("input submitted at reserved index {}", reserved_index);
+                        return;
+                    }
 
                     coord.wait_for_round(Round::MPCExecution).await.unwrap();
                     coord
@@ -2312,6 +2380,10 @@ async fn main() {
                         .send_masked_input(masked, reserved_index)
                         .await
                         .unwrap();
+                    if coordinator_input_only {
+                        println!("input submitted at reserved index {}", reserved_index);
+                        return;
+                    }
 
                     coord.wait_for_round(Round::MPCExecution).await.unwrap();
                     coord
@@ -2804,6 +2876,8 @@ async fn main() {
     #[cfg(feature = "honeybadger")]
     let mut input_ids: Vec<Vec<u8>> = Vec::new();
     #[cfg(feature = "honeybadger")]
+    let mut off_chain_output_ids: Vec<Vec<u8>> = Vec::new();
+    #[cfg(feature = "honeybadger")]
     let mut on_chain_input_ids: Vec<Address> = Vec::new();
     #[cfg(feature = "honeybadger")]
     let mut on_chain_output_clients: Vec<(Vec<u8>, Address)> = Vec::new();
@@ -2882,6 +2956,11 @@ async fn main() {
         input_ids = expected_clients
             .iter()
             .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
+            .collect();
+        off_chain_output_ids = output_clients
+            .iter()
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read output client cert")))
             .collect();
 
         if let Some(ref rpc) = rpc_addr {
@@ -3326,7 +3405,12 @@ async fn main() {
                             .wait_for_round(Round::OutputDistribution)
                             .await
                             .unwrap();
-                        for cid in input_ids.iter() {
+                        let output_ids = if off_chain_output_ids.is_empty() {
+                            &input_ids
+                        } else {
+                            &off_chain_output_ids
+                        };
+                        for cid in output_ids.iter() {
                             let share: RobustShare<ark_bls12_381::Fr> =
                                 ark_serialize::CanonicalDeserialize::deserialize_compressed(
                                     output_share.as_slice(),
@@ -3452,9 +3536,13 @@ Flags:
   --key <path>            Path to DER-encoded private key
   --timestamp <u64>       Coordinator session timestamp (off-chain)
   --client-index <u64>    Reserved coordinator input index (coordinator client mode)
+  --input-only            Coordinator client sends input and exits without reading outputs
+  --output-only           Coordinator client waits for authorized outputs without sending input
   --preproc-store <path>  Persistent HoneyBadger preprocessing store directory
   --expected-clients <cert-paths-or-addrs>
                           Comma-separated client cert paths for off-chain or addresses for on-chain mode
+  --output-clients <cert-paths>
+                          Comma-separated off-chain output client cert paths
   -h, --help              Show this help
 
 Required environment:

@@ -19,14 +19,17 @@ echo "StoffelVM Node Startup"
 echo "=========================================="
 echo "Role: ${STOFFEL_ROLE}"
 if [ "${STOFFEL_ROLE}" = "client" ]; then
-    echo "Inputs: ${STOFFEL_INPUTS}"
+    echo "Input Only: ${STOFFEL_CLIENT_INPUT_ONLY:-false}"
+    echo "Output Only: ${STOFFEL_CLIENT_OUTPUT_ONLY:-false}"
+    echo "Inputs: ${STOFFEL_INPUTS:-none}"
     echo "Client Index: ${STOFFEL_CLIENT_INDEX:-unset}"
-    echo "Servers: ${STOFFEL_SERVERS}"
+    echo "Servers: ${STOFFEL_SERVERS:-none}"
 else
     echo "Party ID: ${STOFFEL_PARTY_ID}"
     echo "Bind Address: ${STOFFEL_BIND_ADDR}"
     echo "Bootstrap: ${STOFFEL_BOOTSTRAP_ADDR:-N/A}"
     echo "Expected Clients: ${STOFFEL_EXPECTED_CLIENTS:-none}"
+    echo "Output Clients: ${STOFFEL_OUTPUT_CLIENTS:-default}"
 fi
 echo "N Parties: ${STOFFEL_N_PARTIES}"
 echo "Threshold: ${STOFFEL_THRESHOLD}"
@@ -77,10 +80,17 @@ build_command() {
     local cmd="/app/stoffel-run"
 
     if [ "${STOFFEL_ROLE}" = "client" ]; then
-        # Client mode: connect to coordinator and submit inputs
+        # Client mode: connect to coordinator and submit inputs, or only receive outputs.
         cmd="${cmd} --client"
-        cmd="${cmd} --inputs ${STOFFEL_INPUTS}"
-        cmd="${cmd} --servers ${STOFFEL_SERVERS}"
+        if [ "${STOFFEL_CLIENT_OUTPUT_ONLY:-false}" = "true" ]; then
+            cmd="${cmd} --output-only"
+        else
+            if [ "${STOFFEL_CLIENT_INPUT_ONLY:-false}" = "true" ]; then
+                cmd="${cmd} --input-only"
+            fi
+            cmd="${cmd} --inputs ${STOFFEL_INPUTS}"
+            cmd="${cmd} --servers ${STOFFEL_SERVERS}"
+        fi
         cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
         cmd="${cmd} --threshold ${STOFFEL_THRESHOLD:-1}"
         cmd="${cmd} --off-chain-coord ${STOFFEL_COORD_ADDR}"
@@ -133,6 +143,10 @@ build_command() {
         cmd="${cmd} --expected-clients ${STOFFEL_EXPECTED_CLIENTS}"
     fi
 
+    if [ -n "${STOFFEL_OUTPUT_CLIENTS:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+        cmd="${cmd} --output-clients ${STOFFEL_OUTPUT_CLIENTS}"
+    fi
+
     if [ -n "${STOFFEL_PREPROC_STORE:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
         cmd="${cmd} --preproc-store ${STOFFEL_PREPROC_STORE}"
     fi
@@ -173,21 +187,27 @@ build_command() {
 main() {
     # Handle client mode
     if [ "${STOFFEL_ROLE}" = "client" ]; then
-        # Wait for servers to be ready
-        # Parse the first server address to check connectivity
-        FIRST_SERVER=$(echo "${STOFFEL_SERVERS}" | cut -d',' -f1)
-        SERVER_HOST=$(echo "${FIRST_SERVER}" | cut -d: -f1)
-        SERVER_PORT=$(echo "${FIRST_SERVER}" | cut -d: -f2)
+        if [ "${STOFFEL_CLIENT_OUTPUT_ONLY:-false}" = "true" ]; then
+            DELAY=${STOFFEL_CLIENT_DELAY:-5}
+            echo "Output client: waiting ${DELAY}s before connecting to coordinator..."
+            sleep $DELAY
+        else
+            # Wait for servers to be ready
+            # Parse the first server address to check connectivity
+            FIRST_SERVER=$(echo "${STOFFEL_SERVERS}" | cut -d',' -f1)
+            SERVER_HOST=$(echo "${FIRST_SERVER}" | cut -d: -f1)
+            SERVER_PORT=$(echo "${FIRST_SERVER}" | cut -d: -f2)
 
-        # Add startup delay to let servers complete preprocessing
-        DELAY=${STOFFEL_CLIENT_DELAY:-30}
-        echo "Client: waiting ${DELAY}s for servers to complete preprocessing..."
-        sleep $DELAY
+            # Add startup delay to let servers complete preprocessing
+            DELAY=${STOFFEL_CLIENT_DELAY:-30}
+            echo "Client: waiting ${DELAY}s for servers to complete preprocessing..."
+            sleep $DELAY
 
-        # Wait for first server to be reachable
-        if ! wait_for_host "$SERVER_HOST" "$SERVER_PORT" 120; then
-            echo "Failed to connect to server at ${FIRST_SERVER}"
-            exit 1
+            # Wait for first server to be reachable
+            if ! wait_for_host "$SERVER_HOST" "$SERVER_PORT" 120; then
+                echo "Failed to connect to server at ${FIRST_SERVER}"
+                exit 1
+            fi
         fi
 
         # Build and execute the command
