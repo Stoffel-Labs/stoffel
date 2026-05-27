@@ -78,17 +78,15 @@ use tokio::sync::mpsc;
 use x509_parser::prelude::*;
 
 #[cfg(feature = "honeybadger")]
-type HbCoordinatorField = ark_bls12_381::Fr;
+type HbCoordinatorShare<F> = RobustShare<F>;
 #[cfg(feature = "honeybadger")]
-type HbCoordinatorShare = RobustShare<HbCoordinatorField>;
+type HbOffChainCoordinator<F> = OffChainCoordinatorClient<F, HbCoordinatorShare<F>>;
 #[cfg(feature = "honeybadger")]
-type HbOffChainCoordinator = OffChainCoordinatorClient<HbCoordinatorField, HbCoordinatorShare>;
+type HbOffChainNodeRpcClient<F> = OffChainNodeRPCClient<F, HbCoordinatorShare<F>>;
 #[cfg(feature = "honeybadger")]
-type HbOffChainNodeRpcClient = OffChainNodeRPCClient<HbCoordinatorField, HbCoordinatorShare>;
+type HbOffChainNodeRpcServer<F> = OffChainNodeRPCServer<F, HbCoordinatorShare<F>>;
 #[cfg(feature = "honeybadger")]
-type HbOffChainNodeRpcServer = OffChainNodeRPCServer<HbCoordinatorField, HbCoordinatorShare>;
-#[cfg(feature = "honeybadger")]
-type HbOnChainNodeRpcClient = OnChainNodeRPCClient<HbCoordinatorField, HbCoordinatorShare>;
+type HbOnChainNodeRpcClient<F> = OnChainNodeRPCClient<F, HbCoordinatorShare<F>>;
 
 #[cfg(feature = "avss")]
 type AvssCoordinatorShare<F, G> = FeldmanShamirShare<F, G>;
@@ -1631,6 +1629,246 @@ async fn run_avss_offchain_coordinator_client(
 }
 
 #[cfg(feature = "honeybadger")]
+#[allow(clippy::too_many_arguments)]
+async fn run_hb_coordinator_client_for_field<F>(
+    client_inputs: Option<String>,
+    server_addrs: Vec<SocketAddr>,
+    coord_addr: Option<(String, u16)>,
+    contract_addr: Option<String>,
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+    timestamp: Option<u64>,
+    threshold: Option<usize>,
+    coordinator_client_index: Option<u64>,
+    eth_node_addr: Option<String>,
+    wallet_sk_str: Option<String>,
+) where
+    F: SupportedMpcField,
+{
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls crypto");
+
+    let t = threshold.unwrap_or(1);
+    let input_str = client_inputs.expect("--inputs required in client mode");
+    let input_values = parse_inputs_as_field::<F>(&input_str);
+    if input_values.len() != 1 {
+        eprintln!(
+            "Error: coordinator client mode currently supports exactly one input value; got {}",
+            input_values.len()
+        );
+        exit(2);
+    }
+    let reserved_index = coordinator_client_index.unwrap_or_else(|| {
+        eprintln!(
+            "Error: coordinator client mode requires --client-index to claim a reserved input slot"
+        );
+        exit(2);
+    });
+
+    if let Some(contract) = contract_addr {
+        // On-chain client mode
+        let eth_node = eth_node_addr
+            .as_deref()
+            .expect("--eth-node required in on-chain client mode");
+        let wallet_sk = wallet_sk_str
+            .as_deref()
+            .expect("--wallet-sk required in on-chain client mode");
+        let signer = PrivateKeySigner::from_str(wallet_sk).expect("Invalid --wallet-sk");
+        let client_addr = signer.address();
+        let eth = on_chain::ws_connect(eth_node, wallet_sk).await;
+        let contract_addr = Address::from_str(&contract).expect("Invalid --on-chain-coord address");
+        let mut coord = on_chain::setup_coord::<_, F, HbCoordinatorShare<F>>(
+            eth,
+            contract_addr,
+            t as u64,
+            1,
+            Some(key_der.clone()),
+        )
+        .await;
+
+        coord.wait_for_round(Round::Preprocessing).await.unwrap();
+        coord
+            .wait_for_round(Round::InputMaskReservation)
+            .await
+            .unwrap();
+        coord.reserve_mask_index(reserved_index).await.unwrap();
+
+        let sig = on_chain::generate_client_sig(coord.base_nonce().await, reserved_index, signer)
+            .await
+            .unwrap();
+
+        let rpc_addrs: Vec<(String, u16)> = server_addrs
+            .iter()
+            .map(|a| (a.ip().to_string(), a.port()))
+            .collect();
+        let node_rpc_client =
+            HbOnChainNodeRpcClient::<F>::start_rpc_client(t, rpc_addrs, cert_der, key_der).await;
+        let mask = node_rpc_client
+            .receive_mask(sig.as_bytes().to_vec(), client_addr)
+            .await
+            .unwrap();
+
+        coord.wait_for_round(Round::InputCollection).await.unwrap();
+        coord
+            .send_masked_input(mask + input_values[0], reserved_index)
+            .await
+            .unwrap();
+
+        coord.wait_for_round(Round::MPCExecution).await.unwrap();
+        coord
+            .wait_for_round(Round::OutputDistribution)
+            .await
+            .unwrap();
+        let outputs = coord.obtain_outputs().await.unwrap();
+        println!("outputs: {}", format_coordinator_outputs(&outputs));
+        return;
+    }
+
+    // Off-chain client mode
+    let ca = coord_addr.expect("--off-chain-coord required in off-chain client mode");
+    let mut coord: HbOffChainCoordinator<F> = HbOffChainCoordinator::<F>::start_rpc_client(
+        &ca.0,
+        ca.1,
+        timestamp.expect("--timestamp required in client mode"),
+        t as u64,
+        1,
+        cert_der.clone(),
+        key_der.clone(),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        eprintln!("Failed to connect to off-chain coordinator: {error}");
+        exit(13);
+    });
+
+    coord.wait_for_round(Round::Preprocessing).await.unwrap();
+    coord
+        .wait_for_round(Round::InputMaskReservation)
+        .await
+        .unwrap();
+    coord.reserve_mask_index(reserved_index).await.unwrap();
+
+    let rpc_addrs: Vec<(String, u16)> = server_addrs
+        .iter()
+        .map(|a| (a.ip().to_string(), a.port()))
+        .collect();
+    let node_rpc_client: HbOffChainNodeRpcClient<F> =
+        HbOffChainNodeRpcClient::<F>::start_rpc_client(t, rpc_addrs, cert_der, key_der)
+            .await
+            .unwrap_or_else(|error| {
+                eprintln!("Failed to connect to node RPC servers: {error}");
+                exit(13);
+            });
+    let mask = node_rpc_client.receive_mask().await.unwrap();
+
+    coord.wait_for_round(Round::InputCollection).await.unwrap();
+    coord
+        .send_masked_input(mask + input_values[0], reserved_index)
+        .await
+        .unwrap();
+
+    coord.wait_for_round(Round::MPCExecution).await.unwrap();
+    coord
+        .wait_for_round(Round::OutputDistribution)
+        .await
+        .unwrap();
+    let outputs = coord.obtain_outputs().await.unwrap();
+    println!("outputs: {}", format_coordinator_outputs(&outputs));
+}
+
+#[cfg(feature = "honeybadger")]
+#[allow(clippy::too_many_arguments)]
+async fn run_hb_coordinator_client(
+    curve_config: MpcCurveConfig,
+    client_inputs: Option<String>,
+    server_addrs: Vec<SocketAddr>,
+    coord_addr: Option<(String, u16)>,
+    contract_addr: Option<String>,
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+    timestamp: Option<u64>,
+    threshold: Option<usize>,
+    coordinator_client_index: Option<u64>,
+    eth_node_addr: Option<String>,
+    wallet_sk_str: Option<String>,
+) {
+    match curve_config {
+        MpcCurveConfig::Bls12_381 => {
+            run_hb_coordinator_client_for_field::<ark_bls12_381::Fr>(
+                client_inputs,
+                server_addrs,
+                coord_addr,
+                contract_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                threshold,
+                coordinator_client_index,
+                eth_node_addr,
+                wallet_sk_str,
+            )
+            .await
+        }
+        MpcCurveConfig::Bn254 => {
+            run_hb_coordinator_client_for_field::<ark_bn254::Fr>(
+                client_inputs,
+                server_addrs,
+                coord_addr,
+                contract_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                threshold,
+                coordinator_client_index,
+                eth_node_addr,
+                wallet_sk_str,
+            )
+            .await
+        }
+        MpcCurveConfig::Curve25519 => {
+            run_hb_coordinator_client_for_field::<ark_curve25519::Fr>(
+                client_inputs,
+                server_addrs,
+                coord_addr,
+                contract_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                threshold,
+                coordinator_client_index,
+                eth_node_addr,
+                wallet_sk_str,
+            )
+            .await
+        }
+        MpcCurveConfig::Ed25519 => {
+            run_hb_coordinator_client_for_field::<ark_ed25519::Fr>(
+                client_inputs,
+                server_addrs,
+                coord_addr,
+                contract_addr,
+                cert_der,
+                key_der,
+                timestamp,
+                threshold,
+                coordinator_client_index,
+                eth_node_addr,
+                wallet_sk_str,
+            )
+            .await
+        }
+        MpcCurveConfig::Secp256k1 | MpcCurveConfig::Secp256r1 => {
+            eprintln!(
+                "Error: curve {} is not supported by honeybadger backend",
+                curve_config.name()
+            );
+            exit(2);
+        }
+    }
+}
+
+#[cfg(feature = "honeybadger")]
 struct HbPartySetup<'a> {
     net: Arc<QuicNetworkManager>,
     my_id: usize,
@@ -3080,150 +3318,37 @@ async fn main() {
 
             #[cfg(feature = "honeybadger")]
             {
-                rustls::crypto::ring::default_provider()
-                    .install_default()
-                    .expect("install rustls crypto");
-
-                let t = threshold.unwrap_or(1);
-                let input_str = client_inputs.expect("--inputs required in client mode");
-                let input_values = parse_inputs_as_field::<HbCoordinatorField>(&input_str);
-                if input_values.len() != 1 {
-                    eprintln!(
-                    "Error: coordinator client mode currently supports exactly one input value; got {}",
-                    input_values.len()
-                );
+                let curve_config = if let Some(ref name) = mpc_curve {
+                    match MpcCurveConfig::from_str(name) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            exit(2);
+                        }
+                    }
+                } else {
+                    MpcCurveConfig::default()
+                };
+                if let Err(e) = curve_config.validate_for_backend(MpcBackendKind::HoneyBadger) {
+                    eprintln!("Error: {}", e);
                     exit(2);
                 }
-                let reserved_index = coordinator_client_index.unwrap_or_else(|| {
-                eprintln!(
-                    "Error: coordinator client mode requires --client-index to claim a reserved input slot"
-                );
-                exit(2);
-            });
-
-                if let Some(ref contract) = contract_addr {
-                    // On-chain client mode
-                    let cert = cert_der.clone().expect("--cert required in client mode");
-                    let key = key_der.clone().expect("--key required in client mode");
-                    let eth_node = eth_node_addr
-                        .as_deref()
-                        .expect("--eth-node required in on-chain client mode");
-                    let wallet_sk = wallet_sk_str
-                        .as_deref()
-                        .expect("--wallet-sk required in on-chain client mode");
-                    let signer =
-                        PrivateKeySigner::from_str(wallet_sk).expect("Invalid --wallet-sk");
-                    let client_addr = signer.address();
-                    let eth = on_chain::ws_connect(eth_node, wallet_sk).await;
-                    let contract_addr =
-                        Address::from_str(contract).expect("Invalid --on-chain-coord address");
-                    let mut coord = on_chain::setup_coord::<
-                        _,
-                        HbCoordinatorField,
-                        HbCoordinatorShare,
-                    >(
-                        eth, contract_addr, t as u64, 1, Some(key.clone())
-                    )
-                    .await;
-
-                    coord.wait_for_round(Round::Preprocessing).await.unwrap();
-                    coord
-                        .wait_for_round(Round::InputMaskReservation)
-                        .await
-                        .unwrap();
-                    coord.reserve_mask_index(reserved_index).await.unwrap();
-
-                    let sig = on_chain::generate_client_sig(
-                        coord.base_nonce().await,
-                        reserved_index,
-                        signer,
-                    )
-                    .await
-                    .unwrap();
-
-                    let rpc_addrs: Vec<(String, u16)> = server_addrs
-                        .iter()
-                        .map(|a| (a.ip().to_string(), a.port()))
-                        .collect();
-                    let node_rpc_client =
-                        HbOnChainNodeRpcClient::start_rpc_client(t, rpc_addrs, cert, key).await;
-                    let mask = node_rpc_client
-                        .receive_mask(sig.as_bytes().to_vec(), client_addr)
-                        .await
-                        .unwrap();
-
-                    coord.wait_for_round(Round::InputCollection).await.unwrap();
-                    let masked = mask + input_values[0];
-                    coord
-                        .send_masked_input(masked, reserved_index)
-                        .await
-                        .unwrap();
-
-                    coord.wait_for_round(Round::MPCExecution).await.unwrap();
-                    coord
-                        .wait_for_round(Round::OutputDistribution)
-                        .await
-                        .unwrap();
-                    let outputs = coord.obtain_outputs().await.unwrap();
-                    println!("outputs: {}", format_coordinator_outputs(&outputs));
-                    return;
-                } else {
-                    // Off-chain client mode
-                    let cert = cert_der.clone().expect("--cert required in client mode");
-                    let key = key_der.clone().expect("--key required in client mode");
-
-                    let ca = coord_addr.as_ref().unwrap();
-                    let mut coord: HbOffChainCoordinator = HbOffChainCoordinator::start_rpc_client(
-                        &ca.0,
-                        ca.1,
-                        timestamp.expect("--timestamp required in client mode"),
-                        t as u64,
-                        1,
-                        cert.clone(),
-                        key.clone(),
-                    )
-                    .await
-                    .unwrap_or_else(|error| {
-                        eprintln!("Failed to connect to off-chain coordinator: {error}");
-                        exit(13);
-                    });
-
-                    coord.wait_for_round(Round::Preprocessing).await.unwrap();
-                    coord
-                        .wait_for_round(Round::InputMaskReservation)
-                        .await
-                        .unwrap();
-                    coord.reserve_mask_index(reserved_index).await.unwrap();
-
-                    let rpc_addrs: Vec<(String, u16)> = server_addrs
-                        .iter()
-                        .map(|a| (a.ip().to_string(), a.port()))
-                        .collect();
-                    let node_rpc_client: HbOffChainNodeRpcClient =
-                        HbOffChainNodeRpcClient::start_rpc_client(t, rpc_addrs, cert, key)
-                            .await
-                            .unwrap_or_else(|error| {
-                                eprintln!("Failed to connect to node RPC servers: {error}");
-                                exit(13);
-                            });
-                    let mask = node_rpc_client.receive_mask().await.unwrap();
-
-                    coord.wait_for_round(Round::InputCollection).await.unwrap();
-                    let masked = mask + input_values[0];
-                    coord
-                        .send_masked_input(masked, reserved_index)
-                        .await
-                        .unwrap();
-
-                    coord.wait_for_round(Round::MPCExecution).await.unwrap();
-                    coord
-                        .wait_for_round(Round::OutputDistribution)
-                        .await
-                        .unwrap();
-                    let outputs = coord.obtain_outputs().await.unwrap();
-                    println!("outputs: {}", format_coordinator_outputs(&outputs));
-                    return;
-                }
+                run_hb_coordinator_client(
+                    curve_config,
+                    client_inputs,
+                    server_addrs,
+                    coord_addr,
+                    contract_addr,
+                    cert_der.expect("--cert required in client mode"),
+                    key_der.expect("--key required in client mode"),
+                    timestamp,
+                    threshold,
+                    coordinator_client_index,
+                    eth_node_addr,
+                    wallet_sk_str,
+                )
+                .await;
+                return;
             }
         }
 
@@ -3712,9 +3837,9 @@ async fn main() {
 
     // Coordinator initialization (both leader and party modes)
     #[cfg(feature = "honeybadger")]
-    let mut coord_opt: Option<HbOffChainCoordinator> = None;
+    let mut coord_opt: Option<HbOffChainCoordinator<ark_bls12_381::Fr>> = None;
     #[cfg(feature = "honeybadger")]
-    let mut node_rpc_opt: Option<HbOffChainNodeRpcServer> = None;
+    let mut node_rpc_opt: Option<HbOffChainNodeRpcServer<ark_bls12_381::Fr>> = None;
     #[cfg(feature = "honeybadger")]
     let mut input_ids: Vec<Vec<u8>> = Vec::new();
     #[cfg(feature = "honeybadger")]
@@ -3739,9 +3864,17 @@ async fn main() {
                 .expect("--wallet-sk required in on-chain coordinator mode");
             let eth = on_chain::ws_connect(eth_node, wallet_sk).await;
             let contract = Address::from_str(contract).expect("Invalid --on-chain-coord address");
-            on_chain_input_ids = parse_on_chain_client_addresses(&node_ids, &expected_clients);
+            on_chain_input_ids = expected_clients
+                .iter()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| Address::from_str(s.trim()).expect("Invalid on-chain client address"))
+                .collect();
             Some(
-                on_chain::setup_coord::<_, HbCoordinatorField, HbCoordinatorShare>(
+                on_chain::setup_coord::<
+                    _,
+                    ark_bls12_381::Fr,
+                    HbCoordinatorShare<ark_bls12_381::Fr>,
+                >(
                     eth,
                     contract,
                     session_threshold.unwrap_or(1) as u64,
@@ -3778,7 +3911,7 @@ async fn main() {
     #[cfg(feature = "honeybadger")]
     if matches!(backend_kind, MpcBackendKind::HoneyBadger) {
         if let Some(ref ca) = coord_addr {
-            let coord = HbOffChainCoordinator::start_rpc_client(
+            let coord = HbOffChainCoordinator::<ark_bls12_381::Fr>::start_rpc_client(
                 &ca.0,
                 ca.1,
                 timestamp.expect("--timestamp required"),
@@ -3800,7 +3933,7 @@ async fn main() {
                 .collect();
 
             if let Some(ref rpc) = rpc_addr {
-                let node_rpc = HbOffChainNodeRpcServer::start(
+                let node_rpc = HbOffChainNodeRpcServer::<ark_bls12_381::Fr>::start(
                     &rpc.0,
                     rpc.1,
                     cert_der.clone().unwrap(),
@@ -4298,7 +4431,7 @@ async fn main() {
                             .await
                             .unwrap();
                         for cid in input_ids.iter() {
-                            let share: RobustShare<ark_bls12_381::Fr> =
+                            let share: HbCoordinatorShare<ark_bls12_381::Fr> =
                                 ark_serialize::CanonicalDeserialize::deserialize_compressed(
                                     output_share.as_slice(),
                                 )
@@ -4344,7 +4477,7 @@ async fn main() {
                             .unwrap();
 
                         for (key, client_addr) in on_chain_output_clients.iter() {
-                            let share: RobustShare<ark_bls12_381::Fr> =
+                            let share: HbCoordinatorShare<ark_bls12_381::Fr> =
                                 ark_serialize::CanonicalDeserialize::deserialize_compressed(
                                     output_share.as_slice(),
                                 )
