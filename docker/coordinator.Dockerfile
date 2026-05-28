@@ -28,5 +28,6 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY --from=builder /build/coordinator-wrapper/target/release/stoffel-coordinator-docker /app/stoffel-coordinator
+COPY ids /app/ids
 
 ENTRYPOINT ["/app/stoffel-coordinator"]
