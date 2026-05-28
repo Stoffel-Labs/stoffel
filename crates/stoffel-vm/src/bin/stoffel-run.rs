@@ -3003,6 +3003,7 @@ async fn main() {
     let mut coordinator_client_index: Option<u64> = None;
     let mut preproc_store_path: Option<String> = None;
     let mut local_store_path: Option<String> = None;
+    let mut advertise_addr: Option<SocketAddr> = None;
 
     for arg in &raw_args {
         if arg == "-h" || arg == "--help" {
@@ -3047,6 +3048,7 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--client-index") {
         } else if let Some(_rest) = arg.strip_prefix("--preproc-store") {
         } else if let Some(_rest) = arg.strip_prefix("--local-store") {
+        } else if let Some(_rest) = arg.strip_prefix("--advertise") {
         }
     }
 
@@ -3230,6 +3232,11 @@ async fn main() {
             "--expected-clients" => {
                 if let Some(v) = args_iter.next() {
                     expected_clients = v.split(',').map(|s| s.trim().to_string()).collect();
+                }
+            }
+            "--advertise" => {
+                if let Some(v) = args_iter.next() {
+                    advertise_addr = Some(v.parse().expect("Invalid --advertise addr"));
                 }
             }
             _ => {}
@@ -3495,9 +3502,18 @@ async fn main() {
             exit(11);
         }
 
+        // When the bind address is 0.0.0.0 (e.g. ECS/Fargate), connecting TO 0.0.0.0
+        // fails on Linux because it is not a valid destination. Use 127.0.0.1 to reach
+        // our own bootnode instead.
+        let bootnode_connect: SocketAddr = if bind.ip().is_unspecified() {
+            format!("127.0.0.1:{}", bind.port()).parse().unwrap()
+        } else {
+            bind
+        };
+
         eprintln!(
-            "[leader/party {}] Party listening on {}, registering with bootnode {}",
-            my_id, party_bind, bind
+            "[leader/party {}] Party listening on {}, registering with bootnode {} (connect via {})",
+            my_id, party_bind, bind, bootnode_connect
         );
 
         // Register with our own bootnode and wait for session
@@ -3505,9 +3521,9 @@ async fn main() {
         let session_info = match register_and_wait_for_session(
             &mut mgr,
             SessionRegistrationConfig {
-                bootnode: bind, // bootnode is on our bind address
+                bootnode: bootnode_connect,
                 my_party_id: my_id,
-                my_listen: party_bind,
+                my_listen: advertise_addr.unwrap_or(party_bind),
                 program_id,
                 entry: entry.clone(),
                 n_parties: n,
@@ -3590,7 +3606,7 @@ async fn main() {
             SessionRegistrationConfig {
                 bootnode,
                 my_party_id: my_id,
-                my_listen: actual_listen,
+                my_listen: advertise_addr.unwrap_or(actual_listen),
                 program_id,
                 entry: entry.clone(),
                 n_parties: n,

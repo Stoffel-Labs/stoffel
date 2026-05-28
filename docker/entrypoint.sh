@@ -14,6 +14,13 @@ validate_env() {
 
 validate_env
 
+# Resolve the IP address peers should use to connect to this node.
+# STOFFEL_ADVERTISE_IP can be set explicitly; otherwise auto-detect from
+# the primary network interface (works for ECS Fargate and docker-compose).
+if [ -z "${STOFFEL_ADVERTISE_IP:-}" ]; then
+    STOFFEL_ADVERTISE_IP=$(hostname -i | awk '{print $1}')
+fi
+
 echo "=========================================="
 echo "StoffelVM Node Startup"
 echo "=========================================="
@@ -26,6 +33,7 @@ else
     echo "Party ID: ${STOFFEL_PARTY_ID}"
     echo "Bind Address: ${STOFFEL_BIND_ADDR}"
     echo "Bootstrap: ${STOFFEL_BOOTSTRAP_ADDR:-N/A}"
+    echo "Advertise IP: ${STOFFEL_ADVERTISE_IP}"
     echo "Expected Clients: ${STOFFEL_EXPECTED_CLIENTS:-none}"
 fi
 echo "N Parties: ${STOFFEL_N_PARTIES}"
@@ -115,6 +123,9 @@ build_command() {
         cmd="${cmd} --bind ${STOFFEL_BIND_ADDR}"
         cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
         cmd="${cmd} --threshold ${STOFFEL_THRESHOLD}"
+        BIND_PORT=$(echo "${STOFFEL_BIND_ADDR}" | awk -F: '{print $NF}')
+        ADVERTISE_PORT=$((BIND_PORT + 1000))
+        cmd="${cmd} --advertise ${STOFFEL_ADVERTISE_IP}:${ADVERTISE_PORT}"
     elif [ "${STOFFEL_ROLE}" = "bootnode" ]; then
         # Bootnode-only mode (no program execution)
         cmd="/app/stoffel-run --bootnode"
@@ -127,6 +138,8 @@ build_command() {
         cmd="${cmd} --bind ${STOFFEL_BIND_ADDR}"
         cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
         cmd="${cmd} --threshold ${STOFFEL_THRESHOLD}"
+        BIND_PORT=$(echo "${STOFFEL_BIND_ADDR}" | awk -F: '{print $NF}')
+        cmd="${cmd} --advertise ${STOFFEL_ADVERTISE_IP}:${BIND_PORT}"
     fi
 
     # Coordinator flags (for leader, party, and bootnode modes)
