@@ -12,6 +12,7 @@ WORKDIR /build
 
 COPY .cargo /build/.cargo
 COPY docker/coordinator-wrapper /build/coordinator-wrapper
+COPY --from=coordinator . /stoffel-mpc-coordinator
 
 WORKDIR /build/coordinator-wrapper
 RUN cargo build --release

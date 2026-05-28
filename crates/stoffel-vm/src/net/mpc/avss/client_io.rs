@@ -1,4 +1,4 @@
-use super::AvssMpcEngine;
+use super::{AvssClientOutputRecord, AvssMpcEngine};
 use crate::net::client_store::{
     ClientInputHydrationCount, ClientInputStore, ClientOutputShareCount,
 };
@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelnet::network_utils::ClientId;
+
+const OUTPUT_SHARE_LIST_MAGIC: &[u8; 5] = b"VMOS1";
 
 impl<F, G> AvssMpcEngine<F, G>
 where
@@ -86,15 +88,18 @@ where
     ) -> Result<(), String> {
         let input_len = output_share_count.count();
 
-        let shares: Vec<FeldmanShamirShare<F, G>> = if input_len == 1 {
-            let single_share: FeldmanShamirShare<F, G> =
+        let shares: Vec<FeldmanShamirShare<F, G>> =
+            if let Some(shares) = decode_output_share_list(shares_bytes, input_len)? {
+                shares
+            } else if input_len == 1 {
+                let single_share: FeldmanShamirShare<F, G> =
+                    CanonicalDeserialize::deserialize_compressed(shares_bytes)
+                        .map_err(|e| format!("Failed to deserialize single share: {:?}", e))?;
+                vec![single_share]
+            } else {
                 CanonicalDeserialize::deserialize_compressed(shares_bytes)
-                    .map_err(|e| format!("Failed to deserialize single share: {:?}", e))?;
-            vec![single_share]
-        } else {
-            CanonicalDeserialize::deserialize_compressed(shares_bytes)
-                .map_err(|e| format!("Failed to deserialize shares: {:?}", e))?
-        };
+                    .map_err(|e| format!("Failed to deserialize shares: {:?}", e))?
+            };
 
         if shares.len() != input_len {
             return Err(format!(
@@ -104,10 +109,76 @@ where
             ));
         }
 
+        {
+            let mut capture = self.client_output_capture.lock().await;
+            if let Some(records) = capture.as_mut() {
+                records.push(AvssClientOutputRecord { client_id, shares });
+                return Ok(());
+            }
+        }
+
+        let transport_client_id = self.client_output_transport_id(client_id).await;
         let node = self.clone_avss_node().await;
         node.output_server
-            .init(client_id, shares, input_len, self.net.clone())
+            .init(transport_client_id, shares, input_len, self.net.clone())
             .await
             .map_err(|e| format!("OutputServer.init failed: {:?}", e))
     }
+}
+
+fn decode_output_share_list<F, G>(
+    payload: &[u8],
+    expected_count: usize,
+) -> Result<Option<Vec<FeldmanShamirShare<F, G>>>, String>
+where
+    F: SupportedMpcField,
+    G: CurveGroup<ScalarField = F>,
+{
+    if !payload.starts_with(OUTPUT_SHARE_LIST_MAGIC) {
+        return Ok(None);
+    }
+
+    let mut offset = OUTPUT_SHARE_LIST_MAGIC.len();
+    let count = read_u32(payload, &mut offset)? as usize;
+    if count != expected_count {
+        return Err(format!(
+            "Output share count mismatch: envelope has {}, expected {}",
+            count, expected_count
+        ));
+    }
+
+    let mut shares = Vec::with_capacity(count);
+    for index in 0..count {
+        let len = read_u32(payload, &mut offset)? as usize;
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| "Output share envelope length overflow".to_owned())?;
+        if end > payload.len() {
+            return Err(format!(
+                "Output share envelope truncated at share {}",
+                index
+            ));
+        }
+        let share = FeldmanShamirShare::<F, G>::deserialize_compressed(&payload[offset..end])
+            .map_err(|e| format!("Failed to deserialize output share {}: {:?}", index, e))?;
+        shares.push(share);
+        offset = end;
+    }
+
+    if offset != payload.len() {
+        return Err("Output share envelope has trailing bytes".to_owned());
+    }
+
+    Ok(Some(shares))
+}
+
+fn read_u32(payload: &[u8], offset: &mut usize) -> Result<u32, String> {
+    let end = offset
+        .checked_add(std::mem::size_of::<u32>())
+        .ok_or_else(|| "Output share envelope offset overflow".to_owned())?;
+    let bytes = payload
+        .get(*offset..end)
+        .ok_or_else(|| "Output share envelope is truncated".to_owned())?;
+    *offset = end;
+    Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
 }

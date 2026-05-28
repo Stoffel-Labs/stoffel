@@ -1,3 +1,5 @@
+#[cfg(feature = "avss")]
+pub mod avss_certificate_programs;
 #[cfg(feature = "avss_itest")]
 pub mod avss_e2e_integration;
 #[cfg(feature = "avss")]

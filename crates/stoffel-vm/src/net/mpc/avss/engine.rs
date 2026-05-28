@@ -86,6 +86,7 @@ where
             let node = avss_node.lock().await;
             node.clone()
         };
+        Self::ensure_multiply_preprocessing_ids(&mut node, net.clone()).await?;
         let result = node
             .mul(vec![left_share], vec![right_share], net)
             .await
@@ -96,6 +97,48 @@ where
             .next()
             .ok_or_else(|| "Multiplication returned no result".to_string())?;
         Self::share_to_share_data(&product)
+    }
+
+    async fn ensure_multiply_preprocessing_ids(
+        node: &mut AvssMpcNode<F, Avid<AvssSessionId>, G>,
+        net: Arc<QuicNetworkManager>,
+    ) -> Result<(), String> {
+        let mut triple_count = {
+            let store = node.preprocessing_material.lock().await;
+            store.len().0
+        };
+
+        if triple_count == 0 {
+            MPCProtocol::<F, FeldmanShamirShare<F, G>, QuicNetworkManager>::rand(node, net)
+                .await
+                .map_err(|e| format!("preprocess multiplication material failed: {:?}", e))?;
+            triple_count = {
+                let store = node.preprocessing_material.lock().await;
+                store.len().0
+            };
+        }
+
+        if triple_count == 0 {
+            return Ok(());
+        }
+
+        let mut triples = {
+            let mut store = node.preprocessing_material.lock().await;
+            store
+                .take_triples(triple_count)
+                .map_err(|e| format!("take multiplication triples: {:?}", e))?
+        };
+
+        for triple in &mut triples {
+            // mpc-protocols builds the triple c-share with a 0-based party id,
+            // while AVSS/Feldman shares are evaluated at 1-based ids.
+            let share_id = triple.a.feldmanshare.id;
+            triple.c.feldmanshare.id = share_id;
+        }
+
+        let mut store = node.preprocessing_material.lock().await;
+        store.add(Some(triples), None);
+        Ok(())
     }
 
     pub(super) async fn broadcast_open_registry_payload(
@@ -276,6 +319,10 @@ where
             MpcCurveConfig::Curve25519
         } else if TypeId::of::<G>() == TypeId::of::<ark_ed25519::EdwardsProjective>() {
             MpcCurveConfig::Ed25519
+        } else if TypeId::of::<G>() == TypeId::of::<ark_secp256k1::Projective>() {
+            MpcCurveConfig::Secp256k1
+        } else if TypeId::of::<G>() == TypeId::of::<ark_secp256r1::Projective>() {
+            MpcCurveConfig::Secp256r1
         } else {
             F::CURVE_CONFIG
         }

@@ -10,6 +10,8 @@ use std::time::Duration;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelnet::network_utils::ClientId;
 
+const OUTPUT_SHARE_LIST_MAGIC: &[u8; 5] = b"VMOS1";
+
 impl<F, G> HoneyBadgerMpcEngine<F, G>
 where
     F: SupportedMpcField,
@@ -138,15 +140,18 @@ where
     ) -> Result<(), String> {
         let input_len = output_share_count.count();
 
-        let shares: Vec<RobustShare<F>> = if input_len == 1 {
-            let single_share: RobustShare<F> =
+        let shares: Vec<RobustShare<F>> =
+            if let Some(shares) = decode_output_share_list(shares_bytes, input_len)? {
+                shares
+            } else if input_len == 1 {
+                let single_share: RobustShare<F> =
+                    CanonicalDeserialize::deserialize_compressed(shares_bytes)
+                        .map_err(|e| format!("Failed to deserialize single share: {:?}", e))?;
+                vec![single_share]
+            } else {
                 CanonicalDeserialize::deserialize_compressed(shares_bytes)
-                    .map_err(|e| format!("Failed to deserialize single share: {:?}", e))?;
-            vec![single_share]
-        } else {
-            CanonicalDeserialize::deserialize_compressed(shares_bytes)
-                .map_err(|e| format!("Failed to deserialize shares: {:?}", e))?
-        };
+                    .map_err(|e| format!("Failed to deserialize shares: {:?}", e))?
+            };
 
         if shares.len() != input_len {
             return Err(format!(
@@ -162,4 +167,60 @@ where
             .await
             .map_err(|e| format!("OutputServer.init failed: {:?}", e))
     }
+}
+
+fn decode_output_share_list<F>(
+    payload: &[u8],
+    expected_count: usize,
+) -> Result<Option<Vec<RobustShare<F>>>, String>
+where
+    F: SupportedMpcField,
+{
+    if !payload.starts_with(OUTPUT_SHARE_LIST_MAGIC) {
+        return Ok(None);
+    }
+
+    let mut offset = OUTPUT_SHARE_LIST_MAGIC.len();
+    let count = read_u32(payload, &mut offset)? as usize;
+    if count != expected_count {
+        return Err(format!(
+            "Output share count mismatch: envelope has {}, expected {}",
+            count, expected_count
+        ));
+    }
+
+    let mut shares = Vec::with_capacity(count);
+    for index in 0..count {
+        let len = read_u32(payload, &mut offset)? as usize;
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| "Output share envelope length overflow".to_owned())?;
+        if end > payload.len() {
+            return Err(format!(
+                "Output share envelope truncated at share {}",
+                index
+            ));
+        }
+        let share = RobustShare::<F>::deserialize_compressed(&payload[offset..end])
+            .map_err(|e| format!("Failed to deserialize output share {}: {:?}", index, e))?;
+        shares.push(share);
+        offset = end;
+    }
+
+    if offset != payload.len() {
+        return Err("Output share envelope has trailing bytes".to_owned());
+    }
+
+    Ok(Some(shares))
+}
+
+fn read_u32(payload: &[u8], offset: &mut usize) -> Result<u32, String> {
+    let end = offset
+        .checked_add(std::mem::size_of::<u32>())
+        .ok_or_else(|| "Output share envelope offset overflow".to_owned())?;
+    let bytes = payload
+        .get(*offset..end)
+        .ok_or_else(|| "Output share envelope is truncated".to_owned())?;
+    *offset = end;
+    Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
 }

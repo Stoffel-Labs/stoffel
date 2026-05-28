@@ -1638,6 +1638,8 @@ mod avss_ffi {
         Bn254 = 1,
         Curve25519 = 2,
         Ed25519 = 3,
+        Secp256k1 = 4,
+        P256 = 5,
     }
 
     impl CAvssCurveConfig {
@@ -1647,6 +1649,8 @@ mod avss_ffi {
                 1 => Some(CAvssCurveConfig::Bn254),
                 2 => Some(CAvssCurveConfig::Curve25519),
                 3 => Some(CAvssCurveConfig::Ed25519),
+                4 => Some(CAvssCurveConfig::Secp256k1),
+                5 => Some(CAvssCurveConfig::P256),
                 _ => None,
             }
         }
@@ -1819,6 +1823,46 @@ mod avss_ffi {
         )
     }
 
+    fn create_secp256k1_engine(
+        instance_id: u64,
+        party_id: usize,
+        n: usize,
+        t: usize,
+        net: Arc<QuicNetworkManager>,
+        sk_bytes: &[u8],
+        pk_bytes: &[u8],
+    ) -> Result<AvssFfiWrapper, String> {
+        create_engine_inner::<ark_secp256k1::Fr, ark_secp256k1::Projective>(
+            instance_id,
+            party_id,
+            n,
+            t,
+            net,
+            sk_bytes,
+            pk_bytes,
+        )
+    }
+
+    fn create_p256_engine(
+        instance_id: u64,
+        party_id: usize,
+        n: usize,
+        t: usize,
+        net: Arc<QuicNetworkManager>,
+        sk_bytes: &[u8],
+        pk_bytes: &[u8],
+    ) -> Result<AvssFfiWrapper, String> {
+        create_engine_inner::<ark_secp256r1::Fr, ark_secp256r1::Projective>(
+            instance_id,
+            party_id,
+            n,
+            t,
+            net,
+            sk_bytes,
+            pk_bytes,
+        )
+    }
+
     /// Creates a new AVSS engine
     ///
     /// # Arguments
@@ -1827,7 +1871,7 @@ mod avss_ffi {
     /// * `n` - Total number of parties
     /// * `t` - Threshold
     /// * `network_ptr` - Pointer to a QuicNetworkManager (same opaque type as HB)
-    /// * `curve_config` - Curve configuration (0 = BLS12-381, 1 = BN254, 2 = Curve25519, 3 = Ed25519)
+    /// * `curve_config` - Curve configuration (0 = BLS12-381, 1 = BN254, 2 = Curve25519, 3 = Ed25519, 4 = secp256k1, 5 = P-256)
     /// * `sk_bytes` - Secret key bytes (serialized Fr element), or null for random key
     /// * `sk_len` - Length of secret key bytes
     /// * `pk_map_ptr` - Pointer to serialized public key map (required, must not be null)
@@ -1892,6 +1936,12 @@ mod avss_ffi {
             }
             CAvssCurveConfig::Ed25519 => {
                 create_ed25519_engine(instance_id, party_id, n, t, net, sk_slice, pk_slice)
+            }
+            CAvssCurveConfig::Secp256k1 => {
+                create_secp256k1_engine(instance_id, party_id, n, t, net, sk_slice, pk_slice)
+            }
+            CAvssCurveConfig::P256 => {
+                create_p256_engine(instance_id, party_id, n, t, net, sk_slice, pk_slice)
             }
         };
 

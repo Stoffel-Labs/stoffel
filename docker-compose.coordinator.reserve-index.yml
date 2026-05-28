@@ -1,5 +1,10 @@
 # Reserve-index off-chain coordinator stack.
 #
+# This stack exercises the API/coordinator topology through the current
+# HoneyBadger coordinator path. Coordinator I/O is still tied to the
+# HoneyBadger/BLS12-381 VM path; AVSS curves and local-store persistence are
+# exercised by docker-compose.avss.yml until coordinator I/O supports AVSS.
+#
 # Default run:
 #   STOFFEL_AUTH_TOKEN=replace-with-random-secret \
 #   docker compose -f docker-compose.coordinator.reserve-index.yml up --build
@@ -25,6 +30,8 @@ x-party-common: &party-common
     STOFFEL_THRESHOLD: "1"
     STOFFEL_PROGRAM: /app/programs/client_sub_order.stflb
     STOFFEL_ENTRY: main
+    STOFFEL_MPC_BACKEND: honeybadger
+    STOFFEL_MPC_CURVE: bls12-381
     STOFFEL_COORD_ADDR: 172.29.0.5:31415
     STOFFEL_TIMESTAMP: "0"
     STOFFEL_EXPECTED_CLIENTS: /app/ids/clients/cert0.crt,/app/ids/clients/cert1.crt
@@ -40,6 +47,8 @@ x-client-common: &client-common
     STOFFEL_SERVERS: 172.29.0.10:16180,172.29.0.11:16181,172.29.0.12:16182,172.29.0.13:16183,172.29.0.14:16184
     STOFFEL_N_PARTIES: "5"
     STOFFEL_THRESHOLD: "1"
+    STOFFEL_MPC_BACKEND: honeybadger
+    STOFFEL_MPC_CURVE: bls12-381
     STOFFEL_COORD_ADDR: 172.29.0.5:31415
     STOFFEL_TIMESTAMP: "0"
     STOFFEL_CLIENT_DELAY: "20"

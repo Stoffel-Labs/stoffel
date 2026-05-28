@@ -10,8 +10,9 @@
 //! complementary and intentionally both required.
 //!
 //! The server is generic over a `(F, G)` field/curve pair. Use the type aliases
-//! `Bls12381AvssServer`, `Bn254AvssServer`, `Curve25519AvssServer`, or
-//! `Ed25519AvssServer` for the supported configurations.
+//! `Bls12381AvssServer`, `Bn254AvssServer`, `Curve25519AvssServer`,
+//! `Ed25519AvssServer`, `Secp256k1AvssServer`, or `P256AvssServer` for the
+//! supported configurations.
 
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{FftField, PrimeField};
@@ -44,6 +45,8 @@ pub type Bn254AvssServer = AvssQuicServer<ark_bn254::Fr, ark_bn254::G1Projective
 pub type Curve25519AvssServer =
     AvssQuicServer<ark_curve25519::Fr, ark_curve25519::EdwardsProjective>;
 pub type Ed25519AvssServer = AvssQuicServer<ark_ed25519::Fr, ark_ed25519::EdwardsProjective>;
+pub type Secp256k1AvssServer = AvssQuicServer<ark_secp256k1::Fr, ark_secp256k1::Projective>;
+pub type P256AvssServer = AvssQuicServer<ark_secp256r1::Fr, ark_secp256r1::Projective>;
 
 /// Configuration for AVSS over QUIC
 #[derive(Debug, Clone)]
@@ -113,7 +116,8 @@ pub enum AvssPublicKeyEnvelopeError {
 ///
 /// Generic over `(F, G)` where `F` is the scalar field and `G` is the curve group.
 /// Use the type aliases: `Bls12381AvssServer`, `Bn254AvssServer`,
-/// `Curve25519AvssServer`, or `Ed25519AvssServer`.
+/// `Curve25519AvssServer`, `Ed25519AvssServer`, `Secp256k1AvssServer`, or
+/// `P256AvssServer`.
 pub struct AvssQuicServer<F, G>
 where
     F: FftField + PrimeField,

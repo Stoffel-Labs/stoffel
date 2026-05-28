@@ -164,7 +164,7 @@ pub use mpc_runner::{
 #[cfg(feature = "avss")]
 pub use avss_server::{
     AvssPublicKeyEnvelopeError, AvssQuicConfig, AvssQuicServer, Bls12381AvssServer,
-    Bn254AvssServer, Curve25519AvssServer, Ed25519AvssServer,
+    Bn254AvssServer, Curve25519AvssServer, Ed25519AvssServer, P256AvssServer, Secp256k1AvssServer,
 };
 // Re-export discovery helpers
 pub use discovery::{

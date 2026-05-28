@@ -69,9 +69,13 @@ COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/matrix_average_f
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/client_mul.stflb /app/programs/client_mul.stflb
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/client_sub_order.stflb /app/programs/client_sub_order.stflb
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/avss_keygen.stflb /app/programs/avss_keygen.stflb
+COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/avss_certificate_keygen.stflb /app/programs/avss_certificate_keygen.stflb
+COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/avss_certificate_sign.stflb /app/programs/avss_certificate_sign.stflb
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/threshold_schnorr_ed25519.stflb /app/programs/threshold_schnorr_ed25519.stflb
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/threshold_eddsa_ed25519.stflb /app/programs/threshold_eddsa_ed25519.stflb
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/threshold_bls_bls12381.stflb /app/programs/threshold_bls_bls12381.stflb
+COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/threshold_ecdsa_secp256k1.stflb /app/programs/threshold_ecdsa_secp256k1.stflb
+COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/threshold_ecdsa_p256.stflb /app/programs/threshold_ecdsa_p256.stflb
 
 # Copy pre-generated certificates for coordinator identity
 COPY ids /app/ids

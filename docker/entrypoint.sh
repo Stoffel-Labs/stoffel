@@ -34,6 +34,7 @@ echo "Program: ${STOFFEL_PROGRAM}"
 echo "Entry: ${STOFFEL_ENTRY}"
 echo "Coordinator: ${STOFFEL_COORD_ADDR:-N/A}"
 echo "Preproc Store: ${STOFFEL_PREPROC_STORE:-none}"
+echo "Local Store: ${STOFFEL_LOCAL_STORE:-none}"
 echo "Auth Token: $( [ -n "${STOFFEL_AUTH_TOKEN:-}" ] && echo "configured" || echo "not set" )"
 echo "=========================================="
 
@@ -83,12 +84,23 @@ build_command() {
         cmd="${cmd} --servers ${STOFFEL_SERVERS}"
         cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
         cmd="${cmd} --threshold ${STOFFEL_THRESHOLD:-1}"
-        cmd="${cmd} --off-chain-coord ${STOFFEL_COORD_ADDR}"
-        cmd="${cmd} --cert ${STOFFEL_CERT}"
-        cmd="${cmd} --key ${STOFFEL_KEY}"
-        cmd="${cmd} --timestamp ${STOFFEL_TIMESTAMP:-0}"
+        if [ -n "${STOFFEL_OUTPUTS:-}" ]; then
+            cmd="${cmd} --outputs ${STOFFEL_OUTPUTS}"
+        fi
+        if [ -n "${STOFFEL_COORD_ADDR:-}" ]; then
+            cmd="${cmd} --off-chain-coord ${STOFFEL_COORD_ADDR}"
+            cmd="${cmd} --cert ${STOFFEL_CERT}"
+            cmd="${cmd} --key ${STOFFEL_KEY}"
+            cmd="${cmd} --timestamp ${STOFFEL_TIMESTAMP:-0}"
+        fi
         if [ -n "${STOFFEL_CLIENT_INDEX:-}" ]; then
             cmd="${cmd} --client-index ${STOFFEL_CLIENT_INDEX}"
+        fi
+        if [ -n "${STOFFEL_MPC_BACKEND:-}" ]; then
+            cmd="${cmd} --mpc-backend ${STOFFEL_MPC_BACKEND}"
+        fi
+        if [ -n "${STOFFEL_MPC_CURVE:-}" ]; then
+            cmd="${cmd} --mpc-curve ${STOFFEL_MPC_CURVE}"
         fi
         echo "$cmd"
         return
@@ -133,8 +145,16 @@ build_command() {
         cmd="${cmd} --expected-clients ${STOFFEL_EXPECTED_CLIENTS}"
     fi
 
+    if [ -n "${STOFFEL_WAIT_FOR_CLIENTS:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+        cmd="${cmd} --wait-for-clients ${STOFFEL_WAIT_FOR_CLIENTS}"
+    fi
+
     if [ -n "${STOFFEL_PREPROC_STORE:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
         cmd="${cmd} --preproc-store ${STOFFEL_PREPROC_STORE}"
+    fi
+
+    if [ -n "${STOFFEL_LOCAL_STORE:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+        cmd="${cmd} --local-store ${STOFFEL_LOCAL_STORE}"
     fi
 
     # Add MPC backend if specified

@@ -43,6 +43,8 @@ pub enum MpcExponentGroup {
     Bn254G1,
     Curve25519Edwards,
     Ed25519Edwards,
+    Secp256k1,
+    P256,
 }
 
 impl MpcExponentGroup {
@@ -53,6 +55,8 @@ impl MpcExponentGroup {
             MpcExponentGroup::Bn254G1 => "bn254-g1",
             MpcExponentGroup::Curve25519Edwards => "curve25519-edwards",
             MpcExponentGroup::Ed25519Edwards => "ed25519-edwards",
+            MpcExponentGroup::Secp256k1 => "secp256k1",
+            MpcExponentGroup::P256 => "p-256",
         }
     }
 
@@ -66,6 +70,8 @@ impl MpcExponentGroup {
             MpcCurveConfig::Bn254 => MpcExponentGroup::Bn254G1,
             MpcCurveConfig::Curve25519 => MpcExponentGroup::Curve25519Edwards,
             MpcCurveConfig::Ed25519 => MpcExponentGroup::Ed25519Edwards,
+            MpcCurveConfig::Secp256k1 => MpcExponentGroup::Secp256k1,
+            MpcCurveConfig::Secp256r1 => MpcExponentGroup::P256,
         }
     }
 
@@ -94,6 +100,12 @@ impl MpcExponentGroup {
             MpcExponentGroup::Ed25519Edwards => {
                 serialize_prime_group_generator::<ark_ed25519::EdwardsProjective>("generator")
             }
+            MpcExponentGroup::Secp256k1 => {
+                serialize_prime_group_generator::<ark_secp256k1::Projective>("generator")
+            }
+            MpcExponentGroup::P256 => {
+                serialize_prime_group_generator::<ark_secp256r1::Projective>("generator")
+            }
         }
     }
 }
@@ -109,6 +121,10 @@ impl std::str::FromStr for MpcExponentGroup {
             "bn254-g1" => Ok(MpcExponentGroup::Bn254G1),
             "curve25519-edwards" => Ok(MpcExponentGroup::Curve25519Edwards),
             "ed25519-edwards" => Ok(MpcExponentGroup::Ed25519Edwards),
+            "secp256k1" | "secp256k1-g" | "secp256k1-g1" => Ok(MpcExponentGroup::Secp256k1),
+            "p-256" | "p256" | "nist-p256" | "secp256r1" | "secp256r1-g" | "secp256r1-g1" => {
+                Ok(MpcExponentGroup::P256)
+            }
             _ => Err(MpcExponentError::UnsupportedGroupName {
                 name: trimmed.to_string(),
             }),

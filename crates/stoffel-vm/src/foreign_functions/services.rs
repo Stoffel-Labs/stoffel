@@ -20,6 +20,7 @@ pub(crate) trait ForeignFunctionVmServices:
     + ForeignHookServices
     + ForeignClosureServices
     + ForeignTableMemoryServices
+    + ForeignLocalStorageServices
     + ForeignMpcServices
     + ForeignShareObjectServices
 {
@@ -31,6 +32,7 @@ impl<T> ForeignFunctionVmServices for T where
         + ForeignHookServices
         + ForeignClosureServices
         + ForeignTableMemoryServices
+        + ForeignLocalStorageServices
         + ForeignMpcServices
         + ForeignShareObjectServices
         + ?Sized
@@ -192,6 +194,34 @@ impl ForeignTableMemoryServices for VMState {
 
     fn push_array_ref_values(&mut self, array_ref: ArrayRef, values: &[Value]) -> VmResult<usize> {
         VMState::push_array_ref_values(self, array_ref, values)
+    }
+}
+
+pub(crate) trait ForeignLocalStorageServices {
+    fn local_storage_store_value(&mut self, key: &[u8], value: &Value) -> VmResult<()>;
+
+    fn local_storage_load_value(&mut self, key: &[u8]) -> VmResult<Option<Value>>;
+
+    fn local_storage_delete(&mut self, key: &[u8]) -> VmResult<bool>;
+
+    fn local_storage_exists(&mut self, key: &[u8]) -> VmResult<bool>;
+}
+
+impl ForeignLocalStorageServices for VMState {
+    fn local_storage_store_value(&mut self, key: &[u8], value: &Value) -> VmResult<()> {
+        VMState::local_storage_store_value(self, key, value)
+    }
+
+    fn local_storage_load_value(&mut self, key: &[u8]) -> VmResult<Option<Value>> {
+        VMState::local_storage_load_value(self, key)
+    }
+
+    fn local_storage_delete(&mut self, key: &[u8]) -> VmResult<bool> {
+        VMState::local_storage_delete(self, key)
+    }
+
+    fn local_storage_exists(&mut self, key: &[u8]) -> VmResult<bool> {
+        VMState::local_storage_exists(self, key)
     }
 }
 

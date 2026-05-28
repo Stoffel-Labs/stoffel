@@ -341,6 +341,41 @@ impl Array {
         self.length_hint
     }
 
+    fn is_length_index_key(key: &Value, length: usize) -> bool {
+        match key {
+            Value::I64(idx) if *idx >= 0 => usize::try_from(*idx).is_ok_and(|idx| idx < length),
+            _ => false,
+        }
+    }
+
+    pub fn entries(&self, limit: usize) -> Vec<(Value, Value)> {
+        let mut entries = Vec::with_capacity(self.length_hint.min(limit));
+        for index in 0..self.length_hint.min(limit) {
+            let Ok(index_i64) = i64::try_from(index) else {
+                break;
+            };
+            let key = Value::I64(index_i64);
+            let value = self.get(&key).cloned().unwrap_or(Value::Unit);
+            entries.push((key, value));
+        }
+
+        if entries.len() >= limit {
+            return entries;
+        }
+
+        for (key, value) in &self.extra_fields {
+            if Self::is_length_index_key(key, self.length_hint) {
+                continue;
+            }
+            entries.push((key.clone(), value.clone()));
+            if entries.len() >= limit {
+                break;
+            }
+        }
+
+        entries
+    }
+
     /// Format the array contents for display with a depth limit to prevent infinite recursion.
     /// Returns a string like `[1, 2, 3]` for simple arrays.
     pub fn format_contents(&self, memory: &dyn TableMemoryView, max_depth: usize) -> String {
@@ -1474,6 +1509,27 @@ pub trait TableMemoryView {
         object_ref: ObjectRef,
         limit: usize,
     ) -> TableMemoryResult<Vec<(Value, Value)>>;
+    fn array_ref_entries(
+        &self,
+        array_ref: ArrayRef,
+        limit: usize,
+    ) -> TableMemoryResult<Vec<(Value, Value)>> {
+        let len = self.array_ref_len(array_ref)?;
+        let mut entries = Vec::with_capacity(len.min(limit));
+        for index in 0..len.min(limit) {
+            let index_i64 =
+                i64::try_from(index).map_err(|_| TableMemoryError::VmIntegerRangeExceeded {
+                    label: "Array index",
+                    value: index,
+                })?;
+            let key = Value::I64(index_i64);
+            let value = self
+                .get_table_field(TableRef::from(array_ref), &key)?
+                .unwrap_or(Value::Unit);
+            entries.push((key, value));
+        }
+        Ok(entries)
+    }
 }
 
 /// Object/array table memory operations used by the VM execution path.
@@ -1539,6 +1595,32 @@ pub trait TableMemory: Send + Sync {
         object_ref: ObjectRef,
         limit: usize,
     ) -> TableMemoryResult<Vec<(Value, Value)>>;
+    /// Semantically read array entries through the VM-visible memory path.
+    ///
+    /// The default implementation returns entries for numeric indices in the
+    /// VM-visible array length. Backends with extra non-index array fields
+    /// should override this method to preserve those fields.
+    fn read_array_ref_entries(
+        &mut self,
+        array_ref: ArrayRef,
+        limit: usize,
+    ) -> TableMemoryResult<Vec<(Value, Value)>> {
+        let len = self.read_array_ref_len(array_ref)?;
+        let mut entries = Vec::with_capacity(len.min(limit));
+        for index in 0..len.min(limit) {
+            let index_i64 =
+                i64::try_from(index).map_err(|_| TableMemoryError::VmIntegerRangeExceeded {
+                    label: "Array index",
+                    value: index,
+                })?;
+            let key = Value::I64(index_i64);
+            let value = self
+                .read_table_field(TableRef::from(array_ref), &key)?
+                .unwrap_or(Value::Unit);
+            entries.push((key, value));
+        }
+        Ok(entries)
+    }
 }
 
 /// Combined storage system for objects and arrays
@@ -1697,6 +1779,16 @@ impl ObjectStore {
             .collect())
     }
 
+    pub fn array_ref_entries(
+        &self,
+        array_ref: ArrayRef,
+        limit: usize,
+    ) -> TableMemoryResult<Vec<(Value, Value)>> {
+        self.get_array_ref(array_ref)
+            .map(|array| array.entries(limit))
+            .ok_or_else(|| Self::array_not_found(array_ref))
+    }
+
     pub fn object_count(&self) -> usize {
         self.objects.len()
     }
@@ -1737,6 +1829,14 @@ impl TableMemoryView for ObjectStore {
         limit: usize,
     ) -> TableMemoryResult<Vec<(Value, Value)>> {
         ObjectStore::object_ref_entries(self, object_ref, limit)
+    }
+
+    fn array_ref_entries(
+        &self,
+        array_ref: ArrayRef,
+        limit: usize,
+    ) -> TableMemoryResult<Vec<(Value, Value)>> {
+        ObjectStore::array_ref_entries(self, array_ref, limit)
     }
 }
 
@@ -1803,6 +1903,14 @@ impl TableMemory for ObjectStore {
         limit: usize,
     ) -> TableMemoryResult<Vec<(Value, Value)>> {
         ObjectStore::object_ref_entries(self, object_ref, limit)
+    }
+
+    fn read_array_ref_entries(
+        &mut self,
+        array_ref: ArrayRef,
+        limit: usize,
+    ) -> TableMemoryResult<Vec<(Value, Value)>> {
+        ObjectStore::array_ref_entries(self, array_ref, limit)
     }
 }
 

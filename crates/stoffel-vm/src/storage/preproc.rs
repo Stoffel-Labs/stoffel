@@ -202,6 +202,8 @@ fn field_kind_tag(fk: MpcFieldKind) -> u8 {
         MpcFieldKind::Bls12_381Fr => 0,
         MpcFieldKind::Bn254Fr => 1,
         MpcFieldKind::Curve25519Fr => 2,
+        MpcFieldKind::Secp256k1Fr => 3,
+        MpcFieldKind::Secp256r1Fr => 4,
     }
 }
 

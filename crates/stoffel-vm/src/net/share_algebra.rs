@@ -19,6 +19,12 @@ macro_rules! dispatch_share_curve_config {
             crate::net::curve::MpcCurveConfig::Ed25519 => {
                 $function::<ark_ed25519::Fr, ark_ed25519::EdwardsProjective>($($arg),*)
             }
+            crate::net::curve::MpcCurveConfig::Secp256k1 => {
+                $function::<ark_secp256k1::Fr, ark_secp256k1::Projective>($($arg),*)
+            }
+            crate::net::curve::MpcCurveConfig::Secp256r1 => {
+                $function::<ark_secp256r1::Fr, ark_secp256r1::Projective>($($arg),*)
+            }
         }
     };
 }

@@ -68,6 +68,7 @@ pub enum VirtualMachineErrorKind {
     Mpc,
     Registration,
     Runtime,
+    Storage,
     TableMemory,
     Value,
 }
@@ -94,6 +95,9 @@ impl VmError {
             VmError::Function(_) => VirtualMachineErrorKind::Function,
             VmError::Hook(_) => VirtualMachineErrorKind::Hook,
             VmError::Message(_) => VirtualMachineErrorKind::Message,
+            VmError::LocalStorageNotConfigured | VmError::LocalStorageOperationFailed { .. } => {
+                VirtualMachineErrorKind::Storage
+            }
             VmError::MpcValue(_)
             | VmError::RevealBatch(_)
             | VmError::MpcEngineNotConfigured
@@ -231,6 +235,13 @@ pub(crate) enum VmError {
     FunctionNotFound { function: String },
     #[error("Cannot execute foreign function {function}")]
     CannotExecuteForeignFunction { function: String },
+    #[error("Local storage is not configured")]
+    LocalStorageNotConfigured,
+    #[error("Local storage {operation} failed: {reason}")]
+    LocalStorageOperationFailed {
+        operation: &'static str,
+        reason: String,
+    },
     #[error("MPC engine not configured")]
     MpcEngineNotConfigured,
     #[error("MPC engine configured but not ready")]

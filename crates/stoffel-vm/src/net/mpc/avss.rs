@@ -30,7 +30,7 @@ use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::common::MPCProtocol;
 use stoffelnet::network_utils::ClientId;
 use stoffelnet::transports::quic::QuicNetworkManager;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 mod capabilities;
 mod client_io;
@@ -126,10 +126,24 @@ where
     preproc_store: tokio::sync::RwLock<Option<Arc<dyn crate::storage::preproc::PreprocStore>>>,
     /// Program hash and field kind for keying stored material.
     preproc_config: tokio::sync::RwLock<Option<([u8; 32], crate::net::curve::MpcFieldKind)>>,
+    /// Maps VM/client protocol indices to transport-derived client IDs.
+    client_output_id_map: RwLock<Vec<ClientId>>,
+    /// Optional in-process capture used by coordinator-backed output delivery.
+    client_output_capture: Mutex<Option<Vec<AvssClientOutputRecord<F, G>>>>,
     /// Router that owns open-message accumulation for this AVSS runtime.
     open_message_router: Arc<crate::net::open_registry::OpenMessageRouter>,
     /// Per-instance open share accumulation registry.
     open_registry: Arc<crate::net::open_registry::InstanceRegistry>,
+}
+
+#[derive(Clone)]
+pub struct AvssClientOutputRecord<F, G>
+where
+    F: FftField + PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    pub client_id: ClientId,
+    pub shares: Vec<FeldmanShamirShare<F, G>>,
 }
 
 impl<F, G> AvssMpcEngine<F, G>
@@ -186,9 +200,37 @@ where
             _marker: PhantomData,
             preproc_store: tokio::sync::RwLock::new(None),
             preproc_config: tokio::sync::RwLock::new(None),
+            client_output_id_map: RwLock::new(Vec::new()),
+            client_output_capture: Mutex::new(None),
             open_message_router: open_message_router.clone(),
             open_registry: open_message_router.register_instance(instance_id),
         }))
+    }
+
+    pub async fn set_client_output_id_map(&self, client_ids: Vec<ClientId>) {
+        *self.client_output_id_map.write().await = client_ids;
+    }
+
+    pub(crate) async fn client_output_transport_id(&self, client_id: ClientId) -> ClientId {
+        self.client_output_id_map
+            .read()
+            .await
+            .get(client_id)
+            .copied()
+            .unwrap_or(client_id)
+    }
+
+    pub async fn enable_client_output_capture(&self) {
+        *self.client_output_capture.lock().await = Some(Vec::new());
+    }
+
+    pub async fn drain_client_output_records(&self) -> Vec<AvssClientOutputRecord<F, G>> {
+        self.client_output_capture
+            .lock()
+            .await
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// Create a new AVSS engine.
@@ -269,6 +311,10 @@ pub type Curve25519AvssMpcEngine =
 /// Type alias for Ed25519 AVSS engine.
 ///
 /// Note: `ark_ed25519::Fr` is a re-export of `ark_curve25519::Fr`, so
-/// `curve_config()` will report `MpcCurveConfig::Curve25519`. The group
-/// type (`EdwardsProjective`) is distinct.
+/// field-only metadata is shared with Curve25519. The group type
+/// (`EdwardsProjective`) preserves the configured curve identity.
 pub type Ed25519AvssMpcEngine = AvssMpcEngine<ark_ed25519::Fr, ark_ed25519::EdwardsProjective>;
+/// Type alias for secp256k1 AVSS engine.
+pub type Secp256k1AvssMpcEngine = AvssMpcEngine<ark_secp256k1::Fr, ark_secp256k1::Projective>;
+/// Type alias for NIST P-256 (secp256r1) AVSS engine.
+pub type P256AvssMpcEngine = AvssMpcEngine<ark_secp256r1::Fr, ark_secp256r1::Projective>;

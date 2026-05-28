@@ -229,7 +229,9 @@ impl VirtualMachine {
     /// Create a clone of this VM with its own independent runtime state.
     ///
     /// Program metadata is shared immutably, while heap-like table memory is
-    /// re-created through the configured table-memory backend.
+    /// re-created through the configured table-memory backend. Persistent local
+    /// storage, when configured, remains shared because it is an external VM
+    /// boundary rather than per-invocation heap state.
     pub fn try_clone_with_independent_state(&self) -> VirtualMachineResult<Self> {
         Ok(Self {
             state: self.state.try_clone_with_independent_runtime()?,

@@ -2,8 +2,8 @@ use super::*;
 use crate::net::mpc_engine::MpcEngine;
 use crate::storage::preproc::{self, LmdbPreprocStore, PreprocBlob, PreprocKeyScope, PreprocStore};
 use ark_bls12_381::{Fr, G1Projective as G1};
-use ark_ec::PrimeGroup;
-use ark_ff::UniformRand;
+use ark_ec::{CurveGroup, PrimeGroup};
+use ark_ff::{FftField, PrimeField, UniformRand};
 use ark_std::test_rng;
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ClearShareValue, ShareType, F64};
@@ -305,6 +305,57 @@ fn test_bn254_feldman_share_roundtrip() {
     let recovered =
         Bn254AvssMpcEngine::reconstruct_secret(&subset, n, t).expect("reconstruct_secret failed");
     assert_eq!(recovered, secret);
+}
+
+fn assert_feldman_share_roundtrip_for_curve<F, G>()
+where
+    F: FftField + PrimeField + UniformRand + Send + Sync + 'static,
+    G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
+{
+    use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
+
+    let mut rng = test_rng();
+    let n = 4;
+    let t = 1;
+    let secret = F::from(42u64);
+
+    let mut poly = DensePolynomial::<F>::rand(t, &mut rng);
+    poly[0] = secret;
+    let generator = G::generator();
+    let commitments: Vec<G> = poly.coeffs.iter().map(|c| generator * c).collect();
+
+    let shares: Vec<_> = (1..=n)
+        .map(|i| {
+            let x = F::from(i as u64);
+            let y = poly.evaluate(&x);
+            FeldmanShamirShare::<F, G>::new(y, i, t, commitments.clone()).unwrap()
+        })
+        .collect();
+
+    for share in &shares {
+        let bytes = AvssMpcEngine::<F, G>::encode_feldman_share(share).expect("encode failed");
+        let decoded = AvssMpcEngine::<F, G>::decode_feldman_share(&bytes).expect("decode failed");
+        assert_eq!(share.feldmanshare.id, decoded.feldmanshare.id);
+        assert_eq!(share.feldmanshare.degree, decoded.feldmanshare.degree);
+        assert_eq!(share.feldmanshare.share, decoded.feldmanshare.share);
+        assert!(verify_feldman(decoded));
+    }
+
+    let required = t + 1;
+    let subset: Vec<_> = shares.iter().take(required).cloned().collect();
+    let recovered = AvssMpcEngine::<F, G>::reconstruct_secret(&subset, n, t)
+        .expect("reconstruct_secret failed");
+    assert_eq!(recovered, secret);
+}
+
+#[test]
+fn test_secp256k1_feldman_share_roundtrip() {
+    assert_feldman_share_roundtrip_for_curve::<ark_secp256k1::Fr, ark_secp256k1::Projective>();
+}
+
+#[test]
+fn test_p256_feldman_share_roundtrip() {
+    assert_feldman_share_roundtrip_for_curve::<ark_secp256r1::Fr, ark_secp256r1::Projective>();
 }
 
 #[test]

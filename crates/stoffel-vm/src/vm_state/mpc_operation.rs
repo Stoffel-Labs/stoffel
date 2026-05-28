@@ -98,8 +98,9 @@ pub(super) enum PendingMpcBuiltinOperation {
         share_data: Vec<ShareData>,
     },
     SendToClient {
-        share_data: ShareData,
+        share_bytes: Vec<u8>,
         client_id: ClientId,
+        output_share_count: ClientOutputShareCount,
     },
     OpenExp {
         group: MpcExponentGroup,
@@ -350,15 +351,12 @@ impl PendingMpcBuiltinCall {
                 CompletedMpcBuiltinResult::BatchOpen(values)
             }
             PendingMpcBuiltinOperation::SendToClient {
-                share_data,
                 client_id,
+                share_bytes,
+                output_share_count,
             } => {
                 engine
-                    .send_output_to_client_async(
-                        client_id,
-                        share_data.as_bytes(),
-                        ClientOutputShareCount::one(),
-                    )
+                    .send_output_to_client_async(client_id, &share_bytes, output_share_count)
                     .await
                     .map_mpc_backend_err("async_send_output_to_client")?;
                 CompletedMpcBuiltinResult::Value(Value::Bool(true))
