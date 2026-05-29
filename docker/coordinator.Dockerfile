@@ -14,6 +14,14 @@ COPY .cargo /build/.cargo
 COPY docker/coordinator-wrapper /build/coordinator-wrapper
 COPY --from=coordinator . /stoffel-mpc-coordinator
 
+RUN printf '%s\n' \
+      '[net]' \
+      'git-fetch-with-cli = true' \
+      '' \
+      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
+      'stoffel-mpc-coordinator = { path = "/stoffel-mpc-coordinator" }' \
+      > /build/.cargo/config.toml
+
 WORKDIR /build/coordinator-wrapper
 RUN cargo build --release
 

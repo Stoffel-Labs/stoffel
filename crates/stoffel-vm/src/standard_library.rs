@@ -486,9 +486,11 @@ mod tests {
         }
     }
 
+    type RecordedClientOutputs = Arc<Mutex<Vec<(ClientId, Vec<u8>, ClientOutputShareCount)>>>;
+
     #[derive(Clone, Default)]
     struct OutputRecordingEngine {
-        sent: Arc<Mutex<Vec<(ClientId, Vec<u8>, ClientOutputShareCount)>>>,
+        sent: RecordedClientOutputs,
     }
 
     impl MpcEngine for OutputRecordingEngine {

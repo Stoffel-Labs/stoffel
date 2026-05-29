@@ -28,6 +28,7 @@ use crate::core_vm::VirtualMachine;
 use crate::net::hb_engine::HoneyBadgerMpcEngine;
 use crate::net::program_id_from_bytes;
 use crate::tests::mpc_multiplication_integration::{
+    assign_topological_client_ids, register_topological_client_connections,
     setup_honeybadger_quic_clients, setup_honeybadger_quic_network, HoneyBadgerQuicConfig,
     RoutedNetwork,
 };
@@ -312,7 +313,7 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     );
 
     for idx in 0..client_count {
-        let client_id = 90 + idx as ClientId;
+        let client_id = idx as ClientId;
         client_ids.push(client_id);
 
         let mut matrix_values: Vec<Fr> = Vec::new();
@@ -461,42 +462,10 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Build client derived_id → logical_client_id mapping.
-    let mut client_derived_to_logical: HashMap<usize, ClientId> = HashMap::new();
-    for client in &clients {
-        let derived = client.network.lock().await.local_derived_id();
-        client_derived_to_logical.insert(derived, client.client_id);
-    }
-
-    // Register client connections and spawn receive handlers with correct logical client IDs.
-    for server in servers.iter() {
-        let all_clients = server
-            .network
-            .as_ref()
-            .expect("network should be set")
-            .get_all_client_connections();
-        for (derived_id, conn) in &all_clients {
-            if let Some(&logical_id) = client_derived_to_logical.get(derived_id) {
-                if let Some(ref routed) = server.routed_network {
-                    routed.register_client(logical_id, conn.clone());
-                }
-                let txx = server.channels.clone();
-                let conn = conn.clone();
-                tokio::spawn(async move {
-                    loop {
-                        match conn.receive().await {
-                            Ok(data) => {
-                                if txx.send((logical_id, data)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                });
-            }
-        }
-    }
+    assign_topological_client_ids(&mut clients)
+        .await
+        .expect("Failed to assign topological client IDs");
+    register_topological_client_connections(&servers);
 
     // Step 5: Run preprocessing
     info!("Step 5: Running preprocessing...");

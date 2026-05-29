@@ -1439,7 +1439,7 @@ async fn run_as_client(
 }
 
 #[cfg(feature = "avss")]
-async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
+struct AvssOffchainCoordinatorClientArgs {
     curve_config: MpcCurveConfig,
     client_inputs: Option<String>,
     client_outputs: Option<usize>,
@@ -1450,10 +1450,28 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
     timestamp: u64,
     threshold: Option<usize>,
     coordinator_client_index: Option<u64>,
+}
+
+#[cfg(feature = "avss")]
+async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
+    args: AvssOffchainCoordinatorClientArgs,
 ) where
     F: SupportedMpcField,
     G: CurveGroup<ScalarField = F> + Send + Sync + 'static,
 {
+    let AvssOffchainCoordinatorClientArgs {
+        curve_config,
+        client_inputs,
+        client_outputs,
+        server_addrs,
+        coord_addr,
+        cert_der,
+        key_der,
+        timestamp,
+        threshold,
+        coordinator_client_index,
+    } = args;
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("install rustls crypto");
@@ -1537,123 +1555,46 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
 }
 
 #[cfg(feature = "avss")]
-async fn run_avss_offchain_coordinator_client(
-    curve_config: MpcCurveConfig,
-    client_inputs: Option<String>,
-    client_outputs: Option<usize>,
-    server_addrs: Vec<SocketAddr>,
-    coord_addr: (String, u16),
-    cert_der: Vec<u8>,
-    key_der: Vec<u8>,
-    timestamp: u64,
-    threshold: Option<usize>,
-    coordinator_client_index: Option<u64>,
-) {
-    match curve_config {
+async fn run_avss_offchain_coordinator_client(args: AvssOffchainCoordinatorClientArgs) {
+    match args.curve_config {
         MpcCurveConfig::Bls12_381 => {
             run_avss_offchain_coordinator_client_for_curve::<
                 ark_bls12_381::Fr,
                 ark_bls12_381::G1Projective,
-            >(
-                curve_config,
-                client_inputs,
-                client_outputs,
-                server_addrs,
-                coord_addr,
-                cert_der,
-                key_der,
-                timestamp,
-                threshold,
-                coordinator_client_index,
-            )
+            >(args)
             .await
         }
         MpcCurveConfig::Bn254 => run_avss_offchain_coordinator_client_for_curve::<
             ark_bn254::Fr,
             ark_bn254::G1Projective,
-        >(
-            curve_config,
-            client_inputs,
-            client_outputs,
-            server_addrs,
-            coord_addr,
-            cert_der,
-            key_der,
-            timestamp,
-            threshold,
-            coordinator_client_index,
-        )
+        >(args)
         .await,
         MpcCurveConfig::Curve25519 => {
             run_avss_offchain_coordinator_client_for_curve::<
                 ark_curve25519::Fr,
                 ark_curve25519::EdwardsProjective,
-            >(
-                curve_config,
-                client_inputs,
-                client_outputs,
-                server_addrs,
-                coord_addr,
-                cert_der,
-                key_der,
-                timestamp,
-                threshold,
-                coordinator_client_index,
-            )
+            >(args)
             .await
         }
         MpcCurveConfig::Ed25519 => {
             run_avss_offchain_coordinator_client_for_curve::<
                 ark_ed25519::Fr,
                 ark_ed25519::EdwardsProjective,
-            >(
-                curve_config,
-                client_inputs,
-                client_outputs,
-                server_addrs,
-                coord_addr,
-                cert_der,
-                key_der,
-                timestamp,
-                threshold,
-                coordinator_client_index,
-            )
+            >(args)
             .await
         }
         MpcCurveConfig::Secp256k1 => {
             run_avss_offchain_coordinator_client_for_curve::<
                 ark_secp256k1::Fr,
                 ark_secp256k1::Projective,
-            >(
-                curve_config,
-                client_inputs,
-                client_outputs,
-                server_addrs,
-                coord_addr,
-                cert_der,
-                key_der,
-                timestamp,
-                threshold,
-                coordinator_client_index,
-            )
+            >(args)
             .await
         }
         MpcCurveConfig::Secp256r1 => {
             run_avss_offchain_coordinator_client_for_curve::<
                 ark_secp256r1::Fr,
                 ark_secp256r1::Projective,
-            >(
-                curve_config,
-                client_inputs,
-                client_outputs,
-                server_addrs,
-                coord_addr,
-                cert_der,
-                key_der,
-                timestamp,
-                threshold,
-                coordinator_client_index,
-            )
+            >(args)
             .await
         }
     }
@@ -2255,20 +2196,34 @@ where
 }
 
 #[cfg(feature = "avss")]
-async fn setup_avss_party_for_curve<F, G>(
-    vm: &mut VirtualMachine,
-    net: Arc<QuicNetworkManager>,
+struct AvssPartySetup {
     my_id: usize,
     n: usize,
     t: usize,
     instance_id: u64,
     expected_client_count: Option<usize>,
     client_input_count: usize,
+}
+
+#[cfg(feature = "avss")]
+async fn setup_avss_party_for_curve<F, G>(
+    vm: &mut VirtualMachine,
+    net: Arc<QuicNetworkManager>,
+    setup: AvssPartySetup,
 ) -> Result<Arc<stoffel_vm::net::avss_engine::AvssMpcEngine<F, G>>, String>
 where
     F: SupportedMpcField,
     G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
 {
+    let AvssPartySetup {
+        my_id,
+        n,
+        t,
+        instance_id,
+        expected_client_count,
+        client_input_count,
+    } = setup;
+
     // ---- Phase 1: Wait for clients ----
     let mut input_ids: Vec<ClientId> = Vec::new();
 
@@ -2772,8 +2727,19 @@ where
         .await
         .map_err(|e| e.to_string())?;
 
-    let engine =
-        setup_avss_party_for_curve::<F, G>(vm, net, my_id, n, t, instance_id, None, 1).await?;
+    let engine = setup_avss_party_for_curve::<F, G>(
+        vm,
+        net,
+        AvssPartySetup {
+            my_id,
+            n,
+            t,
+            instance_id,
+            expected_client_count: None,
+            client_input_count: 1,
+        },
+    )
+    .await?;
     engine.enable_client_output_capture().await;
 
     let mut mask_shares = Vec::with_capacity(input_ids.len());
@@ -3367,18 +3333,18 @@ async fn main() {
                 eprintln!("Error: {}", e);
                 exit(2);
             }
-            run_avss_offchain_coordinator_client(
+            run_avss_offchain_coordinator_client(AvssOffchainCoordinatorClientArgs {
                 curve_config,
                 client_inputs,
                 client_outputs,
                 server_addrs,
-                coord_addr.clone().unwrap(),
-                cert_der.clone().expect("--cert required in client mode"),
-                key_der.clone().expect("--key required in client mode"),
-                timestamp.expect("--timestamp required in client mode"),
+                coord_addr: coord_addr.clone().unwrap(),
+                cert_der: cert_der.clone().expect("--cert required in client mode"),
+                key_der: key_der.clone().expect("--key required in client mode"),
+                timestamp: timestamp.expect("--timestamp required in client mode"),
                 threshold,
                 coordinator_client_index,
-            )
+            })
             .await;
             return;
         }
@@ -3979,22 +3945,21 @@ async fn main() {
     };
 
     #[cfg(feature = "honeybadger")]
-    let mut on_chain_node_rpc_opt = if let (Some(ref rpc), Some(ref coord)) =
-        (rpc_addr.as_ref(), on_chain_coord_opt.as_ref())
-    {
-        Some(
-            on_chain::node_rpc::NodeRPCServer::start(
-                &rpc.0,
-                rpc.1,
-                coord.coord(),
-                cert_der.clone().expect("--cert required"),
-                key_der.clone().expect("--key required"),
+    let mut on_chain_node_rpc_opt =
+        if let (Some(rpc), Some(coord)) = (rpc_addr.as_ref(), on_chain_coord_opt.as_ref()) {
+            Some(
+                on_chain::node_rpc::NodeRPCServer::start(
+                    &rpc.0,
+                    rpc.1,
+                    coord.coord(),
+                    cert_der.clone().expect("--cert required"),
+                    key_der.clone().expect("--key required"),
+                )
+                .await,
             )
-            .await,
-        )
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     #[cfg(feature = "honeybadger")]
     if matches!(backend_kind, MpcBackendKind::HoneyBadger) {
@@ -4437,12 +4402,14 @@ async fn main() {
                         if let Err(e) = setup_avss_party_for_curve::<$F, $G>(
                             &mut vm,
                             net.clone(),
-                            my_id,
-                            n,
-                            t,
-                            instance_id,
-                            expected_client_count,
-                            client_input_count,
+                            AvssPartySetup {
+                                my_id,
+                                n,
+                                t,
+                                instance_id,
+                                expected_client_count,
+                                client_input_count,
+                            },
                         )
                         .await
                         {

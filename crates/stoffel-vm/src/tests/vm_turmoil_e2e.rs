@@ -1235,17 +1235,28 @@ async fn process_avss_node_message(
         .map_err(|error| format!("AVSS node process error: {error:?}"))
 }
 
-async fn run_hb_vm_until_done(
-    mut vm: VirtualMachine,
+struct HbVmRunContext {
     engine: Arc<HbTurmoilVmEngine>,
     node: Arc<Mutex<HbNode>>,
     router: Arc<OpenMessageRouter>,
     network: Arc<VmTurmoilNetwork>,
+}
+
+struct AvssVmRunContext {
+    engine: Arc<AvssTurmoilVmEngine>,
+    node: Arc<Mutex<AvssNode>>,
+    router: Arc<OpenMessageRouter>,
+    network: Arc<VmTurmoilNetwork>,
+}
+
+async fn run_hb_vm_until_done(
+    mut vm: VirtualMachine,
+    context: HbVmRunContext,
     rx: &mut Receiver<(TurmoilSenderId, Vec<u8>)>,
     function: &'static str,
     args: Vec<Value>,
 ) -> Result<Value, String> {
-    let future = vm.execute_async_with_args(function, &args, engine.as_ref());
+    let future = vm.execute_async_with_args(function, &args, context.engine.as_ref());
     tokio::pin!(future);
 
     loop {
@@ -1257,7 +1268,14 @@ async fn run_hb_vm_until_done(
                 let Some((sender, message)) = maybe_message else {
                     return Err("HB turmoil receiver closed before VM completed".to_string());
                 };
-                process_hb_node_message(&node, &router, network.clone(), sender, message).await?;
+                process_hb_node_message(
+                    &context.node,
+                    &context.router,
+                    context.network.clone(),
+                    sender,
+                    message,
+                )
+                .await?;
             }
         }
     }
@@ -1265,15 +1283,12 @@ async fn run_hb_vm_until_done(
 
 async fn run_avss_vm_until_done(
     mut vm: VirtualMachine,
-    engine: Arc<AvssTurmoilVmEngine>,
-    node: Arc<Mutex<AvssNode>>,
-    router: Arc<OpenMessageRouter>,
-    network: Arc<VmTurmoilNetwork>,
+    context: AvssVmRunContext,
     rx: &mut Receiver<(TurmoilSenderId, Vec<u8>)>,
     function: &'static str,
     args: Vec<Value>,
 ) -> Result<Value, String> {
-    let future = vm.execute_async_with_args(function, &args, engine.as_ref());
+    let future = vm.execute_async_with_args(function, &args, context.engine.as_ref());
     tokio::pin!(future);
 
     loop {
@@ -1285,7 +1300,14 @@ async fn run_avss_vm_until_done(
                 let Some((sender, message)) = maybe_message else {
                     return Err("AVSS turmoil receiver closed before VM completed".to_string());
                 };
-                process_avss_node_message(&node, &router, network.clone(), sender, message).await?;
+                process_avss_node_message(
+                    &context.node,
+                    &context.router,
+                    context.network.clone(),
+                    sender,
+                    message,
+                )
+                .await?;
             }
         }
     }
@@ -1293,7 +1315,7 @@ async fn run_avss_vm_until_done(
 
 fn turmoil_sim() -> turmoil::Sim<'static> {
     turmoil::Builder::new()
-        .rng_seed(0x51_0ff_e1)
+        .rng_seed(0x0510_ffe1)
         .enable_random_order()
         .simulation_duration(Duration::from_secs(20))
         .min_message_latency(Duration::from_millis(1))
@@ -1399,7 +1421,16 @@ fn hb_vm_turmoil_mul_open_e2e() {
                     ),
                 ];
                 let result = run_hb_vm_until_done(
-                    vm, engine, node, router, network, &mut rx, "mul_open", args,
+                    vm,
+                    HbVmRunContext {
+                        engine,
+                        node,
+                        router,
+                        network,
+                    },
+                    &mut rx,
+                    "mul_open",
+                    args,
                 )
                 .await;
 
@@ -1485,7 +1516,16 @@ fn avss_vm_turmoil_mul_open_e2e() {
                     ),
                 ];
                 let result = run_avss_vm_until_done(
-                    vm, engine, node, router, network, &mut rx, "mul_open", args,
+                    vm,
+                    AvssVmRunContext {
+                        engine,
+                        node,
+                        router,
+                        network,
+                    },
+                    &mut rx,
+                    "mul_open",
+                    args,
                 )
                 .await;
 
@@ -1624,10 +1664,12 @@ fn hb_vm_turmoil_full_client_flow_e2e() {
 
                     let value = run_hb_vm_until_done(
                         vm,
-                        engine,
-                        node,
-                        router,
-                        network,
+                        HbVmRunContext {
+                            engine,
+                            node,
+                            router,
+                            network,
+                        },
                         &mut rx,
                         "client_square_to_output",
                         Vec::new(),
@@ -1786,10 +1828,12 @@ fn run_avss_vm_turmoil_full_client_flow(
 
                     let value = run_avss_vm_until_done(
                         vm,
-                        engine,
-                        node,
-                        router,
-                        network,
+                        AvssVmRunContext {
+                            engine,
+                            node,
+                            router,
+                            network,
+                        },
                         &mut rx,
                         "client_square_to_output",
                         Vec::new(),

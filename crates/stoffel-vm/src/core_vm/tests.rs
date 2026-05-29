@@ -3183,8 +3183,12 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
             .await?;
         assert!(matches!(from_clear, Value::Object(_)));
         assert_eq!(
-            vm.execute_async_with_args("turmoil_open_arg", &[from_clear.clone()], engine.as_ref(),)
-                .await?,
+            vm.execute_async_with_args(
+                "turmoil_open_arg",
+                std::slice::from_ref(&from_clear),
+                engine.as_ref(),
+            )
+            .await?,
             Value::I64(7)
         );
 

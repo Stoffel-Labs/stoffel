@@ -254,7 +254,7 @@ impl RuntimeFunction {
         let index = instruction_pointer.index();
         self.instructions
             .get(index)
-            .ok_or_else(|| VmError::InstructionOutOfBounds { index })
+            .ok_or(VmError::InstructionOutOfBounds { index })
     }
 }
 

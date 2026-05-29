@@ -5,6 +5,7 @@ use crate::net::mpc_engine::{
     MpcEngineResult, MpcPartyId, RbcSessionId,
 };
 use ark_ec::{CurveGroup, PrimeGroup};
+use stoffelnet::network_utils::Network;
 
 // RBC and ABA use the engine's session-local open registry for in-process
 // coordination between parties. Multi-process deployments should route through
@@ -25,8 +26,10 @@ where
             message,
         )
         .map_mpc_engine_operation("rbc_broadcast")?;
-        self.broadcast_open_registry_payload_sync(wire_message)
-            .map_mpc_engine_operation("rbc_broadcast")?;
+        if self.net.party_count() > 1 {
+            self.broadcast_open_registry_payload_sync(wire_message)
+                .map_mpc_engine_operation("rbc_broadcast")?;
+        }
         Ok(RbcSessionId::new(session_id))
     }
 
@@ -55,8 +58,10 @@ where
             value,
         )
         .map_mpc_engine_operation("aba_propose")?;
-        self.broadcast_open_registry_payload_sync(wire_message)
-            .map_mpc_engine_operation("aba_propose")?;
+        if self.net.party_count() > 1 {
+            self.broadcast_open_registry_payload_sync(wire_message)
+                .map_mpc_engine_operation("aba_propose")?;
+        }
         Ok(AbaSessionId::new(session_id))
     }
 
@@ -86,9 +91,11 @@ where
             message,
         )
         .map_mpc_engine_operation("async_rbc_broadcast")?;
-        self.broadcast_open_registry_payload(wire_message)
-            .await
-            .map_mpc_engine_operation("async_rbc_broadcast")?;
+        if self.net.party_count() > 1 {
+            self.broadcast_open_registry_payload(wire_message)
+                .await
+                .map_mpc_engine_operation("async_rbc_broadcast")?;
+        }
         Ok(RbcSessionId::new(session_id))
     }
 
@@ -127,9 +134,11 @@ where
             value,
         )
         .map_mpc_engine_operation("async_aba_propose")?;
-        self.broadcast_open_registry_payload(wire_message)
-            .await
-            .map_mpc_engine_operation("async_aba_propose")?;
+        if self.net.party_count() > 1 {
+            self.broadcast_open_registry_payload(wire_message)
+                .await
+                .map_mpc_engine_operation("async_aba_propose")?;
+        }
         Ok(AbaSessionId::new(session_id))
     }
 
