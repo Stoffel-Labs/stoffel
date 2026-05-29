@@ -839,6 +839,7 @@ fn verify_secp256k1_ecdsa(message_hash: &[u8], public_key: &[u8], r: &[u8; 32], 
         k256::ecdsa::VerifyingKey::from_sec1_bytes(public_key).expect("valid secp256k1 public key");
     let signature = k256::ecdsa::Signature::from_slice(&signature_bytes(r, s))
         .expect("valid secp256k1 ECDSA signature");
+    let signature = signature.normalize_s().unwrap_or(signature);
 
     verifying_key
         .verify_prehash(message_hash, &signature)

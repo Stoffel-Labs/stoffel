@@ -192,9 +192,10 @@ fn parse_public_keys(cert_files: &[String]) -> Vec<Vec<u8>> {
     cert_files
         .iter()
         .map(|cert_file| {
-            let cert_der = fs::read(cert_file).expect("could not read certificate file");
-            let (_, parsed_cert) =
-                X509Certificate::from_der(&cert_der).expect("Failed to parse X.509 certificate");
+            let cert_der = fs::read(cert_file)
+                .unwrap_or_else(|_| panic!("could not read certificate file {cert_file}"));
+            let (_, parsed_cert) = X509Certificate::from_der(&cert_der)
+                .unwrap_or_else(|_| panic!("Failed to parse X.509 certificate {cert_file}"));
             parsed_cert
                 .public_key()
                 .subject_public_key
