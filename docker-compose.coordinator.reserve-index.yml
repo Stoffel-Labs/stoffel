@@ -62,6 +62,8 @@ services:
     build:
       context: .
       dockerfile: docker/coordinator.Dockerfile
+      additional_contexts:
+        coordinator: ${STOFFEL_COORDINATOR_DIR:-/Users/gabriel/RustroverProjects/stoffel-mpc-coordinator}
     container_name: stoffel-coordinator-reserve-index
     hostname: coordinator
     command:

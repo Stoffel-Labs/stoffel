@@ -41,7 +41,8 @@ use stoffel_vm::net::hb_engine::HoneyBadgerMpcEngine;
 use stoffel_vm::net::mpc_engine::MpcEngine;
 #[cfg(feature = "honeybadger")]
 use stoffel_vm::net::{
-    honeybadger_node_opts, honeybadger_protocol_instance_id, spawn_receive_loops_split,
+    avss_protocol_instance_id, honeybadger_node_opts, honeybadger_protocol_instance_id,
+    spawn_receive_loops_split,
 };
 use stoffel_vm::net::{
     program_id_from_bytes, register_and_wait_for_session, run_bootnode_with_config,
@@ -309,16 +310,15 @@ where
         .collect()
 }
 
-/// Network adapter for MPC clients that remaps party IDs from 5-space (0..n-1)
-/// to 6-space (0..n with client's position excluded).
+/// Network adapter for MPC clients.
 ///
-/// The client's QuicNetworkManager includes the client's own public key in the
-/// sorted key list, creating n+1 entries. The MPC protocol expects n parties.
-/// This wrapper adjusts send() to skip the client's own position.
+/// Client receive paths use authenticated sorted-key IDs and normalize them to
+/// protocol party IDs before messages enter MPC code. Sends use the explicit
+/// server IDs registered from `--servers`, so they are already in protocol
+/// party order.
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
 struct ClientNetworkAdapter {
     inner: QuicNetworkManager,
-    /// The client's position in the (n+1)-key sorted list
     local_position: usize,
 }
 
@@ -333,22 +333,40 @@ impl Network for ClientNetworkAdapter {
         recipient: stoffelnet::network_utils::PartyId,
         message: &[u8],
     ) -> Result<usize, stoffelnet::network_utils::NetworkError> {
-        // Remap: 5-space party_id → 6-space position (skip our own slot)
         let mapped = if recipient >= self.local_position {
             recipient + 1
         } else {
             recipient
         };
-        self.inner.send(mapped, message).await
+        let mut connections = Vec::new();
+        if let Some(connection) = self.inner.get_connection_by_party_id(mapped) {
+            connections.push(connection);
+        }
+        if mapped != recipient {
+            if let Some(connection) = self.inner.get_connection_by_party_id(recipient) {
+                connections.push(connection);
+            }
+        }
+        if connections.is_empty() {
+            return Err(stoffelnet::network_utils::NetworkError::PartyNotFound(
+                recipient,
+            ));
+        }
+        for connection in connections {
+            let bytes = message.to_vec();
+            tokio::spawn(async move {
+                if let Err(error) = connection.send(&bytes).await {
+                    eprintln!("[client] Failed to send MPC message to party {recipient}: {error}");
+                }
+            });
+        }
+        Ok(message.len())
     }
 
     async fn broadcast(
         &self,
         message: &[u8],
     ) -> Result<usize, stoffelnet::network_utils::NetworkError> {
-        // Must remap each party_id through our send() to skip the client's own
-        // slot in the 6-key sorted list. Using inner.broadcast() directly would
-        // iterate over 6 positions (including self) with wrong party mapping.
         let n = self.party_count();
         let mut total = 0usize;
         let results = futures::future::join_all(
@@ -418,13 +436,13 @@ impl Network for ClientNetworkAdapter {
 }
 
 /// Network adapter for MPC servers that remaps sequential client indices
-/// (0, 1, ...) back to transport-derived client IDs for send_to_client().
+/// (0, 1, ...) back to transport client IDs for send_to_client().
 /// The MPC protocol uses small indices (because session_id only has 8 bits),
-/// but the network layer needs transport-derived IDs to route messages.
+/// and the network layer exposes clients in canonical sorted transport order.
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
 struct ServerClientAdapter {
     inner: QuicNetworkManager,
-    /// Maps sequential index → transport-derived client ID
+    /// Maps sequential index to transport client ID.
     client_id_map: Vec<ClientId>,
 }
 
@@ -474,7 +492,7 @@ impl Network for ServerClientAdapter {
         client: ClientId,
         message: &[u8],
     ) -> Result<usize, stoffelnet::network_utils::NetworkError> {
-        // Remap sequential index → transport-derived client ID
+        // Remap sequential index to the canonical transport client ID.
         let transport_id = self.client_id_map.get(client).copied().unwrap_or(client);
         self.inner.send_to_client(transport_id, message).await
     }
@@ -543,6 +561,13 @@ fn print_vm_result(vm: &mut VirtualMachine, result: Value) {
         }
         _ => println!("Program returned: {:?}", result),
     }
+}
+
+#[cfg(feature = "honeybadger")]
+fn coordinator_output_share_bytes(vm: &mut VirtualMachine, result: &Value) -> Option<Vec<u8>> {
+    vm.read_share_object(result)
+        .ok()
+        .map(|(_ty, share_data)| share_data.as_bytes().to_vec())
 }
 
 #[cfg(any(feature = "honeybadger", feature = "avss"))]
@@ -991,8 +1016,7 @@ where
     G: CurveGroup<ScalarField = F>,
 {
     let mpc_cid = config.client_index as usize;
-    let instance_id = u32::try_from(config.instance_id)
-        .map_err(|_| format!("AVSS instance id {} exceeds u32 range", config.instance_id))?;
+    let instance_id = avss_protocol_instance_id(config.instance_id);
     let mut mpc_client = AvssMPCClient::<F, Avid<AvssSessionId>, G>::new(
         mpc_cid,
         config.n,
@@ -1005,6 +1029,12 @@ where
 
     let mut messages_processed = 0usize;
     while let Some((sender_id, data)) = msg_rx.recv().await {
+        eprintln!(
+            "[client {}] Received {} AVSS bytes from sender {}",
+            mpc_cid,
+            data.len(),
+            sender_id
+        );
         if data.len() == 13 && data.starts_with(b"INST") {
             eprintln!(
                 "[client {}] Skipping extra INST from sender {}",
@@ -1474,6 +1504,7 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
         .wait_for_round(Round::InputMaskReservation)
         .await
         .unwrap();
+    eprintln!("[client slot {reserved_index}] reserving input mask");
     coord.reserve_mask_index(reserved_index).await.unwrap();
 
     let rpc_addrs: Vec<(String, u16)> = server_addrs
@@ -1760,15 +1791,18 @@ async fn run_hb_coordinator_client_for_field<F>(
                 eprintln!("Failed to connect to node RPC servers: {error}");
                 exit(13);
             });
+    eprintln!("[client slot {reserved_index}] waiting for mask shares");
     let mask = node_rpc_client.receive_mask().await.unwrap();
 
     coord.wait_for_round(Round::InputCollection).await.unwrap();
+    eprintln!("[client slot {reserved_index}] submitting masked input");
     coord
         .send_masked_input(mask + input_values[0], reserved_index)
         .await
         .unwrap();
 
     coord.wait_for_round(Round::MPCExecution).await.unwrap();
+    eprintln!("[client slot {reserved_index}] waiting for output distribution");
     coord
         .wait_for_round(Round::OutputDistribution)
         .await
@@ -1877,6 +1911,7 @@ struct HbPartySetup<'a> {
     t: usize,
     instance_id: u64,
     expected_client_count: Option<usize>,
+    client_input_count: usize,
     program_hash: [u8; 32],
     preproc_store_path: Option<&'a str>,
 }
@@ -1898,6 +1933,7 @@ where
         t,
         instance_id,
         expected_client_count,
+        client_input_count,
         program_hash,
         preproc_store_path,
     } = setup;
@@ -1909,9 +1945,12 @@ where
         if expected_count == 0 {
             return Err("--wait-for-clients count must be greater than 0".to_string());
         }
+        if client_input_count == 0 {
+            return Err("--client-input-count must be greater than 0".to_string());
+        }
 
         eprintln!(
-            "[party {}] Waiting for {} transport-derived clients...",
+            "[party {}] Waiting for {} clients...",
             my_id, expected_count
         );
 
@@ -1974,7 +2013,7 @@ where
         }
 
         eprintln!(
-            "[party {}] Using transport-derived input IDs: {:?}",
+            "[party {}] Using canonical client input IDs: {:?}",
             my_id, input_ids
         );
 
@@ -1988,8 +2027,9 @@ where
     //   - Clone 1 (`processing_node`): handles incoming messages via process()
     //   - Clone 2 (inside `engine`): initiates preprocessing via run_preprocessing()
     // Both share the same Arc<Mutex> stores, but only ONE processes each message.
-    let n_triples = 1;
-    let n_random = 4;
+    let n_triples = (2 * t + 1).max(1);
+    let n_client_random = input_ids.len().saturating_mul(client_input_count);
+    let n_random = 2 + 2 * n_triples + n_client_random;
     eprintln!(
         "[party {}] Creating MPC node opts (n_triples={}, n_random={}, timeout=600s)",
         my_id, n_triples, n_random
@@ -2038,6 +2078,8 @@ where
     if let Some(path) = preproc_store_path {
         eprintln!("[party {}] Using preprocessing store at {}", my_id, path);
     }
+    engine.set_client_output_id_map(input_ids.clone()).await;
+    vm.set_mpc_engine(engine.clone());
 
     eprintln!(
         "[party {}] Spawning receive loops (split channels)...",
@@ -2046,7 +2088,7 @@ where
     let (mut server_rx, mut client_rx) =
         spawn_receive_loops_split(net.clone(), my_id, n, open_message_router).await;
 
-    // Remap transport-derived client IDs to sequential indices for the MPC protocol.
+    // Map canonical client transport IDs to MPC protocol indices.
     let client_id_to_index: std::collections::HashMap<ClientId, usize> = input_ids
         .iter()
         .enumerate()
@@ -2118,7 +2160,7 @@ where
             .collect();
 
         // Create a server-side network adapter that remaps sequential client
-        // indices to transport-derived client IDs for send_to_client().
+        // indices to transport client IDs for send_to_client().
         let server_adapter = Arc::new(ServerClientAdapter {
             inner: (*net).clone(),
             client_id_map: client_index_map.iter().map(|(_, tid)| *tid).collect(),
@@ -2137,7 +2179,7 @@ where
                     .preprocessing_material
                     .lock()
                     .await
-                    .take_random_shares(1)
+                    .take_random_shares(client_input_count)
                     .map_err(|e| format!("Not enough random shares for client {}: {:?}", idx, e))?;
 
                 eprintln!(
@@ -2146,7 +2188,12 @@ where
                 );
                 node.preprocess
                     .input
-                    .init(idx, local_shares, 1, server_adapter.clone())
+                    .init(
+                        idx,
+                        local_shares,
+                        client_input_count,
+                        server_adapter.clone(),
+                    )
                     .await
                     .map_err(|e| {
                         format!("Failed to init InputServer for client {}: {:?}", idx, e)
@@ -2198,7 +2245,7 @@ where
                 .unwrap_or(idx);
             vm.try_store_client_input(idx, shares)?;
             eprintln!(
-                "[party {}] Stored inputs for client index {} (transport {})",
+                "[party {}] Stored inputs for client index {} (client {})",
                 my_id, idx, transport_cid
             );
         }
@@ -2216,6 +2263,7 @@ async fn setup_avss_party_for_curve<F, G>(
     t: usize,
     instance_id: u64,
     expected_client_count: Option<usize>,
+    client_input_count: usize,
 ) -> Result<Arc<stoffel_vm::net::avss_engine::AvssMpcEngine<F, G>>, String>
 where
     F: SupportedMpcField,
@@ -2227,6 +2275,9 @@ where
     if let Some(expected_count) = expected_client_count {
         if expected_count == 0 {
             return Err("--wait-for-clients count must be greater than 0".to_string());
+        }
+        if client_input_count == 0 {
+            return Err("--client-input-count must be greater than 0".to_string());
         }
 
         eprintln!(
@@ -2293,7 +2344,7 @@ where
         }
 
         eprintln!(
-            "[party {}] Using transport-derived input IDs: {:?}",
+            "[party {}] Using canonical client input IDs: {:?}",
             my_id, input_ids
         );
 
@@ -2325,13 +2376,14 @@ where
     // Broadcast our PK to all peers via existing connections
     let connections = net.get_all_server_connections();
     for (peer_id, conn) in &connections {
-        if *peer_id == my_id {
+        let authenticated_peer_id = conn.remote_party_id().unwrap_or(*peer_id);
+        if authenticated_peer_id == my_id {
             continue;
         }
         if let Err(e) = conn.send(&envelope).await {
             eprintln!(
                 "[party {}] Failed to send PK to peer {}: {}",
-                my_id, peer_id, e
+                my_id, authenticated_peer_id, e
             );
         }
     }
@@ -2346,19 +2398,22 @@ where
     let (pk_tx, mut pk_rx) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(n);
 
     for (peer_id, conn) in &connections {
-        if *peer_id == my_id {
+        let authenticated_peer_id = conn.remote_party_id().unwrap_or(*peer_id);
+        if authenticated_peer_id == my_id {
             continue;
         }
-        let peer_id = *peer_id;
         let tx = pk_tx.clone();
         let conn = conn.clone();
         tokio::spawn(async move {
             match conn.receive().await {
                 Ok(data) => {
-                    let _ = tx.send((peer_id, data)).await;
+                    let _ = tx.send((authenticated_peer_id, data)).await;
                 }
                 Err(e) => {
-                    eprintln!("[AVSS] Failed to receive PK from peer {}: {}", peer_id, e);
+                    eprintln!(
+                        "[AVSS] Failed to receive PK from peer {}: {}",
+                        authenticated_peer_id, e
+                    );
                 }
             }
         });
@@ -2439,6 +2494,7 @@ where
         .start_async()
         .await
         .map_err(|e| format!("Failed to start AVSS engine: {}", e))?;
+    vm.set_mpc_engine(engine.clone());
 
     // ---- Phase 4: Spawn message loops on existing connections ----
     // Server message loops
@@ -2582,11 +2638,16 @@ where
                     .preprocessing_material
                     .lock()
                     .await
-                    .take_v_random_shares(1)
+                    .take_v_random_shares(client_input_count)
                     .map_err(|e| format!("Not enough random shares for client {}: {:?}", idx, e))?;
 
                 node.input_server
-                    .init(idx, local_shares, 1, server_adapter.clone())
+                    .init(
+                        idx,
+                        local_shares,
+                        client_input_count,
+                        server_adapter.clone(),
+                    )
                     .await
                     .map_err(|e| {
                         format!("Failed to init InputServer for client {}: {:?}", idx, e)
@@ -2638,13 +2699,12 @@ where
                 .unwrap_or(idx);
             vm.try_store_client_input_feldman(idx, shares)?;
             eprintln!(
-                "[party {}] Stored inputs for client index {} (transport {})",
+                "[party {}] Stored inputs for client index {} (client {})",
                 my_id, idx, transport_cid
             );
         }
     }
 
-    vm.set_mpc_engine(engine.clone());
     Ok(engine)
 }
 
@@ -2713,7 +2773,7 @@ where
         .map_err(|e| e.to_string())?;
 
     let engine =
-        setup_avss_party_for_curve::<F, G>(vm, net, my_id, n, t, instance_id, None).await?;
+        setup_avss_party_for_curve::<F, G>(vm, net, my_id, n, t, instance_id, None, 1).await?;
     engine.enable_client_output_capture().await;
 
     let mut mask_shares = Vec::with_capacity(input_ids.len());
@@ -2986,6 +3046,7 @@ async fn main() {
     let mut client_inputs: Option<String> = None;
     let mut client_outputs: Option<usize> = None;
     let mut expected_client_count: Option<usize> = None;
+    let mut client_input_count: usize = 1;
     let mut _enable_nat: bool = false;
     let mut _stun_servers: Vec<SocketAddr> = Vec::new();
     let mut server_addrs: Vec<SocketAddr> = Vec::new();
@@ -3032,6 +3093,7 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--inputs") {
         } else if let Some(_rest) = arg.strip_prefix("--outputs") {
         } else if let Some(_rest) = arg.strip_prefix("--wait-for-clients") {
+        } else if let Some(_rest) = arg.strip_prefix("--client-input-count") {
         } else if let Some(_rest) = arg.strip_prefix("--stun-servers") {
         } else if let Some(_rest) = arg.strip_prefix("--servers") {
         } else if let Some(_rest) = arg.strip_prefix("--mpc-backend") {
@@ -3128,6 +3190,11 @@ async fn main() {
             "--wait-for-clients" => {
                 if let Some(v) = args_iter.next() {
                     expected_client_count = Some(v.parse().expect("Invalid --wait-for-clients"));
+                }
+            }
+            "--client-input-count" => {
+                if let Some(v) = args_iter.next() {
+                    client_input_count = v.parse().expect("Invalid --client-input-count");
                 }
             }
             "--stun-servers" => {
@@ -3863,6 +3930,10 @@ async fn main() {
     let mut on_chain_input_ids: Vec<Address> = Vec::new();
     #[cfg(feature = "honeybadger")]
     let mut on_chain_output_clients: Vec<(Vec<u8>, Address)> = Vec::new();
+    #[cfg(feature = "honeybadger")]
+    let mut hb_bls12381_coord_engine: Option<
+        Arc<HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>>,
+    > = None;
 
     #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
     if coord_addr.is_some() || contract_addr.is_some() {
@@ -4019,7 +4090,7 @@ async fn main() {
                 // Phase 2: Create MPC engine + preprocessing + coordinator input phases
                 macro_rules! setup_hb {
                     ($F:ty, $G:ty) => {{
-                        let engine = match setup_hb_party_for_curve::<$F, $G>(
+                        match setup_hb_party_for_curve::<$F, $G>(
                             &mut vm,
                             HbPartySetup {
                                 net: net.clone(),
@@ -4029,19 +4100,19 @@ async fn main() {
                                 t,
                                 instance_id,
                                 expected_client_count,
+                                client_input_count,
                                 program_hash: program_id,
                                 preproc_store_path: preproc_store_path.as_deref(),
                             },
                         )
                         .await
                         {
-                            Ok(e) => e,
+                            Ok(_) => {}
                             Err(e) => {
                                 eprintln!("[party {}] HoneyBadger setup failed: {}", my_id, e);
                                 exit(13);
                             }
                         };
-                        vm.set_mpc_engine(engine);
                     }};
                 }
 
@@ -4062,6 +4133,7 @@ async fn main() {
                             t,
                             instance_id,
                             expected_client_count: None, // coordinator handles clients
+                            client_input_count,
                             program_hash: program_id,
                             preproc_store_path: preproc_store_path.as_deref(),
                         },
@@ -4074,7 +4146,10 @@ async fn main() {
                             exit(13);
                         }
                     };
-                    vm.set_mpc_engine(engine.clone());
+                    if coord_opt.is_some() {
+                        engine.enable_client_output_capture().await;
+                        hb_bls12381_coord_engine = Some(engine.clone());
+                    }
 
                     // Coordinator mask distribution + input collection
                     if let Some(ref mut coord) = coord_opt {
@@ -4111,6 +4186,7 @@ async fn main() {
                             }
 
                             if as_leader {
+                                eprintln!("[party {my_id}] coordinator -> InputMaskReservation");
                                 coord.reserve_input_masks().await.unwrap();
                             }
                             coord
@@ -4118,10 +4194,12 @@ async fn main() {
                                 .await
                                 .unwrap();
 
+                            eprintln!("[party {my_id}] waiting for reserved input indices");
                             let client_to_index = coord
                                 .wait_for_indices(input_ids.len() as u64)
                                 .await
                                 .unwrap();
+                            eprintln!("[party {my_id}] reserved input indices received");
 
                             let mask_shares = if let Some(mask_shares) = precomputed_mask_shares {
                                 mask_shares
@@ -4161,14 +4239,17 @@ async fn main() {
                             }
 
                             if as_leader {
+                                eprintln!("[party {my_id}] coordinator -> InputCollection");
                                 coord.collect_inputs().await.unwrap();
                             }
                             coord.wait_for_round(Round::InputCollection).await.unwrap();
 
+                            eprintln!("[party {my_id}] waiting for masked client inputs");
                             let client_inputs = coord
                                 .wait_for_inputs(input_ids.len() as u64, mask_shares)
                                 .await
                                 .unwrap();
+                            eprintln!("[party {my_id}] masked client inputs received");
                             store_reserved_client_inputs(&mut vm, &client_to_index, client_inputs);
                         }
                     }
@@ -4361,6 +4442,7 @@ async fn main() {
                             t,
                             instance_id,
                             expected_client_count,
+                            client_input_count,
                         )
                         .await
                         {
@@ -4409,6 +4491,7 @@ async fn main() {
     #[cfg(feature = "honeybadger")]
     if let Some(ref mut coord) = coord_opt {
         if as_leader {
+            eprintln!("[party] coordinator -> MPCExecution");
             coord.start_mpc().await.unwrap();
         }
         coord.wait_for_round(Round::MPCExecution).await.unwrap();
@@ -4433,15 +4516,42 @@ async fn main() {
                 if let Some(ref mut coord) = coord_opt {
                     handled_by_coordinator = true;
                     // Coordinator output delivery
-                    let output_share = match &result {
-                        Value::Share(_ty, share_data) => share_data.as_bytes().to_vec(),
-                        _ => {
-                            println!("Program returned: {:?}", result);
-                            vec![]
-                        }
+                    let output_share = coordinator_output_share_bytes(&mut vm, &result);
+                    let captured_outputs = if let Some(engine) = hb_bls12381_coord_engine.as_ref() {
+                        engine.drain_client_output_records().await
+                    } else {
+                        Vec::new()
                     };
 
-                    if !output_share.is_empty() {
+                    if output_share.is_some() || !captured_outputs.is_empty() {
+                        let mut output_shares_by_client: Vec<
+                            Vec<HbCoordinatorShare<ark_bls12_381::Fr>>,
+                        > = vec![Vec::new(); input_ids.len()];
+
+                        if let Some(output_share) = output_share {
+                            let share: HbCoordinatorShare<ark_bls12_381::Fr> =
+                                ark_serialize::CanonicalDeserialize::deserialize_compressed(
+                                    output_share.as_slice(),
+                                )
+                                .expect("deserialize output share");
+                            for shares in output_shares_by_client.iter_mut() {
+                                shares.push(share.clone());
+                            }
+                        }
+
+                        for record in captured_outputs {
+                            let Some(shares) = output_shares_by_client.get_mut(record.client_id)
+                            else {
+                                eprintln!(
+                                    "Execution error in '{}': HoneyBadger output client index {} has no matching coordinator client identity",
+                                    agreed_entry,
+                                    record.client_id
+                                );
+                                exit(4);
+                            };
+                            shares.extend(record.shares);
+                        }
+
                         if as_leader {
                             coord.send_output().await.unwrap();
                         }
@@ -4449,14 +4559,15 @@ async fn main() {
                             .wait_for_round(Round::OutputDistribution)
                             .await
                             .unwrap();
-                        for cid in input_ids.iter() {
-                            let share: HbCoordinatorShare<ark_bls12_381::Fr> =
-                                ark_serialize::CanonicalDeserialize::deserialize_compressed(
-                                    output_share.as_slice(),
-                                )
-                                .expect("deserialize output share");
+
+                        for (cid, output_shares) in
+                            input_ids.iter().zip(output_shares_by_client.into_iter())
+                        {
+                            if output_shares.is_empty() {
+                                continue;
+                            }
                             if let Err(e) = coord
-                                .send_output_shares(cid.clone(), cid.clone(), vec![share])
+                                .send_output_shares(cid.clone(), cid.clone(), output_shares)
                                 .await
                             {
                                 eprintln!(
@@ -4473,20 +4584,16 @@ async fn main() {
                                 );
                             }
                         }
+                    } else {
+                        println!("Program returned: {:?}", result);
                     }
                 }
 
                 if let Some(ref mut coord) = on_chain_coord_opt {
                     handled_by_coordinator = true;
-                    let output_share = match &result {
-                        Value::Share(_ty, share_data) => share_data.as_bytes().to_vec(),
-                        _ => {
-                            println!("Program returned: {:?}", result);
-                            vec![]
-                        }
-                    };
+                    let output_share = coordinator_output_share_bytes(&mut vm, &result);
 
-                    if !output_share.is_empty() {
+                    if let Some(output_share) = output_share {
                         if as_leader {
                             coord.send_output().await.unwrap();
                         }
@@ -4520,6 +4627,8 @@ async fn main() {
                                 );
                             }
                         }
+                    } else {
+                        println!("Program returned: {:?}", result);
                     }
                 }
 
@@ -4566,6 +4675,9 @@ Flags:
   --wait-for-clients <n>
                           Number of client inputs to collect before starting computation
                           (HoneyBadger only; ALPN handles routing, this controls coordination)
+  --client-input-count <n>
+                          Number of input shares each direct host-mode client submits
+                          (default: 1; use with --wait-for-clients)
   --off-chain-coord <addr:port>
                           Off-chain coordinator address
   --on-chain-coord <address>
@@ -4628,7 +4740,7 @@ Examples:
   stoffel-run program.stfbin main --party-id 1 --bootstrap 127.0.0.1:9000 --bind 127.0.0.1:9002 --n-parties 5 --threshold 1
   # ... etc
 
-  # Multi-party execution with client inputs (transport-derived IDs)
+  # Multi-party execution with client inputs (canonical sorted client IDs)
   # Terminal 1: Leader with expected client count
   stoffel-run program.stfbin main --leader --bind 127.0.0.1:9000 --n-parties 5 --threshold 1 --wait-for-clients 2
 

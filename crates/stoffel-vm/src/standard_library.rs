@@ -58,10 +58,19 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
             let args = ctx.named_args("get_field");
             args.require_min(2, "at least 2 arguments: object and key")?;
             let target = args.cloned(0)?;
+            let key = args.cloned(1)?;
+            if let Value::String(value) = target {
+                let index = value_to_usize(&key, "string index")?;
+                return Ok(value
+                    .chars()
+                    .nth(index)
+                    .map(|ch| Value::String(ch.to_string()))
+                    .unwrap_or(Value::Unit));
+            }
             let Some(table_ref) = TableRef::from_value(&target) else {
                 return Ok(Value::Unit);
             };
-            (table_ref, args.cloned(1)?)
+            (table_ref, key)
         };
 
         let value = ctx
@@ -120,13 +129,25 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     });
 
     register_standard_builtin!("array_length", |mut ctx| {
-        let array_ref = {
+        let len = {
             let args = ctx.named_args("array_length");
             args.require_exact(1, "1 argument: array")?;
-            args.array_ref(0, "First argument")?
+            let value = args.cloned(0)?;
+            if let Value::String(value) = value {
+                value.chars().count()
+            } else {
+                let Some(array_ref) =
+                    TableRef::from_value(&value).and_then(|table_ref| match table_ref {
+                        TableRef::Array(array_ref) => Some(array_ref),
+                        TableRef::Object(_) => None,
+                    })
+                else {
+                    return Err("First argument must be an array or string".into());
+                };
+                ctx.read_array_ref_len(array_ref)?
+            }
         };
 
-        let len = ctx.read_array_ref_len(array_ref)?;
         let len = usize_to_vm_i64(len, "array length")?;
         Ok(Value::I64(len))
     });
@@ -641,6 +662,33 @@ mod tests {
                 &[Value::String("share".to_owned())]
             )
             .expect("load missing"),
+            Value::Unit
+        );
+    }
+
+    #[test]
+    fn strings_can_be_read_with_collection_builtins() {
+        let mut vm = VirtualMachine::builder().try_build().expect("build VM");
+
+        assert_eq!(
+            vm.execute_with_args("array_length", &[Value::String("score".to_owned())])
+                .expect("string length"),
+            Value::I64(5)
+        );
+        assert_eq!(
+            vm.execute_with_args(
+                "get_field",
+                &[Value::String("score".to_owned()), Value::I64(1)]
+            )
+            .expect("string index"),
+            Value::String("c".to_owned())
+        );
+        assert_eq!(
+            vm.execute_with_args(
+                "get_field",
+                &[Value::String("score".to_owned()), Value::I64(99)]
+            )
+            .expect("out of bounds string index"),
             Value::Unit
         );
     }

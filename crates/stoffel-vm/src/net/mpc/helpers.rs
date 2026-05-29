@@ -37,6 +37,11 @@ pub fn honeybadger_protocol_instance_id(instance_id: u64) -> u32 {
     derive_protocol_instance_id_u32(b"honeybadger", instance_id)
 }
 
+/// Derive the AVSS protocol instance id from the VM session id.
+pub fn avss_protocol_instance_id(instance_id: u64) -> u32 {
+    derive_protocol_instance_id_u32(b"avss", instance_id)
+}
+
 /// Convenience for creating default node options for a n-party network.
 /// Customize n_triples / n_random_shares / instance_id as needed at callsite.
 #[cfg(feature = "honeybadger")]

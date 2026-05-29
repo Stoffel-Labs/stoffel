@@ -17,9 +17,10 @@ pub use accumulators::{
 pub use instance::InstanceRegistry;
 pub use router::OpenMessageRouter;
 pub use wire::{
-    encode_avss_g2_open_exp_wire_message, encode_avss_open_exp_wire_message,
-    encode_batch_share_wire_message, encode_hb_open_exp_wire_message,
-    encode_single_share_wire_message, UNKNOWN_SENDER_ID,
+    encode_aba_wire_message, encode_avss_g2_open_exp_wire_message,
+    encode_avss_open_exp_wire_message, encode_batch_share_wire_message,
+    encode_hb_open_exp_wire_message, encode_rbc_wire_message, encode_single_share_wire_message,
+    UNKNOWN_SENDER_ID,
 };
 
 #[cfg(test)]

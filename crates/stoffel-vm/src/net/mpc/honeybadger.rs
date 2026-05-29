@@ -12,7 +12,7 @@ use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustS
 use stoffelmpc_mpc::honeybadger::HoneyBadgerMPCNode;
 use stoffelnet::network_utils::ClientId;
 use stoffelnet::transports::quic::QuicNetworkManager;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 mod capabilities;
 mod client_io;
@@ -54,10 +54,23 @@ where
     persistent_party_id: AtomicUsize,
     /// Reservation registry for masked-input protocol.
     reservation: tokio::sync::RwLock<Option<ReservationRegistry>>,
+    /// Optional in-process capture used by coordinator-backed output delivery.
+    client_output_capture: Mutex<Option<Vec<HoneyBadgerClientOutputRecord<F>>>>,
+    /// Maps VM/client protocol indices to transport-derived client IDs.
+    client_output_id_map: RwLock<Vec<ClientId>>,
     /// Session-local router for open-share/open-exp payloads.
     open_message_router: Arc<crate::net::open_registry::OpenMessageRouter>,
     /// Per-instance open share accumulation registry.
     open_registry: Arc<crate::net::open_registry::InstanceRegistry>,
+}
+
+#[derive(Clone)]
+pub struct HoneyBadgerClientOutputRecord<F>
+where
+    F: SupportedMpcField,
+{
+    pub client_id: ClientId,
+    pub shares: Vec<RobustShare<F>>,
 }
 
 pub type Bls12381HoneyBadgerMpcEngine =
@@ -135,6 +148,8 @@ where
             program_hash: tokio::sync::RwLock::new(None),
             persistent_party_id: AtomicUsize::new(party_id),
             reservation: tokio::sync::RwLock::new(None),
+            client_output_capture: Mutex::new(None),
+            client_output_id_map: RwLock::new(Vec::new()),
             open_registry: open_message_router.register_instance(instance_id),
             open_message_router,
         }))
@@ -249,9 +264,37 @@ where
             program_hash: tokio::sync::RwLock::new(None),
             persistent_party_id: AtomicUsize::new(party_id),
             reservation: tokio::sync::RwLock::new(None),
+            client_output_capture: Mutex::new(None),
+            client_output_id_map: RwLock::new(Vec::new()),
             open_registry: open_message_router.register_instance(instance_id),
             open_message_router,
         })
+    }
+
+    pub async fn set_client_output_id_map(&self, client_ids: Vec<ClientId>) {
+        *self.client_output_id_map.write().await = client_ids;
+    }
+
+    pub(crate) async fn client_output_transport_id(&self, client_id: ClientId) -> ClientId {
+        self.client_output_id_map
+            .read()
+            .await
+            .get(client_id)
+            .copied()
+            .unwrap_or(client_id)
+    }
+
+    pub async fn enable_client_output_capture(&self) {
+        *self.client_output_capture.lock().await = Some(Vec::new());
+    }
+
+    pub async fn drain_client_output_records(&self) -> Vec<HoneyBadgerClientOutputRecord<F>> {
+        self.client_output_capture
+            .lock()
+            .await
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// Returns a handle to the inner MPC node for direct access (e.g., InputServer init).

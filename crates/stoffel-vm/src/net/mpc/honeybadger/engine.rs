@@ -6,7 +6,6 @@ use crate::net::mpc_engine::{
     MpcEnginePreprocPersistence, MpcEngineRandomness, MpcEngineReservation, MpcSessionTopology,
 };
 use ark_ec::{CurveGroup, PrimeGroup};
-use ark_std::rand::SeedableRng;
 use std::any::TypeId;
 use std::sync::atomic::Ordering;
 use stoffel_vm_types::core_types::{
@@ -46,17 +45,12 @@ where
             match clear.into_parts() {
                 (ShareType::SecretInt { .. }, ClearShareValue::Integer(v)) => {
                     let secret = crate::net::curve::field_from_i64::<F>(v);
-                    let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-                    let shares = RobustShare::compute_shares(
+                    let share = RobustShare::new(
                         secret,
-                        self.topology.n_parties(),
+                        self.topology.party_id(),
                         self.topology.threshold(),
-                        None,
-                        &mut rng,
-                    )
-                    .map_err(|e| format!("compute_shares: {:?}", e))?;
-                    let my = &shares[self.topology.party_id()];
-                    Self::encode_share(my).map(ShareData::Opaque)
+                    );
+                    Self::encode_share(&share).map(ShareData::Opaque)
                 }
                 (
                     ShareType::SecretInt {
@@ -65,32 +59,22 @@ where
                     ClearShareValue::Boolean(b),
                 ) => {
                     let secret = if b { F::from(1u64) } else { F::from(0u64) };
-                    let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-                    let shares = RobustShare::compute_shares(
+                    let share = RobustShare::new(
                         secret,
-                        self.topology.n_parties(),
+                        self.topology.party_id(),
                         self.topology.threshold(),
-                        None,
-                        &mut rng,
-                    )
-                    .map_err(|e| format!("compute_shares: {:?}", e))?;
-                    let my = &shares[self.topology.party_id()];
-                    Self::encode_share(my).map(ShareData::Opaque)
+                    );
+                    Self::encode_share(&share).map(ShareData::Opaque)
                 }
                 (ShareType::SecretFixedPoint { precision }, ClearShareValue::FixedPoint(fp)) => {
                     let scaled_value = crate::net::curve::fixed_point_float_to_i64(precision, fp)?;
                     let secret = crate::net::curve::field_from_i64(scaled_value);
-                    let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-                    let shares = RobustShare::compute_shares(
+                    let share = RobustShare::new(
                         secret,
-                        self.topology.n_parties(),
+                        self.topology.party_id(),
                         self.topology.threshold(),
-                        None,
-                        &mut rng,
-                    )
-                    .map_err(|e| format!("compute_shares: {:?}", e))?;
-                    let my = &shares[self.topology.party_id()];
-                    Self::encode_share(my).map(ShareData::Opaque)
+                    );
+                    Self::encode_share(&share).map(ShareData::Opaque)
                 }
                 _ => Err("Unsupported type for input_share".to_string()),
             }

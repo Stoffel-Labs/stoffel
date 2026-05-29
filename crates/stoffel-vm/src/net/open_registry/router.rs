@@ -96,6 +96,16 @@ impl OpenMessageRouter {
                 sender_party_id,
                 ..
             } => (*instance_id, *sender_party_id),
+            OpenRegistryWireMessage::Rbc {
+                instance_id,
+                sender_party_id,
+                ..
+            } => (*instance_id, *sender_party_id),
+            OpenRegistryWireMessage::Aba {
+                instance_id,
+                sender_party_id,
+                ..
+            } => (*instance_id, *sender_party_id),
         };
 
         if authenticated_sender_id == UNKNOWN_SENDER_ID {
@@ -130,6 +140,17 @@ impl OpenMessageRouter {
                 shares,
                 ..
             } => registry.insert_batch(&type_key, sender_party_id, shares),
+            OpenRegistryWireMessage::Rbc {
+                sender_party_id,
+                message,
+                ..
+            } => registry.insert_rbc_broadcast(sender_party_id, message),
+            OpenRegistryWireMessage::Aba {
+                sender_party_id,
+                session_id,
+                value,
+                ..
+            } => registry.insert_aba_proposal(session_id, sender_party_id, value),
         }
         Ok(true)
     }

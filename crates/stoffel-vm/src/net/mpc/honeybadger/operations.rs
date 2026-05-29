@@ -153,7 +153,10 @@ where
         crate::net::block_on_current(self.broadcast_open_exp_payload(payload))
     }
 
-    async fn broadcast_open_registry_payload(&self, payload: Vec<u8>) -> Result<(), String> {
+    pub(super) async fn broadcast_open_registry_payload(
+        &self,
+        payload: Vec<u8>,
+    ) -> Result<(), String> {
         crate::net::broadcast::broadcast_to_other_parties(
             self.net.as_ref(),
             self.topology.n_parties(),

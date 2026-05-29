@@ -76,6 +76,22 @@ where
 }
 
 impl InstanceRegistry {
+    pub(crate) fn insert_rbc_broadcast(&self, party_id: usize, message: Vec<u8>) {
+        let mut registry = self.rbc.lock();
+
+        let mut session_id = 0u64;
+        while registry.messages.contains_key(&(session_id, party_id)) {
+            session_id = match session_id.checked_add(1) {
+                Some(next) => next,
+                None => return,
+            };
+        }
+
+        registry.messages.insert((session_id, party_id), message);
+        drop(registry);
+        self.rbc_notify.notify_waiters();
+    }
+
     pub fn rbc_broadcast(&self, party_id: usize, message: &[u8]) -> Result<u64, String> {
         let mut registry = self.rbc.lock();
 
@@ -231,6 +247,13 @@ impl InstanceRegistry {
             || self.try_deliver_rbc_any(instance_id, receiver_party_id),
         )
         .await
+    }
+
+    pub(crate) fn insert_aba_proposal(&self, session_id: u64, party_id: usize, value: bool) {
+        let mut registry = self.aba.lock();
+        registry.proposals.insert((session_id, party_id), value);
+        drop(registry);
+        self.aba_notify.notify_waiters();
     }
 
     pub fn aba_propose(&self, party_id: usize, value: bool) -> Result<u64, String> {

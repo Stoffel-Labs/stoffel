@@ -36,6 +36,17 @@ pub(super) enum OpenRegistryWireMessage {
         sender_party_id: usize,
         shares: Vec<Vec<u8>>,
     },
+    Rbc {
+        instance_id: u64,
+        sender_party_id: usize,
+        message: Vec<u8>,
+    },
+    Aba {
+        instance_id: u64,
+        sender_party_id: usize,
+        session_id: u64,
+        value: bool,
+    },
 }
 
 pub fn encode_single_share_wire_message(
@@ -72,6 +83,44 @@ pub fn encode_batch_share_wire_message(
     };
     let encoded =
         bincode::serialize(&payload).map_err(|e| format!("serialize open wire payload: {}", e))?;
+    let mut out = Vec::with_capacity(OPEN_REGISTRY_WIRE_PREFIX.len() + encoded.len());
+    out.extend_from_slice(OPEN_REGISTRY_WIRE_PREFIX);
+    out.extend_from_slice(&encoded);
+    Ok(out)
+}
+
+pub fn encode_rbc_wire_message(
+    instance_id: u64,
+    sender_party_id: usize,
+    message: &[u8],
+) -> Result<Vec<u8>, String> {
+    let payload = OpenRegistryWireMessage::Rbc {
+        instance_id,
+        sender_party_id,
+        message: message.to_vec(),
+    };
+    let encoded =
+        bincode::serialize(&payload).map_err(|e| format!("serialize RBC payload: {}", e))?;
+    let mut out = Vec::with_capacity(OPEN_REGISTRY_WIRE_PREFIX.len() + encoded.len());
+    out.extend_from_slice(OPEN_REGISTRY_WIRE_PREFIX);
+    out.extend_from_slice(&encoded);
+    Ok(out)
+}
+
+pub fn encode_aba_wire_message(
+    instance_id: u64,
+    sender_party_id: usize,
+    session_id: u64,
+    value: bool,
+) -> Result<Vec<u8>, String> {
+    let payload = OpenRegistryWireMessage::Aba {
+        instance_id,
+        sender_party_id,
+        session_id,
+        value,
+    };
+    let encoded =
+        bincode::serialize(&payload).map_err(|e| format!("serialize ABA payload: {}", e))?;
     let mut out = Vec::with_capacity(OPEN_REGISTRY_WIRE_PREFIX.len() + encoded.len());
     out.extend_from_slice(OPEN_REGISTRY_WIRE_PREFIX);
     out.extend_from_slice(&encoded);

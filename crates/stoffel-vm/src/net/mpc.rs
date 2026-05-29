@@ -16,4 +16,7 @@ pub mod session_config;
 
 pub use helpers::NetEnvelope;
 #[cfg(feature = "honeybadger")]
-pub use helpers::{default_node_opts, honeybadger_node_opts, honeybadger_protocol_instance_id};
+pub use helpers::{
+    avss_protocol_instance_id, default_node_opts, honeybadger_node_opts,
+    honeybadger_protocol_instance_id,
+};

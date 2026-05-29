@@ -15,10 +15,19 @@ where
     G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
 {
     fn rbc_broadcast(&self, message: &[u8]) -> MpcEngineResult<RbcSessionId> {
-        self.open_registry
+        let session_id = self
+            .open_registry
             .rbc_broadcast(self.topology.party_id(), message)
-            .map(RbcSessionId::new)
-            .map_mpc_engine_operation("rbc_broadcast")
+            .map_mpc_engine_operation("rbc_broadcast")?;
+        let wire_message = crate::net::open_registry::encode_rbc_wire_message(
+            self.topology.instance_id(),
+            self.topology.party_id(),
+            message,
+        )
+        .map_mpc_engine_operation("rbc_broadcast")?;
+        self.broadcast_open_registry_payload_sync(wire_message)
+            .map_mpc_engine_operation("rbc_broadcast")?;
+        Ok(RbcSessionId::new(session_id))
     }
 
     fn rbc_receive(&self, from_party: MpcPartyId, timeout_ms: u64) -> MpcEngineResult<Vec<u8>> {
@@ -35,10 +44,20 @@ where
     }
 
     fn aba_propose(&self, value: bool) -> MpcEngineResult<AbaSessionId> {
-        self.open_registry
+        let session_id = self
+            .open_registry
             .aba_propose(self.topology.party_id(), value)
-            .map(AbaSessionId::new)
-            .map_mpc_engine_operation("aba_propose")
+            .map_mpc_engine_operation("aba_propose")?;
+        let wire_message = crate::net::open_registry::encode_aba_wire_message(
+            self.topology.instance_id(),
+            self.topology.party_id(),
+            session_id,
+            value,
+        )
+        .map_mpc_engine_operation("aba_propose")?;
+        self.broadcast_open_registry_payload_sync(wire_message)
+            .map_mpc_engine_operation("aba_propose")?;
+        Ok(AbaSessionId::new(session_id))
     }
 
     fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> MpcEngineResult<bool> {
@@ -56,11 +75,21 @@ where
     G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
 {
     async fn rbc_broadcast_async(&self, message: &[u8]) -> MpcEngineResult<RbcSessionId> {
-        self.open_registry
+        let session_id = self
+            .open_registry
             .rbc_broadcast_async(self.topology.party_id(), message)
             .await
-            .map(RbcSessionId::new)
-            .map_mpc_engine_operation("async_rbc_broadcast")
+            .map_mpc_engine_operation("async_rbc_broadcast")?;
+        let wire_message = crate::net::open_registry::encode_rbc_wire_message(
+            self.topology.instance_id(),
+            self.topology.party_id(),
+            message,
+        )
+        .map_mpc_engine_operation("async_rbc_broadcast")?;
+        self.broadcast_open_registry_payload(wire_message)
+            .await
+            .map_mpc_engine_operation("async_rbc_broadcast")?;
+        Ok(RbcSessionId::new(session_id))
     }
 
     async fn rbc_receive_async(
@@ -86,11 +115,22 @@ where
     }
 
     async fn aba_propose_async(&self, value: bool) -> MpcEngineResult<AbaSessionId> {
-        self.open_registry
+        let session_id = self
+            .open_registry
             .aba_propose_async(self.topology.party_id(), value)
             .await
-            .map(AbaSessionId::new)
-            .map_mpc_engine_operation("async_aba_propose")
+            .map_mpc_engine_operation("async_aba_propose")?;
+        let wire_message = crate::net::open_registry::encode_aba_wire_message(
+            self.topology.instance_id(),
+            self.topology.party_id(),
+            session_id,
+            value,
+        )
+        .map_mpc_engine_operation("async_aba_propose")?;
+        self.broadcast_open_registry_payload(wire_message)
+            .await
+            .map_mpc_engine_operation("async_aba_propose")?;
+        Ok(AbaSessionId::new(session_id))
     }
 
     async fn aba_result_async(
