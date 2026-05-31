@@ -16,7 +16,7 @@
 // to work correctly with the AVSS protocol.
 
 use crate::net::engine_config::MpcSessionConfig;
-use crate::net::mpc_engine::{MpcPartyId, MpcSessionTopology};
+use crate::net::mpc_engine::{DurableIdentityDigest, MpcPartyId, MpcSessionTopology};
 use ark_ec::CurveGroup;
 use ark_ff::{FftField, PrimeField};
 use std::collections::BTreeMap;
@@ -105,6 +105,7 @@ where
     G: CurveGroup<ScalarField = F>,
 {
     topology: MpcSessionTopology,
+    local_identity: DurableIdentityDigest,
     net: Arc<QuicNetworkManager>,
     /// Full AVSS MPC node (share gen, multiplication, preprocessing, message routing)
     avss_node: Arc<Mutex<AvssMpcNode<F, Avid<AvssSessionId>, G>>>,
@@ -162,7 +163,8 @@ where
             secret_key,
             public_keys,
         } = config;
-        let (topology, network, input_ids, open_message_router) = session.into_parts();
+        let (topology, local_identity, network, input_ids, open_message_router) =
+            session.into_parts();
         let instance_id = topology.instance_id();
         let party_id = topology.party_id();
         let n_parties = topology.n_parties();
@@ -190,6 +192,7 @@ where
 
         Ok(Arc::new(Self {
             topology,
+            local_identity,
             net: network,
             avss_node: Arc::new(Mutex::new(avss_node)),
             stored_shares: Arc::new(Mutex::new(BTreeMap::new())),

@@ -13,16 +13,19 @@
 //! This module is designed to be portable and can be copied directly to the compiler
 //! codebase without modification.
 
-use crate::core_types::{F64, Value};
+use crate::core_types::{F64, FixedPointPrecision, ShareType, Value};
 use crate::functions::{FunctionError, VMFunction};
 use crate::instructions::{Instruction, ReducedOpcode};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
 // Magic bytes that identify a StoffelVM bytecode file
 pub const MAGIC_BYTES: &[u8; 4] = b"STFL";
 // Current bytecode format version
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 3;
+pub const CLIENT_IO_MANIFEST_FORMAT_VERSION: u16 = 2;
+pub const MPC_BACKEND_MANIFEST_FORMAT_VERSION: u16 = 3;
 
 const MAX_BINARY_COLLECTION_LEN: usize = 1_000_000;
 const MAX_BINARY_STRING_BYTES: usize = 16 * 1024 * 1024;
@@ -111,6 +114,12 @@ fn read_u32<R: Read>(reader: &mut R) -> BinaryResult<u32> {
     Ok(u32::from_le_bytes(bytes))
 }
 
+fn read_u64<R: Read>(reader: &mut R) -> BinaryResult<u64> {
+    let mut bytes = [0u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
 fn read_usize_u32<R: Read>(reader: &mut R, field: &str) -> BinaryResult<usize> {
     let value = read_u32(reader)?;
     usize::try_from(value).map_err(|_| invalid_data(format!("{field} {value} exceeds usize::MAX")))
@@ -181,6 +190,28 @@ pub struct CompiledBinary {
     pub constants: Vec<Value>,
     /// Functions in the program
     pub functions: Vec<CompiledFunction>,
+    /// VM-backed client input/output schema metadata.
+    pub client_io_manifest: ClientIoManifest,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientIoManifest {
+    pub mpc_backend: MpcBackend,
+    pub clients: Vec<ClientIoSchema>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientIoSchema {
+    pub client_slot: u64,
+    pub inputs: Vec<ShareType>,
+    pub outputs: Vec<ShareType>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MpcBackend {
+    #[default]
+    HoneyBadger,
+    Avss,
 }
 
 /// Represents a compiled function in the program
@@ -258,6 +289,7 @@ impl CompiledBinary {
             version: FORMAT_VERSION,
             constants: Vec::new(),
             functions: Vec::new(),
+            client_io_manifest: ClientIoManifest::default(),
         }
     }
 
@@ -552,6 +584,65 @@ impl CompiledBinary {
             self.serialize_function(function, writer)?;
         }
 
+        if self.version >= CLIENT_IO_MANIFEST_FORMAT_VERSION {
+            Self::serialize_client_io_manifest(
+                &self.client_io_manifest,
+                self.version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION,
+                writer,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn serialize_client_io_manifest<W: Write>(
+        manifest: &ClientIoManifest,
+        include_backend: bool,
+        writer: &mut W,
+    ) -> BinaryResult<()> {
+        if include_backend {
+            Self::serialize_mpc_backend(manifest.mpc_backend, writer)?;
+        }
+        write_usize_as_u32(writer, manifest.clients.len(), "client IO schema count")?;
+        for client in &manifest.clients {
+            writer.write_all(&client.client_slot.to_le_bytes())?;
+            write_usize_as_u32(writer, client.inputs.len(), "client IO input count")?;
+            for share_type in &client.inputs {
+                Self::serialize_share_type(*share_type, writer)?;
+            }
+            write_usize_as_u32(writer, client.outputs.len(), "client IO output count")?;
+            for share_type in &client.outputs {
+                Self::serialize_share_type(*share_type, writer)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn serialize_mpc_backend<W: Write>(backend: MpcBackend, writer: &mut W) -> BinaryResult<()> {
+        let tag = match backend {
+            MpcBackend::HoneyBadger => 0u8,
+            MpcBackend::Avss => 1u8,
+        };
+        writer.write_all(&[tag])?;
+        Ok(())
+    }
+
+    fn serialize_share_type<W: Write>(share_type: ShareType, writer: &mut W) -> BinaryResult<()> {
+        match share_type {
+            ShareType::SecretInt { bit_length } => {
+                writer.write_all(&[0u8])?;
+                write_usize_as_u32(writer, bit_length, "SecretInt bit length")?;
+            }
+            ShareType::SecretFixedPoint { precision } => {
+                writer.write_all(&[1u8])?;
+                write_usize_as_u32(writer, precision.total_bits(), "fixed-point total bits")?;
+                write_usize_as_u32(
+                    writer,
+                    precision.fractional_bits(),
+                    "fixed-point fractional bits",
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -870,11 +961,105 @@ impl CompiledBinary {
             functions.push(function);
         }
 
+        let client_io_manifest = if version >= CLIENT_IO_MANIFEST_FORMAT_VERSION {
+            Self::deserialize_client_io_manifest(
+                reader,
+                version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION,
+            )?
+        } else {
+            ClientIoManifest::default()
+        };
+
         Ok(CompiledBinary {
             version,
             constants,
             functions,
+            client_io_manifest,
         })
+    }
+
+    fn deserialize_client_io_manifest<R: Read>(
+        reader: &mut R,
+        has_backend: bool,
+    ) -> BinaryResult<ClientIoManifest> {
+        let mpc_backend = if has_backend {
+            Self::deserialize_mpc_backend(reader)?
+        } else {
+            MpcBackend::default()
+        };
+        let client_count =
+            read_u32_len_bounded(reader, "client IO schema count", MAX_BINARY_COLLECTION_LEN)?;
+        let mut clients = Vec::new();
+        reserve_vec(&mut clients, client_count, "client IO schema count")?;
+        for _ in 0..client_count {
+            let client_slot = read_u64(reader)?;
+            let input_count =
+                read_u32_len_bounded(reader, "client IO input count", MAX_BINARY_COLLECTION_LEN)?;
+            let mut inputs = Vec::new();
+            reserve_vec(&mut inputs, input_count, "client IO input count")?;
+            for _ in 0..input_count {
+                inputs.push(Self::deserialize_share_type(reader)?);
+            }
+
+            let output_count =
+                read_u32_len_bounded(reader, "client IO output count", MAX_BINARY_COLLECTION_LEN)?;
+            let mut outputs = Vec::new();
+            reserve_vec(&mut outputs, output_count, "client IO output count")?;
+            for _ in 0..output_count {
+                outputs.push(Self::deserialize_share_type(reader)?);
+            }
+
+            clients.push(ClientIoSchema {
+                client_slot,
+                inputs,
+                outputs,
+            });
+        }
+        Ok(ClientIoManifest {
+            mpc_backend,
+            clients,
+        })
+    }
+
+    fn deserialize_mpc_backend<R: Read>(reader: &mut R) -> BinaryResult<MpcBackend> {
+        let mut tag = [0u8; 1];
+        reader.read_exact(&mut tag)?;
+        match tag[0] {
+            0 => Ok(MpcBackend::HoneyBadger),
+            1 => Ok(MpcBackend::Avss),
+            tag => Err(invalid_data(format!(
+                "unknown MPC backend tag {tag} in IO manifest"
+            ))),
+        }
+    }
+
+    fn deserialize_share_type<R: Read>(reader: &mut R) -> BinaryResult<ShareType> {
+        let mut type_tag = [0u8; 1];
+        reader.read_exact(&mut type_tag)?;
+        match type_tag[0] {
+            0 => {
+                let bit_length = read_usize_u32(reader, "SecretInt bit length")?;
+                ShareType::try_secret_int(bit_length).map_err(|error| {
+                    invalid_data(format!(
+                        "invalid SecretInt metadata in IO manifest: {error}"
+                    ))
+                })
+            }
+            1 => {
+                let total_bits = read_usize_u32(reader, "fixed-point total bits")?;
+                let fractional_bits = read_usize_u32(reader, "fixed-point fractional bits")?;
+                let precision =
+                    FixedPointPrecision::try_new(total_bits, fractional_bits).map_err(|error| {
+                        invalid_data(format!(
+                            "invalid SecretFixedPoint metadata in IO manifest: {error}"
+                        ))
+                    })?;
+                Ok(ShareType::SecretFixedPoint { precision })
+            }
+            tag => Err(invalid_data(format!(
+                "unknown ShareType tag {tag} in IO manifest"
+            ))),
+        }
     }
 
     /// Deserializes a value from a reader
@@ -1350,6 +1535,13 @@ mod tests {
         bytes
     }
 
+    fn binary_header_with_version(version: u16) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC_BYTES);
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes
+    }
+
     fn append_empty_function_prefix(bytes: &mut Vec<u8>) {
         bytes.extend_from_slice(&4u16.to_le_bytes());
         bytes.extend_from_slice(b"main");
@@ -1358,6 +1550,90 @@ mod tests {
         bytes.extend_from_slice(&0u16.to_le_bytes()); // upvalues
         bytes.push(0); // no parent
         bytes.extend_from_slice(&0u16.to_le_bytes()); // labels
+    }
+
+    #[test]
+    fn bytecode_v2_client_io_manifest_round_trips() {
+        let mut binary = CompiledBinary::new();
+        binary.client_io_manifest = ClientIoManifest {
+            mpc_backend: MpcBackend::Avss,
+            clients: vec![
+                ClientIoSchema {
+                    client_slot: 7,
+                    inputs: vec![
+                        ShareType::secret_int(64),
+                        ShareType::boolean(),
+                        ShareType::secret_fixed_point_from_bits(96, 24),
+                    ],
+                    outputs: vec![
+                        ShareType::secret_fixed_point_from_bits(128, 32),
+                        ShareType::secret_int(16),
+                    ],
+                },
+                ClientIoSchema {
+                    client_slot: 9,
+                    inputs: vec![],
+                    outputs: vec![ShareType::boolean()],
+                },
+            ],
+        };
+
+        let mut buffer = Vec::new();
+        binary.serialize(&mut buffer).unwrap();
+
+        let deserialized = CompiledBinary::deserialize(&mut Cursor::new(&buffer)).unwrap();
+        assert_eq!(deserialized.version, FORMAT_VERSION);
+        assert_eq!(deserialized.client_io_manifest, binary.client_io_manifest);
+    }
+
+    #[test]
+    fn bytecode_v2_client_io_manifest_defaults_to_honeybadger_backend() {
+        let mut bytes = binary_header_with_version(2);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // constants
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // functions
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // client schemas
+
+        let deserialized = CompiledBinary::deserialize(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(deserialized.version, 2);
+        assert_eq!(
+            deserialized.client_io_manifest.mpc_backend,
+            MpcBackend::HoneyBadger
+        );
+        assert!(deserialized.client_io_manifest.clients.is_empty());
+    }
+
+    #[test]
+    fn bytecode_v1_deserializes_with_empty_client_io_manifest() {
+        let mut bytes = binary_header_with_version(1);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // constants
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // functions
+
+        let deserialized = CompiledBinary::deserialize(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(deserialized.version, 1);
+        assert_eq!(
+            deserialized.client_io_manifest.mpc_backend,
+            MpcBackend::HoneyBadger
+        );
+        assert!(deserialized.client_io_manifest.clients.is_empty());
+    }
+
+    #[test]
+    fn deserialize_rejects_invalid_share_type_metadata() {
+        let mut bytes = binary_header();
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // constants
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // functions
+        bytes.push(0); // HoneyBadger backend
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // client schemas
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // client slot
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // inputs
+        bytes.push(0); // SecretInt
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // invalid bit length
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // outputs
+
+        assert_invalid_data(
+            CompiledBinary::deserialize(&mut Cursor::new(bytes)),
+            "invalid SecretInt metadata",
+        );
     }
 
     #[test]
@@ -1523,6 +1799,7 @@ mod tests {
                 labels: HashMap::new(),
                 instructions: vec![CompiledInstruction::LDI(0, 0)],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         assert_invalid_data(
@@ -1545,6 +1822,7 @@ mod tests {
                 labels: HashMap::new(),
                 instructions: vec![CompiledInstruction::LDI(usize::MAX, 0)],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         assert_invalid_data(
@@ -1572,6 +1850,7 @@ mod tests {
                 labels: HashMap::new(),
                 instructions: vec![CompiledInstruction::LDI(0, 0)],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let _ = binary.to_vm_functions();
@@ -1592,6 +1871,7 @@ mod tests {
                 labels: HashMap::new(),
                 instructions: vec![CompiledInstruction::LDI(usize::MAX, 0)],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let _ = binary.to_vm_functions();
@@ -1688,6 +1968,7 @@ mod tests {
                 labels: HashMap::new(),
                 instructions: vec![],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let mut buffer = Vec::new();
@@ -1708,6 +1989,7 @@ mod tests {
                 labels: HashMap::new(),
                 instructions: vec![],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let mut buffer = Vec::new();
@@ -1732,6 +2014,7 @@ mod tests {
                 labels: HashMap::new(),
                 instructions: vec![CompiledInstruction::RET(oversized_operand)],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let mut buffer = Vec::new();
@@ -1759,6 +2042,7 @@ mod tests {
                 labels,
                 instructions: vec![],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let mut buffer = Vec::new();
@@ -1921,6 +2205,7 @@ mod tests {
                     CompiledInstruction::RET(16),
                 ],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let vm_functions = binary.to_vm_functions();

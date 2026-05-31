@@ -4,7 +4,7 @@
 //! `stoffel-vm-types::Value` to commit to a public serialization format while
 //! still allowing local storage backends to persist structured VM values.
 
-use crate::net::mpc_engine::MpcRuntimeInfo;
+use crate::net::mpc_engine::{DurableIdentityDigest, MpcRuntimeInfo};
 use std::collections::HashSet;
 use stoffel_vm_types::core_types::{
     ShareData, ShareType, TableMemory, TableMemoryError, TableRef, Value, F64,
@@ -13,8 +13,11 @@ use stoffel_vm_types::core_types::{
 pub type PersistentValueResult<T> = Result<T, PersistentValueError>;
 
 const MAGIC: &[u8; 8] = b"STFLVAL1";
+#[cfg(test)]
 const LEGACY_SHARE_ENVELOPE_VERSION_WITH_SESSION: u8 = 1;
-const SHARE_ENVELOPE_VERSION: u8 = 2;
+#[cfg(test)]
+const LEGACY_SHARE_ENVELOPE_VERSION_WITH_PARTY_ID: u8 = 2;
+const SHARE_ENVELOPE_VERSION: u8 = 3;
 pub const MAX_PERSISTENT_VALUE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PERSISTENT_BLOB_BYTES: usize = MAX_PERSISTENT_VALUE_BYTES;
 const MAX_PERSISTENT_TABLE_ENTRIES: usize = 65_536;
@@ -58,6 +61,16 @@ impl PersistentValueContext {
         }
     }
 
+    pub fn from_mpc_runtime_with_party_id(
+        info: MpcRuntimeInfo,
+        key_id: &[u8],
+        _party_id: usize,
+    ) -> Self {
+        Self {
+            share: Some(PersistentShareContext::from_mpc_runtime(info, key_id)),
+        }
+    }
+
     fn share_context(&self) -> Option<&PersistentShareContext> {
         self.share.as_ref()
     }
@@ -68,7 +81,7 @@ pub struct PersistentShareContext {
     protocol_name: String,
     curve: String,
     field: String,
-    party_id: usize,
+    node_identity: DurableIdentityDigest,
     n_parties: usize,
     threshold: usize,
     key_id_digest: [u8; 32],
@@ -79,7 +92,7 @@ impl PersistentShareContext {
         protocol_name: impl Into<String>,
         curve: impl Into<String>,
         field: impl Into<String>,
-        party_id: usize,
+        node_identity: DurableIdentityDigest,
         n_parties: usize,
         threshold: usize,
         key_id: &[u8],
@@ -88,7 +101,7 @@ impl PersistentShareContext {
             protocol_name: protocol_name.into(),
             curve: curve.into(),
             field: field.into(),
-            party_id,
+            node_identity,
             n_parties,
             threshold,
             key_id_digest: digest_bytes(key_id),
@@ -100,7 +113,7 @@ impl PersistentShareContext {
             info.protocol_name(),
             info.curve_config().name(),
             info.field_kind().name(),
-            info.party().id(),
+            info.local_identity(),
             info.party_count().count(),
             info.threshold_param().value(),
             key_id,
@@ -349,7 +362,7 @@ impl Encoder<'_> {
         self.write_string(&context.protocol_name)?;
         self.write_string(&context.curve)?;
         self.write_string(&context.field)?;
-        self.write_len(context.party_id, "party id")?;
+        self.write_digest(&context.node_identity.as_bytes());
         self.write_len(context.n_parties, "party count")?;
         self.write_len(context.threshold, "threshold")?;
         self.write_digest(&context.key_id_digest);
@@ -529,10 +542,7 @@ impl Reader<'_> {
 
     fn read_share_envelope(&mut self) -> PersistentValueResult<ShareEnvelope> {
         let version = self.read_u8()?;
-        if !matches!(
-            version,
-            LEGACY_SHARE_ENVELOPE_VERSION_WITH_SESSION | SHARE_ENVELOPE_VERSION
-        ) {
+        if version != SHARE_ENVELOPE_VERSION {
             return Err(invalid_data(format!(
                 "unsupported persistent share envelope version {version}"
             )));
@@ -541,15 +551,12 @@ impl Reader<'_> {
         let protocol_name = self.read_string()?;
         let curve = self.read_string()?;
         let field = self.read_string()?;
-        if version == LEGACY_SHARE_ENVELOPE_VERSION_WITH_SESSION {
-            let _legacy_instance_id = self.read_u64()?;
-        }
 
         Ok(ShareEnvelope {
             protocol_name,
             curve,
             field,
-            party_id: self.read_len("party id")?,
+            node_identity: DurableIdentityDigest::from_bytes(self.read_digest()?),
             n_parties: self.read_len("party count")?,
             threshold: self.read_len("threshold")?,
             key_id_digest: self.read_digest()?,
@@ -704,7 +711,7 @@ struct ShareEnvelope {
     protocol_name: String,
     curve: String,
     field: String,
-    party_id: usize,
+    node_identity: DurableIdentityDigest,
     n_parties: usize,
     threshold: usize,
     key_id_digest: [u8; 32],
@@ -722,7 +729,7 @@ impl ShareEnvelope {
         self.require_str("backend", &context.protocol_name, &self.protocol_name)?;
         self.require_str("curve", &context.curve, &self.curve)?;
         self.require_str("field", &context.field, &self.field)?;
-        self.require_usize("party_id", context.party_id, self.party_id)?;
+        self.require_identity("node_identity", context.node_identity, self.node_identity)?;
         self.require_usize("n_parties", context.n_parties, self.n_parties)?;
         self.require_usize("threshold", context.threshold, self.threshold)?;
         if self.key_id_digest != context.key_id_digest {
@@ -772,6 +779,22 @@ impl ShareEnvelope {
             actual: actual.to_string(),
         })
     }
+
+    fn require_identity(
+        &self,
+        field: &'static str,
+        expected: DurableIdentityDigest,
+        actual: DurableIdentityDigest,
+    ) -> PersistentValueResult<()> {
+        if expected == actual {
+            return Ok(());
+        }
+        Err(PersistentValueError::ShareContextMismatch {
+            field,
+            expected: expected.to_string(),
+            actual: actual.to_string(),
+        })
+    }
 }
 
 fn table_memory_error(
@@ -810,10 +833,11 @@ mod tests {
     use super::{
         decode_value, decode_value_with_context, encode_value, encode_value_with_context,
         PersistentShareContext, PersistentValueContext, PersistentValueError,
-        LEGACY_SHARE_ENVELOPE_VERSION_WITH_SESSION, MAGIC, MAX_PERSISTENT_COMMITMENTS,
-        MAX_PERSISTENT_TABLE_ENTRIES, SHARE_DATA_FELDMAN, SHARE_DATA_OPAQUE,
-        SHARE_ENVELOPE_VERSION, SHARE_TYPE_SECRET_INT, TAG_ARRAY, TAG_SHARE,
+        LEGACY_SHARE_ENVELOPE_VERSION_WITH_PARTY_ID, LEGACY_SHARE_ENVELOPE_VERSION_WITH_SESSION,
+        MAGIC, MAX_PERSISTENT_COMMITMENTS, MAX_PERSISTENT_TABLE_ENTRIES, SHARE_DATA_FELDMAN,
+        SHARE_DATA_OPAQUE, SHARE_ENVELOPE_VERSION, SHARE_TYPE_SECRET_INT, TAG_ARRAY, TAG_SHARE,
     };
+    use crate::net::mpc_engine::DurableIdentityDigest;
     use std::sync::Arc;
     use stoffel_vm_types::core_types::{
         Closure, ObjectRef, ObjectStore, ShareData, ShareType, TableMemory, TableRef, Upvalue,
@@ -825,7 +849,7 @@ mod tests {
             "avss-mpc",
             "bls12-381",
             "bls12-381-fr",
-            0,
+            DurableIdentityDigest::from_public_key_bytes(b"test node"),
             5,
             1,
             key,
@@ -990,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_share_envelope_session_id_is_not_part_of_durable_context() {
+    fn legacy_share_envelopes_are_rejected() {
         let mut memory = ObjectStore::new();
         let context = test_context(b"share-key");
         let share_payload = [1u8, 2, 3];
@@ -1015,11 +1039,25 @@ mod tests {
 
         assert_eq!(
             decode_value_with_context(&bytes, &mut memory, Some(&context))
-                .expect("legacy value decodes across sessions"),
-            Value::Share(
-                ShareType::secret_int(64),
-                ShareData::Opaque(share_payload.to_vec())
-            )
+                .expect_err("legacy envelope should be rejected"),
+            PersistentValueError::InvalidData {
+                reason: format!(
+                    "unsupported persistent share envelope version {}",
+                    LEGACY_SHARE_ENVELOPE_VERSION_WITH_SESSION
+                )
+            }
+        );
+
+        bytes[MAGIC.len() + 1] = LEGACY_SHARE_ENVELOPE_VERSION_WITH_PARTY_ID;
+        assert_eq!(
+            decode_value_with_context(&bytes, &mut memory, Some(&context))
+                .expect_err("legacy party-id envelope should be rejected"),
+            PersistentValueError::InvalidData {
+                reason: format!(
+                    "unsupported persistent share envelope version {}",
+                    LEGACY_SHARE_ENVELOPE_VERSION_WITH_PARTY_ID
+                )
+            }
         );
     }
 
@@ -1051,7 +1089,9 @@ mod tests {
         write_test_string(&mut bytes, "avss-mpc");
         write_test_string(&mut bytes, "bls12-381");
         write_test_string(&mut bytes, "bls12-381-fr");
-        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(
+            &DurableIdentityDigest::from_public_key_bytes(b"test node").as_bytes(),
+        );
         bytes.extend_from_slice(&5u64.to_le_bytes());
         bytes.extend_from_slice(&1u64.to_le_bytes());
         bytes.extend_from_slice(blake3::hash(b"share-key").as_bytes());

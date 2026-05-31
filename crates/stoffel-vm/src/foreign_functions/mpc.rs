@@ -199,6 +199,16 @@ impl<'a> ForeignFunctionContext<'a> {
             .secret_share_mul_field_data(ty, share_data, scalar_bytes)
     }
 
+    pub(crate) fn secret_share_add_field_data(
+        &self,
+        ty: ShareType,
+        share_data: &ShareData,
+        field_bytes: &[u8],
+    ) -> VmResult<ShareData> {
+        self.services
+            .secret_share_add_field_data(ty, share_data, field_bytes)
+    }
+
     pub(crate) fn secret_share_interpolate_local(
         &self,
         ty: ShareType,

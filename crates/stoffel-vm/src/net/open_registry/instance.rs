@@ -414,7 +414,6 @@ impl InstanceRegistry {
         )
     }
 
-    #[cfg(any(feature = "avss", feature = "honeybadger", test))]
     pub(crate) async fn open_share_async<R>(
         &self,
         party_id: usize,
@@ -440,8 +439,6 @@ impl InstanceRegistry {
         )
         .await
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) async fn open_bytes_async<R>(
         &self,
         party_id: usize,

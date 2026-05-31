@@ -110,7 +110,7 @@ The VM also registers MPC-focused module-style builtins:
 - `Aba.*`: asynchronous binary agreement helpers
 - `Crypto.*`: hashing and curve/field conversion helpers
 - `Bytes.*`: byte-array helpers
-- `Avss.*`: AVSS-specific helpers when the `avss` feature is enabled
+- `Avss.*`: AVSS-specific helper functions
 
 ## How do I use it!?
 
@@ -191,7 +191,6 @@ Run the test suite:
 
 ```bash
 cargo test
-cargo test --all-features
 cargo test -- --ignored
 ```
 
@@ -201,7 +200,8 @@ Build the runtime and CLI in release mode:
 cargo build --release -p stoffel-vm
 ```
 
-`stoffel-vm` enables the `honeybadger` and `avss` features by default.
+HoneyBadger and AVSS backend code is built by default. Distributed party runs select the backend
+from the compiled `.stflb` program manifest.
 
 ## CLI: Run a compiled Stoffel binary
 
@@ -274,7 +274,8 @@ Notes:
 
 - `STOFFEL_AUTH_TOKEN` is required for authenticated discovery in bootnode, leader, and party flows
 - The CLI accepts any file path; this repository conventionally stores compiled fixtures as `.stflb`
-- `--mpc-backend` supports `honeybadger` and `avss`
+- `--mpc-backend` supports `honeybadger` and `avss` for client mode and legacy binaries; v3+
+  `.stflb` party runs use the manifest backend and reject conflicting CLI overrides
 - `--mpc-curve` supports `bls12-381`, `bn254`, `curve25519`, `ed25519`, `secp256k1`, and `p-256` (`secp256r1`) for AVSS
 
 ## Docker Flows

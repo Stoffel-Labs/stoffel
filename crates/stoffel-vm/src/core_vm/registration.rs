@@ -91,6 +91,26 @@ impl VirtualMachine {
             )))?)
     }
 
+    pub fn try_register_typed_foreign_method<F>(
+        &mut self,
+        receiver_type: &str,
+        method_name: &str,
+        canonical_name: &str,
+        func: F,
+    ) -> VirtualMachineResult<()>
+    where
+        F: Fn(ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value>
+            + 'static
+            + Send
+            + Sync,
+    {
+        Ok(self.state.try_insert_method(
+            receiver_type,
+            method_name,
+            Function::foreign(ForeignFunction::new(canonical_name, Arc::new(func))),
+        )?)
+    }
+
     pub(crate) fn try_register_mpc_online_foreign_function<F>(
         &mut self,
         builtin: MpcOnlineBuiltin,
@@ -107,6 +127,26 @@ impl VirtualMachine {
         ))?)
     }
 
+    pub(crate) fn try_register_mpc_online_foreign_method<F>(
+        &mut self,
+        receiver_type: &str,
+        method_name: &str,
+        builtin: MpcOnlineBuiltin,
+        func: F,
+    ) -> VirtualMachineResult<()>
+    where
+        F: Fn(ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value>
+            + 'static
+            + Send
+            + Sync,
+    {
+        Ok(self.state.try_insert_method(
+            receiver_type,
+            method_name,
+            Function::foreign(ForeignFunction::mpc_online_builtin(builtin, Arc::new(func))),
+        )?)
+    }
+
     #[track_caller]
     pub fn register_foreign_function<F>(&mut self, name: &str, func: F)
     where
@@ -114,6 +154,23 @@ impl VirtualMachine {
     {
         self.try_register_foreign_function(name, func)
             .expect("invalid foreign function registration");
+    }
+
+    #[track_caller]
+    pub fn register_typed_foreign_method<F>(
+        &mut self,
+        receiver_type: &str,
+        method_name: &str,
+        canonical_name: &str,
+        func: F,
+    ) where
+        F: Fn(ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value>
+            + 'static
+            + Send
+            + Sync,
+    {
+        self.try_register_typed_foreign_method(receiver_type, method_name, canonical_name, func)
+            .expect("invalid foreign method registration");
     }
 
     #[track_caller]

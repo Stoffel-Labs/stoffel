@@ -6,12 +6,23 @@ use crate::VirtualMachineResult;
 use stoffel_vm_types::core_types::Value;
 
 pub(super) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
-    vm.try_register_typed_foreign_function("Share.add", share_add)?;
-    vm.try_register_typed_foreign_function("Share.sub", share_sub)?;
-    vm.try_register_typed_foreign_function("Share.neg", share_neg)?;
-    vm.try_register_typed_foreign_function("Share.add_scalar", share_add_scalar)?;
-    vm.try_register_typed_foreign_function("Share.mul_scalar", share_mul_scalar)?;
-    vm.try_register_typed_foreign_function("Share.mul_field", share_mul_field)?;
+    vm.try_register_typed_foreign_method("Share", "add", "Share.add", share_add)?;
+    vm.try_register_typed_foreign_method("Share", "sub", "Share.sub", share_sub)?;
+    vm.try_register_typed_foreign_method("Share", "neg", "Share.neg", share_neg)?;
+    vm.try_register_typed_foreign_method(
+        "Share",
+        "add_scalar",
+        "Share.add_scalar",
+        share_add_scalar,
+    )?;
+    vm.try_register_typed_foreign_method(
+        "Share",
+        "mul_scalar",
+        "Share.mul_scalar",
+        share_mul_scalar,
+    )?;
+    vm.try_register_typed_foreign_method("Share", "mul_field", "Share.mul_field", share_mul_field)?;
+    vm.try_register_typed_foreign_function("Share.add_field", share_add_field)?;
     vm.try_register_typed_foreign_function("Share.interpolate_local", share_interpolate_local)?;
     Ok(())
 }
@@ -107,6 +118,23 @@ fn share_mul_field(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackRe
     };
 
     let result_data = ctx.secret_share_mul_field_data(ty, &data, &field_bytes)?;
+    create_result_share_object(&mut ctx, ty, result_data)
+}
+
+fn share_add_field(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
+    let (ty, data, field_bytes) = {
+        let (share_value, field_value) = {
+            let args = ctx.named_args("Share.add_field");
+            args.require_min(2, "2 arguments: share, field_bytes")?;
+            (args.cloned(0)?, args.cloned(1)?)
+        };
+
+        let (ty, data) = ctx.extract_share_data(&share_value)?;
+        let field_bytes = ctx.read_byte_array(&field_value)?;
+        (ty, data, field_bytes)
+    };
+
+    let result_data = ctx.secret_share_add_field_data(ty, &data, &field_bytes)?;
     create_result_share_object(&mut ctx, ty, result_data)
 }
 

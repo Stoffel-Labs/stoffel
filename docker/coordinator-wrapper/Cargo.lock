@@ -5106,7 +5106,6 @@ dependencies = [
 [[package]]
 name = "stoffel-mpc-coordinator"
 version = "0.1.0"
-source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=dev#a74c8426263aa491bd2258c3c515f55b97d2b68a"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -5133,6 +5132,7 @@ dependencies = [
  "serde",
  "stoffel-solidity-bindings",
  "stoffel-solidity-bindings-test",
+ "stoffel-vm-types",
  "stoffelmpc-mpc",
  "stoffelnet",
  "thiserror 2.0.18",
@@ -5147,7 +5147,7 @@ dependencies = [
 [[package]]
 name = "stoffel-solidity-bindings"
 version = "0.1.0"
-source = "git+https://github.com/Stoffel-Labs/Stoffel-solidity-SDK.git?branch=test-coord#bd3e1f77ba77f78b5539deb739be45bdd23fae5f"
+source = "git+https://github.com/Stoffel-Labs/Stoffel-solidity-SDK.git?branch=use-immutable-vars#269fadfade9ad33cf2b3fb05b927a08ac95dc43a"
 dependencies = [
  "alloy",
  "serde",
@@ -5156,10 +5156,20 @@ dependencies = [
 [[package]]
 name = "stoffel-solidity-bindings-test"
 version = "0.1.0"
-source = "git+https://github.com/Stoffel-Labs/Stoffel-solidity-SDK.git?branch=test-coord#bd3e1f77ba77f78b5539deb739be45bdd23fae5f"
+source = "git+https://github.com/Stoffel-Labs/Stoffel-solidity-SDK.git?branch=use-immutable-vars#269fadfade9ad33cf2b3fb05b927a08ac95dc43a"
 dependencies = [
  "alloy",
  "serde",
+]
+
+[[package]]
+name = "stoffel-vm-types"
+version = "0.1.0"
+dependencies = [
+ "parking_lot 0.12.5",
+ "rustc-hash",
+ "serde",
+ "smallvec",
 ]
 
 [[package]]
@@ -5221,7 +5231,6 @@ dependencies = [
 [[package]]
 name = "stoffelnet"
 version = "0.1.0"
-source = "git+https://github.com/Stoffel-Labs/stoffel-networking.git#8ffb2fac8c62c6e2e342b63e99886282cfb01e40"
 dependencies = [
  "ark-ff 0.5.0",
  "async-trait",

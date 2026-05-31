@@ -2,20 +2,14 @@ use super::MpcCapability;
 use std::fmt;
 
 pub type MpcEngineResult<T> = Result<T, MpcEngineError>;
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 pub(crate) trait MpcEngineOperationResultExt<T> {
     fn map_mpc_engine_operation(self, operation: &'static str) -> MpcEngineResult<T>;
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 impl<T> MpcEngineOperationResultExt<T> for Result<T, String> {
     fn map_mpc_engine_operation(self, operation: &'static str) -> MpcEngineResult<T> {
         self.map_err(|reason| MpcEngineError::operation_failed(operation, reason))
     }
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 impl<T> MpcEngineOperationResultExt<T> for Result<T, crate::net::BlockOnError> {
     fn map_mpc_engine_operation(self, operation: &'static str) -> MpcEngineResult<T> {
         self.map_err(|error| MpcEngineError::operation_failed(operation, error.to_string()))

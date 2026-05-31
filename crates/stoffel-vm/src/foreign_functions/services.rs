@@ -337,6 +337,13 @@ pub(crate) trait ForeignMpcServices {
         scalar_bytes: &[u8],
     ) -> VmResult<ShareData>;
 
+    fn secret_share_add_field_data(
+        &self,
+        ty: ShareType,
+        share_data: &ShareData,
+        field_bytes: &[u8],
+    ) -> VmResult<ShareData>;
+
     fn secret_share_interpolate_local(
         &self,
         ty: ShareType,
@@ -508,6 +515,15 @@ impl ForeignMpcServices for VMState {
         VMState::secret_share_mul_field_data(self, ty, share_data, scalar_bytes)
     }
 
+    fn secret_share_add_field_data(
+        &self,
+        ty: ShareType,
+        share_data: &ShareData,
+        field_bytes: &[u8],
+    ) -> VmResult<ShareData> {
+        VMState::secret_share_add_field_data(self, ty, share_data, field_bytes)
+    }
+
     fn secret_share_interpolate_local(
         &self,
         ty: ShareType,
@@ -543,17 +559,9 @@ pub(crate) trait ForeignShareObjectServices {
         share_data: ShareData,
         party_id: usize,
     ) -> VmResult<Value>;
-
-    #[cfg(feature = "avss")]
     fn is_avss_share_object(&mut self, value: &Value) -> bool;
-
-    #[cfg(feature = "avss")]
     fn avss_commitment(&mut self, value: &Value, index: usize) -> VmResult<Vec<u8>>;
-
-    #[cfg(feature = "avss")]
     fn avss_key_name(&mut self, value: &Value) -> VmResult<String>;
-
-    #[cfg(feature = "avss")]
     fn avss_commitment_count(&mut self, value: &Value) -> VmResult<usize>;
 }
 
@@ -595,23 +603,15 @@ impl ForeignShareObjectServices for VMState {
     ) -> VmResult<Value> {
         VMState::create_share_object_value(self, share_type, share_data, party_id)
     }
-
-    #[cfg(feature = "avss")]
     fn is_avss_share_object(&mut self, value: &Value) -> bool {
         VMState::is_avss_share_object(self, value)
     }
-
-    #[cfg(feature = "avss")]
     fn avss_commitment(&mut self, value: &Value, index: usize) -> VmResult<Vec<u8>> {
         VMState::avss_commitment(self, value, index)
     }
-
-    #[cfg(feature = "avss")]
     fn avss_key_name(&mut self, value: &Value) -> VmResult<String> {
         VMState::avss_key_name(self, value)
     }
-
-    #[cfg(feature = "avss")]
     fn avss_commitment_count(&mut self, value: &Value) -> VmResult<usize> {
         VMState::avss_commitment_count(self, value)
     }

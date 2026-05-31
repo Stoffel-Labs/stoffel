@@ -4,10 +4,10 @@
 //! the masked-input protocol. Mirrors the coordinator's allocation model:
 //! sequential index allocation via an advancing cursor.
 
+use crate::net::mpc_engine::DurableIdentityDigest;
 use crate::storage::preproc::{PreprocStore, PreprocStoreError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use stoffelnet::network_utils::ClientId;
 use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
@@ -17,8 +17,8 @@ use tokio::sync::RwLock;
 /// Per-index reservation state (only stored for non-Free indices).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SlotStatus {
-    Reserved(ClientId),
-    Consumed(ClientId),
+    Reserved(DurableIdentityDigest),
+    Consumed(DurableIdentityDigest),
 }
 
 /// Result of a successful reservation.
@@ -41,7 +41,7 @@ impl ReservationGrant {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryState {
     pub program_hash: [u8; 32],
-    pub party_id: usize,
+    pub node_identity: DurableIdentityDigest,
     pub capacity: u64,
     pub next_index: u64,
     pub slots: BTreeMap<u64, SlotStatus>,
@@ -122,37 +122,35 @@ const RESERVATION_NS: &[u8] = b"rsv:";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ReservationPersistenceKey {
     program_hash: [u8; 32],
-    party_id: usize,
+    node_identity: DurableIdentityDigest,
 }
 
 impl ReservationPersistenceKey {
-    fn new(program_hash: [u8; 32], party_id: usize) -> Self {
+    fn new(program_hash: [u8; 32], node_identity: DurableIdentityDigest) -> Self {
         Self {
             program_hash,
-            party_id,
+            node_identity,
         }
     }
 
-    fn encode(self) -> Result<Vec<u8>, PreprocStoreError> {
-        let error_value = u64::try_from(self.party_id).unwrap_or(u64::MAX);
-        let party_id =
-            u32::try_from(self.party_id).map_err(|_| PreprocStoreError::U32Overflow {
-                field: "reservation key party_id",
-                value: error_value,
-            })?;
-        let mut key = Vec::with_capacity(36);
+    fn encode(self) -> Vec<u8> {
+        let mut key = Vec::with_capacity(64);
         key.extend_from_slice(&self.program_hash);
-        key.extend_from_slice(&party_id.to_le_bytes());
-        Ok(key)
+        key.extend_from_slice(&self.node_identity.as_bytes());
+        key
     }
 }
 
 impl ReservationRegistry {
-    pub fn new(program_hash: [u8; 32], party_id: usize, capacity: u64) -> Self {
+    pub fn new(
+        program_hash: [u8; 32],
+        node_identity: DurableIdentityDigest,
+        capacity: u64,
+    ) -> Self {
         Self {
             state: RwLock::new(RegistryState {
                 program_hash,
-                party_id,
+                node_identity,
                 capacity,
                 next_index: 0,
                 slots: BTreeMap::new(),
@@ -174,10 +172,10 @@ impl ReservationRegistry {
         }
     }
 
-    /// Reserve `n` consecutive preprocessing indices for `client_id`.
+    /// Reserve `n` consecutive preprocessing indices for `client_identity`.
     pub async fn reserve(
         &self,
-        client_id: ClientId,
+        client_identity: DurableIdentityDigest,
         n: u64,
     ) -> Result<ReservationGrant, ReservationError> {
         let mut s = self.state.write().await;
@@ -198,7 +196,7 @@ impl ReservationRegistry {
             .checked_add(n)
             .ok_or(ReservationError::IndexOverflow { start, count: n })?;
         for i in start..end {
-            s.slots.insert(i, SlotStatus::Reserved(client_id));
+            s.slots.insert(i, SlotStatus::Reserved(client_identity));
         }
         s.next_index = end;
         Ok(ReservationGrant { start, count: n })
@@ -207,7 +205,7 @@ impl ReservationRegistry {
     /// Submit a masked input at a previously reserved index.
     pub async fn submit_masked_input(
         &self,
-        client_id: ClientId,
+        client_identity: DurableIdentityDigest,
         index: u64,
         value: Vec<u8>,
     ) -> Result<(), ReservationError> {
@@ -216,7 +214,7 @@ impl ReservationRegistry {
             return Err(ReservationError::OutOfBounds(index));
         }
         match s.slots.get(&index) {
-            Some(SlotStatus::Reserved(id)) if *id == client_id => {}
+            Some(SlotStatus::Reserved(id)) if *id == client_identity => {}
             Some(SlotStatus::Consumed(_)) => return Err(ReservationError::AlreadyConsumed(index)),
             Some(_) => return Err(ReservationError::NotReservedByClient(index)),
             None => return Err(ReservationError::NotReserved(index)),
@@ -276,7 +274,7 @@ impl ReservationRegistry {
     pub async fn persist(&self, store: &dyn PreprocStore) -> Result<(), ReservationError> {
         let state = self.snapshot().await;
         state.validate()?;
-        let key = ReservationPersistenceKey::new(state.program_hash, state.party_id).encode()?;
+        let key = ReservationPersistenceKey::new(state.program_hash, state.node_identity).encode();
         let data = bincode::serialize(&state)
             .map_err(|e| PreprocStoreError::Serialization(e.to_string()))?;
         store.store_blob(RESERVATION_NS, &key, &data).await?;
@@ -286,9 +284,9 @@ impl ReservationRegistry {
     pub async fn load(
         store: &dyn PreprocStore,
         program_hash: &[u8; 32],
-        party_id: usize,
+        node_identity: DurableIdentityDigest,
     ) -> Result<Option<Self>, ReservationError> {
-        let key = ReservationPersistenceKey::new(*program_hash, party_id).encode()?;
+        let key = ReservationPersistenceKey::new(*program_hash, node_identity).encode();
         let data = store.load_blob(RESERVATION_NS, &key).await?;
         match data {
             Some(bytes) => {
@@ -310,10 +308,18 @@ mod tests {
     use super::*;
     use crate::storage::preproc::LmdbPreprocStore;
 
+    fn identity(seed: u8) -> DurableIdentityDigest {
+        DurableIdentityDigest::from_public_key_bytes(&[seed; 32])
+    }
+
+    fn client(seed: u8) -> DurableIdentityDigest {
+        DurableIdentityDigest::from_public_key_bytes(&[seed; 16])
+    }
+
     #[tokio::test]
     async fn reserve_basic() {
-        let reg = ReservationRegistry::new([0; 32], 0, 10);
-        let grant = reg.reserve(1, 3).await.unwrap();
+        let reg = ReservationRegistry::new([0; 32], identity(0), 10);
+        let grant = reg.reserve(client(1), 3).await.unwrap();
         assert_eq!(grant.start, 0);
         assert_eq!(grant.count, 3);
         assert_eq!(reg.available().await, 7);
@@ -321,8 +327,8 @@ mod tests {
 
     #[tokio::test]
     async fn reserve_insufficient() {
-        let reg = ReservationRegistry::new([0; 32], 0, 5);
-        let err = reg.reserve(1, 6).await.unwrap_err();
+        let reg = ReservationRegistry::new([0; 32], identity(0), 5);
+        let err = reg.reserve(client(1), 6).await.unwrap_err();
         assert!(matches!(
             err,
             ReservationError::InsufficientMaterial { need: 6, have: 5 }
@@ -331,16 +337,16 @@ mod tests {
 
     #[tokio::test]
     async fn submit_and_consume() {
-        let reg = ReservationRegistry::new([0; 32], 0, 10);
-        let grant = reg.reserve(1, 3).await.unwrap();
+        let reg = ReservationRegistry::new([0; 32], identity(0), 10);
+        let grant = reg.reserve(client(1), 3).await.unwrap();
 
-        reg.submit_masked_input(1, grant.start, vec![0xAA])
+        reg.submit_masked_input(client(1), grant.start, vec![0xAA])
             .await
             .unwrap();
         assert_eq!(reg.get_masked_input(grant.start).await, Some(vec![0xAA]));
 
         let err = reg
-            .submit_masked_input(99, grant.start + 1, vec![0xBB])
+            .submit_masked_input(client(99), grant.start + 1, vec![0xBB])
             .await
             .unwrap_err();
         assert!(matches!(err, ReservationError::NotReservedByClient(_)));
@@ -360,8 +366,11 @@ mod tests {
 
     #[tokio::test]
     async fn unreserved_index_errors() {
-        let reg = ReservationRegistry::new([0; 32], 0, 10);
-        let err = reg.submit_masked_input(1, 0, vec![0xFF]).await.unwrap_err();
+        let reg = ReservationRegistry::new([0; 32], identity(0), 10);
+        let err = reg
+            .submit_masked_input(client(1), 0, vec![0xFF])
+            .await
+            .unwrap_err();
         assert!(matches!(err, ReservationError::NotReserved(0)));
 
         let err = reg.consume(&[0]).await.unwrap_err();
@@ -373,13 +382,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = LmdbPreprocStore::open(dir.path()).unwrap();
 
-        let reg = ReservationRegistry::new([0x42; 32], 1, 20);
-        reg.reserve(5, 4).await.unwrap();
-        reg.submit_masked_input(5, 0, vec![0xFF]).await.unwrap();
+        let node_identity = identity(1);
+        let reg = ReservationRegistry::new([0x42; 32], node_identity, 20);
+        reg.reserve(client(5), 4).await.unwrap();
+        reg.submit_masked_input(client(5), 0, vec![0xFF])
+            .await
+            .unwrap();
 
         reg.persist(&store).await.unwrap();
 
-        let restored = ReservationRegistry::load(&store, &[0x42; 32], 1)
+        let restored = ReservationRegistry::load(&store, &[0x42; 32], node_identity)
             .await
             .unwrap()
             .unwrap();
@@ -391,7 +403,7 @@ mod tests {
     async fn load_nonexistent() {
         let dir = tempfile::tempdir().unwrap();
         let store = LmdbPreprocStore::open(dir.path()).unwrap();
-        let result = ReservationRegistry::load(&store, &[0x99; 32], 0)
+        let result = ReservationRegistry::load(&store, &[0x99; 32], identity(0))
             .await
             .unwrap();
         assert!(result.is_none());
@@ -401,14 +413,14 @@ mod tests {
     async fn reserve_rejects_invalid_cursor_without_underflow() {
         let reg = ReservationRegistry::from_state(RegistryState {
             program_hash: [0; 32],
-            party_id: 0,
+            node_identity: identity(0),
             capacity: 1,
             next_index: 2,
             slots: BTreeMap::new(),
             masked_inputs: BTreeMap::new(),
         });
 
-        let err = reg.reserve(1, 1).await.unwrap_err();
+        let err = reg.reserve(client(1), 1).await.unwrap_err();
         assert!(matches!(err, ReservationError::InvalidState(_)));
     }
 
@@ -419,42 +431,21 @@ mod tests {
         let program_hash = [0x5A; 32];
         let state = RegistryState {
             program_hash,
-            party_id: 0,
+            node_identity: identity(0),
             capacity: 1,
             next_index: 2,
             slots: BTreeMap::new(),
             masked_inputs: BTreeMap::new(),
         };
-        let key = ReservationPersistenceKey::new(program_hash, 0)
-            .encode()
-            .unwrap();
+        let key = ReservationPersistenceKey::new(program_hash, identity(0)).encode();
         let data = bincode::serialize(&state).unwrap();
         store.store_blob(RESERVATION_NS, &key, &data).await.unwrap();
 
-        let err = match ReservationRegistry::load(&store, &program_hash, 0).await {
+        let err = match ReservationRegistry::load(&store, &program_hash, identity(0)).await {
             Ok(_) => panic!("invalid persisted state should be rejected"),
             Err(err) => err,
         };
         assert!(matches!(err, ReservationError::InvalidState(_)));
-    }
-
-    #[test]
-    fn persistence_key_rejects_party_ids_outside_binary_key_domain() {
-        if usize::BITS <= u32::BITS {
-            return;
-        }
-
-        let oversized = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
-        let err = ReservationPersistenceKey::new([0; 32], oversized)
-            .encode()
-            .expect_err("oversized party ID should be rejected");
-        assert!(matches!(
-            err,
-            PreprocStoreError::U32Overflow {
-                field: "reservation key party_id",
-                ..
-            }
-        ));
     }
 
     #[test]
@@ -463,7 +454,7 @@ mod tests {
         masked_inputs.insert(0, vec![0xAA]);
         let state = RegistryState {
             program_hash: [0; 32],
-            party_id: 0,
+            node_identity: identity(0),
             capacity: 1,
             next_index: 0,
             slots: BTreeMap::new(),

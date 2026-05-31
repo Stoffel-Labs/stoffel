@@ -73,6 +73,7 @@ pub struct VirtualMachineBuilder {
     table_memory: Option<Box<dyn TableMemory>>,
     output_sink: Option<Arc<dyn VmOutputSink>>,
     local_storage: Option<Arc<Mutex<Box<dyn LocalStorage>>>>,
+    local_storage_party_id: Option<usize>,
 }
 
 impl Default for VirtualMachineBuilder {
@@ -85,6 +86,7 @@ impl Default for VirtualMachineBuilder {
             table_memory: None,
             output_sink: None,
             local_storage: None,
+            local_storage_party_id: None,
         }
     }
 }
@@ -149,6 +151,11 @@ impl VirtualMachineBuilder {
         self
     }
 
+    pub fn with_local_storage_party_id(mut self, party_id: usize) -> Self {
+        self.local_storage_party_id = Some(party_id);
+        self
+    }
+
     pub fn try_build(self) -> VirtualMachineResult<VirtualMachine> {
         let mut state_config = VMStateConfig::default().with_register_layout(self.register_layout);
         if let Some(table_memory) = self.table_memory {
@@ -162,6 +169,9 @@ impl VirtualMachineBuilder {
         }
         if let Some(local_storage) = self.local_storage {
             state_config = state_config.with_shared_local_storage(local_storage);
+        }
+        if let Some(party_id) = self.local_storage_party_id {
+            state_config = state_config.with_local_storage_party_id(party_id);
         }
         let mut vm = VirtualMachine::empty_with_state_config(state_config);
 

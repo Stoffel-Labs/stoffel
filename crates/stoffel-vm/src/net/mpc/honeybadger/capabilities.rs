@@ -5,11 +5,12 @@ use crate::net::client_store::{
 use crate::net::curve::SupportedMpcField;
 use crate::net::mpc_engine::{
     AsyncMpcEngine, AsyncMpcEngineClientOps, MpcEngine, MpcEngineClientOps, MpcEngineClientOutput,
-    MpcEngineMultiplication, MpcEngineOpenInExponent, MpcEngineOperationResultExt,
-    MpcEnginePreprocPersistence, MpcEngineRandomness, MpcEngineResult,
+    MpcEngineError, MpcEngineMultiplication, MpcEngineOpenInExponent, MpcEngineOperationResultExt,
+    MpcEnginePreprocPersistence, MpcEngineRandomness, MpcEngineResult, MpcExponentGroup,
 };
 use crate::storage::preproc::PreprocStore;
 use ark_ec::{CurveGroup, PrimeGroup};
+use std::any::TypeId;
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType};
 use stoffelnet::network_utils::ClientId;
@@ -73,6 +74,37 @@ where
     ) -> MpcEngineResult<Vec<u8>> {
         self.open_share_in_exp_impl(ty, share_bytes, generator_bytes)
             .map_mpc_engine_operation("open_share_in_exp")
+    }
+
+    fn supports_exponent_group(&self, group: MpcExponentGroup) -> bool {
+        match group {
+            MpcExponentGroup::Bls12381G2 => TypeId::of::<F>() == TypeId::of::<ark_bls12_381::Fr>(),
+            _ => self.native_exponent_group() == group,
+        }
+    }
+
+    fn open_share_in_exp_group(
+        &self,
+        group: MpcExponentGroup,
+        ty: ShareType,
+        share_bytes: &[u8],
+        generator_bytes: &[u8],
+    ) -> MpcEngineResult<Vec<u8>> {
+        if !self.supports_exponent_group(group) {
+            return Err(MpcEngineError::operation_failed(
+                "open_share_in_exp_group",
+                group.unsupported_error(self.protocol_name()),
+            ));
+        }
+
+        let result = match group {
+            MpcExponentGroup::Bls12381G2 => {
+                self.open_share_in_exp_bls12381_g2_impl(share_bytes, generator_bytes)
+            }
+            _ => self.open_share_in_exp_impl(ty, share_bytes, generator_bytes),
+        };
+
+        result.map_mpc_engine_operation("open_share_in_exp_group")
     }
 }
 
@@ -173,6 +205,34 @@ where
         self.open_share_in_exp_async_impl(ty, share_bytes, generator_bytes)
             .await
             .map_mpc_engine_operation("async_open_share_in_exp")
+    }
+
+    async fn open_share_in_exp_group_async(
+        &self,
+        group: MpcExponentGroup,
+        ty: ShareType,
+        share_bytes: &[u8],
+        generator_bytes: &[u8],
+    ) -> MpcEngineResult<Vec<u8>> {
+        if !self.supports_exponent_group(group) {
+            return Err(MpcEngineError::operation_failed(
+                "async_open_share_in_exp_group",
+                group.unsupported_error(self.protocol_name()),
+            ));
+        }
+
+        let result = match group {
+            MpcExponentGroup::Bls12381G2 => {
+                self.open_share_in_exp_bls12381_g2_async_impl(share_bytes, generator_bytes)
+                    .await
+            }
+            _ => {
+                self.open_share_in_exp_async_impl(ty, share_bytes, generator_bytes)
+                    .await
+            }
+        };
+
+        result.map_mpc_engine_operation("async_open_share_in_exp_group")
     }
 }
 

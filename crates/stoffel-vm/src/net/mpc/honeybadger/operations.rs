@@ -5,6 +5,7 @@ use crate::net::open_registry::{ExpOpenRegistryKind, ExpOpenRequest};
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use std::any::TypeId;
 use stoffel_vm_types::core_types::{ClearShareValue, ShareData, ShareType};
 use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -276,6 +277,151 @@ where
                         "deserialize partial point",
                         "zero denominator in Lagrange",
                         "serialize result",
+                    )
+                },
+            )
+            .await
+    }
+
+    pub fn open_share_in_exp_bls12381_g2_impl(
+        &self,
+        share_bytes: &[u8],
+        generator_g2_bytes: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        use ark_bls12_381::{Fr, G2Projective};
+
+        if TypeId::of::<F>() != TypeId::of::<Fr>() {
+            return Err(format!(
+                "MPC backend '{}' uses {:?}, which cannot open shares in bls12-381-g2",
+                self.protocol_name(),
+                F::CURVE_CONFIG
+            ));
+        }
+
+        let share = Self::decode_share(share_bytes)?;
+        let generator = G2Projective::deserialize_compressed(generator_g2_bytes)
+            .map_err(|e| format!("deserialize G2 generator: {}", e))?;
+
+        let mut share_value_bytes = Vec::new();
+        share.share[0]
+            .serialize_compressed(&mut share_value_bytes)
+            .map_err(|e| format!("serialize BLS12-381 scalar share: {}", e))?;
+        let share_value = Fr::deserialize_compressed(&share_value_bytes[..])
+            .map_err(|e| format!("deserialize BLS12-381 scalar share: {}", e))?;
+
+        let partial_point = generator * share_value;
+        let mut partial_bytes = Vec::new();
+        partial_point
+            .into_affine()
+            .serialize_compressed(&mut partial_bytes)
+            .map_err(|e| format!("serialize G2 partial point: {}", e))?;
+
+        let wire_message = crate::net::open_registry::encode_hb_open_exp_wire_message(
+            self.topology.instance_id(),
+            self.topology.party_id(),
+            share.id,
+            &partial_bytes,
+        )?;
+        self.broadcast_open_exp_payload_sync(wire_message)?;
+
+        let required = 2 * self.topology.threshold() + 1;
+        let n = self.topology.n_parties();
+        let domain = GeneralEvaluationDomain::<Fr>::new(n)
+            .ok_or_else(|| "No suitable FFT domain".to_string())?;
+
+        self.open_registry.exp_open_wait(
+            ExpOpenRequest {
+                kind: ExpOpenRegistryKind::G1,
+                party_id: self.topology.party_id(),
+                share_id: share.id,
+                partial_point: &partial_bytes,
+                required,
+                timeout_message: "Timeout waiting for BLS12-381 G2 open_share_in_exp contributions",
+            },
+            |partial_points| {
+                crate::net::group_interpolation::interpolate_compressed_group_points::<
+                    Fr,
+                    G2Projective,
+                    _,
+                >(
+                    partial_points,
+                    |id| Ok(domain.element(id)),
+                    "deserialize G2 partial point",
+                    "zero denominator in BLS12-381 G2 Lagrange",
+                    "serialize G2 result",
+                )
+            },
+        )
+    }
+
+    pub async fn open_share_in_exp_bls12381_g2_async_impl(
+        &self,
+        share_bytes: &[u8],
+        generator_g2_bytes: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        use ark_bls12_381::{Fr, G2Projective};
+
+        if TypeId::of::<F>() != TypeId::of::<Fr>() {
+            return Err(format!(
+                "MPC backend '{}' uses {:?}, which cannot open shares in bls12-381-g2",
+                self.protocol_name(),
+                F::CURVE_CONFIG
+            ));
+        }
+
+        let share = Self::decode_share(share_bytes)?;
+        let generator = G2Projective::deserialize_compressed(generator_g2_bytes)
+            .map_err(|e| format!("deserialize G2 generator: {}", e))?;
+
+        let mut share_value_bytes = Vec::new();
+        share.share[0]
+            .serialize_compressed(&mut share_value_bytes)
+            .map_err(|e| format!("serialize BLS12-381 scalar share: {}", e))?;
+        let share_value = Fr::deserialize_compressed(&share_value_bytes[..])
+            .map_err(|e| format!("deserialize BLS12-381 scalar share: {}", e))?;
+
+        let partial_point = generator * share_value;
+        let mut partial_bytes = Vec::new();
+        partial_point
+            .into_affine()
+            .serialize_compressed(&mut partial_bytes)
+            .map_err(|e| format!("serialize G2 partial point: {}", e))?;
+
+        let wire_message = crate::net::open_registry::encode_hb_open_exp_wire_message(
+            self.topology.instance_id(),
+            self.topology.party_id(),
+            share.id,
+            &partial_bytes,
+        )?;
+        self.broadcast_open_exp_payload(wire_message).await?;
+
+        let required = 2 * self.topology.threshold() + 1;
+        let n = self.topology.n_parties();
+        let domain = GeneralEvaluationDomain::<Fr>::new(n)
+            .ok_or_else(|| "No suitable FFT domain".to_string())?;
+
+        self.open_registry
+            .exp_open_async(
+                ExpOpenRequest {
+                    kind: ExpOpenRegistryKind::G1,
+                    party_id: self.topology.party_id(),
+                    share_id: share.id,
+                    partial_point: &partial_bytes,
+                    required,
+                    timeout_message:
+                        "Timeout waiting for BLS12-381 G2 open_share_in_exp contributions",
+                },
+                |partial_points| {
+                    crate::net::group_interpolation::interpolate_compressed_group_points::<
+                        Fr,
+                        G2Projective,
+                        _,
+                    >(
+                        partial_points,
+                        |id| Ok(domain.element(id)),
+                        "deserialize G2 partial point",
+                        "zero denominator in BLS12-381 G2 Lagrange",
+                        "serialize G2 result",
                     )
                 },
             )

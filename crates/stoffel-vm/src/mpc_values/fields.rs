@@ -28,7 +28,6 @@ pub mod aba_fields {
 }
 
 /// Field name constants for AVSS share objects.
-#[cfg(feature = "avss")]
 pub mod avss_fields {
     pub const TYPE: &str = "__type";
     pub const KEY_NAME: &str = "__key_name";

@@ -1,15 +1,10 @@
 use super::*;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use ark_bls12_381::Fr;
-#[cfg(feature = "avss")]
 use ark_bls12_381::G1Projective as G1;
 use std::num::NonZeroUsize;
 use stoffel_vm_types::core_types::{ShareData, ShareType};
-#[cfg(feature = "avss")]
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffelmpc_mpc::common::SecretSharingScheme;
-#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 
 #[test]
@@ -35,7 +30,6 @@ fn client_output_share_count_rejects_zero() {
 }
 
 #[test]
-#[cfg(feature = "honeybadger")]
 fn test_store_and_retrieve() {
     let store = ClientInputStore::new();
     let client_id = 42;
@@ -57,7 +51,6 @@ fn test_store_and_retrieve() {
 }
 
 #[test]
-#[cfg(feature = "honeybadger")]
 fn replace_client_input_replaces_existing_entries() {
     let store = ClientInputStore::new();
     let mut rng = ark_std::test_rng();
@@ -81,7 +74,6 @@ fn replace_client_input_replaces_existing_entries() {
 }
 
 #[test]
-#[cfg(feature = "honeybadger")]
 fn test_get_specific_share() {
     let store = ClientInputStore::new();
     let client_id = 99;
@@ -99,7 +91,6 @@ fn test_get_specific_share() {
 }
 
 #[test]
-#[cfg(feature = "avss")]
 fn test_store_and_retrieve_feldman() {
     let store = ClientInputStore::new();
     let client_id = 55;

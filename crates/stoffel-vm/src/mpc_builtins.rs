@@ -32,7 +32,6 @@
 use crate::core_vm::VirtualMachine;
 use crate::VirtualMachineResult;
 
-#[cfg(feature = "avss")]
 mod avss;
 mod bytes;
 mod consensus;
@@ -43,7 +42,6 @@ mod share;
 pub use crate::mpc_values::{
     aba_fields, rbc_fields, share_fields, share_object, MpcValueError, MpcValueResult,
 };
-#[cfg(feature = "avss")]
 pub use crate::mpc_values::{avss_fields, avss_object};
 
 const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
@@ -68,6 +66,7 @@ const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Share.commitment_count",
     "Share.has_commitments",
     "Share.mul_field",
+    "Share.add_field",
     "Share.open_field",
     "Share.open_exp_custom",
     "Bytes.concat",
@@ -100,7 +99,6 @@ const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Aba.propose_and_wait",
 ];
 
-#[cfg(feature = "avss")]
 const AVSS_BUILTIN_FUNCTIONS: &[&str] = &[
     "Avss.get_commitment",
     "Avss.get_key_name",
@@ -111,7 +109,6 @@ const AVSS_BUILTIN_FUNCTIONS: &[&str] = &[
 /// Try to register all MPC builtin functions with the VM.
 pub fn try_register_mpc_builtins(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     vm.ensure_function_names_available(MPC_BUILTIN_FUNCTIONS, "MPC builtins")?;
-    #[cfg(feature = "avss")]
     vm.ensure_function_names_available(AVSS_BUILTIN_FUNCTIONS, "AVSS builtins")?;
     register_mpc_builtins_unchecked(vm)
 }
@@ -129,7 +126,6 @@ fn register_mpc_builtins_unchecked(vm: &mut VirtualMachine) -> VirtualMachineRes
     consensus::register_aba(vm)?;
     crypto::register(vm)?;
     bytes::register(vm)?;
-    #[cfg(feature = "avss")]
     avss::register(vm)?;
     Ok(())
 }

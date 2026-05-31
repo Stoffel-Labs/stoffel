@@ -595,8 +595,8 @@ impl VMState {
 
         if configured_identity != async_identity {
             return Err(VmError::AsyncMpcEngineMismatch {
-                runtime: async_identity,
-                configured: configured_identity,
+                runtime: Box::new(async_identity),
+                configured: Box::new(configured_identity),
             });
         }
 

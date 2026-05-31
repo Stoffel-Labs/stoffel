@@ -54,13 +54,9 @@ impl<'a> ForeignFunctionContext<'a> {
             .services
             .create_share_object_value(share_type, share_data, party_id)?)
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn is_avss_share_object(&mut self, value: &Value) -> bool {
         self.services.is_avss_share_object(value)
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn avss_commitment(
         &mut self,
         value: &Value,
@@ -68,13 +64,9 @@ impl<'a> ForeignFunctionContext<'a> {
     ) -> ForeignFunctionCallbackResult<Vec<u8>> {
         Ok(self.services.avss_commitment(value, index)?)
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn avss_key_name(&mut self, value: &Value) -> ForeignFunctionCallbackResult<String> {
         Ok(self.services.avss_key_name(value)?)
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn avss_commitment_count(
         &mut self,
         value: &Value,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::net::mpc_engine::MpcEngine;
+use crate::net::mpc_engine::{DurableIdentityDigest, MpcEngine};
 use crate::storage::preproc::{self, LmdbPreprocStore, PreprocBlob, PreprocKeyScope, PreprocStore};
 use ark_bls12_381::{Fr, G1Projective as G1};
 use ark_ec::{CurveGroup, PrimeGroup};
@@ -203,7 +203,7 @@ async fn preprocess_reserves_persistent_avss_random_shares_when_loaded() {
         crate::net::curve::MpcFieldKind::Bls12_381Fr,
         n,
         t,
-        party_id,
+        DurableIdentityDigest::from_legacy_party_id(party_id),
     );
     let key = scope.random_share();
     let shares = generate_feldman_shares(Fr::from(77u64), 3, t);

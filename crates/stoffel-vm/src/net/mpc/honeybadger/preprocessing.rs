@@ -59,14 +59,14 @@ where
             (Some(s), Some(h)) => (s, h),
             _ => return Ok(false),
         };
-        let persistent_party_id = self.persistent_party_id.load(Ordering::SeqCst);
+        let persistent_identity = self.persistent_identity();
 
         let scope = PreprocKeyScope::new(
             hash,
             F::field_kind(),
             self.topology.n_parties(),
             self.topology.threshold(),
-            persistent_party_id,
+            persistent_identity,
         );
         let base = scope.beaver_triple();
         let k_rs = scope.random_share();
@@ -81,9 +81,9 @@ where
 
         if triples.is_none() && randoms.is_none() && prandbits.is_none() && prandints.is_none() {
             let msg = format!(
-                "No preprocessing material found in store for program {} (party_id={}, n={}, t={})",
+                "No preprocessing material found in store for program {} (identity={}, n={}, t={})",
                 hex::encode(hash),
-                persistent_party_id,
+                persistent_identity,
                 self.topology.n_parties(),
                 self.topology.threshold()
             );
@@ -185,9 +185,9 @@ where
             && loaded_prandints == 0
         {
             let msg = format!(
-                "No unconsumed preprocessing material found in store for program {} (party_id={}, n={}, t={})",
+                "No unconsumed preprocessing material found in store for program {} (identity={}, n={}, t={})",
                 hex::encode(hash),
-                persistent_party_id,
+                persistent_identity,
                 self.topology.n_parties(),
                 self.topology.threshold()
             );
@@ -197,9 +197,9 @@ where
         }
 
         let msg = format!(
-            "Loaded preprocessing material from store for program {} (party_id={}, n={}, t={}, triples={}, randoms={}, prandbits={}, prandints={})",
+            "Loaded preprocessing material from store for program {} (identity={}, n={}, t={}, triples={}, randoms={}, prandbits={}, prandints={})",
             hex::encode(hash),
-            persistent_party_id,
+            persistent_identity,
             self.topology.n_parties(),
             self.topology.threshold(),
             loaded_triples,
@@ -210,11 +210,6 @@ where
         eprintln!("{msg}");
         tracing::info!("{msg}");
         Ok(true)
-    }
-
-    pub fn set_preproc_store_party_id(&self, persistent_party_id: usize) {
-        self.persistent_party_id
-            .store(persistent_party_id, Ordering::SeqCst);
     }
 
     /// Persist current preprocessing material to the store.
@@ -228,14 +223,14 @@ where
             (Some(s), Some(h)) => (s, h),
             _ => return Ok(()),
         };
-        let persistent_party_id = self.persistent_party_id.load(Ordering::SeqCst);
+        let persistent_identity = self.persistent_identity();
 
         let scope = PreprocKeyScope::new(
             hash,
             F::field_kind(),
             self.topology.n_parties(),
             self.topology.threshold(),
-            persistent_party_id,
+            persistent_identity,
         );
         let base = scope.beaver_triple();
 
@@ -303,9 +298,9 @@ where
         }
 
         let msg = format!(
-            "Persisted preprocessing material to store for program {} (party_id={}, n={}, t={}, blobs={})",
+            "Persisted preprocessing material to store for program {} (identity={}, n={}, t={}, blobs={})",
             hex::encode(hash),
-            persistent_party_id,
+            persistent_identity,
             self.topology.n_parties(),
             self.topology.threshold(),
             to_store.len()

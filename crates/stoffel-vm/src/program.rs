@@ -119,12 +119,16 @@ enum RegisteredFunction {
 #[derive(Clone, Default)]
 pub struct Program {
     functions: FxHashMap<String, RegisteredFunction>,
+    methods: FxHashMap<(String, String), String>,
+    method_receivers: FxHashMap<String, Vec<String>>,
 }
 
 impl Program {
     pub fn new() -> Self {
         Self {
             functions: FxHashMap::default(),
+            methods: FxHashMap::default(),
+            method_receivers: FxHashMap::default(),
         }
     }
 
@@ -152,6 +156,34 @@ impl Program {
         Ok(())
     }
 
+    pub fn try_insert_method(
+        &mut self,
+        receiver_type: &str,
+        method_name: &str,
+        function: Function,
+    ) -> VmResult<()> {
+        let canonical_name = function.name().to_owned();
+        let method_key = (receiver_type.to_owned(), method_name.to_owned());
+
+        if self.methods.contains_key(&method_key) {
+            return Err(VmError::MethodAlreadyRegistered {
+                receiver_type: receiver_type.to_owned(),
+                method: method_name.to_owned(),
+            });
+        }
+
+        if !self.functions.contains_key(&canonical_name) {
+            self.try_insert(function)?;
+        }
+
+        self.methods.insert(method_key, canonical_name);
+        self.method_receivers
+            .entry(method_name.to_owned())
+            .or_default()
+            .push(receiver_type.to_owned());
+        Ok(())
+    }
+
     pub fn contains(&self, name: &str) -> bool {
         self.functions.contains_key(name)
     }
@@ -172,6 +204,20 @@ impl Program {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn method_target_name(
+        &self,
+        receiver_type: &str,
+        method_name: &str,
+    ) -> Option<&str> {
+        self.methods
+            .get(&(receiver_type.to_owned(), method_name.to_owned()))
+            .map(String::as_str)
+    }
+
+    pub(crate) fn receiver_types_for_method(&self, method_name: &str) -> Option<&[String]> {
+        self.method_receivers.get(method_name).map(Vec::as_slice)
     }
 
     pub(crate) fn call_target(&self, name: &str) -> VmResult<CallTarget> {

@@ -1,45 +1,28 @@
+use alloy::signers::local::PrivateKeySigner;
+use alloy_primitives::Address;
+use ark_ec::{CurveGroup, PrimeGroup};
+use ark_ff::{BigInteger, PrimeField};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::env;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use std::fs;
+use std::fs::File;
 use std::net::SocketAddr;
 use std::process::exit;
 use std::str::FromStr;
-
-#[cfg(feature = "honeybadger")]
-use alloy::signers::local::PrivateKeySigner;
-#[cfg(feature = "honeybadger")]
-use alloy_primitives::Address;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
-use ark_ec::{CurveGroup, PrimeGroup};
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
-use ark_ff::{BigInteger, PrimeField};
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
-use serde::{Deserialize, Serialize};
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
-use std::collections::HashSet;
-use std::fs::File;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffel_mpc_coordinator::off_chain::node_rpc::{
     NodeRPCClient as OffChainNodeRPCClient, NodeRPCServer as OffChainNodeRPCServer,
 };
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffel_mpc_coordinator::off_chain::OffChainCoordinatorClient;
-#[cfg(feature = "honeybadger")]
 use stoffel_mpc_coordinator::on_chain;
-#[cfg(feature = "honeybadger")]
 use stoffel_mpc_coordinator::on_chain::node_rpc::NodeRPCClient as OnChainNodeRPCClient;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffel_mpc_coordinator::{Coordinator, Round};
 use stoffel_vm::core_vm::VirtualMachine;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffel_vm::net::curve::{field_from_i64, field_to_i64, SupportedMpcField};
-#[cfg(feature = "honeybadger")]
 use stoffel_vm::net::hb_engine::HoneyBadgerMpcEngine;
-#[cfg(feature = "honeybadger")]
-use stoffel_vm::net::mpc_engine::MpcEngine;
-#[cfg(feature = "honeybadger")]
+use stoffel_vm::net::mpc_engine::{DurableIdentityDigest, MpcEngine, MpcSessionTopology};
 use stoffel_vm::net::{
     avss_protocol_instance_id, honeybadger_node_opts, honeybadger_protocol_instance_id,
     spawn_receive_loops_split,
@@ -50,55 +33,31 @@ use stoffel_vm::net::{
 };
 use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 use stoffel_vm::runtime_hooks::{HookContext, HookEvent};
-#[cfg(feature = "honeybadger")]
 use stoffel_vm::storage::preproc::LmdbPreprocStore;
 use stoffel_vm::storage::RedbLocalStorage;
-use stoffel_vm_types::compiled_binary::CompiledBinary;
+use stoffel_vm_types::compiled_binary::{CompiledBinary, MPC_BACKEND_MANIFEST_FORMAT_VERSION};
 use stoffel_vm_types::core_types::Value;
-#[cfg(feature = "avss")]
 use stoffelmpc_mpc::avss_mpc::{AvssMPCClient, AvssSessionId};
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
-#[cfg(feature = "avss")]
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
-#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::common::MPCProtocol;
-#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::honeybadger::SessionId as HbSessionId;
-#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::honeybadger::{HoneyBadgerMPCClient, HoneyBadgerMPCNode};
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffelnet::network_utils::ClientId;
 use stoffelnet::network_utils::Network;
 use stoffelnet::transports::quic::{NetworkManager, QuicNetworkManager};
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use tokio::sync::mpsc;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use x509_parser::prelude::*;
-
-#[cfg(feature = "honeybadger")]
 type HbCoordinatorShare<F> = RobustShare<F>;
-#[cfg(feature = "honeybadger")]
 type HbOffChainCoordinator<F> = OffChainCoordinatorClient<F, HbCoordinatorShare<F>>;
-#[cfg(feature = "honeybadger")]
 type HbOffChainNodeRpcClient<F> = OffChainNodeRPCClient<F, HbCoordinatorShare<F>>;
-#[cfg(feature = "honeybadger")]
 type HbOffChainNodeRpcServer<F> = OffChainNodeRPCServer<F, HbCoordinatorShare<F>>;
-#[cfg(feature = "honeybadger")]
 type HbOnChainNodeRpcClient<F> = OnChainNodeRPCClient<F, HbCoordinatorShare<F>>;
-
-#[cfg(feature = "avss")]
 type AvssCoordinatorShare<F, G> = FeldmanShamirShare<F, G>;
-#[cfg(feature = "avss")]
 type AvssOffChainCoordinator<F, G> = OffChainCoordinatorClient<F, AvssCoordinatorShare<F, G>>;
-#[cfg(feature = "avss")]
 type AvssOffChainNodeRpcClient<F, G> = OffChainNodeRPCClient<F, AvssCoordinatorShare<F, G>>;
-#[cfg(feature = "avss")]
 type AvssOffChainNodeRpcServer<F, G> = OffChainNodeRPCServer<F, AvssCoordinatorShare<F, G>>;
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 fn extract_pubkey_from_cert(cert_der: &[u8]) -> Vec<u8> {
     let (_, parsed) = X509Certificate::from_der(cert_der).expect("parse X.509 cert");
     parsed
@@ -109,16 +68,89 @@ fn extract_pubkey_from_cert(cert_der: &[u8]) -> Vec<u8> {
         .to_vec()
 }
 
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
-fn format_coordinator_outputs<F>(outputs: &[F]) -> String
+fn durable_identity_from_cert(cert_der: &[u8]) -> DurableIdentityDigest {
+    DurableIdentityDigest::from_cert_der(cert_der).unwrap_or_else(|error| {
+        eprintln!("Error: failed to derive durable identity from certificate: {error}");
+        exit(2);
+    })
+}
+
+fn required_storage_identity(
+    cert_der: &Option<Vec<u8>>,
+    key_der: &Option<Vec<u8>>,
+    storage_enabled: bool,
+) -> Option<DurableIdentityDigest> {
+    if !storage_enabled {
+        return None;
+    }
+    let cert = cert_der.as_ref().unwrap_or_else(|| {
+        eprintln!("Error: --cert is required when persistent VM/preprocessing storage is enabled");
+        exit(2);
+    });
+    let _key = key_der.as_ref().unwrap_or_else(|| {
+        eprintln!("Error: --key is required when persistent VM/preprocessing storage is enabled");
+        exit(2);
+    });
+    Some(durable_identity_from_cert(cert))
+}
+#[derive(Debug, Clone, Copy)]
+enum CoordinatorOutputFormat {
+    FieldInteger,
+    FixedPoint { fractional_bits: usize },
+}
+fn render_fixed_point_i64(scaled: i64, fractional_bits: usize) -> Option<String> {
+    let scale = 1_i128.checked_shl(u32::try_from(fractional_bits).ok()?)?;
+    if scale == 0 {
+        return None;
+    }
+
+    let scaled = i128::from(scaled);
+    let negative = scaled < 0;
+    let magnitude = scaled.abs();
+    let whole = magnitude / scale;
+    let mut remainder = magnitude % scale;
+
+    if remainder == 0 {
+        return Some(if negative {
+            format!("-{whole}")
+        } else {
+            whole.to_string()
+        });
+    }
+
+    let mut fractional = String::new();
+    while remainder != 0 {
+        remainder *= 10;
+        let digit = remainder / scale;
+        fractional.push(char::from(b'0' + u8::try_from(digit).ok()?));
+        remainder %= scale;
+    }
+
+    Some(if negative {
+        format!("-{whole}.{fractional}")
+    } else {
+        format!("{whole}.{fractional}")
+    })
+}
+fn format_coordinator_outputs<F>(outputs: &[F], output_format: CoordinatorOutputFormat) -> String
 where
     F: PrimeField + Copy + PartialEq + std::fmt::Debug,
 {
     let rendered = outputs
         .iter()
         .copied()
-        .map(|output| match field_to_i64(output) {
-            Ok(signed) if field_from_i64::<F>(signed) == output => signed.to_string(),
+        .map(|output| match (field_to_i64(output), output_format) {
+            (Ok(signed), CoordinatorOutputFormat::FieldInteger)
+                if field_from_i64::<F>(signed) == output =>
+            {
+                signed.to_string()
+            }
+            (Ok(signed), CoordinatorOutputFormat::FixedPoint { fractional_bits })
+                if field_from_i64::<F>(signed) == output =>
+            {
+                render_fixed_point_i64(signed, fractional_bits)
+                    .unwrap_or_else(|| format!("{output:?}"))
+            }
             _ => format!("{output:?}"),
         })
         .collect::<Vec<_>>()
@@ -126,21 +158,59 @@ where
 
     format!("[{}]", rendered)
 }
-
-#[cfg(feature = "honeybadger")]
+trait ReservedMaskIndices {
+    fn into_reserved_indices(self) -> Vec<u64>;
+}
+impl ReservedMaskIndices for u64 {
+    fn into_reserved_indices(self) -> Vec<u64> {
+        vec![self]
+    }
+}
+impl ReservedMaskIndices for Vec<u64> {
+    fn into_reserved_indices(self) -> Vec<u64> {
+        self
+    }
+}
+fn normalize_client_to_indices<I, V>(
+    client_to_indices: std::collections::HashMap<I, V>,
+) -> std::collections::HashMap<I, Vec<u64>>
+where
+    I: Eq + std::hash::Hash,
+    V: ReservedMaskIndices,
+{
+    client_to_indices
+        .into_iter()
+        .map(|(client_id, indices)| (client_id, indices.into_reserved_indices()))
+        .collect()
+}
 fn store_reserved_client_inputs<F, I>(
     vm: &mut VirtualMachine,
-    client_to_index: &std::collections::HashMap<I, u64>,
+    client_to_indices: &std::collections::HashMap<I, Vec<u64>>,
     client_inputs: std::collections::HashMap<I, Vec<RobustShare<F>>>,
+    client_input_count: usize,
 ) where
     F: ark_ff::FftField,
     I: Eq + std::hash::Hash + std::fmt::Debug,
 {
+    if client_input_count == 0 {
+        eprintln!("--client-input-count must be greater than 0");
+        exit(13);
+    }
+
     let mut seen_reserved_indices = std::collections::HashSet::new();
+    let mut grouped_inputs: std::collections::BTreeMap<usize, Vec<Option<RobustShare<F>>>> =
+        std::collections::BTreeMap::new();
 
     for (client_id, shares) in client_inputs {
-        let reserved_index = match client_to_index.get(&client_id).copied() {
-            Some(index) => index,
+        if shares.is_empty() {
+            eprintln!(
+                "Coordinator returned zero input shares for client {:?}",
+                client_id
+            );
+            exit(13);
+        }
+        let reserved_indices = match client_to_indices.get(&client_id) {
+            Some(indices) => indices,
             None => {
                 eprintln!(
                     "Coordinator returned input for client {:?} without a reserved index",
@@ -149,50 +219,108 @@ fn store_reserved_client_inputs<F, I>(
                 exit(13);
             }
         };
-
-        let reserved_index = if reserved_index > usize::MAX as u64 {
+        if reserved_indices.len() != shares.len() {
             eprintln!(
-                "Coordinator reserved index {} exceeds local usize range",
-                reserved_index
-            );
-            exit(13);
-        } else {
-            reserved_index as usize
-        };
-
-        if !seen_reserved_indices.insert(reserved_index) {
-            eprintln!(
-                "Coordinator assigned duplicate reserved index {} while collecting inputs",
-                reserved_index
+                "Coordinator returned {} input shares for client {:?}, but {} reserved indices were recorded",
+                shares.len(),
+                client_id,
+                reserved_indices.len()
             );
             exit(13);
         }
 
-        if let Err(error) = vm.try_store_client_input(reserved_index, shares) {
+        let mut indexed_shares: Vec<(u64, RobustShare<F>)> =
+            reserved_indices.iter().copied().zip(shares).collect();
+        indexed_shares.sort_by_key(|(reserved_index, _)| *reserved_index);
+
+        for (reserved_index, share) in indexed_shares {
+            if reserved_index > usize::MAX as u64 {
+                eprintln!(
+                    "Coordinator reserved index {} exceeds local usize range",
+                    reserved_index
+                );
+                exit(13);
+            }
+
+            let reserved_index = reserved_index as usize;
+            if !seen_reserved_indices.insert(reserved_index) {
+                eprintln!(
+                    "Coordinator assigned duplicate reserved index {} while collecting inputs",
+                    reserved_index
+                );
+                exit(13);
+            }
+
+            let client_store_index = reserved_index / client_input_count;
+            let client_share_index = reserved_index % client_input_count;
+            let client_shares = grouped_inputs.entry(client_store_index).or_insert_with(|| {
+                std::iter::repeat_with(|| None)
+                    .take(client_input_count)
+                    .collect()
+            });
+            if client_shares[client_share_index].replace(share).is_some() {
+                eprintln!(
+                    "Coordinator assigned duplicate share index {} for client store index {}",
+                    client_share_index, client_store_index
+                );
+                exit(13);
+            }
+        }
+    }
+
+    for (client_store_index, client_shares) in grouped_inputs {
+        let mut shares = Vec::with_capacity(client_input_count);
+        for (share_index, share) in client_shares.into_iter().enumerate() {
+            let Some(share) = share else {
+                eprintln!(
+                    "Coordinator did not provide share index {} for client store index {}",
+                    share_index, client_store_index
+                );
+                exit(13);
+            };
+            shares.push(share);
+        }
+
+        if let Err(error) = vm.try_store_client_input(client_store_index, shares) {
             eprintln!(
                 "Failed to store input shares for reserved client index {}: {}",
-                reserved_index, error
+                client_store_index, error
             );
             exit(13);
         }
     }
 }
-
-#[cfg(feature = "avss")]
 fn store_reserved_client_inputs_feldman<F, G, I>(
     vm: &mut VirtualMachine,
-    client_to_index: &std::collections::HashMap<I, u64>,
+    client_to_indices: &std::collections::HashMap<I, Vec<u64>>,
     client_inputs: std::collections::HashMap<I, Vec<FeldmanShamirShare<F, G>>>,
+    client_input_count: usize,
 ) where
     F: SupportedMpcField,
     G: CurveGroup<ScalarField = F>,
     I: Eq + std::hash::Hash + std::fmt::Debug,
 {
+    if client_input_count == 0 {
+        eprintln!("--client-input-count must be greater than 0");
+        exit(13);
+    }
+
     let mut seen_reserved_indices = std::collections::HashSet::new();
+    let mut grouped_inputs: std::collections::BTreeMap<
+        usize,
+        Vec<Option<FeldmanShamirShare<F, G>>>,
+    > = std::collections::BTreeMap::new();
 
     for (client_id, shares) in client_inputs {
-        let reserved_index = match client_to_index.get(&client_id).copied() {
-            Some(index) => index,
+        if shares.is_empty() {
+            eprintln!(
+                "Coordinator returned zero AVSS input shares for client {:?}",
+                client_id
+            );
+            exit(13);
+        }
+        let reserved_indices = match client_to_indices.get(&client_id) {
+            Some(indices) => indices,
             None => {
                 eprintln!(
                     "Coordinator returned input for client {:?} without a reserved index",
@@ -201,40 +329,81 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
                 exit(13);
             }
         };
-
-        let reserved_index = if reserved_index > usize::MAX as u64 {
+        if reserved_indices.len() != shares.len() {
             eprintln!(
-                "Coordinator reserved index {} exceeds local usize range",
-                reserved_index
-            );
-            exit(13);
-        } else {
-            reserved_index as usize
-        };
-
-        if !seen_reserved_indices.insert(reserved_index) {
-            eprintln!(
-                "Coordinator assigned duplicate reserved index {} while collecting inputs",
-                reserved_index
+                "Coordinator returned {} AVSS input shares for client {:?}, but {} reserved indices were recorded",
+                shares.len(),
+                client_id,
+                reserved_indices.len()
             );
             exit(13);
         }
 
-        if let Err(error) = vm.try_store_client_input_feldman(reserved_index, shares) {
+        let mut indexed_shares: Vec<(u64, FeldmanShamirShare<F, G>)> =
+            reserved_indices.iter().copied().zip(shares).collect();
+        indexed_shares.sort_by_key(|(reserved_index, _)| *reserved_index);
+
+        for (reserved_index, share) in indexed_shares {
+            if reserved_index > usize::MAX as u64 {
+                eprintln!(
+                    "Coordinator reserved index {} exceeds local usize range",
+                    reserved_index
+                );
+                exit(13);
+            }
+
+            let reserved_index = reserved_index as usize;
+            if !seen_reserved_indices.insert(reserved_index) {
+                eprintln!(
+                    "Coordinator assigned duplicate reserved index {} while collecting inputs",
+                    reserved_index
+                );
+                exit(13);
+            }
+
+            let client_store_index = reserved_index / client_input_count;
+            let client_share_index = reserved_index % client_input_count;
+            let client_shares = grouped_inputs.entry(client_store_index).or_insert_with(|| {
+                std::iter::repeat_with(|| None)
+                    .take(client_input_count)
+                    .collect()
+            });
+            if client_shares[client_share_index].replace(share).is_some() {
+                eprintln!(
+                    "Coordinator assigned duplicate share index {} for client store index {}",
+                    client_share_index, client_store_index
+                );
+                exit(13);
+            }
+        }
+    }
+
+    for (client_store_index, client_shares) in grouped_inputs {
+        let mut shares = Vec::with_capacity(client_input_count);
+        for (share_index, share) in client_shares.into_iter().enumerate() {
+            let Some(share) = share else {
+                eprintln!(
+                    "Coordinator did not provide share index {} for client store index {}",
+                    share_index, client_store_index
+                );
+                exit(13);
+            };
+            shares.push(share);
+        }
+
+        if let Err(error) = vm.try_store_client_input_feldman(client_store_index, shares) {
             eprintln!(
                 "Failed to store AVSS input shares for reserved client index {}: {}",
-                reserved_index, error
+                client_store_index, error
             );
             exit(13);
         }
     }
 }
-
-#[cfg(feature = "honeybadger")]
 fn configure_hb_preproc_store<F, G>(
     engine: &Arc<HoneyBadgerMpcEngine<F, G>>,
     program_hash: [u8; 32],
-    persistent_party_id: usize,
+    persistent_identity: DurableIdentityDigest,
     preproc_store_path: Option<&str>,
 ) -> Result<(), String>
 where
@@ -249,11 +418,9 @@ where
     engine
         .preproc_persistence_ops()?
         .set_preproc_store(store, program_hash)?;
-    engine.set_preproc_store_party_id(persistent_party_id);
+    engine.set_preproc_store_identity(persistent_identity);
     Ok(())
 }
-
-#[cfg(feature = "honeybadger")]
 async fn load_reserved_mask_share<F, G>(
     engine: &Arc<HoneyBadgerMpcEngine<F, G>>,
     reserved_index: u64,
@@ -267,8 +434,6 @@ where
     ark_serialize::CanonicalDeserialize::deserialize_compressed(share_bytes.as_slice())
         .map_err(|e| format!("deserialize reserved mask share {reserved_index}: {:?}", e))
 }
-
-#[cfg(feature = "honeybadger")]
 async fn load_reserved_mask_shares<F, G>(
     engine: &Arc<HoneyBadgerMpcEngine<F, G>>,
     capacity: usize,
@@ -316,13 +481,10 @@ where
 /// protocol party IDs before messages enter MPC code. Sends use the explicit
 /// server IDs registered from `--servers`, so they are already in protocol
 /// party order.
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 struct ClientNetworkAdapter {
     inner: QuicNetworkManager,
     local_position: usize,
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 #[async_trait::async_trait]
 impl Network for ClientNetworkAdapter {
     type NodeType = <QuicNetworkManager as Network>::NodeType;
@@ -439,14 +601,11 @@ impl Network for ClientNetworkAdapter {
 /// (0, 1, ...) back to transport client IDs for send_to_client().
 /// The MPC protocol uses small indices (because session_id only has 8 bits),
 /// and the network layer exposes clients in canonical sorted transport order.
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 struct ServerClientAdapter {
     inner: QuicNetworkManager,
     /// Maps sequential index to transport client ID.
     client_id_map: Vec<ClientId>,
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 #[async_trait::async_trait]
 impl Network for ServerClientAdapter {
     type NodeType = <QuicNetworkManager as Network>::NodeType;
@@ -562,15 +721,11 @@ fn print_vm_result(vm: &mut VirtualMachine, result: Value) {
         _ => println!("Program returned: {:?}", result),
     }
 }
-
-#[cfg(feature = "honeybadger")]
 fn coordinator_output_share_bytes(vm: &mut VirtualMachine, result: &Value) -> Option<Vec<u8>> {
     vm.read_share_object(result)
         .ok()
         .map(|(_ty, share_data)| share_data.as_bytes().to_vec())
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 fn parse_inputs_as_field<F: PrimeField>(inputs_str: &str) -> Vec<F> {
     inputs_str
         .split(',')
@@ -596,8 +751,6 @@ fn parse_inputs_as_field<F: PrimeField>(inputs_str: &str) -> Vec<F> {
         })
         .collect()
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 fn field_outputs_to_hex<F: PrimeField>(outputs: &[F], curve_config: MpcCurveConfig) -> String {
     let mut bytes = Vec::new();
     for output in outputs {
@@ -616,8 +769,6 @@ fn field_outputs_to_hex<F: PrimeField>(outputs: &[F], curve_config: MpcCurveConf
     }
     hex::encode(bytes)
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 fn fixed_width_be_bytes(bytes: &[u8], width: usize) -> Vec<u8> {
     let significant = bytes
         .iter()
@@ -634,7 +785,6 @@ fn fixed_width_be_bytes(bytes: &[u8], width: usize) -> Vec<u8> {
 }
 
 /// Connect to all MPC servers with retry logic, spawning a receive loop per connection.
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 async fn connect_to_all_servers(
     network: &Arc<tokio::sync::Mutex<QuicNetworkManager>>,
     server_addrs: &[SocketAddr],
@@ -748,25 +898,17 @@ async fn connect_to_all_servers(
         });
     }
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 const CLIENT_SET_SYNC_PREFIX: &[u8; 4] = b"CSS1";
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClientSetSyncMessage {
     sender_party_id: usize,
     client_ids: Vec<ClientId>,
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 fn normalize_client_ids(mut ids: Vec<ClientId>) -> Vec<ClientId> {
     ids.sort_unstable();
     ids.dedup();
     ids
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 fn encode_client_set_sync(msg: &ClientSetSyncMessage) -> Result<Vec<u8>, String> {
     let payload = bincode::serialize(msg)
         .map_err(|e| format!("Failed to serialize client-set sync payload: {}", e))?;
@@ -775,8 +917,6 @@ fn encode_client_set_sync(msg: &ClientSetSyncMessage) -> Result<Vec<u8>, String>
     out.extend_from_slice(&payload);
     Ok(out)
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 fn decode_client_set_sync(bytes: &[u8]) -> Result<ClientSetSyncMessage, String> {
     if bytes.len() < CLIENT_SET_SYNC_PREFIX.len()
         || &bytes[..CLIENT_SET_SYNC_PREFIX.len()] != CLIENT_SET_SYNC_PREFIX
@@ -787,8 +927,6 @@ fn decode_client_set_sync(bytes: &[u8]) -> Result<ClientSetSyncMessage, String> 
     bincode::deserialize(&bytes[CLIENT_SET_SYNC_PREFIX.len()..])
         .map_err(|e| format!("Failed to deserialize client-set sync payload: {}", e))
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 async fn sync_client_set_across_parties(
     net: Arc<QuicNetworkManager>,
     my_id: usize,
@@ -900,8 +1038,6 @@ async fn sync_client_set_across_parties(
     );
     Ok(())
 }
-
-#[cfg(feature = "honeybadger")]
 struct HbClientProtocolConfig {
     n: usize,
     t: usize,
@@ -910,8 +1046,6 @@ struct HbClientProtocolConfig {
     client_index: u8,
     local_position: usize,
 }
-
-#[cfg(feature = "avss")]
 struct AvssClientProtocolConfig {
     n: usize,
     t: usize,
@@ -921,8 +1055,6 @@ struct AvssClientProtocolConfig {
     local_position: usize,
     curve_config: MpcCurveConfig,
 }
-
-#[cfg(feature = "honeybadger")]
 async fn run_hb_client_protocol_for_curve<F: PrimeField>(
     config: HbClientProtocolConfig,
     inputs_str: &str,
@@ -1003,8 +1135,6 @@ async fn run_hb_client_protocol_for_curve<F: PrimeField>(
     );
     Ok(())
 }
-
-#[cfg(feature = "avss")]
 async fn run_avss_client_protocol_for_curve<F, G>(
     config: AvssClientProtocolConfig,
     inputs_str: &str,
@@ -1074,8 +1204,6 @@ where
         messages_processed
     ))
 }
-
-#[cfg(feature = "avss")]
 async fn run_avss_client_for_curve(
     curve_config: MpcCurveConfig,
     config: AvssClientProtocolConfig,
@@ -1138,8 +1266,6 @@ async fn run_avss_client_for_curve(
         }
     }
 }
-
-#[cfg(feature = "honeybadger")]
 async fn run_hb_client_for_curve(
     curve_config: MpcCurveConfig,
     config: HbClientProtocolConfig,
@@ -1190,8 +1316,6 @@ async fn run_hb_client_for_curve(
         )),
     }
 }
-
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 async fn run_as_client(
     n_parties: Option<usize>,
     threshold: Option<usize>,
@@ -1367,7 +1491,6 @@ async fn run_as_client(
     let network_for_process = network.clone();
     let inputs_for_task = inputs_str.clone();
     let process_handle = match backend_kind {
-        #[cfg(feature = "honeybadger")]
         MpcBackendKind::HoneyBadger => {
             let protocol_config = HbClientProtocolConfig {
                 n,
@@ -1388,7 +1511,6 @@ async fn run_as_client(
                 .await
             })
         }
-        #[cfg(feature = "avss")]
         MpcBackendKind::Avss => {
             let protocol_config = AvssClientProtocolConfig {
                 n,
@@ -1437,12 +1559,11 @@ async fn run_as_client(
         }
     }
 }
-
-#[cfg(feature = "avss")]
 struct AvssOffchainCoordinatorClientArgs {
     curve_config: MpcCurveConfig,
     client_inputs: Option<String>,
     client_outputs: Option<usize>,
+    output_format: CoordinatorOutputFormat,
     server_addrs: Vec<SocketAddr>,
     coord_addr: (String, u16),
     cert_der: Vec<u8>,
@@ -1451,8 +1572,6 @@ struct AvssOffchainCoordinatorClientArgs {
     threshold: Option<usize>,
     coordinator_client_index: Option<u64>,
 }
-
-#[cfg(feature = "avss")]
 async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
     args: AvssOffchainCoordinatorClientArgs,
 ) where
@@ -1463,6 +1582,7 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
         curve_config,
         client_inputs,
         client_outputs,
+        output_format: _output_format,
         server_addrs,
         coord_addr,
         cert_der,
@@ -1482,18 +1602,11 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
         exit(2);
     });
     let input_values = parse_inputs_as_field::<F>(&input_str);
-    if input_values.len() != 1 {
-        eprintln!(
-            "Error: coordinator client mode currently supports exactly one input value; got {}",
-            input_values.len()
-        );
+    if input_values.is_empty() {
+        eprintln!("Error: coordinator client mode requires at least one input value");
         exit(2);
     }
     let output_len = client_outputs.unwrap_or(input_values.len());
-    if output_len == 0 {
-        eprintln!("Error: --outputs must be greater than zero in coordinator client mode");
-        exit(2);
-    }
     let reserved_index = coordinator_client_index.unwrap_or_else(|| {
         eprintln!(
             "Error: coordinator client mode requires --client-index to claim a reserved input slot"
@@ -1522,8 +1635,11 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
         .wait_for_round(Round::InputMaskReservation)
         .await
         .unwrap();
-    eprintln!("[client slot {reserved_index}] reserving input mask");
-    coord.reserve_mask_index(reserved_index).await.unwrap();
+    for offset in 0..input_values.len() {
+        let index = reserved_index + offset as u64;
+        eprintln!("[client slot {index}] reserving input mask");
+        coord.reserve_mask_index(index).await.unwrap();
+    }
 
     let rpc_addrs: Vec<(String, u16)> = server_addrs
         .iter()
@@ -1536,13 +1652,26 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
                 eprintln!("Failed to connect to AVSS node RPC servers: {error}");
                 exit(13);
             });
-    let mask = node_rpc_client.receive_mask().await.unwrap();
+    let mut masks = Vec::with_capacity(input_values.len());
+    for offset in 0..input_values.len() {
+        let index = reserved_index + offset as u64;
+        eprintln!("[client slot {index}] waiting for mask shares");
+        masks.push(node_rpc_client.receive_mask().await.unwrap());
+    }
 
     coord.wait_for_round(Round::InputCollection).await.unwrap();
-    coord
-        .send_masked_input(mask + input_values[0], reserved_index)
-        .await
-        .unwrap();
+    for (offset, (input_value, mask)) in input_values.iter().zip(masks).enumerate() {
+        let index = reserved_index + offset as u64;
+        eprintln!("[client slot {index}] submitting masked input");
+        coord
+            .send_masked_input(mask + *input_value, index)
+            .await
+            .unwrap();
+    }
+    if output_len == 0 {
+        eprintln!("[client slot {reserved_index}] input submission complete; no outputs requested");
+        return;
+    }
 
     coord.wait_for_round(Round::MPCExecution).await.unwrap();
     coord
@@ -1553,8 +1682,6 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
     let output_hex = field_outputs_to_hex(&outputs, curve_config);
     println!("Client output: field[{}] 0x{}", outputs.len(), output_hex);
 }
-
-#[cfg(feature = "avss")]
 async fn run_avss_offchain_coordinator_client(args: AvssOffchainCoordinatorClientArgs) {
     match args.curve_config {
         MpcCurveConfig::Bls12_381 => {
@@ -1599,11 +1726,11 @@ async fn run_avss_offchain_coordinator_client(args: AvssOffchainCoordinatorClien
         }
     }
 }
-
-#[cfg(feature = "honeybadger")]
 #[allow(clippy::too_many_arguments)]
 async fn run_hb_coordinator_client_for_field<F>(
     client_inputs: Option<String>,
+    client_outputs: Option<usize>,
+    output_format: CoordinatorOutputFormat,
     server_addrs: Vec<SocketAddr>,
     coord_addr: Option<(String, u16)>,
     contract_addr: Option<String>,
@@ -1624,13 +1751,11 @@ async fn run_hb_coordinator_client_for_field<F>(
     let t = threshold.unwrap_or(1);
     let input_str = client_inputs.expect("--inputs required in client mode");
     let input_values = parse_inputs_as_field::<F>(&input_str);
-    if input_values.len() != 1 {
-        eprintln!(
-            "Error: coordinator client mode currently supports exactly one input value; got {}",
-            input_values.len()
-        );
+    if input_values.is_empty() {
+        eprintln!("Error: coordinator client mode requires at least one input value");
         exit(2);
     }
+    let output_len = client_outputs.unwrap_or(input_values.len());
     let reserved_index = coordinator_client_index.unwrap_or_else(|| {
         eprintln!(
             "Error: coordinator client mode requires --client-index to claim a reserved input slot"
@@ -1654,7 +1779,7 @@ async fn run_hb_coordinator_client_for_field<F>(
             eth,
             contract_addr,
             t as u64,
-            1,
+            output_len as u64,
             Some(key_der.clone()),
         )
         .await;
@@ -1664,11 +1789,14 @@ async fn run_hb_coordinator_client_for_field<F>(
             .wait_for_round(Round::InputMaskReservation)
             .await
             .unwrap();
-        coord.reserve_mask_index(reserved_index).await.unwrap();
+        for offset in 0..input_values.len() {
+            coord
+                .reserve_mask_index(reserved_index + offset as u64)
+                .await
+                .unwrap();
+        }
 
-        let sig = on_chain::generate_client_sig(coord.base_nonce().await, reserved_index, signer)
-            .await
-            .unwrap();
+        let base_nonce = coord.base_nonce().await;
 
         let rpc_addrs: Vec<(String, u16)> = server_addrs
             .iter()
@@ -1676,16 +1804,33 @@ async fn run_hb_coordinator_client_for_field<F>(
             .collect();
         let node_rpc_client =
             HbOnChainNodeRpcClient::<F>::start_rpc_client(t, rpc_addrs, cert_der, key_der).await;
-        let mask = node_rpc_client
-            .receive_mask(sig.as_bytes().to_vec(), client_addr)
-            .await
-            .unwrap();
+        let mut masks = Vec::with_capacity(input_values.len());
+        for offset in 0..input_values.len() {
+            let index = reserved_index + offset as u64;
+            let sig = on_chain::generate_client_sig(base_nonce, index, signer.clone())
+                .await
+                .unwrap();
+            masks.push(
+                node_rpc_client
+                    .receive_mask(sig.as_bytes().to_vec(), client_addr)
+                    .await
+                    .unwrap(),
+            );
+        }
 
         coord.wait_for_round(Round::InputCollection).await.unwrap();
-        coord
-            .send_masked_input(mask + input_values[0], reserved_index)
-            .await
-            .unwrap();
+        for (offset, (input_value, mask)) in input_values.iter().zip(masks).enumerate() {
+            coord
+                .send_masked_input(mask + *input_value, reserved_index + offset as u64)
+                .await
+                .unwrap();
+        }
+        if output_len == 0 {
+            eprintln!(
+                "[client slot {reserved_index}] input submission complete; no outputs requested"
+            );
+            return;
+        }
 
         coord.wait_for_round(Round::MPCExecution).await.unwrap();
         coord
@@ -1693,7 +1838,10 @@ async fn run_hb_coordinator_client_for_field<F>(
             .await
             .unwrap();
         let outputs = coord.obtain_outputs().await.unwrap();
-        println!("outputs: {}", format_coordinator_outputs(&outputs));
+        println!(
+            "outputs: {}",
+            format_coordinator_outputs(&outputs, output_format)
+        );
         return;
     }
 
@@ -1704,7 +1852,7 @@ async fn run_hb_coordinator_client_for_field<F>(
         ca.1,
         timestamp.expect("--timestamp required in client mode"),
         t as u64,
-        1,
+        output_len as u64,
         cert_der.clone(),
         key_der.clone(),
     )
@@ -1719,7 +1867,11 @@ async fn run_hb_coordinator_client_for_field<F>(
         .wait_for_round(Round::InputMaskReservation)
         .await
         .unwrap();
-    coord.reserve_mask_index(reserved_index).await.unwrap();
+    for offset in 0..input_values.len() {
+        let index = reserved_index + offset as u64;
+        eprintln!("[client slot {index}] reserving input mask");
+        coord.reserve_mask_index(index).await.unwrap();
+    }
 
     let rpc_addrs: Vec<(String, u16)> = server_addrs
         .iter()
@@ -1732,15 +1884,26 @@ async fn run_hb_coordinator_client_for_field<F>(
                 eprintln!("Failed to connect to node RPC servers: {error}");
                 exit(13);
             });
-    eprintln!("[client slot {reserved_index}] waiting for mask shares");
-    let mask = node_rpc_client.receive_mask().await.unwrap();
+    let mut masks = Vec::with_capacity(input_values.len());
+    for offset in 0..input_values.len() {
+        let index = reserved_index + offset as u64;
+        eprintln!("[client slot {index}] waiting for mask shares");
+        masks.push(node_rpc_client.receive_mask().await.unwrap());
+    }
 
     coord.wait_for_round(Round::InputCollection).await.unwrap();
-    eprintln!("[client slot {reserved_index}] submitting masked input");
-    coord
-        .send_masked_input(mask + input_values[0], reserved_index)
-        .await
-        .unwrap();
+    for (offset, (input_value, mask)) in input_values.iter().zip(masks).enumerate() {
+        let index = reserved_index + offset as u64;
+        eprintln!("[client slot {index}] submitting masked input");
+        coord
+            .send_masked_input(mask + *input_value, index)
+            .await
+            .unwrap();
+    }
+    if output_len == 0 {
+        eprintln!("[client slot {reserved_index}] input submission complete; no outputs requested");
+        return;
+    }
 
     coord.wait_for_round(Round::MPCExecution).await.unwrap();
     eprintln!("[client slot {reserved_index}] waiting for output distribution");
@@ -1749,14 +1912,17 @@ async fn run_hb_coordinator_client_for_field<F>(
         .await
         .unwrap();
     let outputs = coord.obtain_outputs().await.unwrap();
-    println!("outputs: {}", format_coordinator_outputs(&outputs));
+    println!(
+        "outputs: {}",
+        format_coordinator_outputs(&outputs, output_format)
+    );
 }
-
-#[cfg(feature = "honeybadger")]
 #[allow(clippy::too_many_arguments)]
 async fn run_hb_coordinator_client(
     curve_config: MpcCurveConfig,
     client_inputs: Option<String>,
+    client_outputs: Option<usize>,
+    output_format: CoordinatorOutputFormat,
     server_addrs: Vec<SocketAddr>,
     coord_addr: Option<(String, u16)>,
     contract_addr: Option<String>,
@@ -1772,6 +1938,8 @@ async fn run_hb_coordinator_client(
         MpcCurveConfig::Bls12_381 => {
             run_hb_coordinator_client_for_field::<ark_bls12_381::Fr>(
                 client_inputs,
+                client_outputs,
+                output_format,
                 server_addrs,
                 coord_addr,
                 contract_addr,
@@ -1788,6 +1956,8 @@ async fn run_hb_coordinator_client(
         MpcCurveConfig::Bn254 => {
             run_hb_coordinator_client_for_field::<ark_bn254::Fr>(
                 client_inputs,
+                client_outputs,
+                output_format,
                 server_addrs,
                 coord_addr,
                 contract_addr,
@@ -1804,6 +1974,8 @@ async fn run_hb_coordinator_client(
         MpcCurveConfig::Curve25519 => {
             run_hb_coordinator_client_for_field::<ark_curve25519::Fr>(
                 client_inputs,
+                client_outputs,
+                output_format,
                 server_addrs,
                 coord_addr,
                 contract_addr,
@@ -1820,6 +1992,8 @@ async fn run_hb_coordinator_client(
         MpcCurveConfig::Ed25519 => {
             run_hb_coordinator_client_for_field::<ark_ed25519::Fr>(
                 client_inputs,
+                client_outputs,
+                output_format,
                 server_addrs,
                 coord_addr,
                 contract_addr,
@@ -1842,22 +2016,19 @@ async fn run_hb_coordinator_client(
         }
     }
 }
-
-#[cfg(feature = "honeybadger")]
 struct HbPartySetup<'a> {
     net: Arc<QuicNetworkManager>,
     my_id: usize,
-    persistent_party_id: usize,
+    persistent_identity: DurableIdentityDigest,
     n: usize,
     t: usize,
     instance_id: u64,
     expected_client_count: Option<usize>,
+    coordinator_client_count_hint: usize,
     client_input_count: usize,
     program_hash: [u8; 32],
     preproc_store_path: Option<&'a str>,
 }
-
-#[cfg(feature = "honeybadger")]
 async fn setup_hb_party_for_curve<F, G>(
     vm: &mut VirtualMachine,
     setup: HbPartySetup<'_>,
@@ -1869,11 +2040,12 @@ where
     let HbPartySetup {
         net,
         my_id,
-        persistent_party_id,
+        persistent_identity,
         n,
         t,
         instance_id,
         expected_client_count,
+        coordinator_client_count_hint,
         client_input_count,
         program_hash,
         preproc_store_path,
@@ -1969,7 +2141,8 @@ where
     //   - Clone 2 (inside `engine`): initiates preprocessing via run_preprocessing()
     // Both share the same Arc<Mutex> stores, but only ONE processes each message.
     let n_triples = (2 * t + 1).max(1);
-    let n_client_random = input_ids.len().saturating_mul(client_input_count);
+    let client_random_count = input_ids.len().max(coordinator_client_count_hint);
+    let n_client_random = client_random_count.saturating_mul(client_input_count);
     let n_random = 2 + 2 * n_triples + n_client_random;
     eprintln!(
         "[party {}] Creating MPC node opts (n_triples={}, n_random={}, timeout=600s)",
@@ -1999,21 +2172,20 @@ where
     // Clone 2: the engine node — used for preprocessing initiation only.
     // Created via from_existing_node which wraps it in Arc<Mutex>.
     let open_message_router = Arc::new(stoffel_vm::net::OpenMessageRouter::new());
-    let engine = HoneyBadgerMpcEngine::<F, G>::try_from_existing_node_with_router(
+    let topology = MpcSessionTopology::try_new(instance_id, my_id, n, t)
+        .map_err(|error| format!("Invalid HoneyBadger MPC topology: {error}"))?;
+    let engine = HoneyBadgerMpcEngine::<F, G>::from_existing_node_with_router_and_topology(
         open_message_router.clone(),
-        instance_id,
-        my_id,
-        n,
-        t,
+        topology,
+        persistent_identity,
         net.clone(),
         mpc_node, // moved, not cloned
-    )
-    .map_err(|error| format!("Invalid HoneyBadger MPC topology: {error}"))?;
+    );
 
     configure_hb_preproc_store(
         &engine,
         program_hash,
-        persistent_party_id,
+        persistent_identity,
         preproc_store_path,
     )?;
     if let Some(path) = preproc_store_path {
@@ -2194,18 +2366,15 @@ where
 
     Ok(engine)
 }
-
-#[cfg(feature = "avss")]
 struct AvssPartySetup {
     my_id: usize,
+    local_identity: DurableIdentityDigest,
     n: usize,
     t: usize,
     instance_id: u64,
     expected_client_count: Option<usize>,
     client_input_count: usize,
 }
-
-#[cfg(feature = "avss")]
 async fn setup_avss_party_for_curve<F, G>(
     vm: &mut VirtualMachine,
     net: Arc<QuicNetworkManager>,
@@ -2217,6 +2386,7 @@ where
 {
     let AvssPartySetup {
         my_id,
+        local_identity,
         n,
         t,
         instance_id,
@@ -2439,6 +2609,7 @@ where
     use stoffel_vm::net::avss_engine::{AvssEngineConfig, AvssMpcEngine};
     let session = stoffel_vm::net::MpcSessionConfig::try_new(instance_id, my_id, n, t, net.clone())
         .map_err(|error| format!("Invalid AVSS MPC topology: {error}"))?
+        .with_local_identity(local_identity)
         .with_input_ids(mpc_input_ids);
     let engine = AvssMpcEngine::<F, G>::from_config(AvssEngineConfig::new(session, sk_i, pk_map))
         .await
@@ -2662,8 +2833,6 @@ where
 
     Ok(engine)
 }
-
-#[cfg(feature = "avss")]
 #[allow(clippy::too_many_arguments)]
 async fn run_avss_coordinated_party_for_curve<F, G>(
     vm: &mut VirtualMachine,
@@ -2722,16 +2891,13 @@ where
             .await
             .map_err(|e| e.to_string())?;
     }
-    coord
-        .wait_for_round(Round::Preprocessing)
-        .await
-        .map_err(|e| e.to_string())?;
 
     let engine = setup_avss_party_for_curve::<F, G>(
         vm,
         net,
         AvssPartySetup {
             my_id,
+            local_identity: durable_identity_from_cert(&cert_der),
             n,
             t,
             instance_id,
@@ -2775,16 +2941,20 @@ where
         .await
         .map_err(|e| e.to_string())?;
 
-    let client_to_index = coord
-        .wait_for_indices(input_ids.len() as u64)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    for (cid, idx) in &client_to_index {
-        node_rpc
-            .add_reserved_index(cid.clone(), *idx)
+    let client_to_indices = normalize_client_to_indices(
+        coord
+            .wait_for_indices(input_ids.len() as u64)
             .await
-            .map_err(|e| format!("add_reserved_index: {:?}", e))?;
+            .map_err(|e| e.to_string())?,
+    );
+
+    for (cid, indices) in &client_to_indices {
+        for idx in indices {
+            node_rpc
+                .add_reserved_index(cid.clone(), *idx)
+                .await
+                .map_err(|e| format!("add_reserved_index: {:?}", e))?;
+        }
     }
 
     if as_leader {
@@ -2799,7 +2969,7 @@ where
         .wait_for_inputs(input_ids.len() as u64, mask_shares)
         .await
         .map_err(|e| e.to_string())?;
-    store_reserved_client_inputs_feldman::<F, G, _>(vm, &client_to_index, client_inputs);
+    store_reserved_client_inputs_feldman::<F, G, _>(vm, &client_to_indices, client_inputs, 1);
 
     if as_leader {
         coord.start_mpc().await.map_err(|e| e.to_string())?;
@@ -2845,8 +3015,6 @@ where
     print_vm_result(vm, result);
     Ok(())
 }
-
-#[cfg(feature = "avss")]
 #[allow(clippy::too_many_arguments)]
 async fn run_avss_coordinated_party(
     curve_config: MpcCurveConfig,
@@ -3011,6 +3179,7 @@ async fn main() {
     let mut threshold: Option<usize> = None;
     let mut client_inputs: Option<String> = None;
     let mut client_outputs: Option<usize> = None;
+    let mut output_fixed_point_fractional_bits: Option<usize> = None;
     let mut expected_client_count: Option<usize> = None;
     let mut client_input_count: usize = 1;
     let mut _enable_nat: bool = false;
@@ -3058,6 +3227,7 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--threshold") {
         } else if let Some(_rest) = arg.strip_prefix("--inputs") {
         } else if let Some(_rest) = arg.strip_prefix("--outputs") {
+        } else if let Some(_rest) = arg.strip_prefix("--output-fixed-point-fractional-bits") {
         } else if let Some(_rest) = arg.strip_prefix("--wait-for-clients") {
         } else if let Some(_rest) = arg.strip_prefix("--client-input-count") {
         } else if let Some(_rest) = arg.strip_prefix("--stun-servers") {
@@ -3151,6 +3321,14 @@ async fn main() {
             "--outputs" => {
                 if let Some(v) = args_iter.next() {
                     client_outputs = Some(v.parse().expect("Invalid --outputs"));
+                }
+            }
+            "--output-fixed-point-fractional-bits" => {
+                if let Some(v) = args_iter.next() {
+                    output_fixed_point_fractional_bits = Some(
+                        v.parse()
+                            .expect("Invalid --output-fixed-point-fractional-bits"),
+                    );
                 }
             }
             "--wait-for-clients" => {
@@ -3276,21 +3454,22 @@ async fn main() {
         }
     }
 
-    #[cfg(not(feature = "honeybadger"))]
-    let _ = (
-        &client_inputs,
-        &client_outputs,
-        &server_addrs,
-        &rpc_addr,
-        &key_der,
+    let coordinator_output_format = match output_fixed_point_fractional_bits {
+        Some(bits) => {
+            if bits > 62 {
+                eprintln!("Error: --output-fixed-point-fractional-bits must be <= 62");
+                exit(2);
+            }
+            CoordinatorOutputFormat::FixedPoint {
+                fractional_bits: bits,
+            }
+        }
+        None => CoordinatorOutputFormat::FieldInteger,
+    };
+    let storage_identity = required_storage_identity(
         &cert_der,
-        &timestamp,
-        &expected_clients,
-        &contract_addr,
-        &eth_node_addr,
-        &wallet_sk_str,
-        &coordinator_client_index,
-        &preproc_store_path,
+        &key_der,
+        local_store_path.is_some() || preproc_store_path.is_some(),
     );
 
     // Bootnode-only mode (no program execution)
@@ -3311,7 +3490,6 @@ async fn main() {
 
     // Client mode: connect to MPC servers and provide inputs
     if as_client {
-        #[cfg(feature = "avss")]
         if coord_addr.is_some()
             && contract_addr.is_none()
             && mpc_backend.as_deref().is_some_and(|backend| {
@@ -3337,6 +3515,7 @@ async fn main() {
                 curve_config,
                 client_inputs,
                 client_outputs,
+                output_format: coordinator_output_format,
                 server_addrs,
                 coord_addr: coord_addr.clone().unwrap(),
                 cert_der: cert_der.clone().expect("--cert required in client mode"),
@@ -3351,13 +3530,6 @@ async fn main() {
 
         // Coordinator-based client mode
         if contract_addr.is_some() || coord_addr.is_some() {
-            #[cfg(not(feature = "honeybadger"))]
-            {
-                eprintln!("Error: coordinator client mode requires the 'honeybadger' feature");
-                exit(2);
-            }
-
-            #[cfg(feature = "honeybadger")]
             {
                 let curve_config = if let Some(ref name) = mpc_curve {
                     match MpcCurveConfig::from_str(name) {
@@ -3377,6 +3549,8 @@ async fn main() {
                 run_hb_coordinator_client(
                     curve_config,
                     client_inputs,
+                    client_outputs,
+                    coordinator_output_format,
                     server_addrs,
                     coord_addr,
                     contract_addr,
@@ -3394,7 +3568,6 @@ async fn main() {
         }
 
         // Direct client mode (no coordinator)
-        #[cfg(any(feature = "honeybadger", feature = "avss"))]
         {
             run_as_client(
                 n_parties,
@@ -3408,22 +3581,61 @@ async fn main() {
             .await;
             return;
         }
-        #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
-        {
-            eprintln!("Error: client mode requires an MPC backend feature");
-            exit(2);
-        }
     }
 
-    // Resolve MPC backend kind
+    let path_opt = if !positional.is_empty() {
+        Some(positional.remove(0))
+    } else {
+        None
+    };
+    entry = if !positional.is_empty() {
+        positional.remove(0)
+    } else {
+        entry
+    };
+
+    let manifest_backend = path_opt.as_ref().and_then(|path| {
+        let mut file = File::open(path).unwrap_or_else(|error| {
+            eprintln!(
+                "Error: failed to open compiled program '{}': {}",
+                path, error
+            );
+            exit(2);
+        });
+        let binary = CompiledBinary::deserialize(&mut file).unwrap_or_else(|error| {
+            eprintln!(
+                "Error: failed to deserialize compiled program '{}': {:?}",
+                path, error
+            );
+            exit(2);
+        });
+        (binary.version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION)
+            .then_some(MpcBackendKind::from(binary.client_io_manifest.mpc_backend))
+    });
+
+    // Resolve MPC backend kind. v3+ binaries are authoritative; --mpc-backend
+    // remains for client mode and legacy v1/v2 binaries without backend metadata.
     let backend_kind = if let Some(ref name) = mpc_backend {
-        match MpcBackendKind::from_str(name) {
+        let cli_backend = match MpcBackendKind::from_str(name) {
             Ok(k) => k,
             Err(e) => {
                 eprintln!("Error: {}", e);
                 exit(2);
             }
+        };
+        if let Some(manifest_backend) = manifest_backend {
+            if cli_backend != manifest_backend {
+                eprintln!(
+                    "Error: --mpc-backend '{}' does not match program manifest backend '{}'",
+                    cli_backend.name(),
+                    manifest_backend.name()
+                );
+                exit(2);
+            }
         }
+        cli_backend
+    } else if let Some(manifest_backend) = manifest_backend {
+        manifest_backend
     } else {
         MpcBackendKind::default_backend()
     };
@@ -3461,17 +3673,6 @@ async fn main() {
         );
         exit(2);
     }
-
-    let path_opt = if !positional.is_empty() {
-        Some(positional.remove(0))
-    } else {
-        None
-    };
-    entry = if !positional.is_empty() {
-        positional.remove(0)
-    } else {
-        entry
-    };
 
     // Optional: bring up networking in party mode if bootstrap provided or if leader
     let mut net_opt: Option<Arc<QuicNetworkManager>> = None;
@@ -3525,7 +3726,13 @@ async fn main() {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Now connect to ourselves as the bootnode
-        let mut mgr = QuicNetworkManager::new();
+        let mut mgr = QuicNetworkManager::with_node_id(my_id);
+        if let (Some(cert), Some(key)) = (cert_der.as_ref(), key_der.as_ref()) {
+            if let Err(e) = mgr.set_local_certificate_der(cert.clone(), key.clone()) {
+                eprintln!("Failed to configure local node certificate: {}", e);
+                exit(11);
+            }
+        }
         // Listen on a different port for peer connections
         let party_bind: SocketAddr = format!("{}:{}", bind.ip(), bind.port() + 1000)
             .parse()
@@ -3616,7 +3823,13 @@ async fn main() {
         let t = threshold.unwrap_or(1);
 
         // Prepare QUIC manager
-        let mut mgr = QuicNetworkManager::new();
+        let mut mgr = QuicNetworkManager::with_node_id(my_id);
+        if let (Some(cert), Some(key)) = (cert_der.as_ref(), key_der.as_ref()) {
+            if let Err(e) = mgr.set_local_certificate_der(cert.clone(), key.clone()) {
+                eprintln!("Failed to configure local node certificate: {}", e);
+                exit(11);
+            }
+        }
         // Listen so peers can connect back directly
         if let Err(e) = mgr.listen(bind).await {
             eprintln!("Failed to listen on {}: {}", bind, e);
@@ -3886,28 +4099,15 @@ async fn main() {
     // =====================================================================
 
     // Coordinator initialization (both leader and party modes)
-    #[cfg(feature = "honeybadger")]
     let mut coord_opt: Option<HbOffChainCoordinator<ark_bls12_381::Fr>> = None;
-    #[cfg(feature = "honeybadger")]
     let mut node_rpc_opt: Option<HbOffChainNodeRpcServer<ark_bls12_381::Fr>> = None;
-    #[cfg(feature = "honeybadger")]
     let mut input_ids: Vec<Vec<u8>> = Vec::new();
-    #[cfg(feature = "honeybadger")]
     let mut on_chain_input_ids: Vec<Address> = Vec::new();
-    #[cfg(feature = "honeybadger")]
     let mut on_chain_output_clients: Vec<(Vec<u8>, Address)> = Vec::new();
-    #[cfg(feature = "honeybadger")]
     let mut hb_bls12381_coord_engine: Option<
         Arc<HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>>,
     > = None;
 
-    #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
-    if coord_addr.is_some() || contract_addr.is_some() {
-        eprintln!("Error: coordinator mode requires an MPC backend feature");
-        exit(2);
-    }
-
-    #[cfg(feature = "honeybadger")]
     let mut on_chain_coord_opt = if matches!(backend_kind, MpcBackendKind::HoneyBadger) {
         if let Some(ref contract) = contract_addr {
             let eth_node = eth_node_addr
@@ -3943,8 +4143,6 @@ async fn main() {
     } else {
         None
     };
-
-    #[cfg(feature = "honeybadger")]
     let mut on_chain_node_rpc_opt =
         if let (Some(rpc), Some(coord)) = (rpc_addr.as_ref(), on_chain_coord_opt.as_ref()) {
             Some(
@@ -3960,8 +4158,6 @@ async fn main() {
         } else {
             None
         };
-
-    #[cfg(feature = "honeybadger")]
     if matches!(backend_kind, MpcBackendKind::HoneyBadger) {
         if let Some(ref ca) = coord_addr {
             let coord = HbOffChainCoordinator::<ark_bls12_381::Fr>::start_rpc_client(
@@ -4034,7 +4230,6 @@ async fn main() {
         );
 
         match backend_kind {
-            #[cfg(feature = "honeybadger")]
             MpcBackendKind::HoneyBadger => {
                 // Phase 1: Coordinator preprocessing trigger
                 if let Some(ref mut coord) = coord_opt {
@@ -4042,14 +4237,12 @@ async fn main() {
                         coord.reset_coord().await.unwrap();
                         coord.start_preprocessing().await.unwrap();
                     }
-                    coord.wait_for_round(Round::Preprocessing).await.unwrap();
                 }
                 if let Some(ref mut coord) = on_chain_coord_opt {
                     if as_leader {
                         coord.reset_coord().await.unwrap();
                         coord.start_preprocessing().await.unwrap();
                     }
-                    coord.wait_for_round(Round::Preprocessing).await.unwrap();
                 }
 
                 // Phase 2: Create MPC engine + preprocessing + coordinator input phases
@@ -4060,11 +4253,14 @@ async fn main() {
                             HbPartySetup {
                                 net: net.clone(),
                                 my_id,
-                                persistent_party_id: party_id.unwrap_or(0usize),
+                                persistent_identity: storage_identity.unwrap_or_else(|| {
+                                    DurableIdentityDigest::from_legacy_party_id(my_id)
+                                }),
                                 n,
                                 t,
                                 instance_id,
                                 expected_client_count,
+                                coordinator_client_count_hint: 0,
                                 client_input_count,
                                 program_hash: program_id,
                                 preproc_store_path: preproc_store_path.as_deref(),
@@ -4093,11 +4289,14 @@ async fn main() {
                         HbPartySetup {
                             net: net.clone(),
                             my_id,
-                            persistent_party_id: party_id.unwrap_or(0usize),
+                            persistent_identity: storage_identity.unwrap_or_else(|| {
+                                DurableIdentityDigest::from_legacy_party_id(my_id)
+                            }),
                             n,
                             t,
                             instance_id,
                             expected_client_count: None, // coordinator handles clients
+                            coordinator_client_count_hint: input_ids.len(),
                             client_input_count,
                             program_hash: program_id,
                             preproc_store_path: preproc_store_path.as_deref(),
@@ -4123,6 +4322,8 @@ async fn main() {
                             .expect("--rpc-bind required with coordinator");
 
                         if !input_ids.is_empty() {
+                            let total_input_count =
+                                input_ids.len().saturating_mul(client_input_count);
                             let precomputed_mask_shares = Some(
                                 engine
                                     .node_handle()
@@ -4131,7 +4332,7 @@ async fn main() {
                                     .preprocessing_material
                                     .lock()
                                     .await
-                                    .take_random_shares(input_ids.len())
+                                    .take_random_shares(total_input_count)
                                     .unwrap_or_else(|e| {
                                         eprintln!("take_random_shares: {}", e);
                                         exit(13);
@@ -4160,10 +4361,12 @@ async fn main() {
                                 .unwrap();
 
                             eprintln!("[party {my_id}] waiting for reserved input indices");
-                            let client_to_index = coord
-                                .wait_for_indices(input_ids.len() as u64)
-                                .await
-                                .unwrap();
+                            let client_to_indices = normalize_client_to_indices(
+                                coord
+                                    .wait_for_indices(total_input_count as u64)
+                                    .await
+                                    .unwrap(),
+                            );
                             eprintln!("[party {my_id}] reserved input indices received");
 
                             let mask_shares = if let Some(mask_shares) = precomputed_mask_shares {
@@ -4171,8 +4374,8 @@ async fn main() {
                             } else {
                                 let mask_shares = load_reserved_mask_shares(
                                     &engine,
-                                    input_ids.len(),
-                                    client_to_index.values().copied(),
+                                    total_input_count,
+                                    client_to_indices.values().flatten().copied(),
                                 )
                                 .await
                                 .unwrap_or_else(|e| {
@@ -4180,7 +4383,7 @@ async fn main() {
                                     exit(13);
                                 });
 
-                                for idx in client_to_index.values().copied() {
+                                for idx in client_to_indices.values().flatten().copied() {
                                     node_rpc
                                         .add_mask_share(idx, &mask_shares[idx as usize])
                                         .await
@@ -4193,14 +4396,16 @@ async fn main() {
                                 mask_shares
                             };
 
-                            for (cid, idx) in &client_to_index {
-                                node_rpc
-                                    .add_reserved_index(cid.clone(), *idx)
-                                    .await
-                                    .unwrap_or_else(|e| {
-                                        eprintln!("add_reserved_index: {:?}", e);
-                                        exit(13);
-                                    });
+                            for (cid, indices) in &client_to_indices {
+                                for idx in indices {
+                                    node_rpc
+                                        .add_reserved_index(cid.clone(), *idx)
+                                        .await
+                                        .unwrap_or_else(|e| {
+                                            eprintln!("add_reserved_index: {:?}", e);
+                                            exit(13);
+                                        });
+                                }
                             }
 
                             if as_leader {
@@ -4211,11 +4416,16 @@ async fn main() {
 
                             eprintln!("[party {my_id}] waiting for masked client inputs");
                             let client_inputs = coord
-                                .wait_for_inputs(input_ids.len() as u64, mask_shares)
+                                .wait_for_inputs(total_input_count as u64, mask_shares)
                                 .await
                                 .unwrap();
                             eprintln!("[party {my_id}] masked client inputs received");
-                            store_reserved_client_inputs(&mut vm, &client_to_index, client_inputs);
+                            store_reserved_client_inputs(
+                                &mut vm,
+                                &client_to_indices,
+                                client_inputs,
+                                client_input_count,
+                            );
                         }
                     }
 
@@ -4225,6 +4435,8 @@ async fn main() {
                             .expect("--rpc-bind required with on-chain coordinator");
 
                         if !on_chain_input_ids.is_empty() {
+                            let total_input_count =
+                                on_chain_input_ids.len().saturating_mul(client_input_count);
                             let precomputed_mask_shares = Some(
                                 engine
                                     .node_handle()
@@ -4233,7 +4445,7 @@ async fn main() {
                                     .preprocessing_material
                                     .lock()
                                     .await
-                                    .take_random_shares(on_chain_input_ids.len())
+                                    .take_random_shares(total_input_count)
                                     .unwrap_or_else(|e| {
                                         eprintln!("take_random_shares: {}", e);
                                         exit(13);
@@ -4260,18 +4472,20 @@ async fn main() {
                                 .await
                                 .unwrap();
 
-                            let client_to_index = coord
-                                .wait_for_indices(on_chain_input_ids.len() as u64)
-                                .await
-                                .unwrap();
+                            let client_to_indices = normalize_client_to_indices(
+                                coord
+                                    .wait_for_indices(total_input_count as u64)
+                                    .await
+                                    .unwrap(),
+                            );
 
                             let mask_shares = if let Some(mask_shares) = precomputed_mask_shares {
                                 mask_shares
                             } else {
                                 let mask_shares = load_reserved_mask_shares(
                                     &engine,
-                                    on_chain_input_ids.len(),
-                                    client_to_index.values().copied(),
+                                    total_input_count,
+                                    client_to_indices.values().flatten().copied(),
                                 )
                                 .await
                                 .unwrap_or_else(|e| {
@@ -4279,7 +4493,7 @@ async fn main() {
                                     exit(13);
                                 });
 
-                                for idx in client_to_index.values().copied() {
+                                for idx in client_to_indices.values().flatten().copied() {
                                     node_rpc
                                         .add_mask_share(idx, mask_shares[idx as usize].clone())
                                         .await
@@ -4292,14 +4506,16 @@ async fn main() {
                                 mask_shares
                             };
 
-                            for (cid, idx) in &client_to_index {
-                                node_rpc
-                                    .add_reserved_index(*cid, *idx)
-                                    .await
-                                    .unwrap_or_else(|e| {
-                                        eprintln!("add_reserved_index: {:?}", e);
-                                        exit(13);
-                                    });
+                            for (cid, indices) in &client_to_indices {
+                                for idx in indices {
+                                    node_rpc
+                                        .add_reserved_index(*cid, *idx)
+                                        .await
+                                        .unwrap_or_else(|e| {
+                                            eprintln!("add_reserved_index: {:?}", e);
+                                            exit(13);
+                                        });
+                                }
                             }
 
                             on_chain_output_clients = node_rpc.ids_and_addrs().await;
@@ -4310,10 +4526,15 @@ async fn main() {
                             coord.wait_for_round(Round::InputCollection).await.unwrap();
 
                             let client_inputs = coord
-                                .wait_for_inputs(on_chain_input_ids.len() as u64, mask_shares)
+                                .wait_for_inputs(total_input_count as u64, mask_shares)
                                 .await
                                 .unwrap();
-                            store_reserved_client_inputs(&mut vm, &client_to_index, client_inputs);
+                            store_reserved_client_inputs(
+                                &mut vm,
+                                &client_to_indices,
+                                client_inputs,
+                                client_input_count,
+                            );
                         }
                     }
                 } else {
@@ -4346,8 +4567,6 @@ async fn main() {
                     my_id
                 );
             }
-
-            #[cfg(feature = "avss")]
             MpcBackendKind::Avss => {
                 eprintln!(
                     "[party {}] Setting up AVSS backend (curve: {})...",
@@ -4404,6 +4623,9 @@ async fn main() {
                             net.clone(),
                             AvssPartySetup {
                                 my_id,
+                                local_identity: storage_identity.unwrap_or_else(|| {
+                                    DurableIdentityDigest::from_legacy_party_id(my_id)
+                                }),
                                 n,
                                 t,
                                 instance_id,
@@ -4445,17 +4667,10 @@ async fn main() {
                     my_id
                 );
             }
-
-            #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
-            MpcBackendKind::NoBackend => {
-                eprintln!("Error: party mode requires an enabled MPC backend feature");
-                exit(2);
-            }
         }
     }
 
     // Coordinator: signal MPC execution phase
-    #[cfg(feature = "honeybadger")]
     if let Some(ref mut coord) = coord_opt {
         if as_leader {
             eprintln!("[party] coordinator -> MPCExecution");
@@ -4463,7 +4678,6 @@ async fn main() {
         }
         coord.wait_for_round(Round::MPCExecution).await.unwrap();
     }
-    #[cfg(feature = "honeybadger")]
     if let Some(ref mut coord) = on_chain_coord_opt {
         if as_leader {
             coord.start_mpc().await.unwrap();
@@ -4476,7 +4690,6 @@ async fn main() {
     // Execute entry function
     match vm.execute(&agreed_entry) {
         Ok(result) => {
-            #[cfg(feature = "honeybadger")]
             {
                 let mut handled_by_coordinator = false;
 
@@ -4603,9 +4816,6 @@ async fn main() {
                     print_vm_result(&mut vm, result);
                 }
             }
-
-            #[cfg(not(feature = "honeybadger"))]
-            print_vm_result(&mut vm, result);
         }
         Err(err) => {
             eprintln!("Execution error in '{}': {}", agreed_entry, err);
@@ -4638,6 +4848,9 @@ Flags:
                           AVSS also supports secp256k1 and p-256
   --inputs <values>       Comma-separated input values (client mode)
   --outputs <n>           Number of output field elements to reconstruct (client mode)
+  --output-fixed-point-fractional-bits <n>
+                          Decode coordinator client outputs as fixed-point values
+                          with n fractional bits instead of raw field integers
   --servers <addrs>       Comma-separated server addresses (client mode)
   --wait-for-clients <n>
                           Number of client inputs to collect before starting computation
@@ -4730,21 +4943,56 @@ Examples:
     exit(1);
 }
 
-#[cfg(all(test, any(feature = "honeybadger", feature = "avss")))]
+#[cfg(test)]
 mod tests {
-    use super::{field_outputs_to_hex, format_coordinator_outputs};
+    use super::{
+        field_outputs_to_hex, format_coordinator_outputs, render_fixed_point_i64,
+        CoordinatorOutputFormat,
+    };
     use stoffel_vm::net::MpcCurveConfig;
 
     #[test]
     fn formats_negative_field_outputs_as_signed_i64s() {
         let outputs = vec![-ark_bls12_381::Fr::from(10u64)];
-        assert_eq!(format_coordinator_outputs(&outputs), "[-10]");
+        assert_eq!(
+            format_coordinator_outputs(&outputs, CoordinatorOutputFormat::FieldInteger),
+            "[-10]"
+        );
     }
 
     #[test]
     fn formats_positive_field_outputs_as_signed_i64s() {
         let outputs = vec![ark_bls12_381::Fr::from(10u64)];
-        assert_eq!(format_coordinator_outputs(&outputs), "[10]");
+        assert_eq!(
+            format_coordinator_outputs(&outputs, CoordinatorOutputFormat::FieldInteger),
+            "[10]"
+        );
+    }
+
+    #[test]
+    fn formats_fixed_point_outputs_without_raw_scale() {
+        let outputs = vec![
+            ark_bls12_381::Fr::from(524_288u64),
+            ark_bls12_381::Fr::from(163_840u64),
+        ];
+
+        assert_eq!(
+            format_coordinator_outputs(
+                &outputs,
+                CoordinatorOutputFormat::FixedPoint {
+                    fractional_bits: 16
+                }
+            ),
+            "[8, 2.5]"
+        );
+    }
+
+    #[test]
+    fn formats_negative_fixed_point_outputs_without_raw_scale() {
+        assert_eq!(
+            render_fixed_point_i64(-163_840, 16).as_deref(),
+            Some("-2.5")
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! crate for memory-mapped reads and ACID write transactions.
 
 use crate::net::curve::MpcFieldKind;
+use crate::net::mpc_engine::DurableIdentityDigest;
 use ark_ff::FftField;
 use ark_serialize::{Compress, Validate};
 use serde::{Deserialize, Serialize};
@@ -81,14 +82,14 @@ pub enum MaterialKind {
 /// Identifies a stored preprocessing blob.
 ///
 /// Use [`PreprocKeyScope`] when deriving several material keys for the same
-/// program/party namespace.
+/// program/node-identity namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PreprocKey {
     pub program_hash: [u8; 32],
     pub field_kind: MpcFieldKind,
     pub n: usize,
     pub t: usize,
-    pub party_id: usize,
+    pub node_identity: DurableIdentityDigest,
     pub kind: MaterialKind,
 }
 
@@ -98,7 +99,7 @@ impl PreprocKey {
         field_kind: MpcFieldKind,
         n: usize,
         t: usize,
-        party_id: usize,
+        node_identity: DurableIdentityDigest,
         kind: MaterialKind,
     ) -> Self {
         Self {
@@ -106,7 +107,7 @@ impl PreprocKey {
             field_kind,
             n,
             t,
-            party_id,
+            node_identity,
             kind,
         }
     }
@@ -121,15 +122,13 @@ impl PreprocKey {
 
     /// Encode as a compact byte key for LMDB lookups.
     pub fn encode(&self) -> Result<Vec<u8>, PreprocStoreError> {
-        let mut buf = Vec::with_capacity(49);
+        let mut buf = Vec::with_capacity(77);
         buf.extend_from_slice(b"pp:");
         buf.extend_from_slice(&self.program_hash);
         buf.push(field_kind_tag(self.field_kind));
         buf.extend_from_slice(&usize_to_u32(self.n, "preprocessing key n")?.to_le_bytes());
         buf.extend_from_slice(&usize_to_u32(self.t, "preprocessing key threshold")?.to_le_bytes());
-        buf.extend_from_slice(
-            &usize_to_u32(self.party_id, "preprocessing key party_id")?.to_le_bytes(),
-        );
+        buf.extend_from_slice(&self.node_identity.as_bytes());
         buf.push(material_kind_tag(self.kind));
         Ok(buf)
     }
@@ -149,7 +148,7 @@ pub struct PreprocKeyScope {
     pub field_kind: MpcFieldKind,
     pub n: usize,
     pub t: usize,
-    pub party_id: usize,
+    pub node_identity: DurableIdentityDigest,
 }
 
 impl PreprocKeyScope {
@@ -158,14 +157,14 @@ impl PreprocKeyScope {
         field_kind: MpcFieldKind,
         n: usize,
         t: usize,
-        party_id: usize,
+        node_identity: DurableIdentityDigest,
     ) -> Self {
         Self {
             program_hash,
             field_kind,
             n,
             t,
-            party_id,
+            node_identity,
         }
     }
 
@@ -175,7 +174,7 @@ impl PreprocKeyScope {
             self.field_kind,
             self.n,
             self.t,
-            self.party_id,
+            self.node_identity,
             kind,
         )
     }
@@ -967,6 +966,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_identity(party_id: usize) -> DurableIdentityDigest {
+        DurableIdentityDigest::from_legacy_party_id(party_id)
+    }
     use ark_bn254::Fr;
     use ark_ff::UniformRand;
     use ark_std::rand::SeedableRng;
@@ -1048,7 +1051,7 @@ mod tests {
             MpcFieldKind::Bn254Fr,
             5,
             2,
-            1,
+            legacy_identity(1),
             MaterialKind::BeaverTriple,
         );
         let rs = base.with_kind(MaterialKind::RandomShare);
@@ -1059,7 +1062,9 @@ mod tests {
 
     #[test]
     fn preproc_key_scope_preserves_shared_key_namespace() {
-        let scope = PreprocKeyScope::new([0xCD; 32], MpcFieldKind::Bls12_381Fr, 7, 2, 3);
+        let node_identity = legacy_identity(3);
+        let scope =
+            PreprocKeyScope::new([0xCD; 32], MpcFieldKind::Bls12_381Fr, 7, 2, node_identity);
 
         let base = scope.beaver_triple();
         let random = scope.random_share();
@@ -1069,7 +1074,7 @@ mod tests {
         assert_eq!(base.program_hash, [0xCD; 32]);
         assert_eq!(base.n, 7);
         assert_eq!(base.t, 2);
-        assert_eq!(base.party_id, 3);
+        assert_eq!(base.node_identity, node_identity);
         assert_eq!(base.kind, MaterialKind::BeaverTriple);
         assert_eq!(random, base.with_kind(MaterialKind::RandomShare));
         assert_eq!(prand_bit, base.with_kind(MaterialKind::PRandBit));
@@ -1087,7 +1092,7 @@ mod tests {
             MpcFieldKind::Bn254Fr,
             oversized,
             2,
-            1,
+            legacy_identity(1),
             MaterialKind::BeaverTriple,
         );
         let err = key
@@ -1158,7 +1163,7 @@ mod tests {
             MpcFieldKind::Bn254Fr,
             5,
             2,
-            0,
+            legacy_identity(0),
             MaterialKind::RandomShare,
         );
         let blob = PreprocBlob::new(vec![0xAA; 480], 48, 10);
@@ -1181,7 +1186,7 @@ mod tests {
             MpcFieldKind::Bls12_381Fr,
             3,
             1,
-            0,
+            legacy_identity(0),
             MaterialKind::BeaverTriple,
         );
         let blob = PreprocBlob::new(vec![0; 480], 48, 10);
@@ -1209,7 +1214,7 @@ mod tests {
             MpcFieldKind::Bls12_381Fr,
             3,
             1,
-            0,
+            legacy_identity(0),
             MaterialKind::RandomShare,
         );
         let blob = PreprocBlob::new(vec![0; 144], 48, 3);

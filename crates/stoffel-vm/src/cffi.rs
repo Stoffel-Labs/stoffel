@@ -50,32 +50,26 @@
 
 use std::ffi::{c_char, CStr, CString};
 use std::io::Cursor;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use std::marker::PhantomPinned;
 use std::os::raw::{c_int, c_void};
 use std::ptr::NonNull;
-#[cfg(feature = "honeybadger")]
 use std::sync::Arc;
 
 use crate::core_vm::VirtualMachine;
 use crate::foreign_functions::ForeignFunctionContext;
-#[cfg(feature = "honeybadger")]
 use crate::net::hb_engine::{
     HoneyBadgerEngineConfig, HoneyBadgerMpcEngine, HoneyBadgerPreprocessingConfig,
 };
-#[cfg(feature = "honeybadger")]
 use crate::net::mpc_engine::MpcEngine;
 use stoffel_vm_types::compiled_binary::CompiledBinary;
 use stoffel_vm_types::core_types::{
     ArrayRef, ForeignObjectRef, ObjectRef, ShareType, Value, DEFAULT_FIXED_POINT_FRACTIONAL_BITS,
     F64,
 };
-#[cfg(feature = "honeybadger")]
 use stoffelnet::transports::quic::QuicNetworkManager;
 
 /// Maximum share buffer size accepted from FFI callers (1 MB).
 /// Prevents accidental or malicious oversized allocations from C/SDK code.
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 const MAX_FFI_SHARE_LEN: usize = 1_048_576;
 
 /// Write a `Vec<u8>` result through FFI out-pointers using the boxed-slice pattern.
@@ -86,7 +80,6 @@ const MAX_FFI_SHARE_LEN: usize = 1_048_576;
 ///
 /// # Safety
 /// `result_ptr` and `result_len_ptr` must be valid, non-null, aligned pointers.
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 unsafe fn write_ffi_result_bytes(
     bytes: Vec<u8>,
     result_ptr: *mut *mut u8,
@@ -106,7 +99,6 @@ unsafe fn write_ffi_result_bytes(
 /// # Safety
 /// `ptr` must have been produced by `write_ffi_result_bytes` with the matching `len`,
 /// and must not have been freed already.
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 unsafe fn free_ffi_result_bytes(ptr: *mut u8, len: usize) {
     if !ptr.is_null() {
         let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len));
@@ -176,8 +168,6 @@ pub type CForeignFunction =
 // ============================================================================
 // HoneyBadgerMpcEngine FFI Types
 // ============================================================================
-
-#[cfg(feature = "honeybadger")]
 /// Opaque pointer type for HoneyBadgerMpcEngine
 ///
 /// This type is used to pass engine handles across the FFI boundary.
@@ -187,8 +177,6 @@ pub struct HBEngineOpaque {
     _data: (),
     _marker: core::marker::PhantomData<(*mut u8, PhantomPinned)>,
 }
-
-#[cfg(feature = "honeybadger")]
 /// Opaque pointer type for QuicNetworkManager
 ///
 /// This type is used to pass network handles across the FFI boundary.
@@ -197,8 +185,6 @@ pub struct HBNetworkOpaque {
     _data: (),
     _marker: core::marker::PhantomData<(*mut u8, PhantomPinned)>,
 }
-
-#[cfg(feature = "honeybadger")]
 /// Error codes for HoneyBadgerMpcEngine FFI operations
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -904,8 +890,6 @@ pub unsafe extern "C" fn stoffel_load_bytecode(
 // ============================================================================
 // HoneyBadgerMpcEngine FFI Functions
 // ============================================================================
-
-#[cfg(feature = "honeybadger")]
 /// Creates a new HoneyBadgerMpcEngine
 ///
 /// # Arguments
@@ -965,8 +949,6 @@ pub unsafe extern "C" fn hb_engine_new(
         Err(_) => std::ptr::null_mut(),
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Frees a HoneyBadgerMpcEngine instance
 ///
 /// # Safety
@@ -981,8 +963,6 @@ pub unsafe extern "C" fn hb_engine_free(engine_ptr: *mut HBEngineOpaque) {
         }
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Runs preprocessing (generates Beaver triples and random shares)
 ///
 /// This is a blocking call that runs the async preprocessing protocol.
@@ -1017,8 +997,6 @@ pub unsafe extern "C" fn hb_engine_start_async(
         Err(_) => HBEngineErrorCode::HBEnginePreprocessingFailed,
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Checks if the engine is ready (preprocessing complete)
 ///
 /// # Returns
@@ -1041,8 +1019,6 @@ pub unsafe extern "C" fn hb_engine_is_ready(engine_ptr: *mut HBEngineOpaque) -> 
         0
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Performs secure multiplication of two shares
 ///
 /// # Arguments
@@ -1112,8 +1088,6 @@ pub unsafe extern "C" fn hb_engine_multiply_share_async(
         Err(_) => HBEngineErrorCode::HBEngineMultiplyFailed,
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Opens (reconstructs) a shared value
 ///
 /// # Arguments
@@ -1171,8 +1145,6 @@ pub unsafe extern "C" fn hb_engine_open_share(
         Err(_) => HBEngineErrorCode::HBEngineOpenShareFailed,
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Initialize input shares from a client
 ///
 /// # Arguments
@@ -1252,8 +1224,6 @@ pub unsafe extern "C" fn hb_engine_init_client_input(
         Err(_) => HBEngineErrorCode::HBEngineClientInputFailed,
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Get shares for a specific client
 ///
 /// # Arguments
@@ -1325,8 +1295,6 @@ pub unsafe extern "C" fn hb_engine_get_client_shares(
         Err(_) => HBEngineErrorCode::HBEngineGetClientSharesFailed,
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Get the party ID of the engine
 ///
 /// # Safety
@@ -1340,8 +1308,6 @@ pub unsafe extern "C" fn hb_engine_party_id(engine_ptr: *mut HBEngineOpaque) -> 
     let engine = unsafe { &*(engine_ptr as *const Arc<HoneyBadgerMpcEngine>) };
     engine.party().id()
 }
-
-#[cfg(feature = "honeybadger")]
 /// Get the instance ID of the engine
 ///
 /// # Safety
@@ -1355,8 +1321,6 @@ pub unsafe extern "C" fn hb_engine_instance_id(engine_ptr: *mut HBEngineOpaque) 
     let engine = unsafe { &*(engine_ptr as *const Arc<HoneyBadgerMpcEngine>) };
     engine.instance().id()
 }
-
-#[cfg(feature = "honeybadger")]
 /// Get the protocol name (returns static string, do not free)
 ///
 /// # Safety
@@ -1370,8 +1334,6 @@ pub unsafe extern "C" fn hb_engine_protocol_name(engine_ptr: *mut HBEngineOpaque
     }
     PROTOCOL_NAME.as_ptr() as *const c_char
 }
-
-#[cfg(feature = "honeybadger")]
 /// Get the network handle from the engine
 ///
 /// Returns a cloned network pointer. Caller must free with hb_network_free.
@@ -1393,8 +1355,6 @@ pub unsafe extern "C" fn hb_engine_get_network(
     // Box the Arc for stable FFI pointer
     Box::into_raw(Box::new(net)) as *mut HBNetworkOpaque
 }
-
-#[cfg(feature = "honeybadger")]
 /// Free a network handle obtained from hb_engine_get_network
 ///
 /// # Safety
@@ -1410,8 +1370,6 @@ pub unsafe extern "C" fn hb_network_free(network_ptr: *mut HBNetworkOpaque) {
         }
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Free bytes allocated by engine functions (e.g., multiply_share_async result)
 ///
 /// # Safety
@@ -1449,7 +1407,7 @@ mod tests {
 // HoneyBadgerMpcEngine FFI - Unit Tests
 // ============================================================================
 
-#[cfg(all(test, feature = "honeybadger"))]
+#[cfg(test)]
 mod hb_engine_tests {
     use super::*;
 
@@ -1581,8 +1539,6 @@ mod hb_engine_tests {
 // FFI export names keep the `adkg_` prefix for ABI compatibility with existing
 // C/SDK consumers. Internal Rust types use the `Avss` prefix.
 // ============================================================================
-
-#[cfg(feature = "avss")]
 mod avss_ffi {
     use super::*;
     use crate::net::avss_engine::{AvssEngineConfig, AvssMpcEngine, AvssOperations};

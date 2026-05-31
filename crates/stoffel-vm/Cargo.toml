@@ -61,11 +61,9 @@ ed25519-dalek = { version = "2", features = ["std"] }
 curve25519-dalek = { version = "4", features = ["alloc"] }
 
 [features]
-default = ["honeybadger", "avss"]
-honeybadger = []
-avss = ["stoffel-mpc-coordinator/avss"]
-hb_itest = ["honeybadger"]
-avss_itest = ["avss"]
+default = []
+hb_itest = []
+avss_itest = []
 nat = []
 
 [dev-dependencies]

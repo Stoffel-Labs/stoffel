@@ -11,7 +11,6 @@ use crate::net::share_runtime::MpcShareRuntime;
 use crate::reveal_destination::{FrameDepth, RevealDestination};
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ShareData, ShareType, Value};
-#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelnet::network_utils::ClientId;
 
@@ -171,8 +170,6 @@ impl MpcRuntimeState {
     pub(super) fn client_store_len(&self) -> usize {
         self.client_store.len()
     }
-
-    #[cfg(feature = "honeybadger")]
     pub(super) fn client_store(&self) -> Arc<ClientInputStore> {
         Arc::clone(&self.client_store)
     }
@@ -203,8 +200,6 @@ impl MpcRuntimeState {
     {
         self.client_store.replace_client_shares(inputs)
     }
-
-    #[cfg(feature = "honeybadger")]
     pub(super) fn try_store_client_input<F>(
         &self,
         client_id: ClientId,
@@ -217,8 +212,6 @@ impl MpcRuntimeState {
             .client_store
             .try_store_client_input(client_id, shares)?)
     }
-
-    #[cfg(feature = "avss")]
     pub(super) fn try_store_client_input_feldman<F, G>(
         &self,
         client_id: ClientId,
@@ -232,8 +225,6 @@ impl MpcRuntimeState {
             .client_store
             .try_store_client_input_feldman(client_id, shares)?)
     }
-
-    #[cfg(feature = "honeybadger")]
     pub(super) fn try_replace_client_input<F, I>(&self, inputs: I) -> VmResult<usize>
     where
         F: ark_ff::FftField,
@@ -241,8 +232,6 @@ impl MpcRuntimeState {
     {
         Ok(self.client_store.try_replace_client_input(inputs)?)
     }
-
-    #[cfg(feature = "honeybadger")]
     pub(super) fn client_share<F>(
         &self,
         client_id: ClientId,

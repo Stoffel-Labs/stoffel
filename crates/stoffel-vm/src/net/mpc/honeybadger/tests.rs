@@ -1,6 +1,6 @@
 use super::{HoneyBadgerEngineConfig, HoneyBadgerMpcEngine, HoneyBadgerPreprocessingConfig};
 use crate::net::engine_config::MpcSessionConfig;
-use crate::net::mpc_engine::{MpcEngine, MpcEngineConsensus, MpcPartyId};
+use crate::net::mpc_engine::{DurableIdentityDigest, MpcEngine, MpcEngineConsensus, MpcPartyId};
 use crate::net::reservation::ReservationRegistry;
 use crate::storage::preproc::{
     self, LmdbPreprocStore, MaterialKind, PreprocBlob, PreprocKeyScope, PreprocStore,
@@ -66,7 +66,7 @@ async fn preprocess_reserves_persistent_random_shares_when_loaded() {
         crate::net::curve::MpcFieldKind::Bls12_381Fr,
         n,
         t,
-        party_id,
+        DurableIdentityDigest::from_legacy_party_id(party_id),
     );
     let key = scope.key(MaterialKind::RandomShare);
 
@@ -122,7 +122,7 @@ async fn get_mask_share_reserves_requested_persistent_index_once() {
         crate::net::curve::MpcFieldKind::Bls12_381Fr,
         n,
         t,
-        party_id,
+        DurableIdentityDigest::from_legacy_party_id(party_id),
     );
     let key = scope.random_share();
 
@@ -242,7 +242,7 @@ async fn consume_masked_inputs_evicts_fully_used_persistent_masks() {
         crate::net::curve::MpcFieldKind::Bls12_381Fr,
         n,
         t,
-        party_id,
+        DurableIdentityDigest::from_legacy_party_id(party_id),
     );
     let key = scope.random_share();
 
@@ -295,10 +295,14 @@ async fn consume_masked_inputs_evicts_fully_used_persistent_masks() {
         "fully consumed persistent masks should be evicted after use"
     );
 
-    let restored = ReservationRegistry::load(store.as_ref(), &program_hash, party_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let restored = ReservationRegistry::load(
+        store.as_ref(),
+        &program_hash,
+        DurableIdentityDigest::from_legacy_party_id(party_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let snapshot = restored.snapshot().await;
     assert!(
         snapshot.masked_inputs.is_empty(),

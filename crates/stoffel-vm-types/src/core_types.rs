@@ -14,6 +14,7 @@
 
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::any::Any;
 use std::fmt;
@@ -525,7 +526,7 @@ pub const DEFAULT_FIXED_POINT_FRACTIONAL_BITS: usize = 16;
 /// This deliberately lives in `stoffel-vm-types` instead of an MPC backend crate
 /// so bytecode/value metadata remains independent from the protocol selected at
 /// runtime. Backends can map this shape onto their own fixed-point encodings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FixedPointPrecision {
     total_bits: usize,
     fractional_bits: usize,
@@ -623,7 +624,7 @@ impl FixedPointPrecision {
 }
 
 /// Enum to represent the underlying type of a secret share
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ShareType {
     /// Secure integer shares (mirrors `SecretInt` in mpc-protocols)
     SecretInt { bit_length: usize },

@@ -10,7 +10,6 @@ use crate::net::mpc_engine::{
 };
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType, Value};
-#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelnet::network_utils::ClientId;
 
@@ -74,8 +73,6 @@ impl VMState {
     pub(crate) fn client_store_len(&self) -> usize {
         self.mpc_runtime.client_store_len()
     }
-
-    #[cfg(feature = "honeybadger")]
     pub(crate) fn client_input_store(&self) -> Arc<crate::net::client_store::ClientInputStore> {
         self.mpc_runtime.client_store()
     }
@@ -113,7 +110,6 @@ impl VMState {
     }
 
     /// Store HoneyBadger client shares through the runtime boundary.
-    #[cfg(feature = "honeybadger")]
     pub(crate) fn try_store_client_input<F>(
         &self,
         client_id: ClientId,
@@ -126,7 +122,6 @@ impl VMState {
     }
 
     /// Store AVSS Feldman client shares through the runtime boundary.
-    #[cfg(feature = "avss")]
     pub(crate) fn try_store_client_input_feldman<F, G>(
         &self,
         client_id: ClientId,
@@ -141,7 +136,6 @@ impl VMState {
     }
 
     /// Replace all VM client inputs with robust shares.
-    #[cfg(feature = "honeybadger")]
     pub(crate) fn try_replace_client_input<F, I>(&self, inputs: I) -> VmResult<usize>
     where
         F: ark_ff::FftField,
@@ -151,7 +145,6 @@ impl VMState {
     }
 
     /// Retrieve a robust share for a client input.
-    #[cfg(feature = "honeybadger")]
     pub(crate) fn client_share<F>(
         &self,
         client_id: ClientId,
@@ -337,6 +330,16 @@ impl VMState {
     ) -> VmResult<ShareData> {
         self.share_runtime()?
             .mul_field_data(ty, share_data, scalar_bytes)
+    }
+
+    pub(crate) fn secret_share_add_field_data(
+        &self,
+        ty: ShareType,
+        share_data: &ShareData,
+        field_bytes: &[u8],
+    ) -> VmResult<ShareData> {
+        self.share_runtime()?
+            .add_field_data(ty, share_data, field_bytes)
     }
 
     #[cfg(test)]

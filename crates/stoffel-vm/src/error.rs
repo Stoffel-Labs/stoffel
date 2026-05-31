@@ -112,6 +112,7 @@ impl VmError {
             | VmError::ClientShareTypeMismatch { .. }
             | VmError::InvalidShareRevealValue => VirtualMachineErrorKind::Mpc,
             VmError::FunctionAlreadyRegistered { .. }
+            | VmError::MethodAlreadyRegistered { .. }
             | VmError::RegistrationDuplicateFunction { .. }
             | VmError::RegistrationFunctionAlreadyRegistered { .. } => {
                 VirtualMachineErrorKind::Registration
@@ -136,6 +137,9 @@ impl VmError {
             | VmError::ForeignFunctionAsClosure { .. }
             | VmError::QuotedFunctionNotFound { .. }
             | VmError::FunctionNotFound { .. }
+            | VmError::MethodNotFound { .. }
+            | VmError::MethodReceiverTypeMismatch { .. }
+            | VmError::MethodCallRequiresReceiver { .. }
             | VmError::CannotExecuteForeignFunction { .. }
             | VmError::MissingResolvedInstructions { .. }
             | VmError::RuntimeInstructionMetadataMismatch { .. }
@@ -225,6 +229,11 @@ pub(crate) enum VmError {
     ForeignFunctionAsClosure { function: String },
     #[error("Function '{function}' is already registered")]
     FunctionAlreadyRegistered { function: String },
+    #[error("Method '{receiver_type}.{method}' is already registered")]
+    MethodAlreadyRegistered {
+        receiver_type: String,
+        method: String,
+    },
     #[error("{group} registration contains duplicate function '{function}'")]
     RegistrationDuplicateFunction { group: String, function: String },
     #[error("{group} cannot register function '{function}' because it is already registered")]
@@ -233,6 +242,19 @@ pub(crate) enum VmError {
     QuotedFunctionNotFound { function: String },
     #[error("Function {function} not found")]
     FunctionNotFound { function: String },
+    #[error("Method '{method}' not found for receiver type '{receiver_type}'")]
+    MethodNotFound {
+        method: String,
+        receiver_type: String,
+    },
+    #[error("Method '{method}' expected receiver type '{expected}', got '{actual}'")]
+    MethodReceiverTypeMismatch {
+        method: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("Method '{method}' requires a receiver argument")]
+    MethodCallRequiresReceiver { method: String },
     #[error("Cannot execute foreign function {function}")]
     CannotExecuteForeignFunction { function: String },
     #[error("Local storage is not configured")]
@@ -253,8 +275,8 @@ pub(crate) enum VmError {
     },
     #[error("Async MPC engine {runtime} does not match VM engine {configured}")]
     AsyncMpcEngineMismatch {
-        runtime: MpcEngineIdentity,
-        configured: MpcEngineIdentity,
+        runtime: Box<MpcEngineIdentity>,
+        configured: Box<MpcEngineIdentity>,
     },
     #[error("No MPC engine configured for output protocol")]
     MpcOutputEngineNotConfigured,

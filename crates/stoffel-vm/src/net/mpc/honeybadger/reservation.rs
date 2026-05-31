@@ -4,7 +4,6 @@ use crate::net::mpc_engine::{MpcEngineOperationResultExt, MpcEngineReservation, 
 use crate::net::reservation::{ReservationGrant, ReservationRegistry};
 use crate::storage::preproc::{self, PreprocKeyScope};
 use ark_ec::{CurveGroup, PrimeGroup};
-use std::sync::atomic::Ordering;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelnet::network_utils::ClientId;
 
@@ -41,10 +40,10 @@ where
     ) -> MpcEngineResult<()> {
         async {
             let store = self.preproc_store.read().await.clone();
-            let persistent_party_id = self.persistent_party_id.load(Ordering::SeqCst);
+            let persistent_identity = self.persistent_identity();
             if let Some(store) = store {
                 if let Some(restored) =
-                    ReservationRegistry::load(store.as_ref(), &program_hash, persistent_party_id)
+                    ReservationRegistry::load(store.as_ref(), &program_hash, persistent_identity)
                         .await
                         .map_err(|e| e.to_string())?
                 {
@@ -54,7 +53,7 @@ where
             }
             *self.reservation.write().await = Some(ReservationRegistry::new(
                 program_hash,
-                persistent_party_id,
+                persistent_identity,
                 capacity,
             ));
             Ok::<(), String>(())
@@ -71,7 +70,10 @@ where
         async {
             let guard = self.reservation.read().await;
             let reg = guard.as_ref().ok_or("reservations not initialized")?;
-            let grant = reg.reserve(client_id, n).await.map_err(|e| e.to_string())?;
+            let grant = reg
+                .reserve(self.client_identity(client_id), n)
+                .await
+                .map_err(|e| e.to_string())?;
             drop(guard);
             self.persist_reservation_state_if_configured().await?;
             Ok::<ReservationGrant, String>(grant)
@@ -84,7 +86,7 @@ where
         async {
             let store = self.preproc_store.read().await.clone();
             let hash = *self.program_hash.read().await;
-            let persistent_party_id = self.persistent_party_id.load(Ordering::SeqCst);
+            let persistent_identity = self.persistent_identity();
             let (store, hash) = match (store, hash) {
                 (Some(s), Some(h)) => (s, h),
                 _ => return Err::<Vec<u8>, String>("preproc store not configured".to_owned()),
@@ -95,7 +97,7 @@ where
                 F::field_kind(),
                 self.topology.n_parties(),
                 self.topology.threshold(),
-                persistent_party_id,
+                persistent_identity,
             )
             .random_share();
             let blob = store.load(&key).await?.ok_or("no random shares stored")?;
@@ -118,7 +120,7 @@ where
         async {
             let guard = self.reservation.read().await;
             let reg = guard.as_ref().ok_or("reservations not initialized")?;
-            reg.submit_masked_input(client_id, index, value)
+            reg.submit_masked_input(self.client_identity(client_id), index, value)
                 .await
                 .map_err(|e| e.to_string())?;
             drop(guard);
@@ -146,7 +148,7 @@ where
 
             let store = self.preproc_store.read().await.clone();
             let hash = *self.program_hash.read().await;
-            let persistent_party_id = self.persistent_party_id.load(Ordering::SeqCst);
+            let persistent_identity = self.persistent_identity();
             let (store, hash) = match (store, hash) {
                 (Some(s), Some(h)) => (s, h),
                 _ => {
@@ -160,7 +162,7 @@ where
                 F::field_kind(),
                 self.topology.n_parties(),
                 self.topology.threshold(),
-                persistent_party_id,
+                persistent_identity,
             )
             .random_share();
             let blob = store.load(&key).await?.ok_or("no random shares stored")?;

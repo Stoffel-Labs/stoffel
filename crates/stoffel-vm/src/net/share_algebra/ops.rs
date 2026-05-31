@@ -74,6 +74,18 @@ pub(crate) fn mul_share_field_for_curve(
     )
 }
 
+pub(crate) fn add_share_field_for_curve(
+    curve_config: MpcCurveConfig,
+    _ty: ShareType,
+    share_bytes: &[u8],
+    field_bytes: &[u8],
+) -> ShareAlgebraResult<Vec<u8>> {
+    dispatch_share_curve_config!(
+        curve_config,
+        share_field_add_typed(share_bytes, field_bytes)
+    )
+}
+
 pub(super) fn share_scalar_op_typed<F, G>(
     share_bytes: &[u8],
     scalar: i64,
@@ -266,6 +278,34 @@ where
         DecodedShare::Feldman(share) => {
             let new_share = (share * scalar_f).map_err(|e| {
                 ShareAlgebraError::feldman_operation("multiply Feldman share by field element", e)
+            })?;
+            encode_share_bytes_typed(&new_share)
+        }
+    }
+}
+
+fn share_field_add_typed<F, G>(
+    share_bytes: &[u8],
+    field_bytes: &[u8],
+) -> ShareAlgebraResult<Vec<u8>>
+where
+    F: FftField + PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    let share = decode_share_bytes_typed::<F, G>(share_bytes)?;
+    let field = F::deserialize_compressed(field_bytes).map_err(|e| {
+        ShareAlgebraError::FieldElementDecode {
+            source: e.to_string(),
+        }
+    })?;
+    match share {
+        DecodedShare::Robust(share) => {
+            let new_share = RobustShare::new(share.share[0] + field, share.id, share.degree);
+            encode_share_bytes_typed(&new_share)
+        }
+        DecodedShare::Feldman(share) => {
+            let new_share = (share + field).map_err(|e| {
+                ShareAlgebraError::feldman_operation("add field element to Feldman share", e)
             })?;
             encode_share_bytes_typed(&new_share)
         }

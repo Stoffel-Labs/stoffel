@@ -1,6 +1,5 @@
 use super::VMState;
 use crate::error::VmResult;
-#[cfg(feature = "avss")]
 use crate::mpc_values::avss_object;
 use crate::mpc_values::share_object;
 use stoffel_vm_types::core_types::{ShareData, ShareType, Value};
@@ -69,8 +68,6 @@ impl VMState {
         )?;
         Ok(Value::from(object_ref))
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn create_avss_share_object_value(
         &mut self,
         key_name: &str,
@@ -87,13 +84,9 @@ impl VMState {
         )?;
         Ok(Value::from(object_ref))
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn is_avss_share_object(&mut self, value: &Value) -> bool {
         avss_object::is_avss_share_object(self.table_memory.as_mut(), value)
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn avss_commitment(&mut self, value: &Value, index: usize) -> VmResult<Vec<u8>> {
         Ok(avss_object::get_commitment(
             self.table_memory.as_mut(),
@@ -101,16 +94,12 @@ impl VMState {
             index,
         )?)
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn avss_key_name(&mut self, value: &Value) -> VmResult<String> {
         Ok(avss_object::get_key_name(
             self.table_memory.as_mut(),
             value,
         )?)
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn avss_commitment_count(&mut self, value: &Value) -> VmResult<usize> {
         Ok(avss_object::get_commitment_count(
             self.table_memory.as_mut(),

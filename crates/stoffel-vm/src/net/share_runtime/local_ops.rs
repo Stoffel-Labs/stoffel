@@ -134,6 +134,19 @@ impl MpcShareRuntime<'_> {
         self.preserve_share_data_format(share_data, result)
     }
 
+    pub(crate) fn add_field_data(
+        &self,
+        ty: ShareType,
+        share_data: &ShareData,
+        field_bytes: &[u8],
+    ) -> VmResult<ShareData> {
+        let result = self
+            .engine
+            .add_share_field_local(ty, share_data.as_bytes(), field_bytes)
+            .map_mpc_backend_err("add_share_field_local")?;
+        self.preserve_share_data_format(share_data, result)
+    }
+
     #[cfg(test)]
     pub(crate) fn add_bytes(
         &self,

@@ -4,7 +4,7 @@ use crate::foreign_functions::{
 };
 use crate::net::client_store::{ClientInputIndex, ClientOutputShareCount, ClientShareIndex};
 use crate::runtime_hooks::HookEvent;
-use crate::value_conversions::{usize_to_vm_i64, value_to_usize};
+use crate::value_conversions::{usize_to_vm_i64, value_to_i64, value_to_usize};
 use crate::VirtualMachineResult;
 use stoffel_vm_types::core_types::{ShareData, ShareType, TableRef, Value};
 
@@ -17,6 +17,9 @@ pub(crate) const FUNCTION_NAMES: &[&str] = &[
     "set_field",
     "array_length",
     "array_push",
+    "append",
+    "len",
+    "range",
     "ClientStore.get_number_clients",
     "ClientStore.take_share",
     "ClientStore.take_share_fixed",
@@ -161,6 +164,65 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
 
         let len = ctx.push_array_args_from(array_ref, 1, "array_push")?;
         Ok(Value::I64(usize_to_vm_i64(len, "array length")?))
+    });
+
+    register_standard_builtin!("append", |mut ctx| {
+        let array_ref = {
+            let args = ctx.named_args("append");
+            args.require_min(2, "at least 2 arguments: array and value")?;
+            args.array_ref(0, "First argument")?
+        };
+
+        let len = ctx.push_array_args_from(array_ref, 1, "append")?;
+        Ok(Value::I64(usize_to_vm_i64(len, "array length")?))
+    });
+
+    register_standard_builtin!("len", |mut ctx| {
+        let len = {
+            let args = ctx.named_args("len");
+            args.require_exact(1, "1 argument: array")?;
+            let value = args.cloned(0)?;
+            if let Value::String(value) = value {
+                value.chars().count()
+            } else {
+                let Some(array_ref) =
+                    TableRef::from_value(&value).and_then(|table_ref| match table_ref {
+                        TableRef::Array(array_ref) => Some(array_ref),
+                        TableRef::Object(_) => None,
+                    })
+                else {
+                    return Err("First argument must be an array or string".into());
+                };
+                ctx.read_array_ref_len(array_ref)?
+            }
+        };
+
+        let len = usize_to_vm_i64(len, "array length")?;
+        Ok(Value::I64(len))
+    });
+
+    register_standard_builtin!("range", |mut ctx| {
+        let (start, stop) = {
+            let args = ctx.named_args("range");
+            args.require_exact(2, "2 arguments: start and stop")?;
+            (
+                value_to_i64(&args.cloned(0)?, "range start")?,
+                value_to_i64(&args.cloned(1)?, "range stop")?,
+            )
+        };
+
+        let count = if stop <= start {
+            0
+        } else {
+            usize::try_from(i128::from(stop) - i128::from(start))
+                .map_err(|_| "range length is too large".to_owned())?
+        };
+        let array_ref = ctx.create_array_ref(count)?;
+        if count > 0 {
+            let values: Vec<Value> = (start..stop).map(Value::I64).collect();
+            ctx.push_array_ref_values(array_ref, &values)?;
+        }
+        Ok(Value::from(array_ref))
     });
 
     register_standard_builtin!("ClientStore.get_number_clients", |ctx| {
@@ -430,6 +492,38 @@ mod tests {
             self.lines.lock().push(line.to_owned());
             Ok(())
         }
+    }
+
+    #[test]
+    fn python_shaped_array_aliases_are_registered() {
+        let mut vm = VirtualMachine::try_new().expect("vm with standard library");
+        let array = vm
+            .execute_with_args("create_array", &[])
+            .expect("create array");
+
+        assert_eq!(
+            vm.execute_with_args("append", &[array.clone(), Value::I64(7)])
+                .expect("append value"),
+            Value::I64(1)
+        );
+        assert_eq!(
+            vm.execute_with_args("len", &[array]).expect("array length"),
+            Value::I64(1)
+        );
+    }
+
+    #[test]
+    fn range_builtin_returns_python_style_exclusive_array() {
+        let mut vm = VirtualMachine::try_new().expect("vm with standard library");
+        let result = vm
+            .execute_with_args("range", &[Value::I64(2), Value::I64(5)])
+            .expect("range array");
+
+        assert_eq!(
+            vm.execute_with_args("len", &[result])
+                .expect("range length"),
+            Value::I64(3)
+        );
     }
 
     struct StorageTestEngine {

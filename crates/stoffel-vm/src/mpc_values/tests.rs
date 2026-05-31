@@ -257,8 +257,6 @@ fn matching_share_pair_reports_typed_mismatch_context() {
         }
     );
 }
-
-#[cfg(feature = "avss")]
 #[test]
 fn avss_object_shape_errors_are_typed() {
     let mut store = ObjectStore::new();
@@ -293,8 +291,6 @@ fn avss_object_shape_errors_are_typed() {
         }
     );
 }
-
-#[cfg(feature = "avss")]
 #[test]
 fn avss_commitment_bounds_errors_are_typed() {
     let mut store = ObjectStore::new();
@@ -319,8 +315,6 @@ fn avss_commitment_bounds_errors_are_typed() {
         }
     );
 }
-
-#[cfg(feature = "avss")]
 #[test]
 fn avss_typed_ref_helpers_avoid_value_wrapping() {
     let mut store = ObjectStore::new();

@@ -1,12 +1,12 @@
 use crate::net::curve::SupportedMpcField;
 use crate::net::mpc::honeybadger_node_opts;
-use crate::net::mpc_engine::{MpcPartyId, MpcSessionTopology};
+use crate::net::mpc_engine::{DurableIdentityDigest, MpcPartyId, MpcSessionTopology};
 use crate::net::reservation::ReservationRegistry;
 use crate::storage::preproc::PreprocStore;
 use ark_ec::{CurveGroup, PrimeGroup};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, RwLock as StdRwLock};
 use stoffelmpc_mpc::common::MPCProtocol;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::HoneyBadgerMPCNode;
@@ -42,6 +42,7 @@ where
     G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
 {
     topology: MpcSessionTopology,
+    local_identity: DurableIdentityDigest,
     net: Arc<QuicNetworkManager>,
     node: Arc<Mutex<HoneyBadgerMPCNode<F, RBCImpl>>>,
     ready: AtomicBool,
@@ -50,8 +51,8 @@ where
     preproc_store: tokio::sync::RwLock<Option<Arc<dyn PreprocStore>>>,
     /// Program hash for keying stored material.
     program_hash: tokio::sync::RwLock<Option<[u8; 32]>>,
-    /// Stable operator-assigned party slot used for persistent store keys.
-    persistent_party_id: AtomicUsize,
+    /// Durable node identity used for persistent store keys.
+    persistent_identity: StdRwLock<DurableIdentityDigest>,
     /// Reservation registry for masked-input protocol.
     reservation: tokio::sync::RwLock<Option<ReservationRegistry>>,
     /// Optional in-process capture used by coordinator-backed output delivery.
@@ -110,12 +111,27 @@ where
         self.topology.party()
     }
 
+    pub(crate) fn persistent_identity(&self) -> DurableIdentityDigest {
+        *self
+            .persistent_identity
+            .read()
+            .expect("persistent identity lock poisoned")
+    }
+
+    pub fn set_preproc_store_identity(&self, identity: DurableIdentityDigest) {
+        *self
+            .persistent_identity
+            .write()
+            .expect("persistent identity lock poisoned") = identity;
+    }
+
     pub fn from_config(config: HoneyBadgerEngineConfig) -> Result<Arc<Self>, String> {
         let HoneyBadgerEngineConfig {
             session,
             preprocessing,
         } = config;
-        let (topology, network, input_ids, open_message_router) = session.into_parts();
+        let (topology, local_identity, network, input_ids, open_message_router) =
+            session.into_parts();
         let instance_id = topology.instance_id();
         let party_id = topology.party_id();
         let n_parties = topology.n_parties();
@@ -140,13 +156,14 @@ where
 
         Ok(Arc::new(Self {
             topology,
+            local_identity,
             net: network,
             node: Arc::new(Mutex::new(node)),
             ready: AtomicBool::new(false),
             group_marker: PhantomData,
             preproc_store: tokio::sync::RwLock::new(None),
             program_hash: tokio::sync::RwLock::new(None),
-            persistent_party_id: AtomicUsize::new(party_id),
+            persistent_identity: StdRwLock::new(local_identity),
             reservation: tokio::sync::RwLock::new(None),
             client_output_capture: Mutex::new(None),
             client_output_id_map: RwLock::new(Vec::new()),
@@ -227,6 +244,7 @@ where
         Ok(Self::from_existing_node_with_router_and_topology(
             open_message_router,
             topology,
+            DurableIdentityDigest::from_legacy_party_id(party_id),
             net,
             node,
         ))
@@ -240,6 +258,7 @@ where
         Self::from_existing_node_with_router_and_topology(
             Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
             topology,
+            DurableIdentityDigest::from_legacy_party_id(topology.party_id()),
             net,
             node,
         )
@@ -248,21 +267,22 @@ where
     pub fn from_existing_node_with_router_and_topology(
         open_message_router: Arc<crate::net::open_registry::OpenMessageRouter>,
         topology: MpcSessionTopology,
+        local_identity: DurableIdentityDigest,
         net: Arc<QuicNetworkManager>,
         node: HoneyBadgerMPCNode<F, RBCImpl>,
     ) -> Arc<Self> {
         let instance_id = topology.instance_id();
-        let party_id = topology.party_id();
         let node = Arc::new(Mutex::new(node));
         Arc::new(Self {
             topology,
+            local_identity,
             net,
             node,
             ready: AtomicBool::new(true),
             group_marker: PhantomData,
             preproc_store: tokio::sync::RwLock::new(None),
             program_hash: tokio::sync::RwLock::new(None),
-            persistent_party_id: AtomicUsize::new(party_id),
+            persistent_identity: StdRwLock::new(local_identity),
             reservation: tokio::sync::RwLock::new(None),
             client_output_capture: Mutex::new(None),
             client_output_id_map: RwLock::new(Vec::new()),
@@ -282,6 +302,13 @@ where
             .get(client_id)
             .copied()
             .unwrap_or(client_id)
+    }
+
+    pub(crate) fn client_identity(&self, client_id: ClientId) -> DurableIdentityDigest {
+        self.net
+            .client_public_key_bytes(client_id)
+            .map(|bytes| DurableIdentityDigest::from_public_key_bytes(&bytes))
+            .unwrap_or_else(|| DurableIdentityDigest::from_legacy_party_id(client_id))
     }
 
     pub async fn enable_client_output_capture(&self) {

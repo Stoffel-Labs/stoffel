@@ -95,6 +95,9 @@ build_command() {
         if [ -n "${STOFFEL_OUTPUTS:-}" ]; then
             cmd="${cmd} --outputs ${STOFFEL_OUTPUTS}"
         fi
+        if [ -n "${STOFFEL_OUTPUT_FIXED_POINT_FRACTIONAL_BITS:-}" ]; then
+            cmd="${cmd} --output-fixed-point-fractional-bits ${STOFFEL_OUTPUT_FIXED_POINT_FRACTIONAL_BITS}"
+        fi
         if [ -n "${STOFFEL_COORD_ADDR:-}" ]; then
             cmd="${cmd} --off-chain-coord ${STOFFEL_COORD_ADDR}"
             cmd="${cmd} --cert ${STOFFEL_CERT}"
@@ -162,12 +165,21 @@ build_command() {
         cmd="${cmd} --wait-for-clients ${STOFFEL_WAIT_FOR_CLIENTS}"
     fi
 
+    if [ -n "${STOFFEL_CLIENT_INPUT_COUNT:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+        cmd="${cmd} --client-input-count ${STOFFEL_CLIENT_INPUT_COUNT}"
+    fi
+
     if [ -n "${STOFFEL_PREPROC_STORE:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
         cmd="${cmd} --preproc-store ${STOFFEL_PREPROC_STORE}"
     fi
 
     if [ -n "${STOFFEL_LOCAL_STORE:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
         cmd="${cmd} --local-store ${STOFFEL_LOCAL_STORE}"
+    fi
+
+    if [ -z "${STOFFEL_COORD_ADDR:-}" ] && [ -n "${STOFFEL_CERT:-}" ] && [ -n "${STOFFEL_KEY:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+        cmd="${cmd} --cert ${STOFFEL_CERT}"
+        cmd="${cmd} --key ${STOFFEL_KEY}"
     fi
 
     # Add MPC backend if specified

@@ -13,13 +13,13 @@ mod traits;
 
 pub use crate::net::share_algebra::{ShareAlgebraError, ShareAlgebraResult};
 pub use capabilities::{MpcCapabilities, MpcCapability, MpcCapabilityError, MpcCapabilityResult};
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 pub(crate) use error::MpcEngineOperationResultExt;
 pub use error::{MpcEngineError, MpcEngineResult};
 pub use exponent::{MpcExponentError, MpcExponentGenerator, MpcExponentGroup, MpcExponentResult};
 pub use identity::{
-    AbaSessionId, MpcEngineIdentity, MpcInstanceId, MpcPartyCount, MpcPartyId, MpcRuntimeInfo,
-    MpcSessionTopology, MpcSessionTopologyError, MpcThreshold, RbcSessionId,
+    AbaSessionId, DurableIdentityDigest, MpcEngineIdentity, MpcInstanceId, MpcPartyCount,
+    MpcPartyId, MpcRuntimeInfo, MpcSessionTopology, MpcSessionTopologyError, MpcThreshold,
+    RbcSessionId,
 };
 pub use traits::{
     AsyncMpcEngine, AsyncMpcEngineClientOps, AsyncMpcEngineConsensus, MpcEngine,

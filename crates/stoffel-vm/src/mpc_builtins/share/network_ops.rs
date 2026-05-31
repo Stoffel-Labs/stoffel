@@ -10,17 +10,37 @@ use crate::VirtualMachineResult;
 use stoffel_vm_types::core_types::{ShareType, Value};
 
 pub(super) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
-    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::Mul, share_mul)?;
-    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::Open, share_open)?;
+    vm.try_register_mpc_online_foreign_method("Share", "mul", MpcOnlineBuiltin::Mul, share_mul)?;
+    vm.try_register_mpc_online_foreign_method("Share", "open", MpcOnlineBuiltin::Open, share_open)?;
+    vm.try_register_mpc_online_foreign_method(
+        "Share",
+        "open_fixed",
+        MpcOnlineBuiltin::Open,
+        share_open,
+    )?;
     vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::BatchOpen, share_batch_open)?;
-    vm.try_register_mpc_online_foreign_function(
+    vm.try_register_mpc_online_foreign_method(
+        "Share",
+        "send_to_client",
         MpcOnlineBuiltin::SendToClient,
         share_send_to_client,
     )?;
-    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::OpenExp, share_open_exp)?;
+    vm.try_register_mpc_online_foreign_method(
+        "Share",
+        "open_exp",
+        MpcOnlineBuiltin::OpenExp,
+        share_open_exp,
+    )?;
     vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::Random, share_random)?;
-    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::OpenField, share_open_field)?;
-    vm.try_register_mpc_online_foreign_function(
+    vm.try_register_mpc_online_foreign_method(
+        "Share",
+        "open_field",
+        MpcOnlineBuiltin::OpenField,
+        share_open_field,
+    )?;
+    vm.try_register_mpc_online_foreign_method(
+        "Share",
+        "open_exp_custom",
         MpcOnlineBuiltin::OpenExpCustom,
         share_open_exp_custom,
     )?;

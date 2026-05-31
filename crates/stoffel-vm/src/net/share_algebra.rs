@@ -39,7 +39,8 @@ pub(crate) use codec::preserve_share_data_format_for_curve;
 pub use error::{ShareAlgebraError, ShareAlgebraResult};
 pub(crate) use interpolation::interpolate_local_for_curve;
 pub(crate) use ops::{
-    add_share_for_curve, mul_share_field_for_curve, neg_share_for_curve, sub_share_for_curve,
+    add_share_field_for_curve, add_share_for_curve, mul_share_field_for_curve, neg_share_for_curve,
+    sub_share_for_curve,
 };
 pub(crate) use scalar::{
     add_share_scalar_for_curve, div_share_scalar_for_curve, mul_share_scalar_for_curve,

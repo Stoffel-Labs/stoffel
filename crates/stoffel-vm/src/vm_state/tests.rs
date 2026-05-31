@@ -82,6 +82,131 @@ fn function_registration_clears_vm_local_call_target_cache() {
     assert!(vm.last_call_target.is_none());
 }
 
+fn tagged_share_object(vm: &mut VMState) -> Value {
+    let object_ref = vm
+        .table_memory
+        .create_object_ref()
+        .expect("create test object");
+    vm.table_memory
+        .set_table_field(
+            stoffel_vm_types::core_types::TableRef::from(object_ref),
+            Value::String("__type".to_string()),
+            Value::String("Share".to_string()),
+        )
+        .expect("set type tag");
+    Value::from(object_ref)
+}
+
+fn register_test_share_open(vm: &mut VMState) {
+    vm.try_insert_method(
+        "Share",
+        "open",
+        Function::foreign(ForeignFunction::new(
+            "Share.open",
+            Arc::new(|_| Ok(Value::I64(42))),
+        )),
+    )
+    .expect("register Share.open method");
+}
+
+#[test]
+fn call_dispatches_bare_method_by_receiver_runtime_type() {
+    let mut vm = VMState::new();
+    register_test_share_open(&mut vm);
+    let receiver = tagged_share_object(&mut vm);
+    vm.push_activation_record(ActivationRecord::with_registers(
+        "caller",
+        RegisterFile::from(vec![Value::Unit]),
+        vec![],
+        None,
+    ));
+    vm.current_frame_mut()
+        .expect("caller frame")
+        .push_stack(receiver);
+
+    vm.execute_call("open", false)
+        .expect("dispatch bare receiver method");
+
+    let frame = vm.current_activation_record().expect("caller frame");
+    assert_eq!(frame.register(r(0)), Some(&Value::I64(42)));
+}
+
+#[test]
+fn call_validates_explicit_method_receiver_runtime_type() {
+    let mut vm = VMState::new();
+    register_test_share_open(&mut vm);
+    let receiver = tagged_share_object(&mut vm);
+    vm.push_activation_record(ActivationRecord::with_registers(
+        "caller",
+        RegisterFile::from(vec![Value::Unit]),
+        vec![],
+        None,
+    ));
+    vm.current_frame_mut()
+        .expect("caller frame")
+        .push_stack(receiver);
+
+    vm.execute_call("Share.open", false)
+        .expect("dispatch explicit receiver method");
+
+    let frame = vm.current_activation_record().expect("caller frame");
+    assert_eq!(frame.register(r(0)), Some(&Value::I64(42)));
+}
+
+#[test]
+fn call_errors_when_method_receiver_is_missing_or_wrong_type() {
+    let mut vm = VMState::new();
+    register_test_share_open(&mut vm);
+    vm.push_activation_record(ActivationRecord::with_registers(
+        "caller",
+        RegisterFile::from(vec![Value::Unit]),
+        vec![],
+        None,
+    ));
+
+    let err = vm
+        .execute_call("open", false)
+        .expect_err("method call without receiver should fail");
+    assert!(matches!(err, VmError::MethodCallRequiresReceiver { .. }));
+
+    vm.current_frame_mut()
+        .expect("caller frame")
+        .push_stack(Value::I64(1));
+    let err = vm
+        .execute_call("Share.open", false)
+        .expect_err("explicit method call with wrong receiver should fail");
+    assert!(matches!(
+        err,
+        VmError::MethodReceiverTypeMismatch { expected, actual, .. }
+            if expected == "Share" && actual == "int64"
+    ));
+}
+
+#[test]
+fn duplicate_method_registration_is_rejected() {
+    let mut vm = VMState::new();
+    register_test_share_open(&mut vm);
+
+    let err = vm
+        .try_insert_method(
+            "Share",
+            "open",
+            Function::foreign(ForeignFunction::new(
+                "Share.open_duplicate",
+                Arc::new(|_| Ok(Value::Unit)),
+            )),
+        )
+        .expect_err("duplicate method registration should fail");
+
+    assert!(matches!(
+        err,
+        VmError::MethodAlreadyRegistered {
+            receiver_type,
+            method
+        } if receiver_type == "Share" && method == "open"
+    ));
+}
+
 impl MpcEngine for DummyFieldEngine {
     fn protocol_name(&self) -> &'static str {
         "dummy"

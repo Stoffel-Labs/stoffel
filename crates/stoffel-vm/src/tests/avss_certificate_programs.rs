@@ -181,14 +181,15 @@ pub fn build_avss_certificate_sign_program_for_key(
         Instruction::PUSHARG(15),
         Instruction::CALL("Share.add".to_owned()),
         Instruction::MOV(15, 0),
-        // r17 = [r], produced from a clear one-share so output client receives r and s together.
-        Instruction::LDI(16, Value::I64(1)),
+        // r17 = [r], produced locally from a zero share so output does not trigger a nested input round.
+        Instruction::PUSHARG(4),
+        Instruction::LDI(16, Value::I64(0)),
         Instruction::PUSHARG(16),
-        Instruction::CALL("Share.from_clear".to_owned()),
+        Instruction::CALL("Share.mul_scalar".to_owned()),
         Instruction::MOV(16, 0),
         Instruction::PUSHARG(16),
         Instruction::PUSHARG(12),
-        Instruction::CALL("Share.mul_field".to_owned()),
+        Instruction::CALL("Share.add_field".to_owned()),
         Instruction::MOV(17, 0),
         // Send [r], [s] to output client 0.
         Instruction::LDI(18, Value::I64(2)),

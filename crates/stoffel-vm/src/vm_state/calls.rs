@@ -18,7 +18,7 @@ use crate::vm_state::mpc_operation::{
 };
 use smallvec::SmallVec;
 use std::sync::Arc;
-use stoffel_vm_types::core_types::{Closure, ShareType, Upvalue, Value};
+use stoffel_vm_types::core_types::{Closure, ObjectRef, ShareType, TableRef, Upvalue, Value};
 use stoffel_vm_types::instructions::Instruction;
 use stoffel_vm_types::registers::RegisterIndex;
 
@@ -63,6 +63,11 @@ struct DrainedCallArgs {
     values: SmallVec<[Value; 8]>,
 }
 
+struct ResolvedCallTarget {
+    name: String,
+    target: CallTarget,
+}
+
 impl DrainedCallArgs {
     fn new(checkpoint: CallStackCheckpoint, values: SmallVec<[Value; 8]>) -> Self {
         Self { checkpoint, values }
@@ -105,7 +110,9 @@ impl VMState {
         function_name: &str,
         hooks_enabled: bool,
     ) -> VmResult<InstructionOutcome> {
-        let function = self.call_target(function_name)?;
+        let resolved = self.resolve_call_target(function_name)?;
+        let function_name = resolved.name;
+        let function = resolved.target;
 
         match function {
             CallTarget::Vm(target) => {
@@ -150,7 +157,7 @@ impl VMState {
                 if arg_count == 0 {
                     let checkpoint = CallStackCheckpoint::new(self.call_stack.len());
                     let outcome = self.call_foreign_function_internal(
-                        function_name,
+                        &function_name,
                         foreign_func.as_ref(),
                         &[],
                         hooks_enabled,
@@ -162,7 +169,7 @@ impl VMState {
                 } else {
                     let args = self.drain_call_args(hooks_enabled)?;
                     let outcome = match self.call_foreign_function_internal(
-                        function_name,
+                        &function_name,
                         foreign_func.as_ref(),
                         args.as_slice(),
                         hooks_enabled,
@@ -206,6 +213,88 @@ impl VMState {
         let target = self.program.call_target(function_name)?;
         self.last_call_target = Some((Arc::from(function_name), target.clone()));
         Ok(target)
+    }
+
+    fn resolve_call_target(&mut self, function_name: &str) -> VmResult<ResolvedCallTarget> {
+        if let Some((receiver_type, method_name)) = function_name.split_once('.') {
+            if self
+                .program
+                .method_target_name(receiver_type, method_name)
+                .is_some()
+            {
+                let Some(receiver) = self.current_frame()?.stack().first().cloned() else {
+                    return Err(VmError::MethodCallRequiresReceiver {
+                        method: function_name.to_owned(),
+                    });
+                };
+                let actual = self.runtime_type_name(&receiver)?;
+                if actual != receiver_type {
+                    return Err(VmError::MethodReceiverTypeMismatch {
+                        method: method_name.to_owned(),
+                        expected: receiver_type.to_owned(),
+                        actual,
+                    });
+                }
+            }
+
+            return Ok(ResolvedCallTarget {
+                name: function_name.to_owned(),
+                target: self.call_target(function_name)?,
+            });
+        }
+
+        if self
+            .program
+            .receiver_types_for_method(function_name)
+            .is_some()
+        {
+            let Some(receiver) = self.current_frame()?.stack().first().cloned() else {
+                return Err(VmError::MethodCallRequiresReceiver {
+                    method: function_name.to_owned(),
+                });
+            };
+            let actual = self.runtime_type_name(&receiver)?;
+
+            if let Some(canonical_name) = self
+                .program
+                .method_target_name(&actual, function_name)
+                .map(str::to_owned)
+            {
+                return Ok(ResolvedCallTarget {
+                    name: canonical_name.clone(),
+                    target: self.program.call_target(&canonical_name)?,
+                });
+            }
+
+            return Err(VmError::MethodNotFound {
+                method: function_name.to_owned(),
+                receiver_type: actual,
+            });
+        }
+
+        Ok(ResolvedCallTarget {
+            name: function_name.to_owned(),
+            target: self.call_target(function_name)?,
+        })
+    }
+
+    fn runtime_type_name(&mut self, value: &Value) -> VmResult<String> {
+        if let Some(object_ref) = ObjectRef::from_value(value) {
+            let type_field = self.table_memory.read_table_field(
+                TableRef::from(object_ref),
+                &Value::String("__type".to_owned()),
+            )?;
+            if let Some(Value::String(type_name)) = type_field {
+                return Ok(type_name);
+            }
+            return Ok("object".to_owned());
+        }
+
+        Ok(match value {
+            Value::Share(_, _) => "Share",
+            other => other.type_name(),
+        }
+        .to_owned())
     }
 
     fn prepare_vm_entry_call(
@@ -289,7 +378,8 @@ impl VMState {
         function_name: &str,
         hooks_enabled: bool,
     ) -> VmResult<Option<PendingMpcOperation>> {
-        let CallTarget::Foreign(foreign_func) = self.call_target(function_name)? else {
+        let CallTarget::Foreign(foreign_func) = self.resolve_call_target(function_name)?.target
+        else {
             return Ok(None);
         };
         let Some(builtin) = foreign_func.mpc_online_builtin_kind() else {

@@ -167,7 +167,6 @@ impl MpcCurveConfig {
 
     /// Validate that this curve is compatible with the given backend.
     pub fn validate_for_backend(self, backend: MpcBackendKind) -> MpcCurveResult<()> {
-        #[cfg(feature = "honeybadger")]
         if matches!(backend, MpcBackendKind::HoneyBadger)
             && matches!(self, Self::Secp256k1 | Self::Secp256r1)
         {
@@ -176,9 +175,6 @@ impl MpcCurveConfig {
                 backend,
             });
         }
-        #[cfg(not(feature = "honeybadger"))]
-        let _ = backend;
-
         Ok(())
     }
 }
@@ -583,7 +579,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "avss")]
     fn avss_curve_compatibility() {
         assert!(MpcCurveConfig::Bls12_381
             .validate_for_backend(MpcBackendKind::Avss)
@@ -606,7 +601,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "honeybadger")]
     fn honeybadger_rejects_avss_only_weierstrass_curves() {
         assert_eq!(
             MpcCurveConfig::Secp256k1

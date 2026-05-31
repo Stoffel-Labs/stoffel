@@ -1,9 +1,10 @@
 use super::AvssMpcEngine;
 use crate::net::curve::{MpcCurveConfig, SupportedMpcField};
 use crate::net::mpc_engine::{
-    MpcCapabilities, MpcEngine, MpcEngineClientOps, MpcEngineClientOutput, MpcEngineFieldOpen,
-    MpcEngineMultiplication, MpcEngineOpenInExponent, MpcEngineOperationResultExt,
-    MpcEnginePreprocPersistence, MpcEngineRandomness, MpcSessionTopology,
+    DurableIdentityDigest, MpcCapabilities, MpcEngine, MpcEngineClientOps, MpcEngineClientOutput,
+    MpcEngineFieldOpen, MpcEngineMultiplication, MpcEngineOpenInExponent,
+    MpcEngineOperationResultExt, MpcEnginePreprocPersistence, MpcEngineRandomness,
+    MpcSessionTopology,
 };
 use ark_ec::CurveGroup;
 use ark_std::rand::SeedableRng;
@@ -187,6 +188,10 @@ where
 
     fn topology(&self) -> MpcSessionTopology {
         self.topology
+    }
+
+    fn local_identity(&self) -> DurableIdentityDigest {
+        self.local_identity
     }
 
     fn is_ready(&self) -> bool {

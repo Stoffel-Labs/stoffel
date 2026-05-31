@@ -10,6 +10,18 @@ impl VMState {
         Ok(())
     }
 
+    pub(crate) fn try_insert_method(
+        &mut self,
+        receiver_type: &str,
+        method_name: &str,
+        function: Function,
+    ) -> VmResult<()> {
+        self.program
+            .try_insert_method(receiver_type, method_name, function)?;
+        self.last_call_target = None;
+        Ok(())
+    }
+
     pub(crate) fn has_function(&self, name: &str) -> bool {
         self.program.contains(name)
     }

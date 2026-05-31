@@ -1,9 +1,10 @@
 use super::HoneyBadgerMpcEngine;
 use crate::net::curve::{MpcCurveConfig, SupportedMpcField};
 use crate::net::mpc_engine::{
-    MpcCapabilities, MpcEngine, MpcEngineClientOps, MpcEngineClientOutput, MpcEngineConsensus,
-    MpcEngineMultiplication, MpcEngineOpenInExponent, MpcEngineOperationResultExt,
-    MpcEnginePreprocPersistence, MpcEngineRandomness, MpcEngineReservation, MpcSessionTopology,
+    DurableIdentityDigest, MpcCapabilities, MpcEngine, MpcEngineClientOps, MpcEngineClientOutput,
+    MpcEngineConsensus, MpcEngineMultiplication, MpcEngineOpenInExponent,
+    MpcEngineOperationResultExt, MpcEnginePreprocPersistence, MpcEngineRandomness,
+    MpcEngineReservation, MpcSessionTopology,
 };
 use ark_ec::{CurveGroup, PrimeGroup};
 use std::any::TypeId;
@@ -25,6 +26,10 @@ where
 
     fn topology(&self) -> MpcSessionTopology {
         self.topology
+    }
+
+    fn local_identity(&self) -> DurableIdentityDigest {
+        self.local_identity
     }
 
     fn is_ready(&self) -> bool {

@@ -1,6 +1,6 @@
 use crate::net::mpc_engine::{
-    MpcInstanceId, MpcPartyCount, MpcPartyId, MpcSessionTopology, MpcSessionTopologyError,
-    MpcThreshold,
+    DurableIdentityDigest, MpcInstanceId, MpcPartyCount, MpcPartyId, MpcSessionTopology,
+    MpcSessionTopologyError, MpcThreshold,
 };
 use crate::net::open_registry::OpenMessageRouter;
 use std::sync::Arc;
@@ -16,6 +16,7 @@ use stoffelnet::transports::quic::QuicNetworkManager;
 #[derive(Clone)]
 pub struct MpcSessionConfig {
     topology: MpcSessionTopology,
+    local_identity: DurableIdentityDigest,
     network: Arc<QuicNetworkManager>,
     input_ids: Vec<ClientId>,
     open_message_router: Arc<OpenMessageRouter>,
@@ -36,6 +37,7 @@ impl MpcSessionConfig {
     pub fn from_topology(topology: MpcSessionTopology, network: Arc<QuicNetworkManager>) -> Self {
         Self {
             topology,
+            local_identity: DurableIdentityDigest::from_legacy_party_id(topology.party_id()),
             network,
             input_ids: Vec::new(),
             open_message_router: Arc::new(OpenMessageRouter::new()),
@@ -62,6 +64,10 @@ impl MpcSessionConfig {
         self.topology.threshold_param()
     }
 
+    pub const fn local_identity(&self) -> DurableIdentityDigest {
+        self.local_identity
+    }
+
     pub fn network(&self) -> Arc<QuicNetworkManager> {
         Arc::clone(&self.network)
     }
@@ -78,16 +84,23 @@ impl MpcSessionConfig {
         self,
     ) -> (
         MpcSessionTopology,
+        DurableIdentityDigest,
         Arc<QuicNetworkManager>,
         Vec<ClientId>,
         Arc<OpenMessageRouter>,
     ) {
         (
             self.topology,
+            self.local_identity,
             self.network,
             self.input_ids,
             self.open_message_router,
         )
+    }
+
+    pub fn with_local_identity(mut self, local_identity: DurableIdentityDigest) -> Self {
+        self.local_identity = local_identity;
+        self
     }
 
     pub fn with_input_ids(mut self, input_ids: Vec<ClientId>) -> Self {
@@ -123,6 +136,10 @@ mod tests {
         assert_eq!(config.party().id(), 1);
         assert_eq!(config.party_count().count(), 4);
         assert_eq!(config.threshold_param().value(), 1);
+        assert_eq!(
+            config.local_identity(),
+            DurableIdentityDigest::from_legacy_party_id(1)
+        );
         assert_eq!(config.input_ids(), &[10, 11]);
         assert!(Arc::ptr_eq(&config.network(), &network));
         assert!(Arc::ptr_eq(&config.open_message_router(), &router));
