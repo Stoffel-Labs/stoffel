@@ -3621,7 +3621,7 @@ async fn main() {
     let mut upload_program_bytes = true;
     let mut bind_addr: Option<SocketAddr> = None;
     let mut party_id: Option<usize> = None;
-    let mut bootstrap_addr: Option<SocketAddr> = None;
+    let mut bootstrap_addr: Option<String> = None;
     let mut n_parties: Option<usize> = None;
     let mut threshold: Option<usize> = None;
     let mut client_inputs: Option<String> = None;
@@ -3635,7 +3635,7 @@ async fn main() {
     let mut client_input_total: usize = 0;
     let mut _enable_nat: bool = false;
     let mut _stun_servers: Vec<SocketAddr> = Vec::new();
-    let mut server_addrs: Vec<SocketAddr> = Vec::new();
+    let mut server_addrs_raw: Vec<String> = Vec::new();
     let mut mpc_backend: Option<String> = None;
     let mut mpc_curve: Option<String> = None;
     let mut rpc_addr: Option<(String, u16)> = None;
@@ -3757,7 +3757,7 @@ async fn main() {
             }
             "--bootstrap" => {
                 if let Some(v) = args_iter.next() {
-                    bootstrap_addr = Some(v.parse().expect("Invalid --bootstrap addr"));
+                    bootstrap_addr = Some(v);
                 }
             }
             "--n-parties" => {
@@ -3819,16 +3819,7 @@ async fn main() {
             }
             "--servers" => {
                 if let Some(v) = args_iter.next() {
-                    server_addrs = v
-                        .split(',')
-                        .filter_map(|s| {
-                            let s = s.trim();
-                            s.parse::<SocketAddr>().ok().or_else(|| {
-                                eprintln!("Warning: Invalid server address '{}', skipping", s);
-                                None
-                            })
-                        })
-                        .collect();
+                    server_addrs_raw = v.split(',').map(|s| s.trim().to_string()).collect();
                 }
             }
             "--mpc-backend" => {
@@ -3947,12 +3938,30 @@ async fn main() {
         &key_der,
         local_store_path.is_some() || preproc_store_path.is_some(),
     );
+
     if contract_addr.is_some() {
         let _ = (eth_node_addr.as_ref(), wallet_sk_str.as_ref());
         eprintln!(
             "Error: on-chain coordinator mode is temporarily unavailable in the crates.io-ready build"
         );
         exit(2);
+    }
+
+    let mut server_addrs: Vec<SocketAddr> = Vec::new();
+    for s in &server_addrs_raw {
+        match tokio::net::lookup_host(s.as_str()).await {
+            Ok(mut iter) => match iter.next() {
+                Some(addr) => server_addrs.push(addr),
+                None => {
+                    eprintln!("Error: no addresses found for --servers entry '{}'", s);
+                    exit(2);
+                }
+            },
+            Err(e) => {
+                eprintln!("Error: could not resolve --servers entry '{}': {}", s, e);
+                exit(2);
+            }
+        }
     }
 
     // Bootnode-only mode (no program execution)
@@ -4306,7 +4315,18 @@ async fn main() {
 
         let net = Arc::new(mgr);
         net_opt = Some(net.clone());
-    } else if let Some(bootnode) = bootstrap_addr {
+    } else if let Some(bootstrap_str) = bootstrap_addr {
+        let bootnode = tokio::net::lookup_host(&bootstrap_str)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Invalid --bootstrap addr '{}': {}", bootstrap_str, e);
+                exit(2)
+            })
+            .next()
+            .unwrap_or_else(|| {
+                eprintln!("Could not resolve --bootstrap addr '{}'", bootstrap_str);
+                exit(2)
+            });
         // Regular party mode: connect to external bootnode
         let bind = bind_addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
         let my_id = party_id.unwrap_or(0usize);
