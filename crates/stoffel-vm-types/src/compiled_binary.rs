@@ -1698,6 +1698,7 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes()); // constants
         bytes.extend_from_slice(&0u32.to_le_bytes()); // functions
         bytes.push(0); // HoneyBadger backend
+        bytes.push(0); // BLS12-381 curve
         bytes.extend_from_slice(&1u32.to_le_bytes()); // client schemas
         bytes.extend_from_slice(&0u64.to_le_bytes()); // client slot
         bytes.extend_from_slice(&1u32.to_le_bytes()); // inputs

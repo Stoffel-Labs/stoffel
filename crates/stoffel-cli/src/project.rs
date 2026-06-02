@@ -20,7 +20,7 @@ pub struct Project {
     config: ProjectConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectConfig {
     pub package: PackageConfig,
@@ -60,16 +60,6 @@ impl Default for MpcConfig {
 pub struct BuildConfig {
     pub source: PathBuf,
     pub target_dir: PathBuf,
-}
-
-impl Default for ProjectConfig {
-    fn default() -> Self {
-        Self {
-            package: PackageConfig::default(),
-            mpc: MpcConfig::default(),
-            build: BuildConfig::default(),
-        }
-    }
 }
 
 impl Default for PackageConfig {

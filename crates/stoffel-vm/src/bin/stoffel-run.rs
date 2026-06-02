@@ -3690,10 +3690,8 @@ async fn main() {
             }
         }
         cli_curve
-    } else if let Some(manifest_curve) = manifest_curve {
-        manifest_curve
     } else {
-        MpcCurveConfig::default()
+        manifest_curve.unwrap_or_default()
     };
 
     if let Err(e) = curve_config.validate_for_backend(backend_kind) {
