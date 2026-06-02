@@ -10,8 +10,8 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 libc = "0.2"
-stoffelmpc-mpc = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "dev" }
-stoffelnet = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-networking.git" }
+stoffelmpc-mpc = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "temp/monorepo-network-dep" }
+stoffelnet = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-networking.git", branch = "feature/robust-identity-based-on-cert" }
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
 stoffel-mpc-coordinator = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "feature/no-feature-gates-and-multi-type-awareness", default-features = false }
 alloy = "1.7.3"

@@ -24,7 +24,7 @@ opentelemetry-stdout = { version = "0.32.0", default-features = false, features 
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1.0", features = ["derive"] }
-stoffelnet = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-networking.git" }
+stoffelnet = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-networking.git", branch = "feature/robust-identity-based-on-cert" }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1.47.1", features = ["rt", "sync", "time"] }
@@ -37,7 +37,7 @@ stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
 stoffel-mpc-coordinator = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "feature/no-feature-gates-and-multi-type-awareness", default-features = false }
 stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
-stoffelmpc-mpc = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "dev" }
+stoffelmpc-mpc = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "temp/monorepo-network-dep" }
 
 [dev-dependencies]
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
