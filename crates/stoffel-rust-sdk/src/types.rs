@@ -7,13 +7,85 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use stoffel_vm_types::core_types::ShareType;
 
+use crate::config::MpcBackend;
 use crate::error::{Error, Result};
 
 pub type PartyId = usize;
 pub type ClientId = stoffelnet::network_utils::ClientId;
 pub type Round = stoffel_mpc_coordinator::Round;
 pub type MaskIndex = u64;
+
+/// SDK-level scalar type expected by a typed client input or output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientValueType {
+    Integer,
+    Boolean,
+    FixedPoint,
+}
+
+impl ClientValueType {
+    pub fn is_compatible_with_share_type(self, share_type: ShareType) -> bool {
+        match (self, share_type) {
+            (ClientValueType::Boolean, ShareType::SecretInt { bit_length: 1 }) => true,
+            (ClientValueType::Integer, ShareType::SecretInt { bit_length }) => bit_length > 1,
+            (ClientValueType::FixedPoint, ShareType::SecretFixedPoint { .. }) => true,
+            _ => false,
+        }
+    }
+}
+
+/// A Rust scalar that can be used as a typed client input.
+pub trait ClientInputValue {
+    const VALUE_TYPE: ClientValueType;
+
+    fn into_sdk_value(self) -> Value;
+}
+
+/// A Rust scalar that can be decoded from typed client output.
+pub trait ClientOutputValue: Sized {
+    const VALUE_TYPE: ClientValueType;
+
+    fn try_from_sdk_value(value: Value) -> Result<Self>;
+}
+
+/// Compile-time typed client input payload.
+///
+/// Implement this trait for domain structs when tuple inputs are not expressive
+/// enough. The SDK still validates the declared Rust type shape against the
+/// loaded program manifest before network submission.
+pub trait TypedClientInputs {
+    fn into_values(self) -> Vec<Value>;
+
+    fn value_types() -> Vec<ClientValueType>;
+}
+
+/// Compile-time typed client output payload.
+///
+/// Implement this trait for domain structs when tuple outputs are not
+/// expressive enough.
+pub trait TypedClientOutputs: Sized {
+    fn from_values(values: Vec<Value>) -> Result<Self>;
+
+    fn value_types() -> Vec<ClientValueType>;
+}
+
+/// Generated program metadata emitted by `stoffel::generate_bindings`.
+///
+/// This marker trait lets application code carry the bytecode manifest's
+/// backend, curve, and client IO shape at the Rust type level. Builders can use
+/// it to select the program backend without hand-written backend/curve literals,
+/// and clients can validate generated bindings against the loaded bytecode
+/// before submitting network inputs.
+pub trait GeneratedProgramManifest {
+    const BACKEND: MpcBackend;
+
+    fn client_input_types(client_slot: u64) -> Option<&'static [ClientValueType]>;
+
+    fn client_output_types(client_slot: u64) -> Option<&'static [ClientValueType]>;
+}
 
 /// Public SDK value type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,9 +308,33 @@ macro_rules! value_from_uint {
 
 value_from_uint!(u8, u16, u32, u64, usize);
 
+macro_rules! client_integer_input {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl ClientInputValue for $ty {
+                const VALUE_TYPE: ClientValueType = ClientValueType::Integer;
+
+                fn into_sdk_value(self) -> Value {
+                    Value::from(self)
+                }
+            }
+        )*
+    };
+}
+
+client_integer_input!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+
 impl From<bool> for Value {
     fn from(value: bool) -> Self {
         Value::Bool(value)
+    }
+}
+
+impl ClientInputValue for bool {
+    const VALUE_TYPE: ClientValueType = ClientValueType::Boolean;
+
+    fn into_sdk_value(self) -> Value {
+        Value::Bool(self)
     }
 }
 
@@ -248,9 +344,25 @@ impl From<f64> for Value {
     }
 }
 
+impl ClientInputValue for f64 {
+    const VALUE_TYPE: ClientValueType = ClientValueType::FixedPoint;
+
+    fn into_sdk_value(self) -> Value {
+        Value::Float(self)
+    }
+}
+
 impl From<f32> for Value {
     fn from(value: f32) -> Self {
         Value::Float(f64::from(value))
+    }
+}
+
+impl ClientInputValue for f32 {
+    const VALUE_TYPE: ClientValueType = ClientValueType::FixedPoint;
+
+    fn into_sdk_value(self) -> Value {
+        Value::Float(f64::from(self))
     }
 }
 
@@ -336,6 +448,141 @@ try_from_value_copy!(i64, I64, "i64");
 try_from_value_copy!(u64, U64, "u64");
 try_from_value_copy!(bool, Bool, "bool");
 try_from_value_copy!(f64, Float, "float");
+
+impl ClientOutputValue for i64 {
+    const VALUE_TYPE: ClientValueType = ClientValueType::Integer;
+
+    fn try_from_sdk_value(value: Value) -> Result<Self> {
+        i64::try_from(value)
+    }
+}
+
+impl ClientOutputValue for bool {
+    const VALUE_TYPE: ClientValueType = ClientValueType::Boolean;
+
+    fn try_from_sdk_value(value: Value) -> Result<Self> {
+        bool::try_from(value)
+    }
+}
+
+impl ClientOutputValue for f64 {
+    const VALUE_TYPE: ClientValueType = ClientValueType::FixedPoint;
+
+    fn try_from_sdk_value(value: Value) -> Result<Self> {
+        f64::try_from(value)
+    }
+}
+
+impl TypedClientInputs for () {
+    fn into_values(self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    fn value_types() -> Vec<ClientValueType> {
+        Vec::new()
+    }
+}
+
+impl<T> TypedClientInputs for T
+where
+    T: ClientInputValue,
+{
+    fn into_values(self) -> Vec<Value> {
+        vec![self.into_sdk_value()]
+    }
+
+    fn value_types() -> Vec<ClientValueType> {
+        vec![T::VALUE_TYPE]
+    }
+}
+
+impl TypedClientOutputs for () {
+    fn from_values(values: Vec<Value>) -> Result<Self> {
+        if values.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::InvalidInput(format!(
+                "expected 0 typed outputs, got {}",
+                values.len()
+            )))
+        }
+    }
+
+    fn value_types() -> Vec<ClientValueType> {
+        Vec::new()
+    }
+}
+
+impl<T> TypedClientOutputs for T
+where
+    T: ClientOutputValue,
+{
+    fn from_values(values: Vec<Value>) -> Result<Self> {
+        let [value]: [Value; 1] = values.try_into().map_err(|values: Vec<Value>| {
+            Error::InvalidInput(format!("expected 1 typed output, got {}", values.len()))
+        })?;
+        T::try_from_sdk_value(value)
+    }
+
+    fn value_types() -> Vec<ClientValueType> {
+        vec![T::VALUE_TYPE]
+    }
+}
+
+macro_rules! typed_client_tuple {
+    ($(($($type_name:ident $value_name:ident),+)),+ $(,)?) => {
+        $(
+            impl<$($type_name),+> TypedClientInputs for ($($type_name,)+)
+            where
+                $($type_name: ClientInputValue),+
+            {
+                fn into_values(self) -> Vec<Value> {
+                    let ($($value_name,)+) = self;
+                    vec![$($value_name.into_sdk_value()),+]
+                }
+
+                fn value_types() -> Vec<ClientValueType> {
+                    vec![$($type_name::VALUE_TYPE),+]
+                }
+            }
+
+            impl<$($type_name),+> TypedClientOutputs for ($($type_name,)+)
+            where
+                $($type_name: ClientOutputValue),+
+            {
+                fn from_values(values: Vec<Value>) -> Result<Self> {
+                    let expected = Self::value_types().len();
+                    let actual = values.len();
+                    if actual != expected {
+                        return Err(Error::InvalidInput(format!(
+                            "expected {expected} typed outputs, got {actual}"
+                        )));
+                    }
+                    let mut values = values.into_iter();
+                    Ok((
+                        $(
+                            $type_name::try_from_sdk_value(values.next().expect("length checked"))?,
+                        )+
+                    ))
+                }
+
+                fn value_types() -> Vec<ClientValueType> {
+                    vec![$($type_name::VALUE_TYPE),+]
+                }
+            }
+        )+
+    };
+}
+
+typed_client_tuple!(
+    (A a, B b),
+    (A a, B b, C c),
+    (A a, B b, C c, D d),
+    (A a, B b, C c, D d, E e),
+    (A a, B b, C c, D d, E e, F f),
+    (A a, B b, C c, D d, E e, F f, G g),
+    (A a, B b, C c, D d, E e, F f, G g, H h),
+);
 
 impl TryFrom<Value> for String {
     type Error = Error;

@@ -184,6 +184,20 @@ fn compile_source(source: &str) -> Result<(), Vec<String>> {
         .map_err(|errors| errors.iter().map(|e| e.message.clone()).collect())
 }
 
+fn assert_client_io_manifest(source: &str, expected: &[(u64, Vec<ShareType>, Vec<ShareType>)]) {
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let binary = convert_to_binary(&program);
+
+    assert_eq!(binary.client_io_manifest.clients.len(), expected.len());
+    for (schema, (client_slot, inputs, outputs)) in
+        binary.client_io_manifest.clients.iter().zip(expected)
+    {
+        assert_eq!(schema.client_slot, *client_slot);
+        assert_eq!(&schema.inputs, inputs);
+        assert_eq!(&schema.outputs, outputs);
+    }
+}
+
 fn instruction_registers(instruction: &Instruction) -> Vec<usize> {
     match instruction {
         Instruction::LD(reg, _)
@@ -1554,6 +1568,161 @@ def main() -> int64:
             ShareType::default_secret_int(),
             ShareType::default_secret_fixed_point()
         ]
+    );
+}
+
+#[test]
+fn test_compile_client_io_manifest_tracks_multiple_literal_clients() {
+    let source = r#"
+def main() -> int64:
+  var client0_score = ClientStore.take_share(0, 0)
+  var client1_weight = ClientStore.take_share_fixed(1, 0)
+  MpcOutput.send_to_client(0, [client0_score])
+  MpcOutput.send_to_client(1, [client1_weight])
+  return 0
+"#;
+    assert_client_io_manifest(
+        source,
+        &[
+            (
+                0,
+                vec![ShareType::default_secret_int()],
+                vec![ShareType::default_secret_int()],
+            ),
+            (
+                1,
+                vec![ShareType::default_secret_fixed_point()],
+                vec![ShareType::default_secret_fixed_point()],
+            ),
+        ],
+    );
+}
+
+#[test]
+fn test_compile_client_io_manifest_tracks_sparse_input_ordinals() {
+    let source = r#"
+def main() -> int64:
+  var first = ClientStore.take_share(2, 0)
+  var third = ClientStore.take_share_fixed(2, 2)
+  MpcOutput.send_to_client(2, [first, third])
+  return 0
+"#;
+    assert_client_io_manifest(
+        source,
+        &[(
+            2,
+            vec![
+                ShareType::default_secret_int(),
+                ShareType::default_secret_int(),
+                ShareType::default_secret_fixed_point(),
+            ],
+            vec![
+                ShareType::default_secret_int(),
+                ShareType::default_secret_fixed_point(),
+            ],
+        )],
+    );
+}
+
+#[test]
+fn test_compile_client_io_manifest_tracks_appended_output_lists() {
+    let source = r#"
+def main() -> int64:
+  var fixed_value = ClientStore.take_share_fixed(0, 0)
+  var int_value = ClientStore.take_share(0, 1)
+  var outputs: list[Share] = []
+  outputs.append(fixed_value)
+  outputs.append(int_value)
+  MpcOutput.send_to_client(0, outputs)
+  return 0
+"#;
+    assert_client_io_manifest(
+        source,
+        &[(
+            0,
+            vec![
+                ShareType::default_secret_fixed_point(),
+                ShareType::default_secret_int(),
+            ],
+            vec![
+                ShareType::default_secret_fixed_point(),
+                ShareType::default_secret_int(),
+            ],
+        )],
+    );
+}
+
+#[test]
+fn test_compile_client_io_manifest_tracks_direct_share_send_to_client() {
+    let source = r#"
+def main() -> int64:
+  var fixed_value = ClientStore.take_share_fixed(0, 0)
+  var int_value = ClientStore.take_share(1, 0)
+  fixed_value.send_to_client(0)
+  int_value.send_to_client(1)
+  return 0
+"#;
+    assert_client_io_manifest(
+        source,
+        &[
+            (
+                0,
+                vec![ShareType::default_secret_fixed_point()],
+                vec![ShareType::default_secret_fixed_point()],
+            ),
+            (
+                1,
+                vec![ShareType::default_secret_int()],
+                vec![ShareType::default_secret_int()],
+            ),
+        ],
+    );
+}
+
+#[test]
+fn test_compile_client_io_manifest_tracks_static_loop_literal_bound_inputs_and_outputs() {
+    let source = r#"
+def main() -> int64:
+  var outputs: list[Share] = []
+  var element_index: int64 = 0
+  while element_index < 3:
+    var value = ClientStore.take_share_fixed(0, element_index)
+    outputs.append(value)
+    element_index = element_index + 1
+  MpcOutput.send_to_client(0, outputs)
+  return 0
+"#;
+    assert_client_io_manifest(
+        source,
+        &[(
+            0,
+            vec![ShareType::default_secret_fixed_point(); 3],
+            vec![ShareType::default_secret_fixed_point(); 3],
+        )],
+    );
+}
+
+#[test]
+fn test_compile_client_io_manifest_tracks_static_loop_fixed_client_io() {
+    let source = include_str!("../../examples/mpc_client_federated_average/main.stfl");
+    let program = compile(
+        source,
+        "mpc_client_federated_average.stfl",
+        &default_options(),
+    )
+    .expect("program compiles");
+    let binary = convert_to_binary(&program);
+
+    assert_eq!(binary.client_io_manifest.clients.len(), 1);
+    let schema = &binary.client_io_manifest.clients[0];
+    assert_eq!(schema.client_slot, 0);
+    assert_eq!(
+        schema.inputs,
+        vec![ShareType::default_secret_fixed_point(); 6]
+    );
+    assert_eq!(
+        schema.outputs,
+        vec![ShareType::default_secret_fixed_point(); 6]
     );
 }
 

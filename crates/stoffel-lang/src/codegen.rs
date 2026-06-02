@@ -73,6 +73,8 @@ struct CodeGenerator {
     client_outputs: HashMap<u64, Vec<ShareType>>,
     variable_share_types: HashMap<String, ShareType>,
     variable_share_lists: HashMap<String, Vec<ShareType>>,
+    clear_int_constants: HashMap<String, u64>,
+    active_loop_bounds: Vec<(String, u64)>,
 }
 
 impl CodeGenerator {
@@ -97,6 +99,8 @@ impl CodeGenerator {
             client_outputs: HashMap::new(),
             variable_share_types: HashMap::new(),
             variable_share_lists: HashMap::new(),
+            clear_int_constants: HashMap::new(),
+            active_loop_bounds: Vec::new(),
         }
     }
 
@@ -130,7 +134,7 @@ impl CodeGenerator {
                 let Some(client_slot) = int_literal_u64(arguments.first()) else {
                     return;
                 };
-                let Some(input_ordinal) = int_literal_u64(arguments.get(1)) else {
+                let Some(input_ordinals) = self.input_ordinals_for_node(arguments.get(1)) else {
                     return;
                 };
                 let share_type = if function_name == "ClientStore.take_share_fixed" {
@@ -139,11 +143,13 @@ impl CodeGenerator {
                     ShareType::default_secret_int()
                 };
                 let inputs = self.client_inputs.entry(client_slot).or_default();
-                let ordinal = input_ordinal as usize;
-                if inputs.len() <= ordinal {
-                    inputs.resize(ordinal + 1, None);
+                for input_ordinal in input_ordinals {
+                    let ordinal = input_ordinal as usize;
+                    if inputs.len() <= ordinal {
+                        inputs.resize(ordinal + 1, None);
+                    }
+                    inputs[ordinal] = Some(share_type);
                 }
-                inputs[ordinal] = Some(share_type);
             }
             "MpcOutput.send_to_client" => {
                 let Some(client_slot) = int_literal_u64(arguments.first()) else {
@@ -172,6 +178,68 @@ impl CodeGenerator {
             }
             _ => {}
         }
+    }
+
+    fn record_share_list_append_call(&mut self, function_name: &str, arguments: &[AstNode]) {
+        if function_name != "append" && function_name != "array_push" {
+            return;
+        }
+        let Some(AstNode::Identifier(list_name, _)) = arguments.first() else {
+            return;
+        };
+        let Some(share_type) = arguments
+            .get(1)
+            .and_then(|argument| self.share_type_for_node(argument))
+        else {
+            return;
+        };
+        let repeat = self.active_loop_iteration_count();
+        self.variable_share_lists
+            .entry(list_name.clone())
+            .or_default()
+            .extend(std::iter::repeat_n(share_type, repeat));
+    }
+
+    fn input_ordinals_for_node(&self, node: Option<&AstNode>) -> Option<Vec<u64>> {
+        match node? {
+            AstNode::Literal(_) => int_literal_u64(node).map(|ordinal| vec![ordinal]),
+            AstNode::Identifier(name, _) => {
+                self.active_loop_bounds
+                    .iter()
+                    .rev()
+                    .find_map(|(loop_var, bound)| {
+                        (loop_var == name).then(|| (0..*bound).collect::<Vec<_>>())
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    fn loop_bound_for_condition(&self, condition: &AstNode) -> Option<(String, u64)> {
+        let AstNode::BinaryOperation {
+            op, left, right, ..
+        } = condition
+        else {
+            return None;
+        };
+        if op != "<" {
+            return None;
+        }
+        let AstNode::Identifier(loop_var, _) = left.as_ref() else {
+            return None;
+        };
+        let bound = int_literal_u64(Some(right.as_ref())).or_else(|| match right.as_ref() {
+            AstNode::Identifier(name, _) => self.clear_int_constants.get(name).copied(),
+            _ => None,
+        })?;
+        Some((loop_var.clone(), bound))
+    }
+
+    fn active_loop_iteration_count(&self) -> usize {
+        self.active_loop_bounds
+            .iter()
+            .map(|(_, bound)| usize::try_from(*bound).unwrap_or(usize::MAX))
+            .fold(1_usize, usize::saturating_mul)
     }
 
     fn share_type_for_node(&self, node: &AstNode) -> Option<ShareType> {
@@ -474,6 +542,14 @@ impl CodeGenerator {
                     self.variable_share_types.remove(name);
                     self.variable_share_lists.remove(name);
                 }
+                if let Some(value) = value
+                    .as_deref()
+                    .and_then(|node| int_literal_u64(Some(node)))
+                {
+                    self.clear_int_constants.insert(name.clone(), value);
+                } else {
+                    self.clear_int_constants.remove(name);
+                }
                 // Update vr_secrecy map for this VR to ensure it has the correct flag
                 self.vr_secrecy.insert(value_vr, value_is_secret);
 
@@ -645,6 +721,11 @@ impl CodeGenerator {
                             .expect("Destination VR missing from secrecy map in assignment");
 
                         // Assignment itself doesn't produce a value/register to be used further.
+                        if let Some(value) = int_literal_u64(Some(value.as_ref())) {
+                            self.clear_int_constants.insert(name.clone(), value);
+                        } else {
+                            self.clear_int_constants.remove(name);
+                        }
                         Ok((dest_vr, dest_is_secret))
                     }
                     AstNode::FieldAccess {
@@ -768,6 +849,7 @@ impl CodeGenerator {
                     .unwrap_or(raw_function_name);
 
                 self.record_client_io_call(&function_name, arguments);
+                self.record_share_list_append_call(&function_name, arguments);
 
                 // 3. Compile arguments first (do NOT emit PUSHARG yet) to keep PUSHARGs contiguous before CALL
                 let mut arg_vrs = Vec::with_capacity(arguments.len());
@@ -930,6 +1012,7 @@ impl CodeGenerator {
             } => {
                 let loop_start_label = format!("loop_start_{}", self.current_instructions.len());
                 let end_loop_label = format!("loop_end_{}", self.current_instructions.len());
+                let loop_bound = self.loop_bound_for_condition(condition);
 
                 // Define the label for the start of the loop (condition check)
                 self.add_label(loop_start_label.clone());
@@ -955,7 +1038,14 @@ impl CodeGenerator {
                 self.emit(Instruction::JMPEQ(end_loop_label.clone()));
                 // condition_vr, false_vr used up to here.
 
-                let (_body_vr, _body_is_secret) = self.compile_node(body)?;
+                if let Some((loop_var, bound)) = loop_bound {
+                    self.active_loop_bounds.push((loop_var, bound));
+                    let body_result = self.compile_node(body);
+                    self.active_loop_bounds.pop();
+                    let (_body_vr, _body_is_secret) = body_result?;
+                } else {
+                    let (_body_vr, _body_is_secret) = self.compile_node(body)?;
+                }
                 // Result of body is discarded. Its live range ends.
 
                 // Jump back to condition check

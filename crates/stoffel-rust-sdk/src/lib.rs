@@ -46,6 +46,7 @@
 
 pub mod backend;
 pub mod client;
+pub mod codegen;
 pub mod compiler;
 pub mod config;
 pub mod consensus;
@@ -71,6 +72,7 @@ pub use client::{
     ClientBuilder, ClientState, ClientSummary, ComputationHandle, ComputationStatus,
     ComputationSummary, OffChainClientConfig, OffChainClientConfigBuilder, StoffelClient,
 };
+pub use codegen::{generate_bindings, generate_bindings_with_config, BindingsConfig};
 pub use config::{
     Curve, MpcConfig, MpcConfigBuilder, MpcConfigSummary, MpcSection, NetworkConfig,
     NetworkConfigBuilder, NetworkConfigSummary, NetworkDeployment, NetworkDeploymentBuilder,
@@ -100,8 +102,9 @@ pub use server::{
     StoffelServer,
 };
 pub use types::{
-    ClientId, FieldElement, GroupElement, MaskIndex, PartyId, PublicKey, Round, Share, Value,
-    ValueSummary,
+    ClientId, ClientInputValue, ClientOutputValue, ClientValueType, FieldElement,
+    GeneratedProgramManifest, GroupElement, MaskIndex, PartyId, PublicKey, Round, Share,
+    TypedClientInputs, TypedClientOutputs, Value, ValueSummary,
 };
 
 #[derive(Debug, Clone)]
@@ -176,6 +179,11 @@ impl Stoffel {
         self.mpc_config.backend = backend;
         self.backend_explicit = true;
         self
+    }
+
+    /// Select the backend and curve declared by generated program bindings.
+    pub fn manifest<M: GeneratedProgramManifest>(self) -> Self {
+        self.backend(M::BACKEND)
     }
 
     /// Select the HoneyBadger backend.

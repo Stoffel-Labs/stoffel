@@ -25,7 +25,7 @@ use crate::consensus::VerifiedOrdering;
 use crate::error::{Error, Result};
 use crate::observability::{HealthStatus, ServerMetrics};
 use crate::program::Program;
-use crate::types::PartyId;
+use crate::types::{GeneratedProgramManifest, PartyId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -185,6 +185,10 @@ impl ServerBuilder {
             config.backend = backend;
         }
         self
+    }
+
+    pub fn manifest<M: GeneratedProgramManifest>(self) -> Self {
+        self.backend(M::BACKEND)
     }
 
     pub fn honeybadger(self) -> Self {

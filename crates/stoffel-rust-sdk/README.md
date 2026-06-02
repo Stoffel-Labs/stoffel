@@ -108,8 +108,9 @@ assert_eq!(result, vec![Value::I64(100)]);
   `runtime.offchain_client_config(slot)` derives the typed client IO settings
   from the compiled program and MPC runtime; callers then provide coordinator
   address, node RPC addresses, timestamp, and client identity material before
-  calling `client.run(...)` or `client.submit(...)`. Server launch for those
-  programs uses `ServerBuilder::offchain_coordinator(...)` to pass the
+  calling `client.run_typed(...)`, `client.submit_typed(...)`, `client.run(...)`,
+  or `client.submit(...)`. Server launch for those programs uses
+  `ServerBuilder::offchain_coordinator(...)` to pass the
   coordinator address, node RPC bind address, party identity files, timestamp,
   and expected client certificates through to `stoffel-run`.
 - AVSS protocol operations are owned by `stoffel-vm` and `mpc-protocols`.
@@ -156,6 +157,44 @@ assert_eq!(result, vec![Value::I64(100)]);
       Some(PublicKey::new("threshold-key", [0x10]))
   );
   ```
+
+## Typed Client IO Bindings
+
+Programs that use `ClientStore` carry ordered input and output types in the
+`.stflb` manifest. Generate Rust bindings from that exact bytecode in your app's
+`build.rs` to get compile-time input/output structs for the program you will
+execute:
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = std::env::var("OUT_DIR")?;
+    stoffel::generate_bindings(
+        "program.stflb",
+        format!("{out_dir}/stoffel_bindings.rs"),
+    )?;
+    Ok(())
+}
+```
+
+```rust
+include!(concat!(env!("OUT_DIR"), "/stoffel_bindings.rs"));
+
+# async fn example(client: stoffel::StoffelClient) -> stoffel::Result<()> {
+let outputs: Client0Outputs = client
+    .run_typed(Client0Inputs {
+        input_0: 42_i64,
+    })
+    .await?;
+# let _ = outputs;
+# Ok(())
+# }
+```
+
+Generated bindings use `Client{slot}Inputs` and `Client{slot}Outputs` with
+ordered fields such as `input_0` and `output_0`. Integers map to `i64`, boolean
+secret integers map to `bool`, and fixed-point shares map to `f64`. The SDK also
+validates the generated type shape against the loaded program manifest before
+submitting to the off-chain coordinator.
 
 ## Core Builders
 

@@ -13,10 +13,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ark_bls12_381::{Fr, G1Projective};
+use ark_ff::{PrimeField, Zero};
 use serde::{Deserialize, Serialize};
 use stoffel_mpc_coordinator::off_chain::{
-    encode_clear_input, node_rpc::NodeRPCClient as OffChainNodeRPCClient, ClearShareValue,
-    OffChainCoordinatorClient, TypedMaskedInput,
+    node_rpc::NodeRPCClient as OffChainNodeRPCClient, BoundMaskedInput, BoundOutputShare,
+    OffChainCoordinatorClient,
 };
 use stoffel_mpc_coordinator::rpc::ValueWrapper;
 use stoffel_vm_types::core_types::ShareType;
@@ -29,7 +30,10 @@ use crate::config::{validate_socket_address, Curve, MpcBackend, NetworkConfig, N
 use crate::consensus::VerifiedOrdering;
 use crate::error::{Error, Result};
 use crate::program::Program;
-use crate::types::{ClientId, Value};
+use crate::types::{
+    ClientId, ClientValueType, GeneratedProgramManifest, TypedClientInputs, TypedClientOutputs,
+    Value,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -329,6 +333,8 @@ pub struct OffChainClientConfig {
     pub cert_der: Vec<u8>,
     pub key_der: Vec<u8>,
     pub output_count: u64,
+    pub input_types: Vec<ShareType>,
+    pub output_types: Vec<ShareType>,
     #[serde(with = "duration_millis")]
     pub timeout: Duration,
 }
@@ -394,6 +400,13 @@ impl OffChainClientConfig {
                 "off-chain client IO timeout must be greater than zero".to_owned(),
             ));
         }
+        if !self.output_types.is_empty() && self.output_count != self.output_types.len() as u64 {
+            return Err(Error::Configuration(format!(
+                "off-chain client output_count {} does not match {} configured output type(s)",
+                self.output_count,
+                self.output_types.len()
+            )));
+        }
         Ok(())
     }
 
@@ -422,6 +435,8 @@ pub struct OffChainClientConfigBuilder {
     cert_der: Option<Vec<u8>>,
     key_der: Option<Vec<u8>>,
     output_count: u64,
+    input_types: Vec<ShareType>,
+    output_types: Vec<ShareType>,
     timeout: Duration,
     config_error: Option<String>,
 }
@@ -451,6 +466,10 @@ impl OffChainClientConfigBuilder {
     pub fn backend(mut self, backend: MpcBackend) -> Self {
         self.backend = backend;
         self
+    }
+
+    pub fn manifest<M: GeneratedProgramManifest>(self) -> Self {
+        self.backend(M::BACKEND)
     }
 
     pub fn honeybadger(mut self) -> Self {
@@ -507,6 +526,23 @@ impl OffChainClientConfigBuilder {
         self
     }
 
+    pub fn input_types<I>(mut self, input_types: I) -> Self
+    where
+        I: IntoIterator<Item = ShareType>,
+    {
+        self.input_types = input_types.into_iter().collect();
+        self
+    }
+
+    pub fn output_types<I>(mut self, output_types: I) -> Self
+    where
+        I: IntoIterator<Item = ShareType>,
+    {
+        self.output_types = output_types.into_iter().collect();
+        self.output_count = self.output_types.len() as u64;
+        self
+    }
+
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -535,6 +571,8 @@ impl OffChainClientConfigBuilder {
                 Error::Configuration("off-chain client key DER is required".to_owned())
             })?,
             output_count: self.output_count,
+            input_types: self.input_types,
+            output_types: self.output_types,
             timeout: self.timeout,
         };
         config.validate()?;
@@ -555,6 +593,8 @@ impl Default for OffChainClientConfigBuilder {
             cert_der: None,
             key_der: None,
             output_count: 0,
+            input_types: Vec::new(),
+            output_types: Vec::new(),
             timeout: Duration::from_secs(30),
             config_error: None,
         }
@@ -630,6 +670,53 @@ impl StoffelClient {
         self.run_offchain_inputs(&inputs).await
     }
 
+    #[tracing::instrument(skip_all, fields(client_id = self.client_id))]
+    pub async fn run_typed<I, O>(&self, inputs: I) -> Result<O>
+    where
+        I: TypedClientInputs,
+        O: TypedClientOutputs,
+    {
+        self.run_function_typed("main", inputs).await
+    }
+
+    #[tracing::instrument(skip_all, fields(client_id = self.client_id))]
+    pub async fn run_typed_with_manifest<M, I, O>(&self, inputs: I) -> Result<O>
+    where
+        M: GeneratedProgramManifest,
+        I: TypedClientInputs,
+        O: TypedClientOutputs,
+    {
+        self.run_function_typed_with_manifest::<M, I, O>("main", inputs)
+            .await
+    }
+
+    #[tracing::instrument(skip_all, fields(client_id = self.client_id, function = name))]
+    pub async fn run_function_typed<I, O>(&self, name: &str, inputs: I) -> Result<O>
+    where
+        I: TypedClientInputs,
+        O: TypedClientOutputs,
+    {
+        self.validate_typed_submission(name, &I::value_types(), &O::value_types())?;
+        let outputs = self.run_offchain_inputs(&inputs.into_values()).await?;
+        O::from_values(outputs)
+    }
+
+    #[tracing::instrument(skip_all, fields(client_id = self.client_id, function = name))]
+    pub async fn run_function_typed_with_manifest<M, I, O>(
+        &self,
+        name: &str,
+        inputs: I,
+    ) -> Result<O>
+    where
+        M: GeneratedProgramManifest,
+        I: TypedClientInputs,
+        O: TypedClientOutputs,
+    {
+        self.validate_generated_typed_submission::<M>(name, &I::value_types(), &O::value_types())?;
+        let outputs = self.run_offchain_inputs(&inputs.into_values()).await?;
+        O::from_values(outputs)
+    }
+
     #[tracing::instrument(skip_all, fields(client_id = self.client_id, input_count = inputs.len()))]
     pub async fn submit<V>(&self, inputs: &[V]) -> Result<ComputationHandle>
     where
@@ -648,6 +735,71 @@ impl StoffelClient {
             .map(|value| value.clone().into())
             .collect::<Vec<Value>>();
         self.validate_submission_inputs(name, inputs.len())?;
+        let config = self.offchain_io.as_ref().cloned().ok_or_else(|| {
+            Error::Configuration(
+                "client run/submit requires off-chain client IO configuration".to_owned(),
+            )
+        })?;
+        let handle = ComputationHandle::submitted();
+        let task_handle = handle.clone();
+        tokio::spawn(async move {
+            let result = run_offchain_inputs_with_config(&config, &inputs).await;
+            task_handle.complete(result);
+        });
+        Ok(handle)
+    }
+
+    #[tracing::instrument(skip_all, fields(client_id = self.client_id))]
+    pub async fn submit_typed<I>(&self, inputs: I) -> Result<ComputationHandle>
+    where
+        I: TypedClientInputs,
+    {
+        self.submit_function_typed("main", inputs).await
+    }
+
+    #[tracing::instrument(skip_all, fields(client_id = self.client_id))]
+    pub async fn submit_typed_with_manifest<M, I>(&self, inputs: I) -> Result<ComputationHandle>
+    where
+        M: GeneratedProgramManifest,
+        I: TypedClientInputs,
+    {
+        self.submit_function_typed_with_manifest::<M, I>("main", inputs)
+            .await
+    }
+
+    #[tracing::instrument(skip_all, fields(client_id = self.client_id, function = name))]
+    pub async fn submit_function_typed<I>(&self, name: &str, inputs: I) -> Result<ComputationHandle>
+    where
+        I: TypedClientInputs,
+    {
+        self.validate_typed_inputs(name, &I::value_types())?;
+        let inputs = inputs.into_values();
+        let config = self.offchain_io.as_ref().cloned().ok_or_else(|| {
+            Error::Configuration(
+                "client run/submit requires off-chain client IO configuration".to_owned(),
+            )
+        })?;
+        let handle = ComputationHandle::submitted();
+        let task_handle = handle.clone();
+        tokio::spawn(async move {
+            let result = run_offchain_inputs_with_config(&config, &inputs).await;
+            task_handle.complete(result);
+        });
+        Ok(handle)
+    }
+
+    #[tracing::instrument(skip_all, fields(client_id = self.client_id, function = name))]
+    pub async fn submit_function_typed_with_manifest<M, I>(
+        &self,
+        name: &str,
+        inputs: I,
+    ) -> Result<ComputationHandle>
+    where
+        M: GeneratedProgramManifest,
+        I: TypedClientInputs,
+    {
+        self.validate_generated_typed_inputs::<M>(name, &I::value_types())?;
+        let inputs = inputs.into_values();
         let config = self.offchain_io.as_ref().cloned().ok_or_else(|| {
             Error::Configuration(
                 "client run/submit requires off-chain client IO configuration".to_owned(),
@@ -768,6 +920,121 @@ impl StoffelClient {
         self.validate_function_inputs(name, input_count)
     }
 
+    fn validate_typed_inputs(&self, name: &str, input_types: &[ClientValueType]) -> Result<()> {
+        if let Some(program) = &self.program {
+            if program.has_client_io() {
+                let client_slot = self.client_slot()?;
+                let client = program.client(client_slot).ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "program does not declare ClientStore metadata for client slot {client_slot}"
+                    ))
+                })?;
+                validate_client_value_types("input", client_slot, client.inputs(), input_types)?;
+                return Ok(());
+            }
+        }
+        self.validate_function_inputs(name, input_types.len())
+    }
+
+    fn validate_typed_submission(
+        &self,
+        name: &str,
+        input_types: &[ClientValueType],
+        output_types: &[ClientValueType],
+    ) -> Result<()> {
+        if let Some(program) = &self.program {
+            if program.has_client_io() {
+                let client_slot = self.client_slot()?;
+                let client = program.client(client_slot).ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "program does not declare ClientStore metadata for client slot {client_slot}"
+                    ))
+                })?;
+                validate_client_value_types("input", client_slot, client.inputs(), input_types)?;
+                validate_client_value_types("output", client_slot, client.outputs(), output_types)?;
+                return Ok(());
+            }
+        }
+        self.validate_function_inputs(name, input_types.len())
+    }
+
+    fn validate_generated_typed_inputs<M: GeneratedProgramManifest>(
+        &self,
+        name: &str,
+        input_types: &[ClientValueType],
+    ) -> Result<()> {
+        let client_slot = self.client_slot()?;
+        let expected_inputs = M::client_input_types(client_slot).ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "generated manifest does not declare client slot {client_slot}"
+            ))
+        })?;
+        validate_client_value_types_from_values(
+            "input",
+            client_slot,
+            expected_inputs,
+            input_types,
+        )?;
+        self.validate_generated_backend::<M>()?;
+        self.validate_typed_inputs(name, input_types)
+    }
+
+    fn validate_generated_typed_submission<M: GeneratedProgramManifest>(
+        &self,
+        name: &str,
+        input_types: &[ClientValueType],
+        output_types: &[ClientValueType],
+    ) -> Result<()> {
+        let client_slot = self.client_slot()?;
+        let expected_inputs = M::client_input_types(client_slot).ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "generated manifest does not declare client slot {client_slot}"
+            ))
+        })?;
+        let expected_outputs = M::client_output_types(client_slot).ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "generated manifest does not declare client slot {client_slot}"
+            ))
+        })?;
+        validate_client_value_types_from_values(
+            "input",
+            client_slot,
+            expected_inputs,
+            input_types,
+        )?;
+        validate_client_value_types_from_values(
+            "output",
+            client_slot,
+            expected_outputs,
+            output_types,
+        )?;
+        self.validate_generated_backend::<M>()?;
+        self.validate_typed_submission(name, input_types, output_types)
+    }
+
+    fn validate_generated_backend<M: GeneratedProgramManifest>(&self) -> Result<()> {
+        if let Some(program) = &self.program {
+            let program_backend = sdk_backend_from_program(program);
+            if program_backend != M::BACKEND {
+                return Err(Error::InvalidInput(format!(
+                    "generated manifest backend {} does not match loaded program backend {}",
+                    M::BACKEND,
+                    program_backend
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn client_slot(&self) -> Result<u64> {
+        u64::try_from(self.client_id).map_err(|_| {
+            Error::InvalidInput(format!(
+                "client id {} cannot be represented as a ClientStore slot",
+                self.client_id
+            ))
+        })
+    }
+
     fn validate_function_inputs(&self, name: &str, input_count: usize) -> Result<()> {
         if let Some(program) = &self.program {
             let function = program
@@ -781,6 +1048,66 @@ impl StoffelClient {
             }
         }
         Ok(())
+    }
+}
+
+fn validate_client_value_types(
+    direction: &str,
+    client_slot: u64,
+    share_types: &[ShareType],
+    value_types: &[ClientValueType],
+) -> Result<()> {
+    if share_types.len() != value_types.len() {
+        return Err(Error::InvalidInput(format!(
+            "client slot {client_slot} expects {} typed {direction}s, got {}",
+            share_types.len(),
+            value_types.len()
+        )));
+    }
+    for (ordinal, (share_type, value_type)) in share_types.iter().zip(value_types).enumerate() {
+        if !value_type.is_compatible_with_share_type(*share_type) {
+            return Err(Error::InvalidInput(format!(
+                "client slot {client_slot} {direction} {ordinal} expects {share_type:?}, got {value_type:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_client_value_types_from_values(
+    direction: &str,
+    client_slot: u64,
+    expected: &[ClientValueType],
+    actual: &[ClientValueType],
+) -> Result<()> {
+    if expected.len() != actual.len() {
+        return Err(Error::InvalidInput(format!(
+            "generated manifest client slot {client_slot} expects {} typed {direction}s, got {}",
+            expected.len(),
+            actual.len()
+        )));
+    }
+    for (ordinal, (expected_type, actual_type)) in expected.iter().zip(actual).enumerate() {
+        if expected_type != actual_type {
+            return Err(Error::InvalidInput(format!(
+                "generated manifest client slot {client_slot} {direction} {ordinal} expects {expected_type:?}, got {actual_type:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn sdk_backend_from_program(program: &Program) -> MpcBackend {
+    match program.bytecode_backend() {
+        stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger => MpcBackend::HoneyBadger,
+        stoffel_vm_types::compiled_binary::MpcBackend::Avss => MpcBackend::Avss {
+            curve: match program.bytecode_curve() {
+                stoffel_vm_types::compiled_binary::MpcCurve::Bls12_381 => Curve::Bls12_381,
+                stoffel_vm_types::compiled_binary::MpcCurve::Bn254 => Curve::Bn254,
+                stoffel_vm_types::compiled_binary::MpcCurve::Curve25519 => Curve::Curve25519,
+                stoffel_vm_types::compiled_binary::MpcCurve::Ed25519 => Curve::Ed25519,
+            },
+        },
     }
 }
 
@@ -819,11 +1146,18 @@ where
         )
         .await?;
         let schema = coord.get_client_io_schema().await?;
-        if schema.inputs.len() != inputs.len() {
+        if schema.input_count as usize != inputs.len() {
             return Err(Error::InvalidInput(format!(
                 "client slot {} expects {} inputs, got {}",
                 schema.client_slot,
-                schema.inputs.len(),
+                schema.input_count,
+                inputs.len()
+            )));
+        }
+        if config.input_types.len() != inputs.len() {
+            return Err(Error::InvalidInput(format!(
+                "off-chain client config has {} input type(s), got {} input value(s)",
+                config.input_types.len(),
                 inputs.len()
             )));
         }
@@ -835,15 +1169,17 @@ where
             config.key_der.clone(),
         )
         .await?;
-        let masks = node_rpc.receive_typed_masks(inputs.len()).await?;
+        let masks = node_rpc.receive_bound_masks(inputs.len()).await?;
         let mut masked_inputs = Vec::with_capacity(inputs.len());
-        for (ordinal, (input, share_type)) in inputs.iter().zip(schema.inputs.iter()).enumerate() {
+        for (ordinal, (input, share_type)) in
+            inputs.iter().zip(config.input_types.iter()).enumerate()
+        {
             let reservation = reservations
                 .iter()
                 .find(|reservation| reservation.input_ordinal as usize == ordinal)
                 .ok_or_else(|| {
                     Error::Coordinator(stoffel_mpc_coordinator::CoordinatorError::JSONError(
-                        format!("missing typed mask reservation for input ordinal {ordinal}"),
+                        format!("missing bound mask reservation for input ordinal {ordinal}"),
                     ))
                 })?;
             let (_, mask) = masks
@@ -851,26 +1187,23 @@ where
                 .find(|(metadata, _)| {
                     metadata.reserved_index == reservation.reserved_index
                         && metadata.input_ordinal == reservation.input_ordinal
-                        && metadata.share_type == reservation.share_type
                 })
                 .ok_or_else(|| {
                     Error::Coordinator(stoffel_mpc_coordinator::CoordinatorError::JSONError(
-                        format!("missing typed mask for input ordinal {ordinal}"),
+                        format!("missing bound mask for input ordinal {ordinal}"),
                     ))
                 })?;
-            let clear = value_to_clear_share_value(input, *share_type)?;
-            let field_input = encode_clear_input::<Fr>(*share_type, clear)?;
-            masked_inputs.push(TypedMaskedInput {
+            let field_input = value_to_field(input, *share_type)?;
+            masked_inputs.push(BoundMaskedInput {
                 reserved_index: reservation.reserved_index,
                 input_ordinal: reservation.input_ordinal,
-                share_type: reservation.share_type,
                 masked_input: ValueWrapper {
                     value: field_input + *mask,
                 },
             });
         }
         coord.submit_masked_inputs(masked_inputs).await?;
-        typed_outputs_to_values(coord.obtain_typed_outputs().await?)
+        bound_outputs_to_values(coord.obtain_bound_outputs().await?, &config.output_types)
     })
     .await
     .map_err(|_| {
@@ -881,32 +1214,30 @@ where
     })?
 }
 
-fn value_to_clear_share_value(value: &Value, share_type: ShareType) -> Result<ClearShareValue> {
+fn value_to_field(value: &Value, share_type: ShareType) -> Result<Fr> {
     match (share_type, value) {
-        (ShareType::SecretInt { bit_length: 1 }, Value::Bool(value)) => {
-            Ok(ClearShareValue::Boolean(*value))
-        }
+        (ShareType::SecretInt { bit_length: 1 }, Value::Bool(value)) => Ok(Fr::from(*value as u64)),
         (ShareType::SecretInt { bit_length: 1 }, Value::I64(value)) => {
-            Ok(ClearShareValue::Boolean(*value != 0))
+            Ok(Fr::from((*value != 0) as u64))
         }
-        (ShareType::SecretInt { .. }, Value::I64(value)) => Ok(ClearShareValue::Integer(*value)),
+        (ShareType::SecretInt { .. }, Value::I64(value)) => Ok(i64_to_field(*value)),
         (ShareType::SecretInt { .. }, Value::U64(value)) => {
             let value = i64::try_from(*value).map_err(|_| {
                 Error::InvalidInput("u64 secret integer input exceeds i64 range".to_owned())
             })?;
-            Ok(ClearShareValue::Integer(value))
+            Ok(i64_to_field(value))
         }
         (ShareType::SecretFixedPoint { .. }, Value::Float(value)) => {
-            Ok(ClearShareValue::FixedPoint(*value))
+            encode_fixed_point(*value, share_type)
         }
         (ShareType::SecretFixedPoint { .. }, Value::I64(value)) => {
-            Ok(ClearShareValue::Integer(*value))
+            encode_fixed_point(*value as f64, share_type)
         }
         (ShareType::SecretFixedPoint { .. }, Value::U64(value)) => {
             let value = i64::try_from(*value).map_err(|_| {
                 Error::InvalidInput("u64 fixed-point input exceeds i64 range".to_owned())
             })?;
-            Ok(ClearShareValue::Integer(value))
+            encode_fixed_point(value as f64, share_type)
         }
         _ => Err(Error::InvalidInput(format!(
             "value kind '{}' is not compatible with share type {share_type:?}",
@@ -915,17 +1246,85 @@ fn value_to_clear_share_value(value: &Value, share_type: ShareType) -> Result<Cl
     }
 }
 
-fn typed_outputs_to_values(
-    outputs: Vec<stoffel_mpc_coordinator::off_chain::TypedClearOutput>,
+fn encode_fixed_point(value: f64, share_type: ShareType) -> Result<Fr> {
+    let ShareType::SecretFixedPoint { precision } = share_type else {
+        return Err(Error::InvalidInput(format!(
+            "cannot encode fixed-point value with share type {share_type:?}"
+        )));
+    };
+    let scale = 2f64.powi(precision.fractional_bits() as i32);
+    Ok(i64_to_field((value * scale).round() as i64))
+}
+
+fn i64_to_field(value: i64) -> Fr {
+    if value >= 0 {
+        Fr::from(value as u64)
+    } else {
+        -Fr::from(value.unsigned_abs())
+    }
+}
+
+fn field_to_i64(value: Fr) -> Result<i64> {
+    let positive = value.into_bigint();
+    if positive.as_ref()[1..].iter().all(|limb| *limb == 0)
+        && positive.as_ref()[0] <= i64::MAX as u64
+    {
+        return Ok(positive.as_ref()[0] as i64);
+    }
+
+    let negative = (-value).into_bigint();
+    if negative.as_ref()[1..].iter().all(|limb| *limb == 0)
+        && negative.as_ref()[0] <= i64::MAX as u64 + 1
+    {
+        let magnitude = negative.as_ref()[0];
+        return if magnitude == (i64::MAX as u64 + 1) {
+            Ok(i64::MIN)
+        } else {
+            Ok(-(magnitude as i64))
+        };
+    }
+
+    Err(Error::InvalidInput(
+        "field output cannot be represented as i64".to_owned(),
+    ))
+}
+
+fn field_to_value(value: Fr, share_type: ShareType) -> Result<Value> {
+    match share_type {
+        ShareType::SecretInt { bit_length: 1 } => Ok(Value::Bool(!value.is_zero())),
+        ShareType::SecretInt { .. } => Ok(Value::I64(field_to_i64(value)?)),
+        ShareType::SecretFixedPoint { precision } => {
+            let scaled = field_to_i64(value)?;
+            let scale = 2f64.powi(precision.fractional_bits() as i32);
+            Ok(Value::Float(scaled as f64 / scale))
+        }
+    }
+}
+
+fn bound_outputs_to_values(
+    outputs: Vec<BoundOutputShare<Fr>>,
+    output_types: &[ShareType],
 ) -> Result<Vec<Value>> {
+    if outputs.len() != output_types.len() {
+        return Err(Error::InvalidInput(format!(
+            "expected {} bound outputs, got {}",
+            output_types.len(),
+            outputs.len()
+        )));
+    }
     let mut values = outputs
         .into_iter()
         .map(|output| {
-            let value = match output.value {
-                ClearShareValue::Integer(value) => Value::I64(value),
-                ClearShareValue::Boolean(value) => Value::Bool(value),
-                ClearShareValue::FixedPoint(value) => Value::Float(value),
-            };
+            let share_type = output_types
+                .get(output.output_ordinal as usize)
+                .copied()
+                .ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "bound output ordinal {} is out of range",
+                        output.output_ordinal
+                    ))
+                })?;
+            let value = field_to_value(output.share, share_type)?;
             Ok((output.output_ordinal, value))
         })
         .collect::<Result<Vec<_>>>()?;

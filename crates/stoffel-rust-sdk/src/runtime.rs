@@ -123,7 +123,8 @@ impl StoffelRuntime {
             .parties(mpc_config.parties)
             .threshold(mpc_config.threshold)
             .backend(mpc_config.backend)
-            .output_count(client.output_count() as u64))
+            .input_types(client.inputs().iter().copied())
+            .output_types(client.outputs().iter().copied()))
     }
 
     pub fn server(&self, party_id: usize) -> ServerBuilder {

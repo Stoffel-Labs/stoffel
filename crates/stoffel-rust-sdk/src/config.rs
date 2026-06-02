@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::{Error, Result};
+use crate::types::GeneratedProgramManifest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -301,6 +302,10 @@ impl MpcConfigBuilder {
     pub fn backend(mut self, backend: MpcBackend) -> Self {
         self.config.backend = backend;
         self
+    }
+
+    pub fn manifest<M: GeneratedProgramManifest>(self) -> Self {
+        self.backend(M::BACKEND)
     }
 
     pub fn honeybadger(mut self) -> Self {
@@ -707,6 +712,10 @@ impl NetworkDeploymentBuilder {
         self
     }
 
+    pub fn manifest<M: GeneratedProgramManifest>(self) -> Self {
+        self.backend(M::BACKEND)
+    }
+
     pub fn honeybadger(mut self) -> Self {
         self.backend = MpcBackend::HoneyBadger;
         self
@@ -888,6 +897,10 @@ impl NetworkConfigBuilder {
     pub fn backend(mut self, backend: MpcBackend) -> Self {
         self.config.mpc.protocol = backend.to_string();
         self
+    }
+
+    pub fn manifest<M: GeneratedProgramManifest>(self) -> Self {
+        self.backend(M::BACKEND)
     }
 
     pub fn honeybadger(mut self) -> Self {

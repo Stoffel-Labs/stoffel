@@ -1,4 +1,5 @@
 use std::net::{SocketAddr, TcpListener};
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -17,6 +18,10 @@ def main(a: int64, b: int64) -> int64:
   return a + b
 "#;
 
+mod federated_average_bindings {
+    include!("fixtures/mpc_client_federated_average_bindings.rs");
+}
+
 #[test]
 fn public_sdk_types_are_send_and_sync_where_expected() {
     fn assert_send_sync<T: Send + Sync>() {}
@@ -31,6 +36,7 @@ fn public_sdk_types_are_send_and_sync_where_expected() {
     assert_send_sync::<ClientMetadataSummary>();
     assert_send_sync::<FunctionMetadata<'static>>();
     assert_send_sync::<ClientMetadata<'static>>();
+    assert_send_sync::<BindingsConfig>();
 
     assert_send_sync::<MpcConfig>();
     assert_send_sync::<MpcConfigBuilder>();
@@ -65,6 +71,7 @@ fn public_sdk_types_are_send_and_sync_where_expected() {
     assert_send_sync::<NodePublicKey>();
 
     assert_send_sync::<Value>();
+    assert_send_sync::<ClientValueType>();
     assert_send_sync::<Share>();
     assert_send_sync::<PublicKey>();
     assert_send_sync::<FieldElement>();
@@ -115,6 +122,8 @@ fn crate_root_reexports_common_reference_sdk_types() {
     assert!(type_name::<stoffel::MpcSection>().contains("MpcSection"));
     assert!(type_name::<stoffel::PreprocessingConfig>().contains("PreprocessingConfig"));
     assert!(type_name::<stoffel::ClientState>().contains("ClientState"));
+    assert!(type_name::<stoffel::BindingsConfig>().contains("BindingsConfig"));
+    assert!(type_name::<stoffel::ClientValueType>().contains("ClientValueType"));
     assert!(type_name::<stoffel::ServerState>().contains("ServerState"));
     assert!(type_name::<stoffel::HealthStatus>().contains("HealthStatus"));
     assert!(type_name::<stoffel::ServerMetrics>().contains("ServerMetrics"));
@@ -136,6 +145,169 @@ fn crate_root_reexports_common_reference_sdk_types() {
     let _public_key = stoffel::PublicKey::new("root-key", [1_u8, 2, 3]);
     let _field = stoffel::FieldElement::from_bytes([4_u8, 5, 6]);
     let _group = stoffel::GroupElement::from_bytes([7_u8, 8, 9]);
+}
+
+#[test]
+fn generate_bindings_emits_typed_client_io_from_stflb_manifest() -> stoffel::Result<()> {
+    let runtime = Stoffel::compile(
+        r#"
+def main() -> int64:
+  var left = ClientStore.take_share(0, 0)
+  var right = ClientStore.take_share_fixed(0, 1)
+  MpcOutput.send_to_client(0, [left, right])
+  return 0
+"#,
+    )?
+    .build()?;
+    let temp = tempdir()?;
+    let bytecode_path = temp.path().join("program.stflb");
+    let bindings_path = temp.path().join("stoffel_bindings.rs");
+    runtime.program().save_bytecode(&bytecode_path)?;
+
+    generate_bindings(&bytecode_path, &bindings_path)?;
+    let generated = std::fs::read_to_string(bindings_path)?;
+
+    assert!(generated.contains("pub struct Client0Inputs"));
+    assert!(generated.contains("pub struct ProgramManifest"));
+    assert!(generated.contains("impl stoffel::GeneratedProgramManifest for ProgramManifest"));
+    assert!(
+        generated.contains("const BACKEND: stoffel::MpcBackend = stoffel::MpcBackend::HoneyBadger")
+    );
+    assert!(generated.contains("pub input_0: i64"));
+    assert!(generated.contains("pub input_1: f64"));
+    assert!(generated.contains("impl stoffel::TypedClientInputs for Client0Inputs"));
+    assert!(generated.contains("pub struct Client0Outputs"));
+    assert!(generated.contains("pub output_0: i64"));
+    assert!(generated.contains("pub output_1: f64"));
+    assert!(generated.contains("impl stoffel::TypedClientOutputs for Client0Outputs"));
+    Ok(())
+}
+
+#[test]
+fn generated_bindings_type_check_federated_average_example() -> stoffel::Result<()> {
+    let sdk_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_dir = sdk_dir
+        .parent()
+        .and_then(Path::parent)
+        .expect("SDK crate lives under crates/");
+    let example_path =
+        workspace_dir.join("crates/stoffel-lang/examples/mpc_client_federated_average/main.stfl");
+    let runtime = Stoffel::compile_file(&example_path)?
+        .parties(5)
+        .threshold(1)
+        .build()?;
+    let client = runtime
+        .program()
+        .client(0)
+        .expect("federated average example declares client slot 0 IO");
+    assert_eq!(client.input_count(), 6);
+    assert_eq!(client.output_count(), 6);
+
+    let temp = tempdir()?;
+    let bytecode_path = temp.path().join("mpc_client_federated_average.stflb");
+    let bindings_path = temp.path().join("stoffel_bindings.rs");
+    runtime.program().save_bytecode(&bytecode_path)?;
+    generate_bindings(&bytecode_path, &bindings_path)?;
+    let generated = std::fs::read_to_string(&bindings_path)?;
+    assert!(generated.contains("pub struct Client0Inputs"));
+    assert!(generated.contains("pub struct ProgramManifest"));
+    assert!(generated.contains("impl stoffel::GeneratedProgramManifest for ProgramManifest"));
+    assert!(generated.contains("impl stoffel::TypedClientInputs for Client0Inputs"));
+    assert!(generated.contains("pub struct Client0Outputs"));
+    assert!(generated.contains("impl stoffel::TypedClientOutputs for Client0Outputs"));
+    for ordinal in 0..6 {
+        assert!(generated.contains(&format!("pub input_{ordinal}: f64")));
+        assert!(generated.contains(&format!("pub output_{ordinal}: f64")));
+    }
+
+    use federated_average_bindings::{Client0Inputs, Client0Outputs, ProgramManifest};
+    let typed_client = StoffelClient::builder()
+        .server("127.0.0.1:1")
+        .client_id(0)
+        .with_program(runtime.program().clone())
+        .build()?;
+    let typed_call = typed_client
+        .run_typed_with_manifest::<ProgramManifest, Client0Inputs, Client0Outputs>(Client0Inputs {
+            input_0: 1.0,
+            input_1: 2.0,
+            input_2: 3.0,
+            input_3: 4.0,
+            input_4: 5.0,
+            input_5: 6.0,
+        });
+    drop(typed_call);
+    let output = Client0Outputs {
+        output_0: 8.0,
+        output_1: 10.0,
+        output_2: 12.0,
+        output_3: 14.0,
+        output_4: 16.0,
+        output_5: 18.0,
+    };
+    assert_eq!(output.output_0, 8.0);
+    Ok(())
+}
+
+#[test]
+fn generated_manifest_marker_selects_backend_and_curve() -> stoffel::Result<()> {
+    use federated_average_bindings::ProgramManifest;
+
+    let mpc = MpcConfig::builder().manifest::<ProgramManifest>().build()?;
+    assert_eq!(mpc.backend, MpcBackend::HoneyBadger);
+
+    let runtime = Stoffel::compile("def main() -> int64:\n  return 0")?
+        .manifest::<ProgramManifest>()
+        .build()?;
+    assert_eq!(
+        runtime.mpc_config().unwrap().backend,
+        MpcBackend::HoneyBadger
+    );
+
+    let network = NetworkConfig::builder()
+        .party_id(0)
+        .bind_address("127.0.0.1:19800")
+        .expected_parties(5)
+        .threshold(1)
+        .manifest::<ProgramManifest>()
+        .build()?;
+    assert_eq!(network.mpc_backend()?, MpcBackend::HoneyBadger);
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_client_run_validates_manifest_types_before_network_submission() -> stoffel::Result<()>
+{
+    let program = Stoffel::compile(
+        r#"
+def main() -> int64:
+  var share = ClientStore.take_share(0, 0)
+  MpcOutput.send_to_client(0, [share])
+  return 0
+"#,
+    )?
+    .build()?
+    .program()
+    .clone();
+    let client = StoffelClient::builder()
+        .server("127.0.0.1:1")
+        .client_id(0)
+        .with_program(program)
+        .build()?;
+
+    let mismatch = client.run_typed::<i64, bool>(55_i64).await.unwrap_err();
+    assert!(matches!(
+        mismatch,
+        stoffel::Error::InvalidInput(message)
+            if message.contains("output 0 expects SecretInt") && message.contains("Boolean")
+    ));
+
+    let missing_config = client.run_typed::<i64, i64>(55_i64).await.unwrap_err();
+    assert!(matches!(
+        missing_config,
+        stoffel::Error::Configuration(message)
+            if message.contains("off-chain client IO configuration")
+    ));
+    Ok(())
 }
 
 #[test]
@@ -3130,11 +3302,10 @@ fn offchain_coordinator_surface_reexports_core_types() {
     >();
 
     let client: stoffel::coordinator::ClientIdentity = vec![1, 2, 3];
-    let reservation = stoffel::coordinator::TypedMaskReservation {
+    let reservation = stoffel::coordinator::BoundMaskReservation {
         client: client.clone(),
         reserved_index: 7,
         input_ordinal: 0,
-        share_type: stoffel_vm_types::core_types::ShareType::SecretInt { bit_length: 64 },
     };
 
     assert_eq!(client, vec![1, 2, 3]);
