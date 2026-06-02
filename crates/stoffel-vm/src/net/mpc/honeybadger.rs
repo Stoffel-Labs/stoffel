@@ -306,8 +306,9 @@ where
 
     pub(crate) fn client_identity(&self, client_id: ClientId) -> DurableIdentityDigest {
         self.net
-            .client_public_key_bytes(client_id)
-            .map(|bytes| DurableIdentityDigest::from_public_key_bytes(&bytes))
+            .get_sorted_client_keys()
+            .get(client_id)
+            .map(|key| DurableIdentityDigest::from_public_key_bytes(&key.0))
             .unwrap_or_else(|| DurableIdentityDigest::from_legacy_party_id(client_id))
     }
 

@@ -1,0 +1,24 @@
+def normalize_score(raw_score: Share) -> Share:
+  var adjusted = raw_score.add_scalar(25)
+  adjusted = adjusted.add_scalar(25)
+  return adjusted.mul_scalar(2)
+
+def main() -> int64:
+  var client_count = ClientStore.get_number_clients()
+  var income_score = ClientStore.take_share(0, 0)
+
+  var eligibility = normalize_score(income_score)
+
+  if client_count > 1:
+    var coapplicant_score = ClientStore.take_share(1, 0)
+    eligibility = eligibility.add(coapplicant_score)
+
+  var client_outputs: list[Share] = []
+  client_outputs.append(eligibility)
+
+  if Mpc.has_capability("client-output"):
+    MpcOutput.send_to_client(0, client_outputs)
+    if client_count > 1:
+      eligibility.send_to_client(1)
+
+  return client_count

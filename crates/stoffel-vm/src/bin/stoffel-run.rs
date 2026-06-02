@@ -35,7 +35,10 @@ use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 use stoffel_vm::runtime_hooks::{HookContext, HookEvent};
 use stoffel_vm::storage::preproc::LmdbPreprocStore;
 use stoffel_vm::storage::RedbLocalStorage;
-use stoffel_vm_types::compiled_binary::{CompiledBinary, MPC_BACKEND_MANIFEST_FORMAT_VERSION};
+use stoffel_vm_types::compiled_binary::{
+    CompiledBinary, MpcCurve, MPC_BACKEND_MANIFEST_FORMAT_VERSION,
+    MPC_CURVE_MANIFEST_FORMAT_VERSION,
+};
 use stoffel_vm_types::core_types::Value;
 use stoffelmpc_mpc::avss_mpc::{AvssMPCClient, AvssSessionId};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
@@ -182,6 +185,15 @@ where
         .into_iter()
         .map(|(client_id, indices)| (client_id, indices.into_reserved_indices()))
         .collect()
+}
+
+fn curve_config_from_manifest(curve: MpcCurve) -> MpcCurveConfig {
+    match curve {
+        MpcCurve::Bls12_381 => MpcCurveConfig::Bls12_381,
+        MpcCurve::Bn254 => MpcCurveConfig::Bn254,
+        MpcCurve::Curve25519 => MpcCurveConfig::Curve25519,
+        MpcCurve::Ed25519 => MpcCurveConfig::Ed25519,
+    }
 }
 fn store_reserved_client_inputs<F, I>(
     vm: &mut VirtualMachine,
@@ -2854,10 +2866,6 @@ where
     F: SupportedMpcField,
     G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
 {
-    if expected_clients.is_empty() {
-        return Err("--expected-clients is required for AVSS coordinator mode".to_owned());
-    }
-
     let input_ids: Vec<Vec<u8>> = expected_clients
         .iter()
         .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
@@ -2907,6 +2915,23 @@ where
     )
     .await?;
     engine.enable_client_output_capture().await;
+
+    if input_ids.is_empty() {
+        if as_leader {
+            coord.start_mpc().await.map_err(|e| e.to_string())?;
+        }
+        coord
+            .wait_for_round(Round::MPCExecution)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        eprintln!("Starting VM execution of '{}'...", agreed_entry);
+        let result = vm
+            .execute(agreed_entry)
+            .map_err(|err| format!("Execution error in '{}': {}", agreed_entry, err))?;
+        print_vm_result(vm, result);
+        return Ok(());
+    }
 
     let mut mask_shares = Vec::with_capacity(input_ids.len());
     {
@@ -3594,7 +3619,7 @@ async fn main() {
         entry
     };
 
-    let manifest_backend = path_opt.as_ref().and_then(|path| {
+    let manifest_config = path_opt.as_ref().map(|path| {
         let mut file = File::open(path).unwrap_or_else(|error| {
             eprintln!(
                 "Error: failed to open compiled program '{}': {}",
@@ -3609,9 +3634,15 @@ async fn main() {
             );
             exit(2);
         });
-        (binary.version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION)
-            .then_some(MpcBackendKind::from(binary.client_io_manifest.mpc_backend))
+        let backend = (binary.version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION)
+            .then_some(MpcBackendKind::from(binary.client_io_manifest.mpc_backend));
+        let curve = (binary.version >= MPC_CURVE_MANIFEST_FORMAT_VERSION).then_some(
+            curve_config_from_manifest(binary.client_io_manifest.mpc_curve),
+        );
+        (backend, curve)
     });
+    let manifest_backend = manifest_config.and_then(|(backend, _)| backend);
+    let manifest_curve = manifest_config.and_then(|(_, curve)| curve);
 
     // Resolve MPC backend kind. v3+ binaries are authoritative; --mpc-backend
     // remains for client mode and legacy v1/v2 binaries without backend metadata.
@@ -3641,13 +3672,26 @@ async fn main() {
     };
 
     let curve_config = if let Some(ref name) = mpc_curve {
-        match MpcCurveConfig::from_str(name) {
+        let cli_curve = match MpcCurveConfig::from_str(name) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Error: {}", e);
                 exit(2);
             }
+        };
+        if let Some(manifest_curve) = manifest_curve {
+            if cli_curve != manifest_curve {
+                eprintln!(
+                    "Error: --mpc-curve '{}' does not match program manifest curve '{}'",
+                    cli_curve.name(),
+                    manifest_curve.name()
+                );
+                exit(2);
+            }
         }
+        cli_curve
+    } else if let Some(manifest_curve) = manifest_curve {
+        manifest_curve
     } else {
         MpcCurveConfig::default()
     };

@@ -1,0 +1,146 @@
+# Object Syntax Test File
+# Tests user-defined object definitions, field access, and method calls
+
+# ==========================================
+# Simple Object Definition
+# ==========================================
+
+object Point:
+  x: int64
+  y: int64
+
+# ==========================================
+# Object with Multiple Field Types
+# ==========================================
+
+object Person:
+  age: int64
+  height: float
+  name: string
+  active: bool
+
+# ==========================================
+# Object with Secret Field Types
+# ==========================================
+
+object SecureData:
+  value: secret int64
+  key: secret int64
+
+# ==========================================
+# Object with Secret Fields
+# ==========================================
+
+object PartiallySecret:
+  public_id: int64
+  secret_value: secret int64
+
+# ==========================================
+# Object with List Field
+# ==========================================
+
+object Container:
+  items: list[int64]
+  count: int64
+
+# ==========================================
+# Object with Secret List Field
+# ==========================================
+
+object SecureContainer:
+  count: int64
+  secrets: list[secret int64]
+
+# ==========================================
+# Multiple Object Definitions
+# ==========================================
+
+object Vector2D:
+  x: float
+  y: float
+
+object Vector3D:
+  x: float
+  y: float
+  z: float
+
+# ==========================================
+# Complex Object with Multiple Types
+# ==========================================
+
+object MPCComputationState:
+  party_id: int64
+  n_parties: int64
+  threshold: int64
+  is_initialized: bool
+
+# ==========================================
+# Object with All Numeric Types
+# ==========================================
+
+object NumericContainer:
+  i64val: int64
+  f64val: float
+
+# ==========================================
+# Function Using Builtin Objects
+# ==========================================
+
+def process_shares() -> secret int64:
+  var s1 = ClientStore.take_share(0, 0)
+  var s2 = ClientStore.take_share(0, 1)
+  var sum: secret int64 = s1 + s2
+  return sum
+
+# ==========================================
+# Function Using Mpc Object Methods
+# ==========================================
+
+def get_party_info() -> int64:
+  var id = Mpc.party_id()
+  var n = Mpc.n_parties()
+  return id + n
+
+# ==========================================
+# Function Using Share Object Methods
+# ==========================================
+
+def create_and_combine_shares() -> int64:
+  var s1 = Share.from_clear(10)
+  var s2 = Share.from_clear(20)
+  var sum = Share.add(s1, s2)
+  var result = Share.open(sum)
+  return result
+
+# ==========================================
+# Main Entry Point
+# ==========================================
+
+def main() -> None:
+  # Test Mpc methods
+  var my_id = Mpc.party_id()
+  var n = Mpc.n_parties()
+  var thresh = Mpc.threshold()
+
+  # Test ClientStore methods
+  var n_clients = ClientStore.get_number_clients()
+
+  # Test conditional based on MPC state
+  if my_id == 0:
+    print("I am party 0")
+
+  # Test loop with MPC values
+  for i in 0..n:
+    print("Processing party")
+
+  # Test Rbc methods
+  Rbc.broadcast("hello world")
+
+  # Test Aba methods
+  Aba.propose(True)
+
+  # Test byte and crypto helpers
+  var msg_bytes = Bytes.from_string("hello")
+  var digest = Crypto.sha256(msg_bytes)
+
+  print("Object syntax tests completed")

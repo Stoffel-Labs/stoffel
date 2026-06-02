@@ -23,9 +23,10 @@ use std::io::{self, Read, Write};
 // Magic bytes that identify a StoffelVM bytecode file
 pub const MAGIC_BYTES: &[u8; 4] = b"STFL";
 // Current bytecode format version
-pub const FORMAT_VERSION: u16 = 3;
+pub const FORMAT_VERSION: u16 = 4;
 pub const CLIENT_IO_MANIFEST_FORMAT_VERSION: u16 = 2;
 pub const MPC_BACKEND_MANIFEST_FORMAT_VERSION: u16 = 3;
+pub const MPC_CURVE_MANIFEST_FORMAT_VERSION: u16 = 4;
 
 const MAX_BINARY_COLLECTION_LEN: usize = 1_000_000;
 const MAX_BINARY_STRING_BYTES: usize = 16 * 1024 * 1024;
@@ -197,6 +198,7 @@ pub struct CompiledBinary {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientIoManifest {
     pub mpc_backend: MpcBackend,
+    pub mpc_curve: MpcCurve,
     pub clients: Vec<ClientIoSchema>,
 }
 
@@ -212,6 +214,15 @@ pub enum MpcBackend {
     #[default]
     HoneyBadger,
     Avss,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MpcCurve {
+    #[default]
+    Bls12_381,
+    Bn254,
+    Curve25519,
+    Ed25519,
 }
 
 /// Represents a compiled function in the program
@@ -588,6 +599,7 @@ impl CompiledBinary {
             Self::serialize_client_io_manifest(
                 &self.client_io_manifest,
                 self.version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION,
+                self.version >= MPC_CURVE_MANIFEST_FORMAT_VERSION,
                 writer,
             )?;
         }
@@ -598,10 +610,14 @@ impl CompiledBinary {
     fn serialize_client_io_manifest<W: Write>(
         manifest: &ClientIoManifest,
         include_backend: bool,
+        include_curve: bool,
         writer: &mut W,
     ) -> BinaryResult<()> {
         if include_backend {
             Self::serialize_mpc_backend(manifest.mpc_backend, writer)?;
+        }
+        if include_curve {
+            Self::serialize_mpc_curve(manifest.mpc_curve, writer)?;
         }
         write_usize_as_u32(writer, manifest.clients.len(), "client IO schema count")?;
         for client in &manifest.clients {
@@ -622,6 +638,17 @@ impl CompiledBinary {
         let tag = match backend {
             MpcBackend::HoneyBadger => 0u8,
             MpcBackend::Avss => 1u8,
+        };
+        writer.write_all(&[tag])?;
+        Ok(())
+    }
+
+    fn serialize_mpc_curve<W: Write>(curve: MpcCurve, writer: &mut W) -> BinaryResult<()> {
+        let tag = match curve {
+            MpcCurve::Bls12_381 => 0u8,
+            MpcCurve::Bn254 => 1u8,
+            MpcCurve::Curve25519 => 2u8,
+            MpcCurve::Ed25519 => 3u8,
         };
         writer.write_all(&[tag])?;
         Ok(())
@@ -965,6 +992,7 @@ impl CompiledBinary {
             Self::deserialize_client_io_manifest(
                 reader,
                 version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION,
+                version >= MPC_CURVE_MANIFEST_FORMAT_VERSION,
             )?
         } else {
             ClientIoManifest::default()
@@ -981,11 +1009,17 @@ impl CompiledBinary {
     fn deserialize_client_io_manifest<R: Read>(
         reader: &mut R,
         has_backend: bool,
+        has_curve: bool,
     ) -> BinaryResult<ClientIoManifest> {
         let mpc_backend = if has_backend {
             Self::deserialize_mpc_backend(reader)?
         } else {
             MpcBackend::default()
+        };
+        let mpc_curve = if has_curve {
+            Self::deserialize_mpc_curve(reader)?
+        } else {
+            MpcCurve::default()
         };
         let client_count =
             read_u32_len_bounded(reader, "client IO schema count", MAX_BINARY_COLLECTION_LEN)?;
@@ -1017,6 +1051,7 @@ impl CompiledBinary {
         }
         Ok(ClientIoManifest {
             mpc_backend,
+            mpc_curve,
             clients,
         })
     }
@@ -1029,6 +1064,20 @@ impl CompiledBinary {
             1 => Ok(MpcBackend::Avss),
             tag => Err(invalid_data(format!(
                 "unknown MPC backend tag {tag} in IO manifest"
+            ))),
+        }
+    }
+
+    fn deserialize_mpc_curve<R: Read>(reader: &mut R) -> BinaryResult<MpcCurve> {
+        let mut tag = [0u8; 1];
+        reader.read_exact(&mut tag)?;
+        match tag[0] {
+            0 => Ok(MpcCurve::Bls12_381),
+            1 => Ok(MpcCurve::Bn254),
+            2 => Ok(MpcCurve::Curve25519),
+            3 => Ok(MpcCurve::Ed25519),
+            tag => Err(invalid_data(format!(
+                "unknown MPC curve tag {tag} in IO manifest"
             ))),
         }
     }
@@ -1557,6 +1606,7 @@ mod tests {
         let mut binary = CompiledBinary::new();
         binary.client_io_manifest = ClientIoManifest {
             mpc_backend: MpcBackend::Avss,
+            mpc_curve: MpcCurve::Ed25519,
             clients: vec![
                 ClientIoSchema {
                     client_slot: 7,
@@ -1598,6 +1648,31 @@ mod tests {
         assert_eq!(
             deserialized.client_io_manifest.mpc_backend,
             MpcBackend::HoneyBadger
+        );
+        assert_eq!(
+            deserialized.client_io_manifest.mpc_curve,
+            MpcCurve::Bls12_381
+        );
+        assert!(deserialized.client_io_manifest.clients.is_empty());
+    }
+
+    #[test]
+    fn bytecode_v3_avss_manifest_defaults_to_bls12381_curve() {
+        let mut bytes = binary_header_with_version(3);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // constants
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // functions
+        bytes.push(1); // avss backend
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // client schemas
+
+        let deserialized = CompiledBinary::deserialize(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(deserialized.version, 3);
+        assert_eq!(
+            deserialized.client_io_manifest.mpc_backend,
+            MpcBackend::Avss
+        );
+        assert_eq!(
+            deserialized.client_io_manifest.mpc_curve,
+            MpcCurve::Bls12_381
         );
         assert!(deserialized.client_io_manifest.clients.is_empty());
     }

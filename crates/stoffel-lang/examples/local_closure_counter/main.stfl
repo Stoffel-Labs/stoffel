@@ -1,0 +1,15 @@
+def increment_counter(amount: int64) -> int64:
+  var saved_amount = amount
+  var current = get_upvalue("start")
+  var updated = current + saved_amount
+  discard set_upvalue("start", updated)
+  return updated
+
+def create_counter(start: int64) -> Closure:
+  return create_closure_with_upvalue("increment_counter", "start")
+
+def main() -> int64:
+  var counter = create_counter(10)
+  var first = call_closure_with_arg(counter, 5)
+  var second = call_closure_with_arg(counter, 7)
+  return first + second

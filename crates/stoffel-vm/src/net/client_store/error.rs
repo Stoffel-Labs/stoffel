@@ -19,7 +19,9 @@ pub enum ClientInputStoreError {
         share_index: ClientShareIndex,
         reason: String,
     },
-    #[error("failed to serialize Feldman commitments for client {client_id} at index {share_index}: {reason}")]
+    #[error(
+        "failed to serialize Feldman commitments for client {client_id} at index {share_index}: {reason}"
+    )]
     FeldmanCommitmentSerialization {
         client_id: ClientId,
         share_index: ClientShareIndex,

@@ -1,0 +1,10 @@
+# Main file that imports the math utilities module
+# After importing, functions are available by their simple names
+import utils.math
+
+def main() -> int64:
+  var a = 5
+  var b = 3
+  var sum = add(a, b)
+  var product = multiply(a, b)
+  return sum + product

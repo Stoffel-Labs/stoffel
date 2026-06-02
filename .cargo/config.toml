@@ -1,8 +1,21 @@
 [net]
 git-fetch-with-cli = true
 
+[alias]
+vm-local-e2e = ["test", "-p", "stoffel-vm", "--test", "local_coordinator_e2e", "--", "--ignored", "--test-threads=1"]
+sdk-test = ["test", "-p", "stoffel-rust-sdk", "--lib", "--test", "sdk_usage"]
+sdk-local-e2e = ["test", "-p", "stoffel-rust-sdk", "--test", "sdk_usage", "--", "--ignored", "--test-threads=1"]
+sdk-examples = ["check", "-p", "stoffel-rust-sdk", "--examples"]
+sdk-doc = ["doc", "-p", "stoffel-rust-sdk", "--no-deps"]
+sdk-clippy = ["clippy", "-p", "stoffel-rust-sdk", "--all-targets", "--", "-D", "warnings"]
+sdk-coverage-report = ["llvm-cov", "report", "-p", "stoffel-rust-sdk", "--summary-only", "--ignore-filename-regex", "crates/(stoffel-lang|stoffel-vm|stoffel-vm-types)/|stoffel-mpc-coordinator/|stoffel-network/"]
+sdk-package-probe = ["package", "-p", "stoffel-rust-sdk", "--allow-dirty", "--no-verify"]
+
 [patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]
 stoffel-mpc-coordinator = { path = "../stoffel-mpc-coordinator" }
 
 [patch."https://github.com/Stoffel-Labs/stoffel-networking.git"]
 stoffelnet = { path = "../stoffel-network" }
+
+[patch."https://github.com/Stoffel-Labs/StoffelVM.git"]
+stoffel-vm-types = { path = "crates/stoffel-vm-types" }

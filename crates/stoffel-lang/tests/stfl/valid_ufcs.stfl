@@ -1,0 +1,16 @@
+# Positive fixture for UFCS-style builtin method calls.
+
+def scale(value: int64, factor: int64) -> int64:
+  return value * factor
+
+def main() -> int64:
+  var share = Share.from_clear(10)
+  var opened = share.open()
+
+  var values: list[int64] = []
+  values.append(opened)
+  values.append(scale(opened, 2))
+
+  var count = values.len()
+
+  return count

@@ -1,0 +1,81 @@
+# Federated Matrix Average using Fixed-Point Shares
+#
+# This program computes the element-wise AVERAGE of a 2x3 matrix across
+# multiple clients using fixed-point secret shares. Each client provides six
+# elements in row-major order. The secret reduction is performed over the flat
+# row-major domain, then the clear averages are reshaped to list[list[float]].
+
+def matrix_get[T](matrix: list[list[T]], row_idx: int64, col_idx: int64) -> T:
+  return matrix[row_idx][col_idx]
+
+def matrix_row[T](matrix: list[list[T]], row_idx: int64) -> list[T]:
+  return matrix[row_idx]
+
+def append_matrix_row[T](matrix: list[list[T]], row: list[T]) -> list[list[T]]:
+  matrix.append(row)
+  return matrix
+
+def reshape_2x3(values: list[float]) -> list[list[float]]:
+  var row_count: int64 = 2
+  var col_count: int64 = 3
+  var matrix: list[list[float]] = []
+
+  var row_idx: int64 = 0
+  while row_idx < row_count:
+    var row: list[float] = []
+
+    var col_idx: int64 = 0
+    while col_idx < col_count:
+      var element_idx: int64 = (row_idx * col_count) + col_idx
+      row.append(values[element_idx])
+      col_idx += 1
+
+    matrix = append_matrix_row(matrix, row)
+    row_idx += 1
+
+  return matrix
+
+# Computes element-wise federated average across all clients.
+# Returns a 2x3 matrix of per-element averages.
+def federated_average_2x3() -> list[list[float]]:
+  var row_count: int64 = 2
+  var col_count: int64 = 3
+  var matrix_size: int64 = row_count * col_count
+  var num_clients: int64 = ClientStore.get_number_clients()
+
+  if num_clients == 0:
+    var empty: list[list[float]] = []
+    return empty
+
+  var flat_sums: list[Share] = []
+  var element_idx: int64 = 0
+  while element_idx < matrix_size:
+    var element_sum: Share = ClientStore.take_share_fixed(0, element_idx)
+
+    var client_idx: int64 = 1
+    while client_idx < num_clients:
+      var share: Share = ClientStore.take_share_fixed(client_idx, element_idx)
+      element_sum = element_sum.add(share)
+      client_idx += 1
+
+    flat_sums.append(element_sum)
+    element_idx += 1
+
+  var opened_sums: list[float] = Share.batch_open_fixed(flat_sums)
+  var flat_averages: list[float] = []
+
+  element_idx = 0
+  while element_idx < matrix_size:
+    flat_averages.append(opened_sums[element_idx] / num_clients)
+    element_idx += 1
+
+  return reshape_2x3(flat_averages)
+
+def main() -> list[list[float]]:
+  var averages: list[list[float]] = federated_average_2x3()
+
+  # Exercise generic nested-list return substitution with T = float.
+  var first_average: float = matrix_get(averages, 0, 0)
+  var first_row: list[float] = matrix_row(averages, 0)
+
+  return averages

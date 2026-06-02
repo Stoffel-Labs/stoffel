@@ -1,0 +1,15 @@
+# Invalid example: trying to assign ClientStore.take_share to non-Share variables
+# This should cause compiler errors
+
+def main() -> None:
+  # ERROR: Cannot assign take_share result to int64
+  var share1: int64 = ClientStore.take_share(0, 0)
+
+  # ERROR: Cannot assign fixed-point share result to float
+  var share2: float = ClientStore.take_share_fixed(1, 0)
+
+  # ERROR: Cannot reassign take_share result to int64 variable
+  var regular_var: int64 = 42
+  regular_var = ClientStore.take_share(0, 1)
+
+  print("This should not compile")

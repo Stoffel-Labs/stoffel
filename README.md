@@ -14,6 +14,9 @@ Stoffel supports Rust <> Stoffel FFI out of the box. This lets you extend the ru
 
 The workspace currently includes:
 
+- `crates/stoffel-cli`: the Cargo-like `stoffel` project CLI
+- `crates/stoffel-lang`: the Stoffel-Lang compiler
+- `crates/stoffel-rust-sdk`: the Rust SDK used by the CLI and applications
 - `crates/stoffel-vm`: the runtime, networking layer, MPC integrations, CLI binaries, and C FFI
 - `crates/stoffel-vm-types`: shared VM types, instruction definitions, and the compiled bytecode format
 - `include/`: the public C header and FFI notes
@@ -177,8 +180,6 @@ let binary = CompiledBinary::from_vm_functions(&functions);
 save_to_file(&binary, "program.stflb").unwrap();
 ```
 
-This repository does not currently include a source-language compiler, so compiled binaries are usually produced either by Rust-side tooling or by an external compiler that targets the same format.
-
 ## Build and Test
 
 Build everything:
@@ -203,7 +204,37 @@ cargo build --release -p stoffel-vm
 HoneyBadger and AVSS backend code is built by default. Distributed party runs select the backend
 from the compiled `.stflb` program manifest.
 
-## CLI: Run a compiled Stoffel binary
+## Stoffel CLI
+
+The `stoffel` binary is a Cargo-like project CLI built on top of `crates/stoffel-rust-sdk`.
+
+Create and run a project:
+
+```bash
+cargo install --path crates/stoffel-cli
+stoffel init hello-mpc
+cd hello-mpc
+stoffel run --input a=40 --input b=2
+```
+
+Compile project bytecode:
+
+```bash
+stoffel build
+stoffel check
+```
+
+Run local MPC development mode when `stoffel-run` is available:
+
+```bash
+cargo build -p stoffel-vm --bin stoffel-run
+stoffel dev --runner /path/to/StoffelVM/target/debug/stoffel-run --input a=40 --input b=2
+```
+
+The CLI reads `Stoffel.toml`, defaults to `src/main.stfl`, and writes bytecode to
+`target/debug/<package>.stflb` or `target/release/<package>.stflb`.
+
+## VM Runner CLI
 
 A CLI is included to run a compiled Stoffel bytecode file locally or as part of a distributed MPC session.
 
@@ -310,9 +341,9 @@ STOFFEL_MPC_CURVE=p-256 \
 docker compose -f docker-compose.avss.yml up --build
 ```
 
-The Stoffel source for these programs lives in `examples/stfl/threshold_ecdsa_secp256k1.stfl` and `examples/stfl/threshold_ecdsa_p256.stfl`. The VM only provides primitive helpers for field inversion, converting an opened curve point to `x mod q`, and formatting the final ECDSA output. The threshold ECDSA protocol itself is expressed in the Stoffel program. The returned layout is fixed-width big-endian `r(32) || s(32) || sec1_compressed_pk(33)`, so callers can DER-encode `(r, s)` directly.
+The Stoffel source for these programs lives in `crates/stoffel-lang/examples/threshold_signatures/threshold_ecdsa_secp256k1/main.stfl` and `crates/stoffel-lang/examples/threshold_signatures/threshold_ecdsa_p256/main.stfl`. The VM only provides primitive helpers for field inversion, converting an opened curve point to `x mod q`, and formatting the final ECDSA output. The threshold ECDSA protocol itself is expressed in the Stoffel program. The returned layout is fixed-width big-endian `r(32) || s(32) || sec1_compressed_pk(33)`, so callers can DER-encode `(r, s)` directly.
 
-For the AVSS certificate-signing path, run `/app/programs/avss_certificate_keygen.stflb` with `STOFFEL_MPC_CURVE=secp256k1` or `STOFFEL_MPC_CURVE=p-256` to persist each party's CA signing share. Keygen is idempotent: it loads the existing share if the storage key already exists and only generates on first use. Then run `/app/programs/avss_certificate_sign.stflb` with `STOFFEL_WAIT_FOR_CLIENTS=1`; the client submits the real SHA-256 TBS digest and reconstructs fixed-width threshold ECDSA `r || s` material with `--outputs 2`. The corresponding Stoffel source lives in `examples/stfl/avss_certificate_keygen.stfl` and `examples/stfl/avss_certificate_sign.stfl`.
+For the AVSS certificate-signing path, run `/app/programs/avss_certificate_keygen.stflb` with `STOFFEL_MPC_CURVE=secp256k1` or `STOFFEL_MPC_CURVE=p-256` to persist each party's CA signing share. Keygen is idempotent: it loads the existing share if the storage key already exists and only generates on first use. Then run `/app/programs/avss_certificate_sign.stflb` with `STOFFEL_WAIT_FOR_CLIENTS=1`; the client submits the real SHA-256 TBS digest and reconstructs fixed-width threshold ECDSA `r || s` material with `--outputs 2`. The corresponding Stoffel source lives in `crates/stoffel-lang/examples/avss_certificate/keygen/main.stfl` and `crates/stoffel-lang/examples/avss_certificate/sign/main.stfl`.
 
 ## C Foreign Function Interface
 

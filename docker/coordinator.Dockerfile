@@ -15,8 +15,6 @@ COPY . /StoffelVM
 COPY docker/coordinator-wrapper /build/coordinator-wrapper
 COPY --from=coordinator . /stoffel-mpc-coordinator
 COPY --from=network . /stoffel-network
-RUN sed -i 's#path = "../StoffelVM/crates/stoffel-vm-types"#path = "/StoffelVM/crates/stoffel-vm-types"#' \
-    /stoffel-mpc-coordinator/Cargo.toml
 
 RUN printf '%s\n' \
       '[net]' \

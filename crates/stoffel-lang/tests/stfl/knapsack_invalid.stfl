@@ -1,0 +1,25 @@
+# This file contains the user's original invalid knapsack program
+# to test the compiler error messages
+
+def mutex(condition: bool, a: secret int64, b: secret int64) -> bool:
+  return a * condition + b * (1-condition)
+
+def knapsack(items: list[secret int64], weights: list[secret int64], max_capacity: int64) -> (list[secret int64], max_weight: secret int64):
+  var final_capacity: secret int64 = 0
+  var chosen_items: list[secret int64] = []
+  var n_items = items.len()
+  for i in 1..n_items:
+    final_capacity += mutex(weights[i] + final_capacity < max_capacity, weights[i], 0)
+    chosen_items.append(mutex(weights[i] + final_capacity < max_capacity, weights[i], 0))
+
+  return chosen_items, final_capacity
+
+
+def main() -> None:
+  var items: list[secret int64] = [1, 2, 3, 4, 5]
+  var weigths: list[secret int64] = [1000, 800, 500, 300, 100]
+  var max_capacity: int64 = 2000
+  chosen_items, final_capacity = knapsack(items, weights, max_capacity)
+  print("final capacity: ", final_capacity.reveal())
+  for i in 1..items.length:
+    print("item: ", items[i].reveal())

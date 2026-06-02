@@ -1,0 +1,9 @@
+# Top of diamond - imports both left and right
+# Diamond pattern: main -> left, right -> shared
+import left
+import right
+
+def main() -> int64:
+  var left_val = left_compute()
+  var right_val = right_compute()
+  return left_val + right_val

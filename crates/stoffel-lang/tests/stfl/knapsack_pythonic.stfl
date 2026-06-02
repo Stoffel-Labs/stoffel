@@ -1,0 +1,58 @@
+# Greedy Knapsack Algorithm with Pythonic Syntax
+#
+# This demonstrates the new Pythonic array syntax in Stoffel-Lang:
+# - Array literals: [1, 2, 3]
+# - Empty array literals: []
+# - .append() method: arr.append(value)
+# - .len() method: arr.len()
+#
+# Compare to knapsack_greedy.stfl which uses the verbose syntax
+
+# Branchless selection for MPC-safe conditional assignment
+def select(condition: int64, a: secret int64, b: secret int64) -> secret int64:
+  return a * condition + b * (1 - condition)
+
+# Greedy knapsack: select items that fit within capacity
+def greedy_knapsack(weights: list[secret int64], thresholds: list[int64], n: int64) -> secret int64:
+  var total: secret int64 = 0
+  var remaining: int64 = thresholds[0]
+  var i: int64 = 0
+
+  while i < n:
+    var w: secret int64 = weights[i]
+    var threshold: int64 = thresholds[i]
+
+    var fits: int64 = 0
+    if remaining >= threshold:
+      fits = 1
+      remaining = remaining - threshold
+
+    total = total + select(fits, w, 0)
+    i = i + 1
+
+  return total
+
+def main() -> None:
+  # Build weights list using Pythonic syntax - much cleaner!
+  var weights: list[secret int64] = []
+  weights.append(1000)
+  weights.append(800)
+  weights.append(500)
+  weights.append(300)
+  weights.append(100)
+
+  # Public capacity thresholds
+  var thresholds: list[int64] = []
+  thresholds.append(2000)
+  thresholds.append(1000)
+  thresholds.append(200)
+  thresholds.append(0)
+  thresholds.append(0)
+
+  var n: int64 = weights.len()
+  var result: secret int64 = greedy_knapsack(weights, thresholds, n)
+
+  # Reveal by assigning secret to clear variable
+  var revealed: int64 = result
+
+  print("Total weight of selected items (Pythonic version):")

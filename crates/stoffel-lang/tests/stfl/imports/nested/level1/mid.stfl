@@ -1,0 +1,6 @@
+# Middle level module - imports from deeper level
+import level2.deep
+
+def mid_compute() -> int64:
+  var d = deep_value()
+  return d + 100

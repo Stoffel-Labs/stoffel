@@ -1,0 +1,64 @@
+# Basic Nim-style function definition
+def add(a: int64, b: int64) -> int64:
+  return a + b
+
+def print(msg: string) -> None {.builtin.}:
+
+# Function with no parameters and no return value (implicit None)
+def greet() -> None:
+  print("Hello!") # Assuming print exists
+
+# Function with no parameters but explicit return type
+def get_pi() -> float:
+  return 3.14159
+
+# Function with parameters but no explicit return type
+def log_message(msg: string) -> None:
+  # Assume some logging mechanism
+  discard msg # Use discard if value isn't used
+
+# Function with a secret return type
+def calculate_secret(input: int64) -> secret int64:
+  var intermediate = input * 2 + 7
+  return intermediate # Implementation is hidden
+
+# Function with secret parameter type
+def process_sensitive_data(data: secret string) -> bool:
+  # Cannot directly access 'data' content easily
+  # Assume some secure processing happens
+  return data.len > 0 # Example: Check length (might be allowed)
+
+# Function with secret return type
+def generate_token() -> secret string:
+  var random_bytes = "..." # Generate securely
+  return random_bytes
+
+# Function with both secret parameter and return type
+def transform_secret(key: secret string) -> secret string:
+  # Process the secret key, return a derived secret
+  return key # Simplified
+
+# Function with secret parameter and return type
+def super_secret_op(val: secret int64) -> secret int64:
+  return val + 1 # Simplified
+
+# Function definition spanning multiple lines (body indentation)
+def complex_calc(x: float, y: float) -> float:
+  var temp1 = x * x
+  var temp2 = y * y
+  if temp1 > temp2:
+    return temp1 - temp2
+  else:
+    return temp2 - temp1
+
+# Calling the functions (requires function call parsing/execution)
+var sum = add(5, 3)
+greet()
+var pi_val = get_pi()
+log_message("Test log")
+var secret_result = calculate_secret(10)
+var sensitive_processed = process_sensitive_data("password123") # Type system handles 'secret'
+var token = generate_token()
+var transformed = transform_secret(token)
+var super_secret = super_secret_op(secret_result)
+var calc_result = complex_calc(10.5, 3.2)

@@ -1,0 +1,31 @@
+# Threshold EdDSA-style signature over Ed25519.
+#
+# Result layout: R(32) || s(32) || pk(32).
+
+def main() -> bytes:
+  var client_count = ClientStore.get_number_clients()
+  var secret_key = Share.random()
+  var public_key = secret_key.get_commitment(0)
+
+  var nonce = Share.random()
+  var nonce_commitment = nonce.get_commitment(0)
+
+  var prefix = Bytes.concat(nonce_commitment, public_key)
+  var message = Bytes.from_string("test message for eddsa")
+  var challenge_input = Bytes.concat(prefix, message)
+  var challenge_hash = Crypto.sha512(challenge_input)
+  var challenge = Crypto.hash_to_field(challenge_hash, "ed25519")
+  if client_count > 0:
+    var challenge_share = ClientStore.take_share(0, 0)
+    challenge = challenge_share.open_field()
+
+  var scaled_secret_key = secret_key.mul_field(challenge)
+  var response_share = nonce.add(scaled_secret_key)
+  var response = response_share.open_field()
+
+  if client_count > 0 and Mpc.has_capability("client-output"):
+    var output_shares: list[Share] = [response_share]
+    MpcOutput.send_to_client(0, output_shares)
+
+  var signature = Bytes.concat(nonce_commitment, response)
+  return Bytes.concat(signature, public_key)

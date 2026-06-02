@@ -1,0 +1,40 @@
+builtin type int64
+builtin type int32
+builtin type int16
+builtin type int8
+builtin type uint64
+builtin type uint32
+builtin type uint16
+builtin type uint8
+builtin type string
+builtin type bool
+builtin type float
+builtin type None
+builtin type void
+builtin type int = int64
+builtin type float64 = float
+builtin type f64 = float
+builtin type bytes = list[uint8]
+builtin type ByteArray = list[uint8]
+builtin opaque Object
+builtin opaque Closure
+
+def print[T](value: T) -> void {.builtin.}:
+def type[T](value: T) -> string {.builtin.}:
+def create_closure(function_name: string) -> Closure {.builtin.}:
+def create_closure_with_upvalue(function_name: string, upvalue_name: string) -> Closure {.builtin: "create_closure".}:
+def call_closure[T](closure: Closure) -> T {.builtin.}:
+def call_closure_with_arg[T, U](closure: Closure, value: T) -> U {.builtin: "call_closure".}:
+def get_upvalue[T](name: string) -> T {.builtin.}:
+def set_upvalue[T](name: string, value: T) -> void {.builtin.}:
+def append[T](array: list[T], value: T) -> int64 {.builtin: "append".}:
+def len[T](array: list[T]) -> int64 {.builtin: "len".}:
+def range(start: int64, stop: int64) -> list[int64] {.builtin.}:
+
+builtin object LocalStorage:
+  def store[T](key: string, value: T) -> bool {.builtin.}:
+  def load[T](key: string) -> T {.builtin.}:
+  def load_share(key: string) -> Share {.builtin: "LocalStorage.load".}:
+  def retrieve[T](key: string) -> T {.builtin.}:
+  def delete(key: string) -> bool {.builtin.}:
+  def exists(key: string) -> bool {.builtin.}:

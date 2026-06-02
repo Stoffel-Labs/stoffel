@@ -15,10 +15,9 @@
 //! two fixed-width big-endian field outputs, `r || s`. It does not emit an
 //! X.509 signatureAlgorithm wrapper or DER-encoded ECDSA signature.
 //!
-//! The human-readable Stoffel source for these fixtures lives under
-//! `examples/stfl/`. This module emits matching `.stflb` fixtures through the
-//! existing Rust-side bytecode path because this repository does not include an
-//! in-tree Stoffel source compiler.
+//! The canonical human-readable Stoffel source for these flows lives under
+//! `crates/stoffel-lang/examples/`. This module keeps Rust-side bytecode
+//! builders for VM-level fixture coverage.
 
 use std::collections::HashMap;
 
@@ -352,9 +351,8 @@ fn certificate_function(
 fn write_and_validate_bytecode(name: &str, function: VMFunction, expected_len: usize) {
     let expected_register_count = function.register_count();
     let binary = from_vm_functions(&[function]);
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/tests/binaries")
-        .join(name);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(name);
 
     save_to_file(&binary, &path).expect("failed to save AVSS certificate bytecode");
 
@@ -407,7 +405,7 @@ fn avss_certificate_keygen_and_sign_programs_use_requested_key_id() {
 }
 
 #[test]
-fn generate_avss_certificate_bytecode() {
+fn avss_certificate_bytecode_round_trips_without_mutating_fixtures() {
     let (keygen_instructions, keygen_labels) = build_avss_certificate_keygen_program();
     let keygen_len = keygen_instructions.len();
     write_and_validate_bytecode(

@@ -1,0 +1,25 @@
+[package]
+name = "stoffel-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Cargo-like command line tool for Stoffel projects"
+license = "MIT"
+repository = "https://github.com/Stoffel-Labs/StoffelVM"
+publish = false
+
+[[bin]]
+name = "stoffel"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+stoffel-rust-sdk = { path = "../stoffel-rust-sdk" }
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
+toml = "0.8"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"

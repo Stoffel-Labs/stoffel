@@ -1,0 +1,22 @@
+def main() -> None:
+  var i8v: int8 = 10i8
+  var i16v: int16 = 10i16
+  var i32v: int32 = 100i32
+  var i64v: int64 = 100i64
+  var u8v: uint8 = 200u8
+  var u16v: uint16 = 200u16
+  var u32v: uint32 = 200u32
+  var u64v: uint64 = 200u64
+  var s: secret int64 = 0
+
+  if i8v <= i16v:
+    discard s
+
+  if i32v < i64v:
+    discard s
+
+  if u8v == 200u8:
+    discard s
+
+  if u16v != u32v:
+    discard s

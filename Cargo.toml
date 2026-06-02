@@ -1,5 +1,8 @@
 [workspace]
 members = [
+    "crates/stoffel-cli",
+    "crates/stoffel-lang",
+    "crates/stoffel-rust-sdk",
     "crates/stoffel-vm",
     "crates/stoffel-vm-types",
 ]

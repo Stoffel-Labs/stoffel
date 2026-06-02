@@ -1,0 +1,11 @@
+def audit_share(share: AvssShare) -> bytes:
+  var key_name = Avss.get_key_name(share)
+  var count = Avss.commitment_count(share)
+  var first_commitment = Avss.get_commitment(share, 0)
+  discard key_name
+  discard count
+  return Crypto.hash_to_field(first_commitment, Mpc.curve())
+
+def main() -> bool:
+  var maybe_share = LocalStorage.load("avss:last-share")
+  return Avss.is_avss_share(maybe_share)

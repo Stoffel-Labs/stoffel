@@ -1,0 +1,138 @@
+# Distributed VM runner for compiled examples in examples/dist.
+#
+# Usage:
+#   STOFFEL_PROGRAM_NAME=mpc_runtime_info.stflb \
+#     docker compose -f examples/docker-compose.mpc.yml up --build
+#
+# For threshold ECDSA:
+#   STOFFEL_PROGRAM_NAME=threshold_signatures_threshold_ecdsa_secp256k1.stflb \
+#   STOFFEL_MPC_BACKEND=avss \
+#   STOFFEL_MPC_CURVE=secp256k1 \
+#     docker compose -f examples/docker-compose.mpc.yml up --build
+
+x-party-common: &party-common
+  build:
+    context: ${STOFFEL_VM_DIR:-../../..}
+    dockerfile: Dockerfile
+    additional_contexts:
+      coordinator: ${STOFFEL_COORDINATOR_DIR:-/Users/gabriel/RustroverProjects/stoffel-mpc-coordinator}
+      network: ${STOFFEL_NETWORK_DIR:-/Users/gabriel/RustroverProjects/stoffel-network}
+  volumes:
+    - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
+    - stoffel-local-store:/app/local-store
+  networks:
+    stoffel-examples:
+  environment: &party-env
+    STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:-stoffel-examples-token}
+    STOFFEL_N_PARTIES: ${STOFFEL_N_PARTIES:-5}
+    STOFFEL_THRESHOLD: ${STOFFEL_THRESHOLD:-1}
+    STOFFEL_PROGRAM: /app/examples/${STOFFEL_PROGRAM_NAME:-mpc_runtime_info.stflb}
+    STOFFEL_ENTRY: ${STOFFEL_ENTRY:-main}
+    STOFFEL_MPC_BACKEND: ${STOFFEL_MPC_BACKEND:-honeybadger}
+    STOFFEL_MPC_CURVE: ${STOFFEL_MPC_CURVE:-bls12-381}
+    STOFFEL_LOCAL_STORE: /app/local-store/party-${STOFFEL_PARTY_ID:-0}.redb
+    RUST_LOG: ${RUST_LOG:-info}
+    RUST_BACKTRACE: "1"
+
+services:
+  party0:
+    <<: *party-common
+    hostname: party0
+    environment:
+      <<: *party-env
+      STOFFEL_ROLE: leader
+      STOFFEL_PARTY_ID: "0"
+      STOFFEL_BIND_ADDR: 172.29.0.10:9000
+      STOFFEL_ADVERTISE_IP: 172.29.0.10
+      STOFFEL_LOCAL_STORE: /app/local-store/party-0.redb
+      STOFFEL_CERT: /app/ids/nodes/cert0.crt
+      STOFFEL_KEY: /app/ids/nodes/key0.der
+    networks:
+      stoffel-examples:
+        ipv4_address: 172.29.0.10
+
+  party1:
+    <<: *party-common
+    hostname: party1
+    depends_on:
+      - party0
+    environment:
+      <<: *party-env
+      STOFFEL_ROLE: party
+      STOFFEL_PARTY_ID: "1"
+      STOFFEL_BIND_ADDR: 172.29.0.11:9001
+      STOFFEL_BOOTSTRAP_ADDR: 172.29.0.10:9000
+      STOFFEL_ADVERTISE_IP: 172.29.0.11
+      STOFFEL_LOCAL_STORE: /app/local-store/party-1.redb
+      STOFFEL_CERT: /app/ids/nodes/cert1.crt
+      STOFFEL_KEY: /app/ids/nodes/key1.der
+    networks:
+      stoffel-examples:
+        ipv4_address: 172.29.0.11
+
+  party2:
+    <<: *party-common
+    hostname: party2
+    depends_on:
+      - party0
+    environment:
+      <<: *party-env
+      STOFFEL_ROLE: party
+      STOFFEL_PARTY_ID: "2"
+      STOFFEL_BIND_ADDR: 172.29.0.12:9002
+      STOFFEL_BOOTSTRAP_ADDR: 172.29.0.10:9000
+      STOFFEL_ADVERTISE_IP: 172.29.0.12
+      STOFFEL_LOCAL_STORE: /app/local-store/party-2.redb
+      STOFFEL_CERT: /app/ids/nodes/cert2.crt
+      STOFFEL_KEY: /app/ids/nodes/key2.der
+    networks:
+      stoffel-examples:
+        ipv4_address: 172.29.0.12
+
+  party3:
+    <<: *party-common
+    hostname: party3
+    depends_on:
+      - party0
+    environment:
+      <<: *party-env
+      STOFFEL_ROLE: party
+      STOFFEL_PARTY_ID: "3"
+      STOFFEL_BIND_ADDR: 172.29.0.13:9003
+      STOFFEL_BOOTSTRAP_ADDR: 172.29.0.10:9000
+      STOFFEL_ADVERTISE_IP: 172.29.0.13
+      STOFFEL_LOCAL_STORE: /app/local-store/party-3.redb
+      STOFFEL_CERT: /app/ids/nodes/cert3.crt
+      STOFFEL_KEY: /app/ids/nodes/key3.der
+    networks:
+      stoffel-examples:
+        ipv4_address: 172.29.0.13
+
+  party4:
+    <<: *party-common
+    hostname: party4
+    depends_on:
+      - party0
+    environment:
+      <<: *party-env
+      STOFFEL_ROLE: party
+      STOFFEL_PARTY_ID: "4"
+      STOFFEL_BIND_ADDR: 172.29.0.14:9004
+      STOFFEL_BOOTSTRAP_ADDR: 172.29.0.10:9000
+      STOFFEL_ADVERTISE_IP: 172.29.0.14
+      STOFFEL_LOCAL_STORE: /app/local-store/party-4.redb
+      STOFFEL_CERT: /app/ids/nodes/cert4.crt
+      STOFFEL_KEY: /app/ids/nodes/key4.der
+    networks:
+      stoffel-examples:
+        ipv4_address: 172.29.0.14
+
+networks:
+  stoffel-examples:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
+
+volumes:
+  stoffel-local-store:

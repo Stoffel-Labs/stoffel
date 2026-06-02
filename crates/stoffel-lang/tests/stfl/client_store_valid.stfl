@@ -1,0 +1,36 @@
+# Valid example: using ClientStore.take_share correctly
+# Demonstrates that take_share results are Share values
+
+# Function that uses ClientStore to retrieve secret shares
+def process_shares() -> Share:
+  # Valid: assigning to Share variable with type annotation
+  var share1: Share = ClientStore.take_share(0, 0)
+
+  # Valid: inferred Share variable
+  var share2 = ClientStore.take_share(1, 0)
+
+  # Valid: explicit Share type annotation
+  var share3: Share = ClientStore.take_share(0, 1)
+
+  # Perform computation on secret shares
+  var result = Share.add(Share.add(share1, share2), share3)
+
+  return result
+
+# Entry point
+def main() -> None:
+  # Valid: direct assignment to Share variable
+  var my_share = ClientStore.take_share(0, 0)
+
+  # Valid: call function that uses ClientStore
+  var computed: Share = process_shares()
+
+  # Retrieve number of clients (clear value)
+  var client_total: int64 = ClientStore.get_number_clients()
+  client_total = ClientStore.get_number_clients()
+
+  # Valid: reassignment to existing Share variable
+  var mutable_share: Share = ClientStore.take_share(1, 1)
+  mutable_share = ClientStore.take_share(2, 0)
+
+  print("ClientStore operations completed successfully")

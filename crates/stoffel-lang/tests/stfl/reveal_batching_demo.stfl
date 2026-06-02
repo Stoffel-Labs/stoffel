@@ -1,0 +1,36 @@
+# Demonstration of reveal batching optimization
+#
+# This file shows a pattern that benefits from instruction reordering.
+# When multiple independent secrets are revealed, the optimizer groups
+# the reveals together so the VM can batch them in a single network operation.
+
+def process_two_secrets() -> int64:
+  # Get two independent secret values
+  var s1 = ClientStore.take_share(0, 0)
+  var s2 = ClientStore.take_share(0, 1)
+
+  # WITHOUT OPTIMIZATION (original order):
+  # var a: int64 = s1      # reveal s1 → queued
+  # var x = a * 2          # uses a → FLUSH! (only s1 batched)
+  # var b: int64 = s2      # reveal s2 → queued
+  # var y = b * 3          # uses b → FLUSH! (only s2 batched)
+  # Result: 2 network round trips
+
+  # WITH OPTIMIZATION (reordered):
+  # var a: int64 = s1      # reveal s1 → queued
+  # var b: int64 = s2      # reveal s2 → queued (moved up!)
+  # var x = a * 2          # uses a → FLUSH! (both s1 and s2 batched)
+  # var y = b * 3          # uses b → already revealed
+  # Result: 1 network round trip
+
+  # The actual code (optimizer will reorder this):
+  var a: int64 = s1.open()
+  var x: int64 = a * 2
+  var b: int64 = s2.open()
+  var y: int64 = b * 3
+
+  return x + y
+
+def main() -> int64:
+  var result: int64 = process_two_secrets()
+  return result

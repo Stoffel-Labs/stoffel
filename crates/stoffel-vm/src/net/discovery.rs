@@ -728,7 +728,9 @@ pub async fn register_and_wait_for_session(
 
                     eprintln!(
                         "[party {}] Connection plan: {} outgoing (to higher IDs), {} incoming (from lower IDs)",
-                        my_party_id, higher_peers.len(), n_expected_incoming
+                        my_party_id,
+                        higher_peers.len(),
+                        n_expected_incoming
                     );
 
                     // Spawn a background accept loop for incoming connections from lower-ID parties

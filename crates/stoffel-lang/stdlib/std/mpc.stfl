@@ -1,0 +1,48 @@
+builtin object ClientStore:
+  def take_share(client_id: int64, share_id: int64) -> Share {.builtin.}:
+  def take_share_fixed(client_id: int64, share_id: int64) -> Share {.builtin.}:
+  def get_number_clients() -> int64 {.builtin.}:
+
+builtin object MpcOutput:
+  def send_to_client(client_id: int64, value: list[Share]) -> bool {.builtin.}:
+
+builtin object Share:
+  def from_clear(value: int64) -> Share {.builtin.}:
+  def from_clear_int(value: int64, bit_length: int64) -> Share {.builtin.}:
+  def from_clear_fixed(value: float, total_bits: int64, frac_bits: int64) -> Share {.builtin.}:
+  def add(share1: Share, share2: Share) -> Share {.builtin.}:
+  def sub(share1: Share, share2: Share) -> Share {.builtin.}:
+  def neg(share: Share) -> Share {.builtin.}:
+  def add_scalar(share: Share, scalar: int64) -> Share {.builtin.}:
+  def mul_scalar(share: Share, scalar: int64) -> Share {.builtin.}:
+  def mul(share1: Share, share2: Share) -> Share {.builtin.}:
+  def open(share: Share) -> int64 {.builtin.}:
+  def open_fixed(share: Share) -> float {.builtin: "Share.open".}:
+  def send_to_client(share: Share, client_id: int64) -> bool {.builtin.}:
+  def interpolate_local(shares: list[Share]) -> int64 {.builtin.}:
+  def get_type(share: Share) -> string {.builtin.}:
+  def get_party_id(share: Share) -> int64 {.builtin.}:
+  def batch_open(shares: list[Share]) -> list[Object] {.builtin.}:
+  def batch_open_fixed[T](shares: list[Share]) -> list[T] {.builtin: "Share.batch_open".}:
+  def open_exp(share: Share, curve_name: string) -> bytes {.builtin.}:
+  def random() -> Share {.builtin.}:
+  def get_commitment(share: Share, index: int64) -> bytes {.builtin.}:
+  def commitment_count(share: Share) -> int64 {.builtin.}:
+  def has_commitments(share: Share) -> bool {.builtin.}:
+  def mul_field(share: Share, field_bytes: bytes) -> Share {.builtin.}:
+  def open_field(share: Share) -> bytes {.builtin.}:
+  def open_exp_custom(share: Share, generator_bytes: bytes) -> bytes {.builtin.}:
+
+builtin object Mpc:
+  def party_id() -> int64 {.builtin.}:
+  def n_parties() -> int64 {.builtin.}:
+  def threshold() -> int64 {.builtin.}:
+  def is_ready() -> bool {.builtin.}:
+  def instance_id() -> uint64 {.builtin.}:
+  def protocol_name() -> string {.builtin.}:
+  def curve() -> string {.builtin.}:
+  def field() -> string {.builtin.}:
+  def has_capability(capability: string) -> bool {.builtin.}:
+  def capabilities() -> list[string] {.builtin.}:
+  def rand() -> bytes {.builtin.}:
+  def rand_int(bit_length: int64) -> uint64 {.builtin.}:

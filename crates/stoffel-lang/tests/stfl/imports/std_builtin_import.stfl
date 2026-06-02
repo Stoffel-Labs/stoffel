@@ -1,0 +1,8 @@
+import std.mpc
+import std.crypto
+
+def main() -> None:
+  var share = Share.random()
+  var message = Bytes.from_string("hello")
+  var digest = Crypto.sha256(message)
+  var opened = Share.open(share)

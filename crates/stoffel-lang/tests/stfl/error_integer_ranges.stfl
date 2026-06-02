@@ -1,0 +1,32 @@
+# Integer range and width checking tests
+
+# This should fail: 500 does not fit in uint8 (0..=255)
+var too_big_u8: uint8 = 500
+
+# This should fail: -1 does not fit in uint8
+var negative_u8: uint8 = -1
+
+# This should fail: 200 does not fit in int8 (-128..=127)
+var too_big_i8: int8 = 200
+
+# This should pass: 200 fits in uint8
+var ok_u8: uint8 = 200
+
+# This should fail at assignment: narrowing from int32 to int8 (non-literal)
+var a32: int32 = 100
+var b8: int8 = a32
+
+# Function argument checks
+def takes_u8(x: uint8) -> int64:
+  return 1
+
+# Should pass
+var _ok_call = takes_u8(123)
+
+# Should fail: 300 does not fit in uint8
+var _bad_call1 = takes_u8(300)
+
+# Should fail: narrowing from int32 variable
+var _bad_call2 = takes_u8(a32)
+
+# Note: No entry point here (intentionally a library/error test)

@@ -1,0 +1,44 @@
+# Threshold ECDSA signature over NIST P-256.
+#
+# Result layout: r(32-byte big-endian) || s(32-byte big-endian) ||
+# SEC1 compressed pk(33).
+
+def main() -> bytes:
+  var client_count = ClientStore.get_number_clients()
+  var secret_key = Share.random()
+  var public_key = secret_key.get_commitment(0)
+
+  var message = Bytes.from_string("stoffel-avss-threshold-ecdsa-demo-message-v1")
+  var message_hash = Crypto.sha256(message)
+  var message_field = Crypto.hash_to_field(message_hash, "p-256")
+  if client_count > 0:
+    var message_share = ClientStore.take_share(0, 0)
+    message_field = message_share.open_field()
+
+  var gamma = Share.random()
+  var nonce = Share.random()
+  var delta_share = gamma.mul(nonce)
+  var delta = delta_share.open_field()
+  var delta_inverse = Crypto.field_inv(delta, "p-256")
+  var nonce_inverse = gamma.mul_field(delta_inverse)
+
+  var nonce_point = nonce.open_exp("p-256")
+  var r = Crypto.point_x_to_field(nonce_point, "p-256")
+
+  var secret_over_nonce = secret_key.mul(nonce_inverse)
+  var message_over_nonce = nonce_inverse.mul_field(message_field)
+  var scaled_secret = secret_over_nonce.mul_field(r)
+  var response_share = message_over_nonce.add(scaled_secret)
+  var response = response_share.open_field()
+
+  if client_count > 0 and Mpc.has_capability("client-output"):
+    var r_share = Share.from_clear(1).mul_field(r)
+    var output_shares: list[Share] = [r_share, response_share]
+    MpcOutput.send_to_client(0, output_shares)
+
+  var r_bytes = Crypto.field_to_scalar_bytes(r, "p-256")
+  var s_bytes = Crypto.field_to_scalar_bytes(response, "p-256")
+  var public_key_bytes = Crypto.point_to_sec1(public_key, "p-256")
+
+  var signature = Bytes.concat(r_bytes, s_bytes)
+  return Bytes.concat(signature, public_key_bytes)

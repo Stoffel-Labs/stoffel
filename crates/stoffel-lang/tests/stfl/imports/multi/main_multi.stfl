@@ -1,0 +1,8 @@
+# Main file with multiple imports
+import helpers
+import constants
+
+def main() -> int64:
+  var pi = get_pi_approx()
+  var squared = square(pi)
+  return squared

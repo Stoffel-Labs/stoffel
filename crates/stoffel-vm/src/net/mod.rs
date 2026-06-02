@@ -8,6 +8,7 @@ pub mod curve;
 pub mod discovery;
 pub(crate) mod group_interpolation;
 pub mod hb_server;
+pub mod local_runner;
 pub mod mpc;
 pub mod mpc_runner;
 pub mod open_registry;
@@ -148,6 +149,11 @@ pub use mpc::{
 pub use hb_server::{
     spawn_receive_loops, spawn_receive_loops_split, FrHoneyBadgerQuicServer, HoneyBadgerQuicConfig,
     HoneyBadgerQuicServer, HoneyBadgerQuicServerError,
+};
+pub use local_runner::{
+    LocalClientInput, LocalCoordinatorRunOutput, LocalCoordinatorRunner,
+    LocalCoordinatorRunnerBuilder, LocalCoordinatorRunnerError, LocalCoordinatorRunnerResult,
+    LocalPartyOutput,
 };
 // Re-export MpcRunner for convenient VM+MPC orchestration
 pub use mpc_runner::{
