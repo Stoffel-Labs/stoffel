@@ -8,8 +8,8 @@ use std::time::Duration;
 use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::PrimeField;
 use stoffel_mpc_coordinator::off_chain::{
-    node_rpc::NodeRPCClient as OffChainNodeRPCClient, OffChainCoordinatorClient,
-    OffChainCoordinatorServer,
+    node_rpc::NodeRPCClient as OffChainNodeRPCClient, InputAssignment, InputSlotAssignment,
+    OffChainCoordinatorClient, OffChainCoordinatorServer,
 };
 use stoffel_mpc_coordinator::self_signed_certs;
 use stoffel_mpc_coordinator::tests::fake_coord::off_chain::{
@@ -129,13 +129,16 @@ impl LocalCoordinatorRunner {
                 Vec::new(),
             )
         } else {
-            FakeCoordinatorRPCServerSharedBase::new_with_client_io_manifest(
+            let (n_inputs, output_clients, input_assignment) =
+                self.coordinator_client_io_binding(&client_bindings)?;
+            FakeCoordinatorRPCServerSharedBase::new_with_input_assignment(
                 program_id,
                 self.parties as u64,
                 self.threshold as u64,
                 node_public_keys,
-                self.binary.client_io_manifest.clone(),
-                client_bindings,
+                n_inputs,
+                output_clients,
+                input_assignment,
             )?
         };
         let coord = OffChainCoordinatorServer::<FakeCoordinatorConnection>::start_coord(
@@ -355,6 +358,42 @@ impl LocalCoordinatorRunner {
             .serialize(&mut std::io::Cursor::new(&mut bytes))
             .map_err(LocalCoordinatorRunnerError::Bytecode)?;
         Ok(bytes)
+    }
+
+    fn coordinator_client_io_binding(
+        &self,
+        client_bindings: &[(u64, Vec<u8>)],
+    ) -> LocalCoordinatorRunnerResult<(u64, Vec<Vec<u8>>, InputAssignment)> {
+        let mut input_slots = Vec::new();
+        let mut output_clients = Vec::new();
+        for schema in &self.binary.client_io_manifest.clients {
+            let client = client_bindings
+                .iter()
+                .find_map(|(slot, identity)| {
+                    (*slot == schema.client_slot).then(|| identity.clone())
+                })
+                .ok_or_else(|| {
+                    LocalCoordinatorRunnerError::Configuration(format!(
+                        "client slot {} does not have a local client identity",
+                        schema.client_slot
+                    ))
+                })?;
+
+            if !schema.outputs.is_empty() {
+                output_clients.push(client.clone());
+            }
+            for input_ordinal in 0..schema.inputs.len() {
+                input_slots.push(InputSlotAssignment {
+                    client: client.clone(),
+                    label: input_ordinal as u64,
+                });
+            }
+        }
+        Ok((
+            input_slots.len() as u64,
+            output_clients,
+            InputAssignment { input_slots },
+        ))
     }
 
     fn spawn_party(
@@ -1067,6 +1106,8 @@ fn local_runner_curve_from_manifest(
         stoffel_vm_types::compiled_binary::MpcCurve::Bn254 => MpcCurveConfig::Bn254,
         stoffel_vm_types::compiled_binary::MpcCurve::Curve25519 => MpcCurveConfig::Curve25519,
         stoffel_vm_types::compiled_binary::MpcCurve::Ed25519 => MpcCurveConfig::Ed25519,
+        stoffel_vm_types::compiled_binary::MpcCurve::Secp256k1 => MpcCurveConfig::Secp256k1,
+        stoffel_vm_types::compiled_binary::MpcCurve::Secp256r1 => MpcCurveConfig::Secp256r1,
     }
 }
 

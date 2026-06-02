@@ -115,11 +115,19 @@ impl StoffelRuntime {
                 "program does not declare ClientStore metadata for client slot {client_slot}"
             ))
         })?;
+        let input_start_index = self
+            .program
+            .clients()
+            .take_while(|schema| schema.client_slot() != client_slot)
+            .map(|schema| schema.input_count() as u64)
+            .sum();
         let mpc_config = self
             .mpc_config
             .as_ref()
             .ok_or_else(|| Error::Configuration("MPC configuration is required".to_owned()))?;
         Ok(OffChainClientConfigBuilder::default()
+            .client_slot(client_slot)
+            .input_start_index(input_start_index)
             .parties(mpc_config.parties)
             .threshold(mpc_config.threshold)
             .backend(mpc_config.backend)

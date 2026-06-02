@@ -154,9 +154,11 @@ fn main() {
         "bn254" => MpcCurve::Bn254,
         "curve25519" | "curve-25519" => MpcCurve::Curve25519,
         "ed25519" | "ed-25519" => MpcCurve::Ed25519,
+        "secp256k1" | "secp256-k1" => MpcCurve::Secp256k1,
+        "p-256" | "p256" | "nist-p256" | "secp256r1" | "secp256-r1" => MpcCurve::Secp256r1,
         other => {
             eprintln!(
-                "Error: unsupported --mpc-curve '{}'. Expected 'bls12_381', 'bn254', 'curve25519', or 'ed25519'",
+                "Error: unsupported --mpc-curve '{}'. Expected 'bls12_381', 'bn254', 'curve25519', 'ed25519', 'secp256k1', or 'p-256'",
                 other
             );
             process::exit(2);

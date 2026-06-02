@@ -193,6 +193,8 @@ fn curve_config_from_manifest(curve: MpcCurve) -> MpcCurveConfig {
         MpcCurve::Bn254 => MpcCurveConfig::Bn254,
         MpcCurve::Curve25519 => MpcCurveConfig::Curve25519,
         MpcCurve::Ed25519 => MpcCurveConfig::Ed25519,
+        MpcCurve::Secp256k1 => MpcCurveConfig::Secp256k1,
+        MpcCurve::Secp256r1 => MpcCurveConfig::Secp256r1,
     }
 }
 fn store_reserved_client_inputs<F, I>(

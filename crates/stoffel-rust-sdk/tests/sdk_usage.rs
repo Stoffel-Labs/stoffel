@@ -3302,7 +3302,7 @@ fn offchain_coordinator_surface_reexports_core_types() {
     >();
 
     let client: stoffel::coordinator::ClientIdentity = vec![1, 2, 3];
-    let reservation = stoffel::coordinator::BoundMaskReservation {
+    let reservation = stoffel::coordinator::AssignedMaskReservation {
         client: client.clone(),
         reserved_index: 7,
         input_ordinal: 0,

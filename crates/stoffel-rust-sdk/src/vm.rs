@@ -160,6 +160,8 @@ fn local_runner_curve(backend: MpcBackend) -> stoffel_vm::net::MpcCurveConfig {
         Some(crate::config::Curve::Bn254) => stoffel_vm::net::MpcCurveConfig::Bn254,
         Some(crate::config::Curve::Curve25519) => stoffel_vm::net::MpcCurveConfig::Curve25519,
         Some(crate::config::Curve::Ed25519) => stoffel_vm::net::MpcCurveConfig::Ed25519,
+        Some(crate::config::Curve::Secp256k1) => stoffel_vm::net::MpcCurveConfig::Secp256k1,
+        Some(crate::config::Curve::Secp256r1) => stoffel_vm::net::MpcCurveConfig::Secp256r1,
     }
 }
 

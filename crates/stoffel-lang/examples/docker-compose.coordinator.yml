@@ -76,6 +76,8 @@ services:
       - "5"
       - --t
       - "1"
+      - --mpc-backend
+      - "${STOFFEL_MPC_BACKEND:-honeybadger}"
       - --n-inputs
       - "${STOFFEL_COORDINATOR_N_INPUTS:-2}"
       - --output-clients

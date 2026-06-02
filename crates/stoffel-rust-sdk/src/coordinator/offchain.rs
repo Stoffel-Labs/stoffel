@@ -5,9 +5,8 @@
 //! re-exported here.
 
 pub use stoffel_mpc_coordinator::off_chain::{
-    BoundClientIoSchema, BoundMaskReservation, BoundMaskShare, BoundMaskedInput,
-    BoundMaskedInputEvent, BoundOutputShare, BoundOutputShareEnvelope, ClientIdentity,
-    OffChainCoordinatorClient, OffChainCoordinatorServer,
+    AssignedMaskReservation, AssignedMaskShare, AssignedMaskedInputEvent, ClientIdentity,
+    InputAssignment, InputSlotAssignment, OffChainCoordinatorClient, OffChainCoordinatorServer,
 };
 
 pub type OffChainCoordinator<F, S> = OffChainCoordinatorClient<F, S>;

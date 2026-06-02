@@ -93,8 +93,15 @@ trap cleanup EXIT
 
 compose down --remove-orphans -v >/dev/null 2>&1 || true
 compose up --build -d
-wait_for_workload_exit
-assert_zero_exit_codes
+if ! wait_for_workload_exit; then
+  capture_logs >&2 || true
+  exit 1
+fi
+if ! assert_zero_exit_codes; then
+  compose ps -a >&2 || true
+  capture_logs >&2 || true
+  exit 1
+fi
 
 logs="$(capture_logs)"
 if ! grep -Fq "outputs: [${EXPECTED_OUTPUT}]" <<<"$logs"; then

@@ -8,9 +8,9 @@ pub mod offchain;
 pub mod onchain;
 
 pub use offchain::{
-    BoundClientIoSchema, BoundMaskReservation, BoundMaskShare, BoundMaskedInput,
-    BoundMaskedInputEvent, BoundOutputShare, BoundOutputShareEnvelope, ClientIdentity,
-    OffChainCoordinator, OffChainCoordinatorClient, OffChainCoordinatorServer,
+    AssignedMaskReservation, AssignedMaskShare, AssignedMaskedInputEvent, ClientIdentity,
+    InputAssignment, InputSlotAssignment, OffChainCoordinator, OffChainCoordinatorClient,
+    OffChainCoordinatorServer,
 };
 pub use onchain::{
     node_rpc, setup_coord, ws_connect, BlsOnChainAvssCoordinator, CoordinatorEvent,

@@ -223,6 +223,8 @@ pub enum MpcCurve {
     Bn254,
     Curve25519,
     Ed25519,
+    Secp256k1,
+    Secp256r1,
 }
 
 /// Represents a compiled function in the program
@@ -649,6 +651,8 @@ impl CompiledBinary {
             MpcCurve::Bn254 => 1u8,
             MpcCurve::Curve25519 => 2u8,
             MpcCurve::Ed25519 => 3u8,
+            MpcCurve::Secp256k1 => 4u8,
+            MpcCurve::Secp256r1 => 5u8,
         };
         writer.write_all(&[tag])?;
         Ok(())
@@ -1076,6 +1080,8 @@ impl CompiledBinary {
             1 => Ok(MpcCurve::Bn254),
             2 => Ok(MpcCurve::Curve25519),
             3 => Ok(MpcCurve::Ed25519),
+            4 => Ok(MpcCurve::Secp256k1),
+            5 => Ok(MpcCurve::Secp256r1),
             tag => Err(invalid_data(format!(
                 "unknown MPC curve tag {tag} in IO manifest"
             ))),

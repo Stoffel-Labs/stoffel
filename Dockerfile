@@ -27,6 +27,8 @@ WORKDIR /build
 COPY . .
 COPY --from=coordinator . /stoffel-mpc-coordinator
 COPY --from=network . /stoffel-network
+RUN sed -i 's#path = "../StoffelVM/crates/stoffel-vm-types"#path = "/build/crates/stoffel-vm-types"#' \
+      /stoffel-mpc-coordinator/Cargo.toml
 
 RUN printf '%s\n' \
       '[net]' \

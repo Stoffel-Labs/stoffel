@@ -16,10 +16,9 @@ use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::{PrimeField, Zero};
 use serde::{Deserialize, Serialize};
 use stoffel_mpc_coordinator::off_chain::{
-    node_rpc::NodeRPCClient as OffChainNodeRPCClient, BoundMaskedInput, BoundOutputShare,
-    OffChainCoordinatorClient,
+    node_rpc::NodeRPCClient as OffChainNodeRPCClient, OffChainCoordinatorClient,
 };
-use stoffel_mpc_coordinator::rpc::ValueWrapper;
+use stoffel_mpc_coordinator::Coordinator as _;
 use stoffel_vm_types::core_types::ShareType;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -326,6 +325,10 @@ pub struct OffChainClientConfig {
     pub coordinator_host: String,
     pub coordinator_port: u16,
     pub timestamp: u64,
+    #[serde(default)]
+    pub client_slot: u64,
+    #[serde(default)]
+    pub input_start_index: u64,
     pub parties: usize,
     pub threshold: usize,
     pub backend: MpcBackend,
@@ -428,6 +431,8 @@ pub struct OffChainClientConfigBuilder {
     coordinator_host: String,
     coordinator_port: Option<u16>,
     timestamp: Option<u64>,
+    client_slot: u64,
+    input_start_index: u64,
     parties: usize,
     threshold: usize,
     backend: MpcBackend,
@@ -450,6 +455,16 @@ impl OffChainClientConfigBuilder {
 
     pub fn timestamp(mut self, timestamp: u64) -> Self {
         self.timestamp = Some(timestamp);
+        self
+    }
+
+    pub fn client_slot(mut self, client_slot: u64) -> Self {
+        self.client_slot = client_slot;
+        self
+    }
+
+    pub fn input_start_index(mut self, input_start_index: u64) -> Self {
+        self.input_start_index = input_start_index;
         self
     }
 
@@ -560,6 +575,8 @@ impl OffChainClientConfigBuilder {
             timestamp: self.timestamp.ok_or_else(|| {
                 Error::Configuration("off-chain coordinator timestamp is required".to_owned())
             })?,
+            client_slot: self.client_slot,
+            input_start_index: self.input_start_index,
             parties: self.parties,
             threshold: self.threshold,
             backend: self.backend,
@@ -586,6 +603,8 @@ impl Default for OffChainClientConfigBuilder {
             coordinator_host: "127.0.0.1".to_owned(),
             coordinator_port: None,
             timestamp: None,
+            client_slot: 0,
+            input_start_index: 0,
             parties: 5,
             threshold: 1,
             backend: MpcBackend::HoneyBadger,
@@ -1106,6 +1125,8 @@ fn sdk_backend_from_program(program: &Program) -> MpcBackend {
                 stoffel_vm_types::compiled_binary::MpcCurve::Bn254 => Curve::Bn254,
                 stoffel_vm_types::compiled_binary::MpcCurve::Curve25519 => Curve::Curve25519,
                 stoffel_vm_types::compiled_binary::MpcCurve::Ed25519 => Curve::Ed25519,
+                stoffel_vm_types::compiled_binary::MpcCurve::Secp256k1 => Curve::Secp256k1,
+                stoffel_vm_types::compiled_binary::MpcCurve::Secp256r1 => Curve::Secp256r1,
             },
         },
     }
@@ -1145,23 +1166,21 @@ where
             config.key_der.clone(),
         )
         .await?;
-        let schema = coord.get_client_io_schema().await?;
-        if schema.input_count as usize != inputs.len() {
-            return Err(Error::InvalidInput(format!(
-                "client slot {} expects {} inputs, got {}",
-                schema.client_slot,
-                schema.input_count,
-                inputs.len()
-            )));
-        }
         if config.input_types.len() != inputs.len() {
             return Err(Error::InvalidInput(format!(
-                "off-chain client config has {} input type(s), got {} input value(s)",
+                "off-chain client config for slot {} has {} input type(s), got {} input value(s)",
+                config.client_slot,
                 config.input_types.len(),
                 inputs.len()
             )));
         }
-        let reservations = coord.reserve_mask_indices(inputs.len() as u64).await?;
+        let mut coord = coord;
+        let mut reservations = Vec::with_capacity(inputs.len());
+        for ordinal in 0..inputs.len() {
+            let reserved_index = config.input_start_index + ordinal as u64;
+            coord.reserve_mask_index(reserved_index).await?;
+            reservations.push((reserved_index, ordinal as u64));
+        }
         let node_rpc = OffChainNodeRPCClient::<Fr, S>::start_rpc_client(
             config.threshold,
             config.node_rpc_endpoints()?,
@@ -1169,41 +1188,36 @@ where
             config.key_der.clone(),
         )
         .await?;
-        let masks = node_rpc.receive_bound_masks(inputs.len()).await?;
-        let mut masked_inputs = Vec::with_capacity(inputs.len());
+        let masks = node_rpc.receive_assigned_masks(inputs.len()).await?;
         for (ordinal, (input, share_type)) in
             inputs.iter().zip(config.input_types.iter()).enumerate()
         {
-            let reservation = reservations
+            let (reserved_index, input_ordinal) = reservations
                 .iter()
-                .find(|reservation| reservation.input_ordinal as usize == ordinal)
+                .copied()
+                .find(|(_, input_ordinal)| *input_ordinal as usize == ordinal)
                 .ok_or_else(|| {
                     Error::Coordinator(stoffel_mpc_coordinator::CoordinatorError::JSONError(
-                        format!("missing bound mask reservation for input ordinal {ordinal}"),
+                        format!("missing assigned mask reservation for input ordinal {ordinal}"),
                     ))
                 })?;
             let (_, mask) = masks
                 .iter()
                 .find(|(metadata, _)| {
-                    metadata.reserved_index == reservation.reserved_index
-                        && metadata.input_ordinal == reservation.input_ordinal
+                    metadata.reserved_index == reserved_index
+                        && metadata.input_ordinal == input_ordinal
                 })
                 .ok_or_else(|| {
                     Error::Coordinator(stoffel_mpc_coordinator::CoordinatorError::JSONError(
-                        format!("missing bound mask for input ordinal {ordinal}"),
+                        format!("missing assigned mask for input ordinal {ordinal}"),
                     ))
                 })?;
             let field_input = value_to_field(input, *share_type)?;
-            masked_inputs.push(BoundMaskedInput {
-                reserved_index: reservation.reserved_index,
-                input_ordinal: reservation.input_ordinal,
-                masked_input: ValueWrapper {
-                    value: field_input + *mask,
-                },
-            });
+            coord
+                .send_masked_input(field_input + *mask, reserved_index)
+                .await?;
         }
-        coord.submit_masked_inputs(masked_inputs).await?;
-        bound_outputs_to_values(coord.obtain_bound_outputs().await?, &config.output_types)
+        outputs_to_values(coord.obtain_outputs().await?, &config.output_types)
     })
     .await
     .map_err(|_| {
@@ -1301,31 +1315,47 @@ fn field_to_value(value: Fr, share_type: ShareType) -> Result<Value> {
     }
 }
 
+fn outputs_to_values(outputs: Vec<Fr>, output_types: &[ShareType]) -> Result<Vec<Value>> {
+    if outputs.len() != output_types.len() {
+        return Err(Error::InvalidInput(format!(
+            "expected {} outputs, got {}",
+            output_types.len(),
+            outputs.len()
+        )));
+    }
+    outputs
+        .into_iter()
+        .zip(output_types.iter().copied())
+        .map(|(output, share_type)| field_to_value(output, share_type))
+        .collect()
+}
+
+#[allow(dead_code)]
 fn bound_outputs_to_values(
-    outputs: Vec<BoundOutputShare<Fr>>,
+    outputs: Vec<(u64, Fr)>,
     output_types: &[ShareType],
 ) -> Result<Vec<Value>> {
     if outputs.len() != output_types.len() {
         return Err(Error::InvalidInput(format!(
-            "expected {} bound outputs, got {}",
+            "expected {} assigned outputs, got {}",
             output_types.len(),
             outputs.len()
         )));
     }
     let mut values = outputs
         .into_iter()
-        .map(|output| {
+        .map(|(output_ordinal, share)| {
             let share_type = output_types
-                .get(output.output_ordinal as usize)
+                .get(output_ordinal as usize)
                 .copied()
                 .ok_or_else(|| {
                     Error::InvalidInput(format!(
-                        "bound output ordinal {} is out of range",
-                        output.output_ordinal
+                        "assigned output ordinal {} is out of range",
+                        output_ordinal
                     ))
                 })?;
-            let value = field_to_value(output.share, share_type)?;
-            Ok((output.output_ordinal, value))
+            let value = field_to_value(share, share_type)?;
+            Ok((output_ordinal, value))
         })
         .collect::<Result<Vec<_>>>()?;
     values.sort_by_key(|(ordinal, _)| *ordinal);

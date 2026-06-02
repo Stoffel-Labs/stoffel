@@ -515,6 +515,8 @@ fn bytecode_curve_name(curve: stoffel_vm_types::compiled_binary::MpcCurve) -> &'
         stoffel_vm_types::compiled_binary::MpcCurve::Bn254 => "bn254",
         stoffel_vm_types::compiled_binary::MpcCurve::Curve25519 => "curve25519",
         stoffel_vm_types::compiled_binary::MpcCurve::Ed25519 => "ed25519",
+        stoffel_vm_types::compiled_binary::MpcCurve::Secp256k1 => "secp256k1",
+        stoffel_vm_types::compiled_binary::MpcCurve::Secp256r1 => "p-256",
     }
 }
 

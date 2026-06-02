@@ -23,6 +23,8 @@ pub enum Curve {
     Bn254,
     Curve25519,
     Ed25519,
+    Secp256k1,
+    Secp256r1,
 }
 
 impl fmt::Display for Curve {
@@ -32,6 +34,8 @@ impl fmt::Display for Curve {
             Curve::Bn254 => "bn254",
             Curve::Curve25519 => "curve25519",
             Curve::Ed25519 => "ed25519",
+            Curve::Secp256k1 => "secp256k1",
+            Curve::Secp256r1 => "p-256",
         })
     }
 }
@@ -45,8 +49,10 @@ impl FromStr for Curve {
             "bn254" => Ok(Curve::Bn254),
             "curve25519" => Ok(Curve::Curve25519),
             "ed25519" => Ok(Curve::Ed25519),
+            "secp256k1" => Ok(Curve::Secp256k1),
+            "p256" | "nistp256" | "secp256r1" => Ok(Curve::Secp256r1),
             curve => Err(Error::Configuration(format!(
-                "unsupported curve '{curve}'; expected one of bls12_381, bn254, curve25519, ed25519"
+                "unsupported curve '{curve}'; expected one of bls12_381, bn254, curve25519, ed25519, secp256k1, p-256"
             ))),
         }
     }
@@ -103,6 +109,12 @@ impl MpcBackend {
             MpcBackend::Avss {
                 curve: Curve::Ed25519,
             } => stoffel_vm_types::compiled_binary::MpcCurve::Ed25519,
+            MpcBackend::Avss {
+                curve: Curve::Secp256k1,
+            } => stoffel_vm_types::compiled_binary::MpcCurve::Secp256k1,
+            MpcBackend::Avss {
+                curve: Curve::Secp256r1,
+            } => stoffel_vm_types::compiled_binary::MpcCurve::Secp256r1,
         }
     }
 

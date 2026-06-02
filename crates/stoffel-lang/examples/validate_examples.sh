@@ -59,7 +59,7 @@ mkdir -p "$OUT_DIR"
 
 echo "Building Stoffel compiler..."
 cargo build --quiet --manifest-path "${ROOT_DIR}/Cargo.toml"
-COMPILER="${ROOT_DIR}/target/debug/stoffellang"
+COMPILER="${WORKSPACE_DIR}/target/debug/stoffellang"
 
 echo "Compiling examples into ${OUT_DIR}..."
 find "$EXAMPLES_DIR" -path "$OUT_DIR" -prune -o -name main.stfl -print | sort | while read -r source; do
@@ -68,13 +68,27 @@ find "$EXAMPLES_DIR" -path "$OUT_DIR" -prune -o -name main.stfl -print | sort | 
   binary_name="$(printf '%s' "$rel_dir" | tr '/ ' '__').stflb"
   output="${OUT_DIR}/${binary_name}"
   mpc_backend="honeybadger"
+  mpc_curve="bls12-381"
   case "$rel_dir" in
-    avss_certificate/*|threshold_signatures/threshold_ecdsa_p256|threshold_signatures/threshold_ecdsa_secp256k1|threshold_signatures/threshold_schnorr_ed25519|threshold_signatures/threshold_eddsa_ed25519)
+    avss_certificate/*)
       mpc_backend="avss"
+      mpc_curve="p-256"
+      ;;
+    threshold_signatures/threshold_ecdsa_p256)
+      mpc_backend="avss"
+      mpc_curve="p-256"
+      ;;
+    threshold_signatures/threshold_ecdsa_secp256k1)
+      mpc_backend="avss"
+      mpc_curve="secp256k1"
+      ;;
+    threshold_signatures/threshold_schnorr_ed25519|threshold_signatures/threshold_eddsa_ed25519)
+      mpc_backend="avss"
+      mpc_curve="ed25519"
       ;;
   esac
-  echo "  ${rel} -> ${binary_name} (${mpc_backend})"
-  "$COMPILER" -b --mpc-backend "$mpc_backend" -o "$output" "$source" >/dev/null
+  echo "  ${rel} -> ${binary_name} (${mpc_backend}/${mpc_curve})"
+  "$COMPILER" -b --mpc-backend "$mpc_backend" --mpc-curve "$mpc_curve" -o "$output" "$source" >/dev/null
 done
 
 run_vm() {

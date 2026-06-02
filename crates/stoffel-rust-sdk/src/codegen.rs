@@ -183,6 +183,8 @@ fn sdk_curve_expr(crate_path: &str, curve: MpcCurve) -> String {
         MpcCurve::Bn254 => "Bn254",
         MpcCurve::Curve25519 => "Curve25519",
         MpcCurve::Ed25519 => "Ed25519",
+        MpcCurve::Secp256k1 => "Secp256k1",
+        MpcCurve::Secp256r1 => "Secp256r1",
     };
     format!("{crate_path}::Curve::{variant}")
 }

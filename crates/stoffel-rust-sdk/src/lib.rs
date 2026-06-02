@@ -502,6 +502,8 @@ fn curve_from_bytecode(curve: stoffel_vm_types::compiled_binary::MpcCurve) -> Cu
         stoffel_vm_types::compiled_binary::MpcCurve::Bn254 => Curve::Bn254,
         stoffel_vm_types::compiled_binary::MpcCurve::Curve25519 => Curve::Curve25519,
         stoffel_vm_types::compiled_binary::MpcCurve::Ed25519 => Curve::Ed25519,
+        stoffel_vm_types::compiled_binary::MpcCurve::Secp256k1 => Curve::Secp256k1,
+        stoffel_vm_types::compiled_binary::MpcCurve::Secp256r1 => Curve::Secp256r1,
     }
 }
 
