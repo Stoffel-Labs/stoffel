@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -96,10 +96,7 @@ impl Default for BuildConfig {
 impl Project {
     pub fn init(path: &Path, template: Template, force: bool) -> Result<()> {
         if path.exists() && !force && fs::read_dir(path)?.next().is_some() {
-            anyhow::bail!(
-                "{} already exists and is not empty; pass --force to write project files",
-                path.display()
-            );
+            anyhow::bail!("{}", init_target_not_empty_message(path));
         }
         fs::create_dir_all(path)?;
         match template {
@@ -113,6 +110,11 @@ impl Project {
     }
 
     pub fn discover(path: Option<&Path>) -> Result<Self> {
+        if let Some(path) = path {
+            if !path.exists() {
+                anyhow::bail!("{} does not exist", path.display());
+            }
+        }
         let start = match path {
             Some(path) if path.is_dir() => path.to_path_buf(),
             Some(path) => path
@@ -227,11 +229,34 @@ impl Project {
 
     pub fn default_bytecode_path_for_source(&self, source: &Path, release: bool) -> PathBuf {
         let profile = if release { "release" } else { "debug" };
-        let stem = source
+        let source_path = if source.is_absolute() {
+            source.to_path_buf()
+        } else {
+            self.root.join(source)
+        };
+        let stem = source_path
             .file_stem()
             .and_then(|name| name.to_str())
             .unwrap_or("main");
-        let name = if source == self.source_path() && stem == "main" {
+        if source_path == self.source_path() && stem == "main" {
+            return self
+                .target_dir()
+                .join(profile)
+                .join(format!("{}.stfb", self.config.package.name));
+        }
+        if let Ok(relative) = source_path.strip_prefix(self.source_dir()) {
+            if relative
+                .parent()
+                .is_some_and(|parent| !parent.as_os_str().is_empty())
+            {
+                return self
+                    .target_dir()
+                    .join(profile)
+                    .join(relative)
+                    .with_extension("stfb");
+            }
+        }
+        let name = if stem == "main" {
             self.config.package.name.as_str()
         } else {
             stem
@@ -243,11 +268,11 @@ impl Project {
         let profile = if release { "release" } else { "debug" };
         let dir = self.target_dir().join(profile);
         let preferred = self.default_bytecode_path(release);
-        if preferred.exists() {
+        if self.is_fresh_bytecode(&preferred)? {
             return Ok(Some(preferred));
         }
         let legacy_preferred = preferred.with_extension("stflb");
-        if legacy_preferred.exists() {
+        if self.is_fresh_bytecode(&legacy_preferred)? {
             return Ok(Some(legacy_preferred));
         }
         if !dir.exists() {
@@ -265,7 +290,33 @@ impl Project {
             }
         }
         files.sort();
-        Ok(files.into_iter().next())
+        for file in files {
+            if self.is_fresh_bytecode(&file)? {
+                return Ok(Some(file));
+            }
+        }
+        Ok(None)
+    }
+
+    fn is_fresh_bytecode(&self, bytecode: &Path) -> Result<bool> {
+        if !bytecode.exists() {
+            return Ok(false);
+        }
+        let bytecode_modified = fs::metadata(bytecode)
+            .and_then(|metadata| metadata.modified())
+            .with_context(|| format!("failed to inspect {}", bytecode.display()))?;
+        for input in self.watch_files()? {
+            let Ok(metadata) = fs::metadata(&input) else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            if modified > bytecode_modified {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -387,16 +438,76 @@ fn init_solidity_hardhat_project(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn init_target_not_empty_message(path: &Path) -> String {
+    if path.join(CONFIG_FILE).exists() {
+        return format!(
+            "{} already contains Stoffel.toml; use `stoffel status {}` or `stoffel run {}` for this project, or pass --force to refresh template files",
+            path.display(),
+            path.display(),
+            path.display()
+        );
+    }
+    format!(
+        "{} already exists and is not empty; pass --force to write Stoffel template files while preserving unrelated files",
+        path.display()
+    )
+}
+
 fn find_root(start: &Path) -> Result<PathBuf> {
     let mut dir = absolutize(start)?;
+    let original = dir.clone();
     loop {
         if dir.join(CONFIG_FILE).exists() {
             return Ok(dir);
         }
         if !dir.pop() {
-            anyhow::bail!("could not find {CONFIG_FILE}; run `stoffel init` first");
+            let nested = nested_config_paths(&original)?;
+            if !nested.is_empty() {
+                let paths = nested
+                    .iter()
+                    .map(|path| path.parent().unwrap_or(path).display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "could not find {CONFIG_FILE} in {} or any parent directory; found nested Stoffel project(s) at {paths}. Pass one of those project paths instead",
+                    original.display()
+                );
+            }
+            anyhow::bail!(
+                "could not find {CONFIG_FILE} in {} or any parent directory; run `stoffel init` first or pass a project path",
+                original.display()
+            );
         }
     }
+}
+
+fn nested_config_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut configs = Vec::new();
+    collect_nested_config_paths(root, 0, &mut configs)?;
+    configs.sort();
+    Ok(configs)
+}
+
+fn collect_nested_config_paths(
+    root: &Path,
+    depth: usize,
+    configs: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if depth >= 3 || !root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            let config = path.join(CONFIG_FILE);
+            if config.exists() {
+                configs.push(config);
+            } else {
+                collect_nested_config_paths(&path, depth + 1, configs)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn read_config(path: &Path) -> Result<ProjectConfig> {
@@ -407,10 +518,72 @@ fn read_config(path: &Path) -> Result<ProjectConfig> {
     if config.build.source.as_os_str().is_empty() {
         config.build.source = BuildConfig::default().source;
     }
+    if config
+        .build
+        .source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension != "stfl")
+    {
+        anyhow::bail!(
+            "invalid build.source {}; expected a .stfl source file or source directory",
+            config.build.source.display()
+        );
+    }
     if config.build.target_dir.as_os_str().is_empty() {
         config.build.target_dir = BuildConfig::default().target_dir;
     }
+    validate_target_dir(
+        path.parent().unwrap_or(Path::new(".")),
+        &config.build.target_dir,
+    )?;
     Ok(config)
+}
+
+fn validate_target_dir(root: &Path, target_dir: &Path) -> Result<()> {
+    if target_dir.is_absolute() {
+        anyhow::bail!(
+            "invalid build.target_dir {}; expected a relative directory inside the project",
+            target_dir.display()
+        );
+    }
+    if target_dir
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        anyhow::bail!(
+            "invalid build.target_dir {}; build artifacts must stay inside the project",
+            target_dir.display()
+        );
+    }
+    if target_dir == Path::new(".") {
+        anyhow::bail!("invalid build.target_dir .; choose a dedicated build directory like target");
+    }
+    if target_dir.starts_with("src") {
+        anyhow::bail!(
+            "invalid build.target_dir {}; build artifacts must not be written under src/",
+            target_dir.display()
+        );
+    }
+    if target_dir.extension().is_some() {
+        anyhow::bail!(
+            "invalid build.target_dir {}; expected a directory path, not a file path",
+            target_dir.display()
+        );
+    }
+    let absolute = if target_dir.is_absolute() {
+        target_dir.to_path_buf()
+    } else {
+        root.join(target_dir)
+    };
+    if absolute.is_file() {
+        anyhow::bail!(
+            "invalid build.target_dir {}; {} is an existing file",
+            target_dir.display(),
+            absolute.display()
+        );
+    }
+    Ok(())
 }
 
 fn collect_stfl_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -432,9 +605,6 @@ fn collect_stfl_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 fn write_new(path: PathBuf, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
-    }
-    if path.exists() {
-        return Ok(());
     }
     fs::write(&path, contents).with_context(|| format!("failed to write {}", path.display()))
 }

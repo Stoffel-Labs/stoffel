@@ -3,7 +3,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::PrimeField;
@@ -1112,15 +1112,19 @@ fn local_runner_curve_from_manifest(
 }
 
 fn socket_with_port_pair() -> std::io::Result<SocketAddr> {
-    for _ in 0..100 {
-        let port = reserve_port()?;
-        if port <= u16::MAX - 1000 && port_is_free(port + 1000) {
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos() as u16)
+        .unwrap_or(0);
+    for offset in 0..30_000u16 {
+        let port = 20_000 + ((seed.wrapping_add(offset)) % 30_000);
+        if port_is_free(port) && port_is_free(port + 1000) {
             return Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
         }
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::AddrNotAvailable,
-        "could not reserve a leader bootnode port with free +1000 party port",
+        "could not reserve a localhost bootnode port with a free +1000 party port in 20000..50999",
     ))
 }
 
