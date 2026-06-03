@@ -689,6 +689,14 @@ fn run_builder(args: &BuildArgs) -> Result<Stoffel> {
             return Ok(apply_inline_build_config(builder, args));
         }
         let project = Project::discover(Some(path))?;
+        if path.is_dir() {
+            if let Some(bytecode) = project.find_bytecode(args.release)? {
+                let builder = Stoffel::load_file(&bytecode)
+                    .with_context(|| format!("failed to load bytecode {}", bytecode.display()))?;
+                return Ok(apply_inline_build_config(builder, args));
+            }
+            return configured_builder(&project, args);
+        }
         return configured_builder_for_source(&project, args, path);
     }
 

@@ -115,25 +115,52 @@ fn run_executes_bytecode_file() {
 #[test]
 fn run_auto_discovers_built_bytecode() {
     let temp = TempDir::new().unwrap();
+    let project = temp.path().join("app");
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("init")
-        .arg(temp.path())
-        .arg("--force")
+        .arg(&project)
         .assert()
         .success();
 
     Command::cargo_bin("stoffel")
         .unwrap()
-        .current_dir(temp.path())
+        .current_dir(&project)
         .arg("build")
         .assert()
         .success();
 
     Command::cargo_bin("stoffel")
         .unwrap()
-        .current_dir(temp.path())
-        .args(["run", "--input", "a=21", "--input", "b=21"])
+        .args([
+            "run",
+            project.to_str().unwrap(),
+            "--input",
+            "a=21",
+            "--input",
+            "b=21",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("42"));
+}
+
+#[test]
+fn run_folder_compiles_project_when_bytecode_is_missing() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("app");
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(&project)
+        .assert()
+        .success();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("run")
+        .arg(project)
+        .args(["--input", "a=21", "--input", "b=21"])
         .assert()
         .success()
         .stdout(predicate::str::contains("42"));
