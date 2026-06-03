@@ -101,6 +101,10 @@ impl Program {
         })
     }
 
+    pub fn disassemble(&self) -> String {
+        stoffellang::binary_converter::disassemble(&self.binary)
+    }
+
     pub fn function_count(&self) -> usize {
         self.binary.functions.len()
     }

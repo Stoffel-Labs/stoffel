@@ -217,22 +217,80 @@ cd hello-mpc
 stoffel run --input a=40 --input b=2
 ```
 
-Compile project bytecode:
+Project templates:
+
+```bash
+stoffel init my-lib --lib
+stoffel init rust-app --template rust
+stoffel init py-app --template python
+stoffel init web-app --template typescript
+stoffel init contract-app --template solidity-foundry
+stoffel init hardhat-app --template solidity-hardhat
+```
+
+Compile project bytecode, print summaries, or inspect bytecode:
 
 ```bash
 stoffel build
 stoffel check
+stoffel compile src/main.stfl -b -O2 --summary
+stoffel compile --disassemble target/debug/hello-mpc.stfb
 ```
+
+`build` and `compile` default to all `src/**/*.stfl` files when no source path is
+provided. Use `--output` when compiling a single file.
 
 Run local MPC development mode when `stoffel-run` is available:
 
 ```bash
 cargo build -p stoffel-vm --bin stoffel-run
-stoffel dev --runner /path/to/StoffelVM/target/debug/stoffel-run --input a=40 --input b=2
+stoffel dev --runner /path/to/StoffelVM/target/debug/stoffel-run --parties 5 --threshold 1 --input a=40 --input b=2
 ```
 
+`stoffel dev` runs once, watches `Stoffel.toml` and the configured source tree,
+then rebuilds and reruns whenever a `.stfl` file or project config changes. Use
+`stoffel dev --once` for the old script-friendly one-shot behavior, or
+`--poll-ms <N>` to tune reload latency.
+
+Run compiled bytecode or project tests:
+
+```bash
+stoffel run target/debug/hello-mpc.stfb --entry main --input a=40 --input b=2
+stoffel run --input a=40 --input b=2
+stoffel run program.stfl --local --client-input 0=42 --parties 5 --threshold 1
+stoffel run target/debug/program.stfb --network --config offchain-client.toml --input x=42
+stoffel run target/debug/program.stfb --network --config party-network.toml --connect-timeout-ms 1000
+stoffel test
+stoffel test --test selected --verbose
+```
+
+`run` accepts `.stfl` source or `.stfb`/`.stflb` bytecode. By default it runs
+through the local MPC coordinator; `--local` is accepted as an explicit local
+mode selector. Use `--client-input SLOT=VALUE` for `ClientStore` programs.
+`--network --config` uses SDK network configuration: an off-chain client config
+executes through the coordinator/node RPC path, while a network config validates
+and connects to real node addresses.
+
+Project management utilities:
+
+```bash
+stoffel status --verbose
+stoffel clean
+stoffel clean --all
+stoffel update --check
+stoffel update
+```
+
+`status` validates project config, checks detected dependency managers, compiles
+configured sources, and reports local MPC network configuration. `clean` removes
+the project `target/` directory and Stoffel build cache; `--all` also removes
+known ecosystem caches such as `node_modules`, Foundry cache/output, and Python
+test caches. `update` reinstalls the local CLI from source and runs detected
+project dependency update commands; use `--check` to inspect without changing
+files.
+
 The CLI reads `Stoffel.toml`, defaults to `src/main.stfl`, and writes bytecode to
-`target/debug/<package>.stflb` or `target/release/<package>.stflb`.
+`target/debug/<package>.stfb` or `target/release/<package>.stfb`.
 
 ## VM Runner CLI
 

@@ -10,6 +10,7 @@ pub use crate::client::{
     ComputationSummary, OffChainClientConfig, OffChainClientConfigBuilder, StoffelClient,
 };
 pub use crate::codegen::{generate_bindings, generate_bindings_with_config, BindingsConfig};
+pub use crate::compiler::CompilationOptions;
 pub use crate::config::{
     Curve, MpcConfig, MpcConfigBuilder, MpcConfigSummary, MpcSection, NetworkConfig,
     NetworkConfigBuilder, NetworkConfigSummary, NetworkDeployment, NetworkDeploymentBuilder,

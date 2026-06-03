@@ -62,6 +62,7 @@ pub mod types;
 pub mod vm;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub use backend::{
     avss::{AvssBackend, AvssEngine},
@@ -73,6 +74,7 @@ pub use client::{
     ComputationSummary, OffChainClientConfig, OffChainClientConfigBuilder, StoffelClient,
 };
 pub use codegen::{generate_bindings, generate_bindings_with_config, BindingsConfig};
+pub use compiler::CompilationOptions;
 pub use config::{
     Curve, MpcConfig, MpcConfigBuilder, MpcConfigSummary, MpcSection, NetworkConfig,
     NetworkConfigBuilder, NetworkConfigSummary, NetworkDeployment, NetworkDeploymentBuilder,
@@ -125,6 +127,7 @@ pub struct Stoffel {
     config_error: Option<String>,
     inputs: Vec<(String, Value)>,
     client_inputs: Vec<(u64, Vec<Value>)>,
+    compiler_options: CompilationOptions,
 }
 
 impl Stoffel {
@@ -204,6 +207,33 @@ impl Stoffel {
     pub fn curve(mut self, curve: Curve) -> Self {
         self.mpc_config.backend = MpcBackend::Avss { curve };
         self.backend_explicit = true;
+        self
+    }
+
+    /// Enable or disable compiler optimizations.
+    pub fn optimize(mut self, enabled: bool) -> Self {
+        self.compiler_options.optimize = enabled;
+        self
+    }
+
+    /// Set the compiler optimization level (0-3).
+    pub fn optimization_level(mut self, level: u8) -> Self {
+        self.compiler_options.optimization_level = level;
+        if level > 0 {
+            self.compiler_options.optimize = true;
+        }
+        self
+    }
+
+    /// Print compiler intermediate representations while compiling.
+    pub fn print_ir(mut self, enabled: bool) -> Self {
+        self.compiler_options.print_ir = enabled;
+        self
+    }
+
+    /// Replace all Stoffel-Lang compiler options carried by this builder.
+    pub fn compiler_options(mut self, options: CompilationOptions) -> Self {
+        self.compiler_options = options;
         self
     }
 
@@ -298,10 +328,17 @@ impl Stoffel {
             .source
             .ok_or_else(|| Error::Configuration("no program source configured".to_owned()))?;
         let program = match source {
-            ProgramSource::Source { source, filename } => {
-                compiler::compile_source(&source, &filename, mpc_config.backend)?
-            }
-            ProgramSource::File { path } => compiler::compile_file(&path, mpc_config.backend)?,
+            ProgramSource::Source { source, filename } => compiler::compile_source_with_options(
+                &source,
+                &filename,
+                mpc_config.backend,
+                self.compiler_options,
+            )?,
+            ProgramSource::File { path } => compiler::compile_file_with_options(
+                &path,
+                mpc_config.backend,
+                self.compiler_options,
+            )?,
             ProgramSource::Bytecode(bytecode) => {
                 let program = Program::from_bytecode(&bytecode)?;
                 let bytecode_backend =
@@ -359,6 +396,38 @@ impl Stoffel {
         vm::execute_local(&runtime, &entry).await
     }
 
+    /// Execute locally using real MPC nodes with an explicit coordinator timeout.
+    #[tracing::instrument(skip_all)]
+    pub async fn execute_local_with_timeout(self, timeout: Duration) -> Result<Vec<Value>> {
+        self.execute_local_function_with_timeout("main", timeout)
+            .await
+    }
+
+    /// Execute a named function locally using real MPC nodes with an explicit
+    /// coordinator timeout.
+    #[tracing::instrument(skip_all, fields(function = name))]
+    pub async fn execute_local_function_with_timeout(
+        self,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<Vec<Value>> {
+        if timeout.is_zero() {
+            return Err(Error::Configuration(
+                "local network timeout must be greater than zero".to_owned(),
+            ));
+        }
+        let (runtime, entry) = self.build_for_local_execution(name)?;
+        vm::execute_local_with_options(
+            &runtime,
+            &entry,
+            vm::LocalExecutionOptions {
+                runner_path: None,
+                timeout: Some(timeout),
+            },
+        )
+        .await
+    }
+
     /// Execute a cleartext Stoffel program with the embedded VM.
     ///
     /// This is intended for local development of non-secret logic. Secret MPC
@@ -394,6 +463,7 @@ impl Stoffel {
             config_error: None,
             inputs: Vec::new(),
             client_inputs: Vec::new(),
+            compiler_options: CompilationOptions::default(),
         }
     }
 
