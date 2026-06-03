@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLES_DIR="${ROOT_DIR}/examples"
 WORKSPACE_DIR="$(cd "${ROOT_DIR}/../.." && pwd)"
 VM_DIR="${STOFFEL_VM_DIR:-${WORKSPACE_DIR}}"
-COORDINATOR_DIR="${STOFFEL_COORDINATOR_DIR:-/Users/gabriel/RustroverProjects/stoffel-mpc-coordinator}"
-NETWORK_DIR="${STOFFEL_NETWORK_DIR:-/Users/gabriel/RustroverProjects/stoffel-network}"
+COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#feature/no-feature-gates-and-multi-type-awareness}}"
+NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://github.com/Stoffel-Labs/stoffel-networking.git#feature/robust-identity-based-on-cert}}"
 OUT_DIR="${STOFFEL_EXAMPLES_OUT:-${EXAMPLES_DIR}/dist}"
 COMPOSE_FILE="${EXAMPLES_DIR}/docker-compose.coordinator.yml"
 AUTH_TOKEN="${STOFFEL_AUTH_TOKEN:-stoffel-examples-coord-token}"
@@ -26,8 +26,8 @@ WORKLOAD_CONTAINERS=(
 compose() {
   STOFFEL_AUTH_TOKEN="$AUTH_TOKEN" \
   STOFFEL_VM_DIR="$VM_DIR" \
-  STOFFEL_COORDINATOR_DIR="$COORDINATOR_DIR" \
-  STOFFEL_NETWORK_DIR="$NETWORK_DIR" \
+  STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
+  STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
   STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
     docker compose -f "$COMPOSE_FILE" "$@"
 }

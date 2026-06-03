@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLES_DIR="${ROOT_DIR}/examples"
 WORKSPACE_DIR="$(cd "${ROOT_DIR}/../.." && pwd)"
 VM_DIR="${STOFFEL_VM_DIR:-${WORKSPACE_DIR}}"
-COORDINATOR_DIR="${STOFFEL_COORDINATOR_DIR:-/Users/gabriel/RustroverProjects/stoffel-mpc-coordinator}"
-NETWORK_DIR="${STOFFEL_NETWORK_DIR:-/Users/gabriel/RustroverProjects/stoffel-network}"
+COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#feature/no-feature-gates-and-multi-type-awareness}}"
+NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://github.com/Stoffel-Labs/stoffel-networking.git#feature/robust-identity-based-on-cert}}"
 OUT_DIR="${STOFFEL_EXAMPLES_OUT:-${EXAMPLES_DIR}/dist}"
 RUN_DOCKER_MPC=0
 RUN_HOST_MPC=0
@@ -30,8 +30,10 @@ five local StoffelVM host processes.
 
 Environment:
   STOFFEL_VM_DIR          VM checkout path
-  STOFFEL_COORDINATOR_DIR Coordinator checkout path used as Docker build context
-  STOFFEL_NETWORK_DIR     Networking checkout path used as Docker build context
+  STOFFEL_COORDINATOR_CONTEXT Coordinator Docker build context; defaults to the git branch
+  STOFFEL_NETWORK_CONTEXT     Networking Docker build context; defaults to the git branch
+  STOFFEL_COORDINATOR_DIR     Backward-compatible local coordinator context override
+  STOFFEL_NETWORK_DIR         Backward-compatible local networking context override
   STOFFEL_EXAMPLES_OUT   Output directory for .stflb files
   STOFFEL_PROGRAM_NAME   Compiled binary to run in docker compose
   STOFFEL_MPC_BACKEND    honeybadger or avss
@@ -48,10 +50,6 @@ done
 
 if [ ! -d "$VM_DIR" ]; then
   echo "VM checkout not found: $VM_DIR" >&2
-  exit 2
-fi
-if [ ! -d "$NETWORK_DIR" ]; then
-  echo "Networking checkout not found: $NETWORK_DIR" >&2
   exit 2
 fi
 
@@ -123,8 +121,8 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
     (
       cd "$EXAMPLES_DIR"
       STOFFEL_VM_DIR="$VM_DIR" \
-      STOFFEL_COORDINATOR_DIR="$COORDINATOR_DIR" \
-      STOFFEL_NETWORK_DIR="$NETWORK_DIR" \
+      STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
+      STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
       STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
         docker compose -f docker-compose.mpc.yml down --remove-orphans >/dev/null 2>&1 || true
     )
@@ -140,8 +138,8 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
     if ! (
       cd "$EXAMPLES_DIR"
       STOFFEL_VM_DIR="$VM_DIR" \
-      STOFFEL_COORDINATOR_DIR="$COORDINATOR_DIR" \
-      STOFFEL_NETWORK_DIR="$NETWORK_DIR" \
+      STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
+      STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
       STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
       STOFFEL_PROGRAM_NAME="$binary_name" \
       STOFFEL_MPC_BACKEND="$backend" \
@@ -160,8 +158,8 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
 
     echo "Running coordinator compose example: ${binary_name}"
     STOFFEL_VM_DIR="$VM_DIR" \
-    STOFFEL_COORDINATOR_DIR="$COORDINATOR_DIR" \
-    STOFFEL_NETWORK_DIR="$NETWORK_DIR" \
+    STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
+    STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
     STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
     STOFFEL_PROGRAM_NAME="$binary_name" \
       "$EXAMPLES_DIR/run_coordinator_compose.sh" "$@"

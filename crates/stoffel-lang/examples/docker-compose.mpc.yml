@@ -15,8 +15,8 @@ x-party-common: &party-common
     context: ${STOFFEL_VM_DIR:-../../..}
     dockerfile: Dockerfile
     additional_contexts:
-      coordinator: ${STOFFEL_COORDINATOR_DIR:-/Users/gabriel/RustroverProjects/stoffel-mpc-coordinator}
-      network: ${STOFFEL_NETWORK_DIR:-/Users/gabriel/RustroverProjects/stoffel-network}
+      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#feature/no-feature-gates-and-multi-type-awareness}"
+      network: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#feature/robust-identity-based-on-cert}"
   volumes:
     - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
     - stoffel-local-store:/app/local-store

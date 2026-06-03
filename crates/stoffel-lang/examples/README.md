@@ -48,6 +48,22 @@ STOFFEL_PROGRAM_NAME=mpc_runtime_info.stflb \
   ./examples/validate_examples.sh --docker-mpc
 ```
 
+Docker examples default to git build contexts for the coordinator and
+networking repos:
+
+```sh
+STOFFEL_COORDINATOR_CONTEXT='https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#feature/no-feature-gates-and-multi-type-awareness'
+STOFFEL_NETWORK_CONTEXT='https://github.com/Stoffel-Labs/stoffel-networking.git#feature/robust-identity-based-on-cert'
+```
+
+To test local uncommitted changes, point those contexts at local checkouts:
+
+```sh
+STOFFEL_COORDINATOR_CONTEXT=/path/to/stoffel-mpc-coordinator \
+STOFFEL_NETWORK_CONTEXT=/path/to/stoffel-network \
+  ./examples/validate_examples.sh --docker-mpc
+```
+
 If Docker is unavailable, run the same 5-party smoke test as local host
 processes:
 
