@@ -1,0 +1,14 @@
+error[E0308]: `?` operator has incompatible types
+  --> tests/ui/generated_client_io_wrong_output_type.rs:12:34
+   |
+12 |       let _outputs: WrongOutputs = client
+   |  __________________________________^
+13 | |         .run_typed::<Client0Inputs, Client0Outputs>(Client0Inputs {
+14 | |             input_0: 1.0,
+15 | |             input_1: 2.0,
+...  |
+20 | |         })
+21 | |         .await?;
+   | |_______________^ expected `WrongOutputs`, found `Client0Outputs`
+   |
+   = note: `?` operator cannot convert from `Client0Outputs` to `WrongOutputs`

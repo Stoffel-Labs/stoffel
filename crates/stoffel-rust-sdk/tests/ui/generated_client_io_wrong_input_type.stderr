@@ -1,0 +1,5 @@
+error[E0308]: mismatched types
+ --> tests/ui/generated_client_io_wrong_input_type.rs:9:18
+  |
+9 |         input_0: 1_i64,
+  |                  ^^^^^ expected `f64`, found `i64`
