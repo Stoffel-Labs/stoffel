@@ -131,6 +131,7 @@ impl Project {
                 .to_owned();
         }
         let source = match path {
+            Some(path) if path.is_dir() => root.join(&config.build.source),
             Some(path) if path.is_file() => absolutize(path)?,
             Some(path) if path.extension().is_some() => absolutize(path)?,
             _ => root.join(&config.build.source),

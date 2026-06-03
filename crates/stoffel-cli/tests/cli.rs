@@ -148,7 +148,7 @@ fn run_auto_discovers_built_bytecode() {
 #[test]
 fn run_folder_compiles_project_when_bytecode_is_missing() {
     let temp = TempDir::new().unwrap();
-    let project = temp.path().join("app");
+    let project = temp.path().join("app.with.dot");
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("init")
