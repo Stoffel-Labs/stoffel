@@ -180,7 +180,7 @@ fn local_client_input_value(value: &Value) -> Result<String> {
         Value::Bytes(value) => Ok(format!("0x{}", hex_encode(value))),
         Value::Float(_) | Value::String(_) | Value::List(_) | Value::Unit => {
             Err(Error::InvalidInput(
-                "local coordinator client inputs support integers, booleans, and raw bytes"
+                "local coordinator client inputs support integers, booleans, and 0x-prefixed hex bytes"
                     .to_owned(),
             ))
         }

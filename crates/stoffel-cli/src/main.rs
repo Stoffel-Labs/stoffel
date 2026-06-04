@@ -1,6 +1,8 @@
 mod project;
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, SystemTime};
@@ -10,6 +12,36 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use stoffel::prelude::*;
 
 use crate::project::{init_library_project, Project, Template};
+
+macro_rules! print {
+    ($($arg:tt)*) => {{
+        crate::write_stdout(format_args!($($arg)*), false);
+    }};
+}
+
+macro_rules! println {
+    () => {{
+        crate::write_stdout(format_args!(""), true);
+    }};
+    ($($arg:tt)*) => {{
+        crate::write_stdout(format_args!($($arg)*), true);
+    }};
+}
+
+fn write_stdout(args: fmt::Arguments<'_>, newline: bool) {
+    let mut stdout = io::stdout().lock();
+    let result = if newline {
+        writeln!(stdout, "{args}")
+    } else {
+        write!(stdout, "{args}")
+    };
+    if let Err(error) = result {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        panic!("failed printing to stdout: {error}");
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -53,7 +85,13 @@ struct InitArgs {
     /// Directory where the project files are created. Defaults to the current directory.
     path: Option<PathBuf>,
     /// Project template to create.
-    #[arg(long, value_enum, default_value_t = TemplateArg::Stoffel, conflicts_with = "lib")]
+    #[arg(
+        long,
+        value_enum,
+        ignore_case = true,
+        default_value_t = TemplateArg::Stoffel,
+        conflicts_with = "lib"
+    )]
     template: TemplateArg,
     /// Write template files into an existing directory without deleting unrelated files.
     #[arg(long)]
@@ -83,20 +121,18 @@ struct BuildArgs {
     /// Write bytecode to this .stfb/.stflb file. Only valid when one source file is selected.
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// Legacy no-op: build and compile always write VM bytecode.
-    #[arg(short = 'b', long, hide = true)]
-    binary: bool,
     /// Print instructions from an existing .stfb/.stflb bytecode file instead of compiling source.
     #[arg(long)]
     disassemble: bool,
     /// Print compiler intermediate representation for debugging.
     #[arg(long)]
     print_ir: bool,
-    /// Set optimization level (0-3). Accepts `-O3` or `-O 3`.
+    /// Set optimization level. Use -O3, -O 3, or --opt-level 3.
     #[arg(
         short = 'O',
         long = "opt-level",
-        value_parser = clap::value_parser!(u8).range(0..=3),
+        value_parser = parse_opt_level,
+        allow_hyphen_values = true,
         value_name = "N"
     )]
     opt_level: Option<u8>,
@@ -113,13 +149,13 @@ struct BuildArgs {
     #[arg(long, alias = "curve")]
     field: Option<Curve>,
     /// Override [mpc].parties from Stoffel.toml for this compile.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
     parties: Option<usize>,
     /// Override [mpc].threshold from Stoffel.toml for this compile.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
     threshold: Option<usize>,
     /// Override [mpc].instance_id from Stoffel.toml for this compile.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_u64_arg, allow_hyphen_values = true)]
     instance_id: Option<u64>,
 }
 
@@ -137,14 +173,11 @@ struct CheckArgs {
     #[arg(long, alias = "curve")]
     field: Option<Curve>,
     /// Override [mpc].parties from Stoffel.toml for this validation.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
     parties: Option<usize>,
     /// Override [mpc].threshold from Stoffel.toml for this validation.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
     threshold: Option<usize>,
-    /// Override [mpc].instance_id from Stoffel.toml for this validation.
-    #[arg(long)]
-    instance_id: Option<u64>,
 }
 
 impl CheckArgs {
@@ -152,7 +185,6 @@ impl CheckArgs {
         BuildArgs {
             path: self.path.clone(),
             output: None,
-            binary: true,
             disassemble: false,
             print_ir: self.print_ir,
             opt_level: None,
@@ -162,7 +194,7 @@ impl CheckArgs {
             field: self.field,
             parties: self.parties,
             threshold: self.threshold,
-            instance_id: self.instance_id,
+            instance_id: None,
         }
     }
 }
@@ -177,11 +209,12 @@ struct ProjectBuildArgs {
     /// Print compiler intermediate representation for debugging.
     #[arg(long)]
     print_ir: bool,
-    /// Set optimization level (0-3). Accepts `-O3` or `-O 3`.
+    /// Set optimization level. Use -O3, -O 3, or --opt-level 3.
     #[arg(
         short = 'O',
         long = "opt-level",
-        value_parser = clap::value_parser!(u8).range(0..=3),
+        value_parser = parse_opt_level,
+        allow_hyphen_values = true,
         value_name = "N"
     )]
     opt_level: Option<u8>,
@@ -198,13 +231,13 @@ struct ProjectBuildArgs {
     #[arg(long, alias = "curve")]
     field: Option<Curve>,
     /// Override [mpc].parties from Stoffel.toml for this build.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
     parties: Option<usize>,
     /// Override [mpc].threshold from Stoffel.toml for this build.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
     threshold: Option<usize>,
     /// Override [mpc].instance_id from Stoffel.toml for this build.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_u64_arg, allow_hyphen_values = true)]
     instance_id: Option<u64>,
 }
 
@@ -213,7 +246,6 @@ impl ProjectBuildArgs {
         BuildArgs {
             path: self.path.clone(),
             output: self.output.clone(),
-            binary: true,
             disassemble: false,
             print_ir: self.print_ir,
             opt_level: self.opt_level,
@@ -239,7 +271,11 @@ struct RunArgs {
     #[arg(long = "input", value_name = "NAME=VALUE")]
     inputs: Vec<InputArg>,
     /// Local simulation input for a numeric client slot, written as SLOT=VALUE.
-    #[arg(long = "client-input", value_name = "SLOT=VALUE")]
+    #[arg(
+        long = "client-input",
+        value_name = "SLOT=VALUE",
+        allow_hyphen_values = true
+    )]
     client_inputs: Vec<ClientInputArg>,
     /// Run on the local MPC simulator. This is the default unless --network or --config is set.
     #[arg(long, conflicts_with = "network")]
@@ -251,19 +287,29 @@ struct RunArgs {
     #[arg(long)]
     config: Option<PathBuf>,
     /// Print function/instruction metadata before executing.
-    #[arg(long = "program-info", alias = "summary")]
+    #[arg(long = "program-info")]
     program_info: bool,
     /// Network client slot to use with --network.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_u64_arg, allow_hyphen_values = true)]
     client_id: Option<u64>,
     /// Timeout for connecting to network nodes, in milliseconds.
-    #[arg(long, default_value_t = 10_000)]
+    #[arg(
+        long,
+        default_value_t = 10_000,
+        value_parser = parse_u64_arg,
+        allow_hyphen_values = true
+    )]
     connect_timeout_ms: u64,
     /// Path to the stoffel-run helper binary for local MPC simulation.
     #[arg(long)]
     runner: Option<PathBuf>,
     /// Timeout for local MPC execution, in seconds.
-    #[arg(long, default_value_t = 180)]
+    #[arg(
+        long,
+        default_value_t = 180,
+        value_parser = parse_u64_arg,
+        allow_hyphen_values = true
+    )]
     timeout_secs: u64,
     /// Catch positional input mistakes so we can explain --input NAME=VALUE.
     #[arg(value_name = "INPUT", trailing_var_arg = true, hide = true)]
@@ -277,11 +323,12 @@ struct RunBuildArgs {
     /// Print compiler intermediate representation when source must be compiled before running.
     #[arg(long)]
     print_ir: bool,
-    /// Set optimization level (0-3). Accepts `-O3` or `-O 3`.
+    /// Set optimization level. Use -O3, -O 3, or --opt-level 3.
     #[arg(
         short = 'O',
         long = "opt-level",
-        value_parser = clap::value_parser!(u8).range(0..=3),
+        value_parser = parse_opt_level,
+        allow_hyphen_values = true,
         value_name = "N"
     )]
     opt_level: Option<u8>,
@@ -298,13 +345,13 @@ struct RunBuildArgs {
     #[arg(long, alias = "curve")]
     field: Option<Curve>,
     /// Override [mpc].parties from Stoffel.toml for this run.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
     parties: Option<usize>,
     /// Override [mpc].threshold from Stoffel.toml for this run.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
     threshold: Option<usize>,
     /// Override [mpc].instance_id from Stoffel.toml for this run.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_u64_arg, allow_hyphen_values = true)]
     instance_id: Option<u64>,
 }
 
@@ -313,7 +360,6 @@ impl RunBuildArgs {
         BuildArgs {
             path: self.path.clone(),
             output: None,
-            binary: true,
             disassemble: false,
             print_ir: self.print_ir,
             opt_level: self.opt_level,
@@ -339,16 +385,20 @@ struct DevArgs {
     #[arg(long = "input", value_name = "NAME=VALUE")]
     inputs: Vec<InputArg>,
     /// Local simulation input for a numeric client slot, written as SLOT=VALUE.
-    #[arg(long = "client-input", value_name = "SLOT=VALUE")]
+    #[arg(
+        long = "client-input",
+        value_name = "SLOT=VALUE",
+        allow_hyphen_values = true
+    )]
     client_inputs: Vec<ClientInputArg>,
     /// Path to the stoffel-run helper binary for local MPC simulation.
     #[arg(long)]
     runner: Option<PathBuf>,
     /// Override [mpc].parties from Stoffel.toml for each dev run.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
     parties: Option<usize>,
     /// Override [mpc].threshold from Stoffel.toml for each dev run.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
     threshold: Option<usize>,
     /// Override [mpc].backend from Stoffel.toml for each dev compile.
     #[arg(long, alias = "protocol")]
@@ -357,13 +407,23 @@ struct DevArgs {
     #[arg(long, alias = "curve")]
     field: Option<Curve>,
     /// Timeout for local MPC execution, in seconds.
-    #[arg(long, default_value_t = 180)]
+    #[arg(
+        long,
+        default_value_t = 180,
+        value_parser = parse_u64_arg,
+        allow_hyphen_values = true
+    )]
     timeout_secs: u64,
     /// Run once and exit; do not watch for file changes.
     #[arg(long)]
     once: bool,
     /// File-watch polling interval for hot reload, in milliseconds. Must be greater than zero.
-    #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(
+        long,
+        default_value_t = 500,
+        value_parser = parse_positive_u64_arg,
+        allow_hyphen_values = true
+    )]
     poll_ms: u64,
     /// Catch positional input mistakes so we can explain --input NAME=VALUE.
     #[arg(value_name = "INPUT", trailing_var_arg = true, hide = true)]
@@ -404,9 +464,6 @@ struct StatusArgs {
 struct CleanArgs {
     /// Project directory or any file inside a project. Defaults to the current directory.
     path: Option<PathBuf>,
-    /// Legacy no-op: plain clean already removes target/, including release artifacts.
-    #[arg(long, hide = true)]
-    release: bool,
     /// Also remove known ecosystem build caches such as node_modules and Rust target dirs.
     #[arg(long)]
     all: bool,
@@ -459,7 +516,8 @@ impl std::str::FromStr for InputArg {
         }
         Ok(Self {
             name: name.to_owned(),
-            value: parse_value(value),
+            value: parse_value(value)
+                .map_err(|error| anyhow::anyhow!("invalid value for input '{name}': {error}"))?,
         })
     }
 }
@@ -485,7 +543,9 @@ impl std::str::FromStr for ClientInputArg {
             client_slot: client_slot
                 .parse()
                 .with_context(|| format!("invalid client slot '{client_slot}'"))?,
-            value: parse_value(value),
+            value: parse_value(value).map_err(|error| {
+                anyhow::anyhow!("invalid value for client input slot {client_slot}: {error}")
+            })?,
         })
     }
 }
@@ -529,6 +589,7 @@ fn init(args: InitArgs) -> Result<()> {
 
 fn check(args: CheckArgs) -> Result<()> {
     let args = args.to_build_args();
+    validate_explicit_build_path(args.path.as_deref())?;
     let project = Project::discover(args.path.as_deref())?;
     for source in selected_sources(&project, &args)? {
         let runtime = configured_builder_for_source(&project, &args, &source)?
@@ -547,6 +608,7 @@ fn build(args: BuildArgs) -> Result<()> {
     if args.disassemble {
         return disassemble(args);
     }
+    validate_explicit_build_path(args.path.as_deref())?;
     let project = Project::discover(args.path.as_deref())?;
     let sources = selected_sources(&project, &args)?;
     if args.output.is_some() && sources.len() > 1 {
@@ -607,7 +669,8 @@ async fn run_network(args: RunArgs) -> Result<()> {
         .config
         .as_ref()
         .context("network execution requires --config")?;
-    validate_network_config_path(config_path)?;
+    let config_path = resolve_network_config_path(config_path, &args.build.to_build_args());
+    validate_network_config_path(&config_path)?;
     if !args.client_inputs.is_empty() {
         anyhow::bail!("network execution accepts --input values for the configured client slot; --client-input is only used for local ClientStore runs");
     }
@@ -636,20 +699,25 @@ async fn run_network(args: RunArgs) -> Result<()> {
         .map(|input| input.value.clone())
         .collect::<Vec<_>>();
 
-    match read_run_network_config(config_path)? {
+    match read_run_network_config(&config_path)? {
         RunNetworkConfig::OffChain(config) => {
             let client_id = client_id_from_u64(args.client_id.unwrap_or(config.client_slot))?;
             let client = runtime
                 .client()
                 .client_id(client_id)
                 .offchain_io(config)
-                .build()?;
+                .build()
+                .map_err(|error| {
+                    anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
+                })?;
             println!("Connected to off-chain MPC coordinator configuration");
             let result = client.run_function(&args.entry, &inputs).await?;
             print_values(&result);
         }
         RunNetworkConfig::Network(config) => {
-            let summary = config.summary()?;
+            let summary = config.summary().map_err(|error| {
+                anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
+            })?;
             let client_id = client_id_from_u64(args.client_id.unwrap_or(0))?;
             let client = runtime
                 .client()
@@ -657,7 +725,10 @@ async fn run_network(args: RunArgs) -> Result<()> {
                 .network_config(&config)
                 .connection_timeout(Duration::from_millis(args.connect_timeout_ms))
                 .connect()
-                .await?;
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
+                })?;
             let client_summary = client.summary();
             println!(
                 "Connected to MPC network ({} servers, backend {}, threshold {})",
@@ -682,13 +753,39 @@ fn validate_run_args(args: &RunArgs) -> Result<()> {
         "stoffel run",
         args.build.path.as_deref(),
         &args.positional_inputs,
-    )
+    )?;
+    if args.local && args.config.is_some() {
+        anyhow::bail!(
+            "--local cannot be used with --config; remove --config for local simulation or remove --local to run against a network config"
+        );
+    }
+    let network_mode = args.network || args.config.is_some();
+    if !network_mode && args.client_id.is_some() {
+        anyhow::bail!(
+            "--client-id only applies to network execution; pass --network --config <CONFIG> or remove --client-id"
+        );
+    }
+    if network_mode && args.runner.is_some() {
+        anyhow::bail!(
+            "--runner only applies to local simulation; remove --runner when using --network or --config"
+        );
+    }
+    Ok(())
 }
 
 fn validate_dev_args(args: &DevArgs) -> Result<()> {
     validate_positional_inputs("stoffel dev", args.path.as_deref(), &args.positional_inputs)?;
     if let Some(path) = args.path.as_deref() {
-        if path.exists() && !path.is_dir() && !is_source_path(path) {
+        if path.exists() && path.is_dir() {
+            let project = Project::discover(Some(path))?;
+            if !is_project_root_dir(&project, path)? {
+                anyhow::bail!(
+                    "stoffel dev expected a project directory containing Stoffel.toml or a .stfl source file; got directory {}. To watch this project, pass {}",
+                    path.display(),
+                    project.root().display()
+                );
+            }
+        } else if path.exists() && !is_source_path(path) {
             if is_bytecode_path(path) {
                 anyhow::bail!(
                     "stoffel dev watches project directories or .stfl source files; use `stoffel run {}` to execute bytecode",
@@ -736,6 +833,13 @@ fn validate_positional_inputs(
         }
     }
     values.extend(positional.iter().cloned());
+    if command == "stoffel run" {
+        if let Some(config) = values.iter().find(|value| is_toml_path(Path::new(value))) {
+            anyhow::bail!(
+                "unexpected TOML config path '{config}' after PATH. Use: stoffel run <PROJECT> --config {config}"
+            );
+        }
+    }
     let hint = values
         .iter()
         .filter(|value| value.contains('='))
@@ -782,7 +886,6 @@ async fn run_dev_once(args: &DevArgs) -> Result<()> {
     let build = BuildArgs {
         path: args.path.clone(),
         output: None,
-        binary: true,
         disassemble: false,
         print_ir: false,
         opt_level: None,
@@ -795,8 +898,9 @@ async fn run_dev_once(args: &DevArgs) -> Result<()> {
         instance_id: None,
     };
     let project = Project::discover(build.path.as_deref())?;
+    let source = dev_source_path(&project, build.path.as_deref());
     let mut builder = apply_run_inputs(
-        configured_builder(&project, &build)?,
+        configured_builder_for_source(&project, &build, &source)?,
         &args.inputs,
         &args.client_inputs,
     )?;
@@ -813,6 +917,15 @@ async fn run_dev_once(args: &DevArgs) -> Result<()> {
         .await?;
     print_values(&result);
     Ok(())
+}
+
+fn dev_source_path(project: &Project, path: Option<&Path>) -> PathBuf {
+    if let Some(path) = path {
+        if path.is_file() && is_source_path(path) {
+            return path.to_path_buf();
+        }
+    }
+    project.source_path().to_path_buf()
 }
 
 async fn test(args: TestArgs) -> Result<()> {
@@ -856,12 +969,8 @@ async fn test(args: TestArgs) -> Result<()> {
     let mut failures = 0;
     for file in &files {
         let builder = Stoffel::compile_file(file)?;
-        let entry = args
-            .test
-            .as_deref()
-            .filter(|name| !test_name_matches_file(file, name))
-            .unwrap_or("main");
         let mut runtime = builder.build()?;
+        let entry = selected_test_entry(runtime.program(), file, args.test.as_deref());
         validate_test_entry_has_no_parameters(runtime.program(), entry, file)?;
         let result = if args.local {
             if let Some(path) = &args.runner {
@@ -892,6 +1001,18 @@ async fn test(args: TestArgs) -> Result<()> {
     Ok(())
 }
 
+fn selected_test_entry<'a>(program: &Program, file: &Path, test: Option<&'a str>) -> &'a str {
+    if let Some(name) = test {
+        if program.function(name).is_some() {
+            return name;
+        }
+        if !test_name_matches_file(file, name) {
+            return name;
+        }
+    }
+    "main"
+}
+
 fn ensure_test_file_path(path: &Path) -> Result<()> {
     if !is_source_path(path) {
         anyhow::bail!(
@@ -918,6 +1039,16 @@ fn validate_test_entry_has_no_parameters(
     entry: &str,
     file: &Path,
 ) -> Result<()> {
+    if !source_declares_function(file, entry)? {
+        let available = function_list(program);
+        if available.is_empty() {
+            anyhow::bail!("test entry '{entry}' not declared in {}", file.display());
+        }
+        anyhow::bail!(
+            "test entry '{entry}' not declared in {}; available functions: {available}. Define `def {entry}(...):` or select a declared no-argument function with `stoffel test --test <name>`",
+            file.display()
+        );
+    }
     let Some(function) = program.function(entry) else {
         let available = function_list(program);
         if available.is_empty() {
@@ -948,6 +1079,29 @@ fn validate_test_entry_has_no_parameters(
     );
 }
 
+fn source_declares_function(file: &Path, entry: &str) -> Result<bool> {
+    let raw = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read {}", file.display()))?;
+    Ok(raw.lines().any(|line| {
+        let Some(rest) = line.trim_start().strip_prefix("def") else {
+            return false;
+        };
+        if !rest
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_whitespace())
+        {
+            return false;
+        }
+        let name = rest
+            .trim_start()
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect::<String>();
+        name == entry
+    }))
+}
+
 fn clean(args: CleanArgs) -> Result<()> {
     let project = Project::discover(args.path.as_deref())?;
     let mut removed = Vec::new();
@@ -958,12 +1112,6 @@ fn clean(args: CleanArgs) -> Result<()> {
         for path in deep_clean_paths(&project) {
             remove_dir_if_exists(&path, &mut removed, &mut skipped)?;
         }
-    } else if args.release {
-        remove_dir_if_exists(
-            &project.target_dir().join("release"),
-            &mut removed,
-            &mut skipped,
-        )?;
     }
     if args.all {
         println!("Cleaned Stoffel project artifacts and known ecosystem caches");
@@ -1020,15 +1168,7 @@ fn status(args: StatusArgs) -> Result<()> {
         println!("Dependencies: {ready}/{} ready", dependencies.len());
         if args.verbose {
             for dep in &dependencies {
-                println!(
-                    "  {}: {}",
-                    dep.name,
-                    if dep.ready {
-                        dep.detail.as_str()
-                    } else {
-                        "missing expected files"
-                    }
-                );
+                println!("  {}: {}", dep.name, dep.detail);
             }
         }
     }
@@ -1075,6 +1215,11 @@ fn status(args: StatusArgs) -> Result<()> {
 }
 
 fn update(args: UpdateArgs) -> Result<()> {
+    if args.self_from_source && args.no_self {
+        anyhow::bail!(
+            "--self-from-source cannot be used with --no-self; remove --no-self to reinstall the CLI from this source checkout"
+        );
+    }
     if args.no_self && args.no_project {
         anyhow::bail!(
             "no update targets selected; remove --no-self to include the Stoffel CLI or remove --no-project to include project dependencies"
@@ -1111,6 +1256,7 @@ fn configured_builder_for_source(
     args: &BuildArgs,
     source: &Path,
 ) -> Result<Stoffel> {
+    validate_mpc_overrides(args)?;
     let builder = Stoffel::compile_file(source)?;
     Ok(apply_build_config(builder, project, args))
 }
@@ -1121,6 +1267,7 @@ struct RunSource {
 }
 
 fn run_builder(args: &BuildArgs) -> Result<RunSource> {
+    validate_mpc_overrides(args)?;
     if let Some(path) = &args.path {
         if is_bytecode_path(path) {
             if !path.exists() {
@@ -1135,6 +1282,7 @@ fn run_builder(args: &BuildArgs) -> Result<RunSource> {
                 bytecode_path: Some(path.clone()),
             });
         }
+        validate_explicit_run_path(path)?;
         let project = Project::discover(Some(path))?;
         if path.is_dir() {
             if !is_project_root_dir(&project, path)? {
@@ -1175,6 +1323,23 @@ fn run_builder(args: &BuildArgs) -> Result<RunSource> {
         builder: configured_builder(&project, args)?,
         bytecode_path: None,
     })
+}
+
+fn validate_explicit_build_path(path: Option<&Path>) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if path.exists() && !path.is_dir() && !is_source_path(path) {
+        ensure_source_path(path)?;
+    }
+    Ok(())
+}
+
+fn validate_explicit_run_path(path: &Path) -> Result<()> {
+    if path.exists() && !path.is_dir() && !is_source_path(path) && !is_bytecode_path(path) {
+        ensure_run_path(path)?;
+    }
+    Ok(())
 }
 
 fn load_bytecode_for_run(path: &Path) -> Result<Stoffel> {
@@ -1239,6 +1404,16 @@ fn apply_inline_build_config(mut builder: Stoffel, args: &BuildArgs) -> Stoffel 
     builder
 }
 
+fn validate_mpc_overrides(args: &BuildArgs) -> Result<()> {
+    if matches!(args.threshold, Some(0)) {
+        anyhow::bail!("invalid --threshold 0; threshold must be greater than zero");
+    }
+    if matches!(args.parties, Some(0)) {
+        anyhow::bail!("invalid --parties 0; parties must be greater than zero");
+    }
+    Ok(())
+}
+
 fn effective_opt_level(args: &BuildArgs, configured: Option<u8>) -> u8 {
     args.opt_level.or(configured).unwrap_or(if args.release {
         3
@@ -1286,6 +1461,18 @@ fn is_project_root_dir(project: &Project, path: &Path) -> Result<bool> {
 }
 
 fn ensure_source_path(path: &Path) -> Result<()> {
+    if is_toml_path(path) {
+        if is_project_config_path(path) {
+            anyhow::bail!(
+                "got project config {}; pass the project directory instead",
+                path.display()
+            );
+        }
+        anyhow::bail!(
+            "got TOML config {}; build/check expect a project directory, source directory, or .stfl source file",
+            path.display()
+        );
+    }
     if !is_source_path(path) {
         anyhow::bail!(
             "expected a .stfl source file or project directory; got {}",
@@ -1296,6 +1483,19 @@ fn ensure_source_path(path: &Path) -> Result<()> {
 }
 
 fn ensure_run_path(path: &Path) -> Result<()> {
+    if is_toml_path(path) {
+        if is_project_config_path(path) {
+            anyhow::bail!(
+                "got project config {}; pass the project directory instead",
+                path.display()
+            );
+        }
+        anyhow::bail!(
+            "got TOML config {}; use `stoffel run <PROJECT> --config {}` for network execution, or pass a project/source/bytecode path",
+            path.display(),
+            path.display()
+        );
+    }
     if !is_source_path(path) {
         anyhow::bail!(
             "expected a .stfl source file, .stfb/.stflb bytecode file, or project directory; got {}",
@@ -1303,6 +1503,18 @@ fn ensure_run_path(path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn is_toml_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+}
+
+fn is_project_config_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("Stoffel.toml"))
 }
 
 fn project_relative_output(project: &Project, output: PathBuf) -> PathBuf {
@@ -1346,6 +1558,7 @@ fn validate_bytecode_output_path(project: &Project, output: &Path) -> Result<()>
 }
 
 fn disassemble(args: BuildArgs) -> Result<()> {
+    validate_disassemble_args(&args)?;
     let path = args
         .path
         .as_ref()
@@ -1363,6 +1576,47 @@ fn disassemble(args: BuildArgs) -> Result<()> {
     Ok(())
 }
 
+fn validate_disassemble_args(args: &BuildArgs) -> Result<()> {
+    let mut ignored = Vec::new();
+    if args.output.is_some() {
+        ignored.push("--output");
+    }
+    if args.print_ir {
+        ignored.push("--print-ir");
+    }
+    if args.opt_level.is_some() {
+        ignored.push("--opt-level");
+    }
+    if args.optimize {
+        ignored.push("--optimize");
+    }
+    if args.release {
+        ignored.push("--release");
+    }
+    if args.backend.is_some() {
+        ignored.push("--backend");
+    }
+    if args.field.is_some() {
+        ignored.push("--field");
+    }
+    if args.parties.is_some() {
+        ignored.push("--parties");
+    }
+    if args.threshold.is_some() {
+        ignored.push("--threshold");
+    }
+    if args.instance_id.is_some() {
+        ignored.push("--instance-id");
+    }
+    if !ignored.is_empty() {
+        anyhow::bail!(
+            "--disassemble reads existing bytecode and cannot be combined with compile options: {}",
+            ignored.join(", ")
+        );
+    }
+    Ok(())
+}
+
 enum RunNetworkConfig {
     OffChain(OffChainClientConfig),
     Network(NetworkConfig),
@@ -1371,20 +1625,64 @@ enum RunNetworkConfig {
 fn read_run_network_config(path: &Path) -> Result<RunNetworkConfig> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
+    if looks_like_project_config(&raw) {
+        anyhow::bail!(
+            "--config expects an MPC network/off-chain client config, but {} looks like a Stoffel project config; pass the project path as PATH instead",
+            path.display()
+        );
+    }
     if let Ok(config) = toml::from_str::<OffChainClientConfig>(&raw) {
-        config
-            .validate()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        config.validate().map_err(|error| {
+            anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
+        })?;
         return Ok(RunNetworkConfig::OffChain(config));
     }
     NetworkConfig::from_toml_str(&raw)
         .map(RunNetworkConfig::Network)
         .map_err(|error| {
             anyhow::anyhow!(
-                "failed to parse {} as off-chain or network config: {error}",
-                path.display()
+                "failed to parse {} as off-chain or network config: {}",
+                path.display(),
+                clean_repeated_invalid_config_prefix(&error.to_string())
             )
         })
+}
+
+fn clean_repeated_invalid_config_prefix(error: &str) -> String {
+    let repeated = "Invalid configuration: Invalid configuration: ";
+    if let Some(rest) = error.strip_prefix(repeated) {
+        format!("Invalid configuration: {rest}")
+    } else {
+        error.to_owned()
+    }
+}
+
+fn looks_like_project_config(raw: &str) -> bool {
+    let Ok(value) = toml::from_str::<toml::Value>(raw) else {
+        return false;
+    };
+    let Some(table) = value.as_table() else {
+        return false;
+    };
+    table.contains_key("package") || table.contains_key("build")
+}
+
+fn resolve_network_config_path(path: &Path, build: &BuildArgs) -> PathBuf {
+    if path.exists() || path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let Some(project_path) = build.path.as_deref() else {
+        return path.to_path_buf();
+    };
+    let Ok(project) = Project::discover(Some(project_path)) else {
+        return path.to_path_buf();
+    };
+    let candidate = project.root().join(path);
+    if candidate.exists() {
+        candidate
+    } else {
+        path.to_path_buf()
+    }
 }
 
 fn validate_network_config_path(path: &Path) -> Result<()> {
@@ -1574,7 +1872,6 @@ fn default_build_for_status(path: PathBuf) -> BuildArgs {
     BuildArgs {
         path: Some(path),
         output: None,
-        binary: true,
         disassemble: false,
         print_ir: false,
         opt_level: None,
@@ -1599,41 +1896,58 @@ fn dependency_statuses(project: &Project) -> Vec<DependencyStatus> {
     let root = project.root();
     let mut statuses = Vec::new();
     if root.join("Cargo.toml").exists() {
+        let ready = command_exists("cargo");
         statuses.push(DependencyStatus {
             name: "cargo",
-            ready: command_exists("cargo"),
-            detail: "Cargo.toml detected".to_owned(),
+            ready,
+            detail: command_dependency_detail("Cargo.toml detected", "cargo", ready),
         });
     }
     if root.join("package.json").exists() {
+        let ready = command_exists("npm");
         statuses.push(DependencyStatus {
             name: "npm",
-            ready: command_exists("npm"),
-            detail: "package.json detected".to_owned(),
+            ready,
+            detail: command_dependency_detail("package.json detected", "npm", ready),
         });
     }
     if root.join("requirements.txt").exists() || root.join("pyproject.toml").exists() {
+        let ready = command_exists("python3") || command_exists("python");
         statuses.push(DependencyStatus {
             name: "python",
-            ready: command_exists("python3") || command_exists("python"),
-            detail: "Python dependency manifest detected".to_owned(),
+            ready,
+            detail: if ready {
+                "Python dependency manifest detected; python available".to_owned()
+            } else {
+                "Python dependency manifest detected; required command 'python3' or 'python' not found in PATH".to_owned()
+            },
         });
     }
     if root.join("foundry.toml").exists() {
+        let ready = command_exists("forge");
         statuses.push(DependencyStatus {
             name: "foundry",
-            ready: command_exists("forge"),
-            detail: "foundry.toml detected".to_owned(),
+            ready,
+            detail: command_dependency_detail("foundry.toml detected", "forge", ready),
         });
     }
     if root.join("hardhat.config.js").exists() || root.join("hardhat.config.ts").exists() {
+        let ready = command_exists("npm");
         statuses.push(DependencyStatus {
             name: "hardhat",
-            ready: command_exists("npm"),
-            detail: "Hardhat config detected".to_owned(),
+            ready,
+            detail: command_dependency_detail("Hardhat config detected", "npm", ready),
         });
     }
     statuses
+}
+
+fn command_dependency_detail(manifest: &str, command: &str, ready: bool) -> String {
+    if ready {
+        format!("{manifest}; {command} available")
+    } else {
+        format!("{manifest}; required command '{command}' not found in PATH")
+    }
 }
 
 fn network_status(project: &Project) -> Option<String> {
@@ -1730,7 +2044,7 @@ fn update_project_dependencies(project: &Project, check: bool) -> Result<()> {
             )?;
         }
     }
-    if root.join("foundry.toml").exists() && command_exists("forge") {
+    if root.join("foundry.toml").exists() {
         detected = true;
         if check {
             println!("Project update: Foundry project detected");
@@ -1794,20 +2108,98 @@ fn deep_clean_paths(project: &Project) -> Vec<PathBuf> {
     paths
 }
 
-fn parse_value(value: &str) -> Value {
+fn parse_opt_level(raw: &str) -> std::result::Result<u8, String> {
+    if raw.starts_with("-O") {
+        return Err("use -O3 or --opt-level 3; do not write --opt-level -O3".to_owned());
+    }
+    let level = raw
+        .parse::<u8>()
+        .map_err(|_| format!("invalid optimization level '{raw}'; use 0, 1, 2, or 3"))?;
+    if level > 3 {
+        return Err(format!(
+            "invalid optimization level '{raw}'; use 0, 1, 2, or 3"
+        ));
+    }
+    Ok(level)
+}
+
+fn parse_u64_arg(raw: &str) -> std::result::Result<u64, String> {
+    if raw.starts_with('-') {
+        return Err(format!(
+            "'{raw}' is not valid here; use 0 or a positive whole number"
+        ));
+    }
+    raw.parse::<u64>()
+        .map_err(|_| format!("invalid value '{raw}'; use 0 or a positive whole number"))
+}
+
+fn parse_usize_arg(raw: &str) -> std::result::Result<usize, String> {
+    if raw.starts_with('-') {
+        return Err(format!(
+            "'{raw}' is not valid here; use 0 or a positive whole number"
+        ));
+    }
+    raw.parse::<usize>()
+        .map_err(|_| format!("invalid value '{raw}'; use 0 or a positive whole number"))
+}
+
+fn parse_positive_u64_arg(raw: &str) -> std::result::Result<u64, String> {
+    if raw.starts_with('-') {
+        return Err(format!(
+            "'{raw}' is not valid here; use a positive whole number"
+        ));
+    }
+    let value = raw
+        .parse::<u64>()
+        .map_err(|_| format!("invalid value '{raw}'; use a positive whole number"))?;
+    if value == 0 {
+        return Err("0 is not valid here; use a positive whole number".to_owned());
+    }
+    Ok(value)
+}
+
+fn parse_value(value: &str) -> Result<Value> {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return Ok(Value::Bytes(parse_hex_bytes(hex)?));
+    }
     if let Ok(value) = value.parse::<i64>() {
-        return Value::I64(value);
+        return Ok(Value::I64(value));
     }
     if let Ok(value) = value.parse::<u64>() {
-        return Value::U64(value);
+        return Ok(Value::U64(value));
     }
     if let Ok(value) = value.parse::<bool>() {
-        return Value::Bool(value);
+        return Ok(Value::Bool(value));
     }
     if let Ok(value) = value.parse::<f64>() {
-        return Value::Float(value);
+        return Ok(Value::Float(value));
     }
-    Value::String(value.to_owned())
+    Ok(Value::String(value.to_owned()))
+}
+
+fn parse_hex_bytes(raw: &str) -> Result<Vec<u8>> {
+    if raw.is_empty() {
+        anyhow::bail!("hex byte input must include at least one byte after 0x");
+    }
+    if raw.len() % 2 != 0 {
+        anyhow::bail!(
+            "hex byte input must contain an even number of digits; write 0x0{raw} for one byte"
+        );
+    }
+    let mut bytes = Vec::with_capacity(raw.len() / 2);
+    for index in (0..raw.len()).step_by(2) {
+        let pair = &raw[index..index + 2];
+        let byte = u8::from_str_radix(pair, 16).map_err(|error| {
+            anyhow::anyhow!(
+                "hex byte input contains invalid digits '{pair}' at offset {index}: {error}"
+            )
+        })?;
+        bytes.push(byte);
+    }
+    Ok(bytes)
 }
 
 fn print_values(values: &[Value]) {
@@ -1894,7 +2286,7 @@ impl WatchSnapshot {
     fn capture(path: Option<&Path>) -> Result<Self> {
         let project = Project::discover(path)?;
         let mut files = BTreeMap::new();
-        for file in project.watch_files()? {
+        for file in dev_watch_files(&project, path)? {
             files.insert(file.clone(), file_fingerprint(&file));
         }
         Ok(Self { files })
@@ -1915,6 +2307,18 @@ impl WatchSnapshot {
             }
         }
     }
+}
+
+fn dev_watch_files(project: &Project, path: Option<&Path>) -> Result<Vec<PathBuf>> {
+    if let Some(path) = path {
+        if path.is_file() && is_source_path(path) {
+            let mut files = vec![project.config_path(), path.to_path_buf()];
+            files.sort();
+            files.dedup();
+            return Ok(files);
+        }
+    }
+    project.watch_files()
 }
 
 fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {

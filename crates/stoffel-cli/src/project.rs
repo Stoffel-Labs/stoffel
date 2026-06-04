@@ -25,7 +25,7 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ProjectConfig {
     pub package: PackageConfig,
     pub mpc: MpcConfig,
@@ -33,7 +33,7 @@ pub struct ProjectConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PackageConfig {
     pub name: String,
     pub version: String,
@@ -41,7 +41,7 @@ pub struct PackageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MpcConfig {
     #[serde(alias = "protocol")]
     pub backend: Option<MpcBackend>,
@@ -65,7 +65,7 @@ impl Default for MpcConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BuildConfig {
     pub source: PathBuf,
     #[serde(alias = "output_dir")]
@@ -118,7 +118,7 @@ impl Project {
     pub fn discover(path: Option<&Path>) -> Result<Self> {
         if let Some(path) = path {
             if !path.exists() {
-                anyhow::bail!("{} does not exist", path.display());
+                anyhow::bail!("{}", missing_path_message(path));
             }
         }
         let start = match path {
@@ -191,12 +191,36 @@ impl Project {
     pub fn source_files(&self) -> Result<Vec<PathBuf>> {
         let source_dir = self.source_dir();
         if !source_dir.exists() {
+            if self.configured_source_is_dir() {
+                anyhow::bail!(
+                    "configured build.source {} does not exist",
+                    self.config.build.source.display()
+                );
+            }
+            if !self.source.exists() {
+                anyhow::bail!(
+                    "configured build.source {} does not exist",
+                    self.config.build.source.display()
+                );
+            }
             return Ok(vec![self.source.clone()]);
         }
         let mut files = Vec::new();
         collect_stfl_files(&source_dir, &mut files)?;
         files.sort();
         if files.is_empty() {
+            if self.configured_source_is_dir() {
+                anyhow::bail!(
+                    "no .stfl source files found under configured build.source {}",
+                    self.config.build.source.display()
+                );
+            }
+            if !self.source.exists() {
+                anyhow::bail!(
+                    "configured build.source {} does not exist",
+                    self.config.build.source.display()
+                );
+            }
             files.push(self.source.clone());
         }
         Ok(files)
@@ -219,13 +243,26 @@ impl Project {
     }
 
     fn source_dir(&self) -> PathBuf {
-        self.root.join(
-            self.config
-                .build
-                .source
-                .parent()
-                .unwrap_or(Path::new("src")),
-        )
+        if self.configured_source_is_dir() {
+            self.root.join(&self.config.build.source)
+        } else {
+            self.root.join(
+                self.config
+                    .build
+                    .source
+                    .parent()
+                    .unwrap_or(Path::new("src")),
+            )
+        }
+    }
+
+    fn configured_source_is_dir(&self) -> bool {
+        self.config
+            .build
+            .source
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("stfl")
     }
 
     pub fn default_bytecode_path_for_source(&self, source: &Path, release: bool) -> PathBuf {
@@ -319,6 +356,62 @@ impl Project {
         }
         Ok(true)
     }
+}
+
+fn missing_path_message(path: &Path) -> String {
+    let mut message = format!("{} does not exist", path.display());
+    if is_stoffel_source_path(path) {
+        if let Some(suggestion) = nearest_stoffel_source(path) {
+            message.push_str(&format!("; did you mean {}?", suggestion.display()));
+        }
+    }
+    message
+}
+
+fn nearest_stoffel_source(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let wanted = path.file_name()?.to_string_lossy();
+    let mut best = None::<(usize, PathBuf)>;
+    for entry in fs::read_dir(parent).ok()?.flatten() {
+        let candidate = entry.path();
+        if !candidate.is_file() || !is_stoffel_source_path(&candidate) {
+            continue;
+        }
+        let Some(name) = candidate.file_name() else {
+            continue;
+        };
+        let distance = levenshtein(&wanted, &name.to_string_lossy());
+        if distance <= 3
+            && best
+                .as_ref()
+                .is_none_or(|(best_distance, _)| distance < *best_distance)
+        {
+            best = Some((distance, candidate));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+fn is_stoffel_source_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension == "stfl")
+}
+
+fn levenshtein(left: &str, right: &str) -> usize {
+    let mut costs = (0..=right.chars().count()).collect::<Vec<_>>();
+    for (left_index, left_char) in left.chars().enumerate() {
+        let mut previous = costs[0];
+        costs[0] = left_index + 1;
+        for (right_index, right_char) in right.chars().enumerate() {
+            let insert = costs[right_index + 1] + 1;
+            let delete = costs[right_index] + 1;
+            let replace = previous + usize::from(left_char != right_char);
+            previous = costs[right_index + 1];
+            costs[right_index + 1] = insert.min(delete).min(replace);
+        }
+    }
+    costs[right.chars().count()]
 }
 
 fn init_stoffel_project(path: &Path) -> Result<()> {
@@ -714,19 +807,30 @@ fn default_library_config_text(name: String) -> String {
 }
 
 fn project_name(path: &Path) -> String {
-    path.file_name()
+    let mut name = String::new();
+    let mut last_was_dash = false;
+    for ch in path
+        .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty() && *name != ".")
         .unwrap_or("stoffel-app")
         .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect()
+    {
+        let ch = ch.to_ascii_lowercase();
+        if ch.is_ascii_alphanumeric() {
+            name.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            name.push('-');
+            last_was_dash = true;
+        }
+    }
+    let name = name.trim_matches('-').to_owned();
+    if name.is_empty() {
+        "stoffel-app".to_owned()
+    } else {
+        name
+    }
 }
 
 fn absolutize(path: &Path) -> Result<PathBuf> {
