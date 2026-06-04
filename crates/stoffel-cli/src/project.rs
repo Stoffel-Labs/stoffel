@@ -123,7 +123,10 @@ impl Project {
         Self::discover_with_options(path, true)
     }
 
-    fn discover_with_options(path: Option<&Path>, allow_existing_target_file: bool) -> Result<Self> {
+    fn discover_with_options(
+        path: Option<&Path>,
+        allow_existing_target_file: bool,
+    ) -> Result<Self> {
         if let Some(path) = path {
             if !path.exists() {
                 anyhow::bail!("{}", missing_path_message(path));
@@ -434,7 +437,7 @@ fn init_stoffel_project(path: &Path) -> Result<()> {
     )?;
     write_new(
         path.join("src/main.stfl"),
-        "def main(a: Share, b: Share) -> int64:\n  var sum = Share.add(a, b)\n  return sum.open()\n",
+        "def main(a: secret int64, b: secret int64) -> secret int64:\n  return a + b\n",
     )?;
     write_new(
         path.join("README.md"),
@@ -483,7 +486,7 @@ fn init_rust_project(path: &Path) -> Result<()> {
     )?;
     write_new(
         path.join("stoffel/src/program.stfl"),
-        "def main(a: Share, b: Share) -> int64:\n  var sum = Share.add(a, b)\n  return sum.open()\n",
+        "def main(a: secret int64, b: secret int64) -> secret int64:\n  return a + b\n",
     )?;
     write_new(
         path.join("Cargo.toml"),
@@ -824,10 +827,7 @@ fn validate_target_dir(
     while let Some(component) = components.next() {
         absolute.push(component.as_os_str());
         let is_final = components.peek().is_none();
-        if absolute.exists()
-            && !absolute.is_dir()
-            && !(allow_existing_final_file && is_final)
-        {
+        if absolute.exists() && !absolute.is_dir() && !(allow_existing_final_file && is_final) {
             anyhow::bail!(
                 "invalid build.target_dir {}; {} is an existing file",
                 target_dir.display(),

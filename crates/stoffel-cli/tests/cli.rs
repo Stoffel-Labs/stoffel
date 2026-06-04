@@ -66,6 +66,8 @@ fn init_creates_default_project() {
 
     assert!(temp.path().join("hello/Stoffel.toml").exists());
     assert!(temp.path().join("hello/src/main.stfl").exists());
+    let program = fs::read_to_string(temp.path().join("hello/src/main.stfl")).unwrap();
+    assert!(program.contains("def main(a: secret int64, b: secret int64) -> secret int64"));
     let readme = fs::read_to_string(temp.path().join("hello/README.md")).unwrap();
     assert!(readme.contains("stoffel check"));
     assert!(readme.contains("stoffel run --input a=40 --input b=2"));
@@ -3376,7 +3378,7 @@ fn init_supports_declared_templates_and_library_mode() {
             assert!(main_rs.contains("await?"));
             assert!(!main_rs.contains("execute_clear"));
             let program = fs::read_to_string(path.join("stoffel/src/program.stfl")).unwrap();
-            assert!(program.contains("Share.add"));
+            assert!(program.contains("secret int64"));
         }
     }
 
