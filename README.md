@@ -223,17 +223,16 @@ Project templates:
 stoffel init my-lib --lib
 stoffel init rust-app --template rust
 stoffel init py-app --template python
-stoffel init web-app --template typescript
 stoffel init contract-app --template solidity-foundry
 stoffel init hardhat-app --template solidity-hardhat
 ```
 
-Compile project bytecode, print summaries, or inspect bytecode:
+Compile project bytecode, validate source, or inspect bytecode:
 
 ```bash
 stoffel build
 stoffel check
-stoffel compile src/main.stfl -b -O2 --summary
+stoffel compile src/main.stfl -O2 --output target/debug/hello-mpc.stfb
 stoffel compile --disassemble target/debug/hello-mpc.stfb
 ```
 

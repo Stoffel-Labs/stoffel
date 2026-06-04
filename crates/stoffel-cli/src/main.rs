@@ -3,12 +3,14 @@ mod project;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use stoffel::prelude::*;
 
 use crate::project::{init_library_project, Project, Template};
@@ -66,6 +68,7 @@ enum Command {
     /// Build project bytecode under target/.
     Build(ProjectBuildArgs),
     /// Run source or bytecode through MPC execution.
+    #[command(visible_aliases = ["exec", "execute"])]
     Run(RunArgs),
     /// Watch a project and rerun it on local MPC when files change.
     Dev(DevArgs),
@@ -77,22 +80,25 @@ enum Command {
     /// Remove generated build artifacts.
     Clean(CleanArgs),
     /// Check or update the CLI and project dependencies.
+    #[command(visible_alias = "upgrade")]
     Update(UpdateArgs),
+    /// Preserve planned and unknown commands for targeted diagnostics.
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 #[derive(Debug, Args)]
 struct InitArgs {
     /// Directory where the project files are created. Defaults to the current directory.
     path: Option<PathBuf>,
-    /// Project template to create.
+    /// Project template to create. Supported templates: stoffel, python (py), rust, solidity-foundry (foundry), solidity-hardhat (hardhat).
     #[arg(
         long,
-        value_enum,
-        ignore_case = true,
-        default_value_t = TemplateArg::Stoffel,
+        value_name = "TEMPLATE",
+        default_value = "stoffel",
         conflicts_with = "lib"
     )]
-    template: TemplateArg,
+    template: String,
     /// Write template files into an existing directory without deleting unrelated files.
     #[arg(long)]
     force: bool,
@@ -104,26 +110,22 @@ struct InitArgs {
     interactive: bool,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum TemplateArg {
-    Stoffel,
-    Python,
-    Rust,
-    Typescript,
-    SolidityFoundry,
-    SolidityHardhat,
-}
-
 #[derive(Debug, Args, Clone)]
 struct BuildArgs {
     /// Project directory, source directory, or .stfl source file to compile. Defaults to source files from Stoffel.toml.
     path: Option<PathBuf>,
+    /// Catch extra positional paths so we can explain that compile accepts one path.
+    #[arg(value_name = "EXTRA_PATH", hide = true)]
+    extra_paths: Vec<PathBuf>,
     /// Write bytecode to this .stfb/.stflb file. Only valid when one source file is selected.
-    #[arg(short, long)]
+    #[arg(short, long, visible_alias = "out")]
     output: Option<PathBuf>,
     /// Print instructions from an existing .stfb/.stflb bytecode file instead of compiling source.
     #[arg(long)]
     disassemble: bool,
+    /// Legacy flag from the old CLI. Modern compile writes bytecode by default.
+    #[arg(short = 'b', long = "binary", hide = true)]
+    binary: bool,
     /// Print compiler intermediate representation for debugging.
     #[arg(long)]
     print_ir: bool,
@@ -140,7 +142,7 @@ struct BuildArgs {
     #[arg(long, conflicts_with = "opt_level")]
     optimize: bool,
     /// Write under target/release and use O3 unless --opt-level is set.
-    #[arg(long)]
+    #[arg(long, visible_aliases = ["prod", "production"])]
     release: bool,
     /// Override [mpc].backend from Stoffel.toml for this compile.
     #[arg(long, alias = "protocol")]
@@ -149,10 +151,10 @@ struct BuildArgs {
     #[arg(long, alias = "curve")]
     field: Option<Curve>,
     /// Override [mpc].parties from Stoffel.toml for this compile.
-    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
+    #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
     parties: Option<usize>,
     /// Override [mpc].threshold from Stoffel.toml for this compile.
-    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
+    #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
     threshold: Option<usize>,
     /// Override [mpc].instance_id from Stoffel.toml for this compile.
     #[arg(long, value_parser = parse_u64_arg, allow_hyphen_values = true)]
@@ -163,6 +165,9 @@ struct BuildArgs {
 struct CheckArgs {
     /// Project directory, source directory, or .stfl source file to validate. Defaults to source files from Stoffel.toml.
     path: Option<PathBuf>,
+    /// Catch extra positional paths so we can explain that check accepts one path.
+    #[arg(value_name = "EXTRA_PATH", hide = true)]
+    extra_paths: Vec<PathBuf>,
     /// Print compiler intermediate representation for debugging.
     #[arg(long)]
     print_ir: bool,
@@ -173,10 +178,10 @@ struct CheckArgs {
     #[arg(long, alias = "curve")]
     field: Option<Curve>,
     /// Override [mpc].parties from Stoffel.toml for this validation.
-    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
+    #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
     parties: Option<usize>,
     /// Override [mpc].threshold from Stoffel.toml for this validation.
-    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
+    #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
     threshold: Option<usize>,
 }
 
@@ -184,8 +189,10 @@ impl CheckArgs {
     fn to_build_args(&self) -> BuildArgs {
         BuildArgs {
             path: self.path.clone(),
+            extra_paths: self.extra_paths.clone(),
             output: None,
             disassemble: false,
+            binary: false,
             print_ir: self.print_ir,
             opt_level: None,
             optimize: false,
@@ -203,8 +210,11 @@ impl CheckArgs {
 struct ProjectBuildArgs {
     /// Project directory, source directory, or .stfl source file to build. Defaults to source files from Stoffel.toml.
     path: Option<PathBuf>,
+    /// Catch extra positional paths so we can explain that build accepts one path.
+    #[arg(value_name = "EXTRA_PATH", hide = true)]
+    extra_paths: Vec<PathBuf>,
     /// Write bytecode to this .stfb/.stflb file. Only valid when one source file is selected.
-    #[arg(short, long)]
+    #[arg(short, long, visible_alias = "out")]
     output: Option<PathBuf>,
     /// Print compiler intermediate representation for debugging.
     #[arg(long)]
@@ -222,7 +232,7 @@ struct ProjectBuildArgs {
     #[arg(long, conflicts_with = "opt_level")]
     optimize: bool,
     /// Write under target/release and use O3 unless --opt-level is set.
-    #[arg(long)]
+    #[arg(long, visible_aliases = ["prod", "production"])]
     release: bool,
     /// Override [mpc].backend from Stoffel.toml for this build.
     #[arg(long, alias = "protocol")]
@@ -231,10 +241,10 @@ struct ProjectBuildArgs {
     #[arg(long, alias = "curve")]
     field: Option<Curve>,
     /// Override [mpc].parties from Stoffel.toml for this build.
-    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
+    #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
     parties: Option<usize>,
     /// Override [mpc].threshold from Stoffel.toml for this build.
-    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
+    #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
     threshold: Option<usize>,
     /// Override [mpc].instance_id from Stoffel.toml for this build.
     #[arg(long, value_parser = parse_u64_arg, allow_hyphen_values = true)]
@@ -245,8 +255,10 @@ impl ProjectBuildArgs {
     fn to_build_args(&self) -> BuildArgs {
         BuildArgs {
             path: self.path.clone(),
+            extra_paths: self.extra_paths.clone(),
             output: self.output.clone(),
             disassemble: false,
+            binary: false,
             print_ir: self.print_ir,
             opt_level: self.opt_level,
             optimize: self.optimize,
@@ -265,29 +277,35 @@ struct RunArgs {
     #[command(flatten)]
     build: RunBuildArgs,
     /// Function to execute from the compiled program.
-    #[arg(long, default_value = "main")]
+    #[arg(
+        long,
+        visible_aliases = ["entrypoint", "function"],
+        default_value = "main",
+        value_parser = parse_entry_arg
+    )]
     entry: String,
     /// Function argument value, written as NAME=VALUE. Repeat once per argument.
-    #[arg(long = "input", value_name = "NAME=VALUE")]
+    #[arg(long = "input", visible_alias = "inputs", value_name = "NAME=VALUE")]
     inputs: Vec<InputArg>,
     /// Local simulation input for a numeric client slot, written as SLOT=VALUE.
     #[arg(
         long = "client-input",
+        visible_alias = "client-inputs",
         value_name = "SLOT=VALUE",
         allow_hyphen_values = true
     )]
     client_inputs: Vec<ClientInputArg>,
     /// Run on the local MPC simulator. This is the default unless --network or --config is set.
-    #[arg(long, conflicts_with = "network")]
+    #[arg(long)]
     local: bool,
     /// Connect to an MPC network described by --config.
-    #[arg(long, conflicts_with = "local")]
+    #[arg(long)]
     network: bool,
     /// MPC network/off-chain client TOML file. Do not pass project Stoffel.toml here.
     #[arg(long)]
     config: Option<PathBuf>,
     /// Print function/instruction metadata before executing.
-    #[arg(long = "program-info")]
+    #[arg(long = "program-info", visible_aliases = ["inspect", "info"])]
     program_info: bool,
     /// Network client slot to use with --network.
     #[arg(long, value_parser = parse_u64_arg, allow_hyphen_values = true)]
@@ -296,18 +314,18 @@ struct RunArgs {
     #[arg(
         long,
         default_value_t = 10_000,
-        value_parser = parse_u64_arg,
+        value_parser = parse_positive_u64_arg,
         allow_hyphen_values = true
     )]
     connect_timeout_ms: u64,
-    /// Path to the stoffel-run helper binary for local MPC simulation.
+    /// Path to the stoffel-run helper binary. Only used with --local.
     #[arg(long)]
     runner: Option<PathBuf>,
     /// Timeout for local MPC execution, in seconds.
     #[arg(
         long,
         default_value_t = 180,
-        value_parser = parse_u64_arg,
+        value_parser = parse_positive_u64_arg,
         allow_hyphen_values = true
     )]
     timeout_secs: u64,
@@ -336,7 +354,7 @@ struct RunBuildArgs {
     #[arg(long, conflicts_with = "opt_level")]
     optimize: bool,
     /// Prefer target/release bytecode and use O3 when compiling source unless --opt-level is set.
-    #[arg(long)]
+    #[arg(long, visible_aliases = ["prod", "production"])]
     release: bool,
     /// Override [mpc].backend from Stoffel.toml when compiling source before running.
     #[arg(long, alias = "protocol")]
@@ -345,10 +363,10 @@ struct RunBuildArgs {
     #[arg(long, alias = "curve")]
     field: Option<Curve>,
     /// Override [mpc].parties from Stoffel.toml for this run.
-    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
+    #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
     parties: Option<usize>,
     /// Override [mpc].threshold from Stoffel.toml for this run.
-    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
+    #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
     threshold: Option<usize>,
     /// Override [mpc].instance_id from Stoffel.toml for this run.
     #[arg(long, value_parser = parse_u64_arg, allow_hyphen_values = true)]
@@ -359,8 +377,10 @@ impl RunBuildArgs {
     fn to_build_args(&self) -> BuildArgs {
         BuildArgs {
             path: self.path.clone(),
+            extra_paths: Vec::new(),
             output: None,
             disassemble: false,
+            binary: false,
             print_ir: self.print_ir,
             opt_level: self.opt_level,
             optimize: self.optimize,
@@ -379,26 +399,32 @@ struct DevArgs {
     /// Project directory or .stfl source file to watch. Defaults to source files from Stoffel.toml.
     path: Option<PathBuf>,
     /// Function to execute after each reload.
-    #[arg(long, default_value = "main")]
+    #[arg(
+        long,
+        visible_aliases = ["entrypoint", "function"],
+        default_value = "main",
+        value_parser = parse_entry_arg
+    )]
     entry: String,
     /// Function argument value, written as NAME=VALUE. Repeat once per argument.
-    #[arg(long = "input", value_name = "NAME=VALUE")]
+    #[arg(long = "input", visible_alias = "inputs", value_name = "NAME=VALUE")]
     inputs: Vec<InputArg>,
     /// Local simulation input for a numeric client slot, written as SLOT=VALUE.
     #[arg(
         long = "client-input",
+        visible_alias = "client-inputs",
         value_name = "SLOT=VALUE",
         allow_hyphen_values = true
     )]
     client_inputs: Vec<ClientInputArg>,
-    /// Path to the stoffel-run helper binary for local MPC simulation.
+    /// Path to the stoffel-run helper binary. Only used with --local.
     #[arg(long)]
     runner: Option<PathBuf>,
     /// Override [mpc].parties from Stoffel.toml for each dev run.
-    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
+    #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
     parties: Option<usize>,
     /// Override [mpc].threshold from Stoffel.toml for each dev run.
-    #[arg(long, value_parser = parse_usize_arg, allow_hyphen_values = true)]
+    #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
     threshold: Option<usize>,
     /// Override [mpc].backend from Stoffel.toml for each dev compile.
     #[arg(long, alias = "protocol")]
@@ -410,16 +436,20 @@ struct DevArgs {
     #[arg(
         long,
         default_value_t = 180,
-        value_parser = parse_u64_arg,
+        value_parser = parse_positive_u64_arg,
         allow_hyphen_values = true
     )]
     timeout_secs: u64,
     /// Run once and exit; do not watch for file changes.
-    #[arg(long)]
+    #[arg(long, visible_alias = "no-watch")]
     once: bool,
+    /// Catch redundant watch requests so we can explain that watching is the default.
+    #[arg(long, hide = true)]
+    watch: bool,
     /// File-watch polling interval for hot reload, in milliseconds. Must be greater than zero.
     #[arg(
         long,
+        visible_alias = "poll",
         default_value_t = 500,
         value_parser = parse_positive_u64_arg,
         allow_hyphen_values = true
@@ -434,11 +464,11 @@ struct DevArgs {
 struct TestArgs {
     /// Project directory or .stfl test file. Defaults to every test file recursively under tests/.
     path: Option<PathBuf>,
-    /// Run tests through local MPC simulation instead of the fast clear test runner.
+    /// Run tests through local MPC simulation instead of the embedded no-network test runner.
     #[arg(long)]
     local: bool,
     /// Run tests whose function name or file stem matches this value.
-    #[arg(long = "test")]
+    #[arg(long = "test", visible_alias = "name", value_parser = parse_test_filter_arg)]
     test: Option<String>,
     /// Run only test files marked as integration tests.
     #[arg(long)]
@@ -446,9 +476,15 @@ struct TestArgs {
     /// Print each selected test and its result.
     #[arg(long, short)]
     verbose: bool,
-    /// Path to the stoffel-run helper binary for local MPC simulation.
+    /// Path to the stoffel-run helper binary. Only used with --local.
     #[arg(long)]
     runner: Option<PathBuf>,
+    /// Catch run-command input mistakes so we can explain the test/run split.
+    #[arg(long = "input", hide = true, value_name = "NAME=VALUE")]
+    inputs: Vec<InputArg>,
+    /// Catch run-command entry mistakes so we can explain the test/run split.
+    #[arg(long, hide = true, value_parser = parse_entry_arg)]
+    entry: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -464,17 +500,20 @@ struct StatusArgs {
 struct CleanArgs {
     /// Project directory or any file inside a project. Defaults to the current directory.
     path: Option<PathBuf>,
-    /// Also remove known ecosystem build caches such as node_modules and Rust target dirs.
+    /// Show what would be removed without deleting anything.
+    #[arg(long, visible_aliases = ["check", "dryrun"])]
+    dry_run: bool,
+    /// Also remove .stoffel and detected ecosystem caches such as node_modules or Foundry/Hardhat output.
     #[arg(long)]
     all: bool,
 }
 
 #[derive(Debug, Args)]
 struct UpdateArgs {
-    /// Project directory or any file inside a project. Defaults to the current directory.
+    /// Stoffel project path or dependency manifest path such as Cargo.toml/package.json. Defaults to the current directory.
     path: Option<PathBuf>,
     /// Print available update actions without changing files.
-    #[arg(long)]
+    #[arg(long, visible_aliases = ["dry-run", "dryrun"])]
     check: bool,
     /// Do not check or update the Stoffel CLI executable.
     #[arg(long)]
@@ -485,6 +524,18 @@ struct UpdateArgs {
     /// Reinstall the Stoffel CLI from this source checkout. Required for source builds.
     #[arg(long)]
     self_from_source: bool,
+}
+
+#[derive(Debug, Args)]
+struct PlannedCommandArgs {
+    /// Preserve user input so legacy planned commands can explain the supported workflow.
+    #[arg(
+        value_name = "ARG",
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        hide = true
+    )]
+    args: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -514,6 +565,16 @@ impl std::str::FromStr for InputArg {
         if value.is_empty() {
             anyhow::bail!("input '{name}' must include a value, written as {name}=value");
         }
+        if let Some(next_name) = comma_separated_assignment_name(value) {
+            anyhow::bail!(
+                "input '{raw}' looks like multiple inputs in one flag. Repeat --input for each value, for example: --input {name}=<value> --input {next_name}=<value>"
+            );
+        }
+        if value.contains('=') {
+            anyhow::bail!(
+                "input '{raw}' has more than one '='. Write one argument per flag as --input {name}=<value>; values must be integers, booleans, or 0x-prefixed hex bytes."
+            );
+        }
         Ok(Self {
             name: name.to_owned(),
             value: parse_value(value)
@@ -539,10 +600,22 @@ impl std::str::FromStr for ClientInputArg {
                 "client input slot {client_slot} must include a value, written as {client_slot}=value"
             );
         }
+        if let Some(next_slot) = comma_separated_assignment_name(value) {
+            anyhow::bail!(
+                "client input '{raw}' looks like multiple inputs in one flag. Repeat --client-input for each client slot, for example: --client-input {client_slot}=<value> --client-input {next_slot}=<value>"
+            );
+        }
+        if value.contains('=') {
+            anyhow::bail!(
+                "client input '{raw}' has more than one '='. Write one client input per flag as --client-input {client_slot}=<value>; values must be integers, booleans, or 0x-prefixed hex bytes."
+            );
+        }
         Ok(Self {
-            client_slot: client_slot
-                .parse()
-                .with_context(|| format!("invalid client slot '{client_slot}'"))?,
+            client_slot: client_slot.parse().with_context(|| {
+                format!(
+                    "invalid client slot '{client_slot}'; use a numeric slot like 0, written as 0=value"
+                )
+            })?,
             value: parse_value(value).map_err(|error| {
                 anyhow::anyhow!("invalid value for client input slot {client_slot}: {error}")
             })?,
@@ -550,31 +623,90 @@ impl std::str::FromStr for ClientInputArg {
     }
 }
 
+fn comma_separated_assignment_name(value: &str) -> Option<&str> {
+    value
+        .split(',')
+        .skip(1)
+        .find_map(|part| part.split_once('=').map(|(left, _)| left.trim()))
+        .filter(|left| !left.is_empty())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Init(args) => init(args),
         Command::Check(args) => check(args),
-        Command::Compile(args) => build(args),
-        Command::Build(args) => build(args.to_build_args()),
+        Command::Compile(args) => build("stoffel compile", args),
+        Command::Build(args) => build("stoffel build", args.to_build_args()),
         Command::Run(args) => run(args).await,
         Command::Dev(args) => dev(args).await,
         Command::Test(args) => test(args).await,
         Command::Status(args) => status(args),
         Command::Clean(args) => clean(args),
         Command::Update(args) => update(args),
+        Command::External(args) => external_command(args),
+    }
+}
+
+fn external_command(args: Vec<String>) -> Result<()> {
+    let Some((command, rest)) = args.split_first() else {
+        anyhow::bail!("missing command. Run `stoffel --help` to see available commands.");
+    };
+    match command.as_str() {
+        "deploy" | "add" | "publish" => planned_command(
+            command,
+            PlannedCommandArgs {
+                args: rest.to_vec(),
+            },
+        ),
+        _ => unknown_command(command),
+    }
+}
+
+fn unknown_command(command: &str) -> Result<()> {
+    if let Some(suggestion) = closest_cli_command(command) {
+        anyhow::bail!(
+            "unknown command `{command}`. Did you mean `stoffel {suggestion}`? Run `stoffel --help` to see available commands."
+        );
+    }
+    anyhow::bail!("unknown command `{command}`. Run `stoffel --help` to see available commands.");
+}
+
+fn closest_cli_command(command: &str) -> Option<&'static str> {
+    const COMMANDS: &[&str] = &[
+        "init", "new", "check", "compile", "build", "run", "exec", "execute", "dev", "test",
+        "status", "doctor", "clean", "update", "upgrade",
+    ];
+    COMMANDS
+        .iter()
+        .map(|candidate| (edit_distance(command, candidate), *candidate))
+        .filter(|(distance, _)| *distance <= 2)
+        .min_by_key(|(distance, candidate)| (*distance, candidate.len()))
+        .map(|(_, candidate)| candidate)
+}
+
+fn planned_command(command: &str, args: PlannedCommandArgs) -> Result<()> {
+    let suffix = if args.args.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", args.args.join(" "))
+    };
+    match command {
+        "deploy" => anyhow::bail!(
+            "`stoffel deploy{suffix}` is not available yet. Build bytecode with `stoffel build`; use `stoffel run --network --config <CONFIG>` for network execution."
+        ),
+        "add" => anyhow::bail!(
+            "`stoffel add{suffix}` is not available yet. Edit project dependency files directly for now, then run `stoffel update --check` to inspect detected dependency managers."
+        ),
+        "publish" => anyhow::bail!(
+            "`stoffel publish{suffix}` is not available yet. Build artifacts with `stoffel build --release` before publishing through your project-specific workflow."
+        ),
+        _ => unreachable!("planned command handler called for unsupported command"),
     }
 }
 
 fn init(args: InitArgs) -> Result<()> {
-    let template = match args.template {
-        TemplateArg::Stoffel => Template::Stoffel,
-        TemplateArg::Python => Template::Python,
-        TemplateArg::Rust => Template::Rust,
-        TemplateArg::Typescript => Template::TypeScript,
-        TemplateArg::SolidityFoundry => Template::SolidityFoundry,
-        TemplateArg::SolidityHardhat => Template::SolidityHardhat,
-    };
+    let template = parse_template(&args.template)?;
     let path = args.path.unwrap_or_else(|| PathBuf::from("."));
     let _interactive = args.interactive;
     if args.lib {
@@ -587,8 +719,53 @@ fn init(args: InitArgs) -> Result<()> {
     Ok(())
 }
 
+fn parse_template(raw: &str) -> Result<Template> {
+    let normalized = raw.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "stoffel" => Ok(Template::Stoffel),
+        "python" | "py" => Ok(Template::Python),
+        "rust" => Ok(Template::Rust),
+        "solidity-foundry" | "foundry" => Ok(Template::SolidityFoundry),
+        "solidity-hardhat" | "hardhat" => Ok(Template::SolidityHardhat),
+        "" => anyhow::bail!(
+            "`--template` needs a template name. Supported templates are: stoffel, python (py), rust, solidity-foundry (foundry), solidity-hardhat (hardhat)."
+        ),
+        _ => {
+            let supported = [
+                "stoffel",
+                "python",
+                "py",
+                "rust",
+                "solidity-foundry",
+                "foundry",
+                "solidity-hardhat",
+                "hardhat",
+            ];
+            if let Some(suggestion) = closest_supported_template(&normalized, &supported) {
+                anyhow::bail!(
+                    "unknown template `{raw}`. Did you mean `{suggestion}`? Supported templates are: stoffel, python (py), rust, solidity-foundry (foundry), solidity-hardhat (hardhat)."
+                );
+            }
+            anyhow::bail!(
+                "unknown template `{raw}`. Supported templates are: stoffel, python (py), rust, solidity-foundry (foundry), solidity-hardhat (hardhat)."
+            );
+        }
+    }
+}
+
+fn closest_supported_template<'a>(candidate: &str, supported: &'a [&str]) -> Option<&'a str> {
+    let max_distance = if candidate.len() <= 2 { 1 } else { 3 };
+    supported
+        .iter()
+        .map(|template| (edit_distance(candidate, template), *template))
+        .filter(|(distance, _)| *distance <= max_distance)
+        .min_by_key(|(distance, template)| (*distance, template.len()))
+        .map(|(_, template)| template)
+}
+
 fn check(args: CheckArgs) -> Result<()> {
     let args = args.to_build_args();
+    validate_single_build_path_arg("stoffel check", args.path.as_deref(), &args.extra_paths)?;
     validate_explicit_build_path(args.path.as_deref())?;
     let project = Project::discover(args.path.as_deref())?;
     for source in selected_sources(&project, &args)? {
@@ -604,7 +781,13 @@ fn check(args: CheckArgs) -> Result<()> {
     Ok(())
 }
 
-fn build(args: BuildArgs) -> Result<()> {
+fn build(command: &str, args: BuildArgs) -> Result<()> {
+    validate_single_build_path_arg(command, args.path.as_deref(), &args.extra_paths)?;
+    if args.binary {
+        anyhow::bail!(
+            "{command} writes bytecode by default; remove -b/--binary. Use --output <FILE.stfb> to choose the bytecode file path."
+        );
+    }
     if args.disassemble {
         return disassemble(args);
     }
@@ -653,6 +836,12 @@ async fn run(args: RunArgs) -> Result<()> {
             run_source.bytecode_path.as_deref(),
         )
     })?;
+    validate_entry_declared_in_source(
+        run_source.source_path.as_deref(),
+        runtime.program(),
+        &args.entry,
+        "stoffel run",
+    )?;
     validate_entry_and_named_inputs(runtime.program(), &args.entry, &args.inputs, "stoffel run")?;
     if args.program_info {
         print_program_summary(runtime.program());
@@ -684,6 +873,12 @@ async fn run_network(args: RunArgs) -> Result<()> {
             run_source.bytecode_path.as_deref(),
         )
     })?;
+    validate_entry_declared_in_source(
+        run_source.source_path.as_deref(),
+        runtime.program(),
+        &args.entry,
+        "stoffel run --network",
+    )?;
     validate_entry_and_named_inputs(
         runtime.program(),
         &args.entry,
@@ -754,10 +949,22 @@ fn validate_run_args(args: &RunArgs) -> Result<()> {
         args.build.path.as_deref(),
         &args.positional_inputs,
     )?;
+    if args.local && args.network {
+        anyhow::bail!("--local and --network select different execution modes; remove one of them");
+    }
     if args.local && args.config.is_some() {
         anyhow::bail!(
             "--local cannot be used with --config; remove --config for local simulation or remove --local to run against a network config"
         );
+    }
+    if args.network && args.config.is_none() {
+        if let Some(path) = args.build.path.as_deref().filter(|path| is_toml_path(path)) {
+            anyhow::bail!(
+                "network config path {} was passed as PATH. Use: stoffel run <PROJECT> --network --config {}",
+                path.display(),
+                path.display()
+            );
+        }
     }
     let network_mode = args.network || args.config.is_some();
     if !network_mode && args.client_id.is_some() {
@@ -770,11 +977,19 @@ fn validate_run_args(args: &RunArgs) -> Result<()> {
             "--runner only applies to local simulation; remove --runner when using --network or --config"
         );
     }
+    if let Some(path) = args.runner.as_deref() {
+        validate_runner_path(path)?;
+    }
     Ok(())
 }
 
 fn validate_dev_args(args: &DevArgs) -> Result<()> {
     validate_positional_inputs("stoffel dev", args.path.as_deref(), &args.positional_inputs)?;
+    if args.watch {
+        anyhow::bail!(
+            "stoffel dev watches by default. Remove --watch, or use --once/--no-watch to run one time and exit."
+        );
+    }
     if let Some(path) = args.path.as_deref() {
         if path.exists() && path.is_dir() {
             let project = Project::discover(Some(path))?;
@@ -797,6 +1012,48 @@ fn validate_dev_args(args: &DevArgs) -> Result<()> {
                 path.display()
             );
         }
+    }
+    if let Some(path) = args.runner.as_deref() {
+        validate_runner_path(path)?;
+    }
+    Ok(())
+}
+
+fn validate_runner_path(path: &Path) -> Result<()> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            anyhow::bail!(
+                "--runner path {} does not exist. Pass the built stoffel-run executable path, or remove --runner to use the default local simulator runner.",
+                path.display()
+            );
+        }
+        Err(error) => {
+            anyhow::bail!(
+                "could not read --runner path {}: {error}. Pass the built stoffel-run executable path, or remove --runner to use the default local simulator runner.",
+                path.display()
+            );
+        }
+    };
+    if metadata.is_dir() {
+        anyhow::bail!(
+            "--runner path {} is a directory. Pass the stoffel-run executable file, not its parent directory.",
+            path.display()
+        );
+    }
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "--runner path {} is not a regular executable file. Pass the built stoffel-run executable path.",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o111 == 0 {
+        anyhow::bail!(
+            "--runner path {} is not executable. Run `chmod +x {}` or pass the built stoffel-run executable path.",
+            path.display(),
+            path.display()
+        );
     }
     Ok(())
 }
@@ -857,6 +1114,26 @@ fn validate_positional_inputs(
     );
 }
 
+fn validate_single_build_path_arg(
+    command: &str,
+    path: Option<&Path>,
+    extra_paths: &[PathBuf],
+) -> Result<()> {
+    if extra_paths.is_empty() {
+        return Ok(());
+    }
+    let mut paths = Vec::new();
+    if let Some(path) = path {
+        paths.push(path.display().to_string());
+    }
+    paths.extend(extra_paths.iter().map(|path| path.display().to_string()));
+    anyhow::bail!(
+        "{command} accepts one PATH, but got {}: {}. Use `{command} <PROJECT_DIR>` or `{command} <SOURCE.stfl>`",
+        paths.len(),
+        paths.join(" ")
+    );
+}
+
 fn path_looks_like_positional_input(path: Option<&Path>) -> bool {
     path.and_then(Path::to_str)
         .is_some_and(|path| path.contains('=') && !Path::new(path).exists())
@@ -885,8 +1162,10 @@ async fn dev(args: DevArgs) -> Result<()> {
 async fn run_dev_once(args: &DevArgs) -> Result<()> {
     let build = BuildArgs {
         path: args.path.clone(),
+        extra_paths: Vec::new(),
         output: None,
         disassemble: false,
+        binary: false,
         print_ir: false,
         opt_level: None,
         optimize: false,
@@ -911,6 +1190,12 @@ async fn run_dev_once(args: &DevArgs) -> Result<()> {
         .clone()
         .build()
         .with_context(|| execution_build_context("stoffel dev", build.path.as_deref(), None))?;
+    validate_entry_declared_in_source(
+        Some(&source),
+        runtime.program(),
+        &args.entry,
+        "stoffel dev",
+    )?;
     validate_entry_and_named_inputs(runtime.program(), &args.entry, &args.inputs, "stoffel dev")?;
     let result = builder
         .execute_local_function_with_timeout(&args.entry, Duration::from_secs(args.timeout_secs))
@@ -929,6 +1214,8 @@ fn dev_source_path(project: &Project, path: Option<&Path>) -> PathBuf {
 }
 
 async fn test(args: TestArgs) -> Result<()> {
+    validate_test_args(&args)?;
+    validate_test_path_hint(args.path.as_deref())?;
     let project = Project::discover(args.path.as_deref())?;
     let mut files = match args.path.as_deref() {
         Some(path) if path.is_file() => {
@@ -997,6 +1284,51 @@ async fn test(args: TestArgs) -> Result<()> {
     }
     if failures > 0 {
         anyhow::bail!("{failures} Stoffel test(s) failed");
+    }
+    Ok(())
+}
+
+fn validate_test_args(args: &TestArgs) -> Result<()> {
+    if !args.inputs.is_empty() {
+        anyhow::bail!(
+            "stoffel test does not accept --input values; tests must be no-argument functions. Use `stoffel run <PATH> --input NAME=VALUE` for programs that require inputs."
+        );
+    }
+    if args.entry.is_some() {
+        anyhow::bail!(
+            "stoffel test does not use --entry; use `stoffel test --test <name>` to select a no-argument test function, or use `stoffel run <PATH> --entry <name>` for normal program execution."
+        );
+    }
+    if args.runner.is_some() && !args.local {
+        anyhow::bail!(
+            "--runner only applies to local MPC tests. Add --local to use the runner, or remove --runner for the embedded no-network test runner."
+        );
+    }
+    if args.local {
+        if let Some(path) = args.runner.as_deref() {
+            validate_runner_path(path)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_test_path_hint(path: Option<&Path>) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if path.exists() {
+        return Ok(());
+    }
+    let raw = path.to_string_lossy();
+    let looks_like_name = path.components().count() == 1
+        && path.extension().is_none()
+        && !raw.contains(std::path::MAIN_SEPARATOR);
+    if looks_like_name {
+        anyhow::bail!(
+            "{} does not exist. To select a test by function name or file stem, use `stoffel test --test {}`",
+            path.display(),
+            path.display()
+        );
     }
     Ok(())
 }
@@ -1080,46 +1412,108 @@ fn validate_test_entry_has_no_parameters(
 }
 
 fn source_declares_function(file: &Path, entry: &str) -> Result<bool> {
+    Ok(declared_function_list(file)?
+        .iter()
+        .any(|function| function == entry))
+}
+
+fn declared_function_list(file: &Path) -> Result<Vec<String>> {
     let raw = std::fs::read_to_string(file)
         .with_context(|| format!("failed to read {}", file.display()))?;
-    Ok(raw.lines().any(|line| {
-        let Some(rest) = line.trim_start().strip_prefix("def") else {
-            return false;
-        };
-        if !rest
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_whitespace())
-        {
-            return false;
+    let mut functions = raw
+        .lines()
+        .filter_map(declared_function_name)
+        .collect::<Vec<_>>();
+    functions.sort();
+    functions.dedup();
+    Ok(functions)
+}
+
+fn declared_function_name(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix("def")?;
+    if !rest
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_whitespace())
+    {
+        return None;
+    }
+    let name = rest
+        .trim_start()
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .collect::<String>();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn closest_name<'a>(needle: &str, candidates: &'a [String]) -> Option<&'a str> {
+    candidates
+        .iter()
+        .map(|candidate| (edit_distance(needle, candidate), candidate.as_str()))
+        .filter(|(distance, _)| *distance <= 2)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, candidate)| candidate)
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (i, left_char) in left.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, right_char) in right.iter().enumerate() {
+            let substitution = previous[j] + usize::from(left_char != right_char);
+            let insertion = current[j] + 1;
+            let deletion = previous[j + 1] + 1;
+            current[j + 1] = substitution.min(insertion).min(deletion);
         }
-        let name = rest
-            .trim_start()
-            .chars()
-            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
-            .collect::<String>();
-        name == entry
-    }))
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
 }
 
 fn clean(args: CleanArgs) -> Result<()> {
-    let project = Project::discover(args.path.as_deref())?;
+    let project = Project::discover_for_clean(args.path.as_deref())?;
     let mut removed = Vec::new();
     let mut skipped = Vec::new();
-    remove_dir_if_exists(&project.target_dir(), &mut removed, &mut skipped)?;
-    remove_dir_if_exists(&project.cache_dir(), &mut removed, &mut skipped)?;
+    remove_dir_if_exists(
+        &project.target_dir(),
+        args.dry_run,
+        &mut removed,
+        &mut skipped,
+    )?;
     if args.all {
         for path in deep_clean_paths(&project) {
-            remove_dir_if_exists(&path, &mut removed, &mut skipped)?;
+            remove_dir_if_exists(&path, args.dry_run, &mut removed, &mut skipped)?;
         }
+    } else {
+        remove_dir_if_exists(
+            &project.cache_dir(),
+            args.dry_run,
+            &mut removed,
+            &mut skipped,
+        )?;
     }
-    if args.all {
+    if args.dry_run && args.all {
+        println!("Would clean Stoffel project artifacts and known ecosystem caches");
+    } else if args.dry_run {
+        println!("Would clean Stoffel build artifacts");
+    } else if args.all {
         println!("Cleaned Stoffel project artifacts and known ecosystem caches");
     } else {
         println!("Cleaned Stoffel build artifacts");
     }
     for path in &removed {
-        println!("Removed {}", path.display());
+        if args.dry_run {
+            println!("Would remove {}", path.display());
+        } else {
+            println!("Removed {}", path.display());
+        }
     }
     if removed.is_empty() {
         println!("Nothing to remove");
@@ -1225,10 +1619,10 @@ fn update(args: UpdateArgs) -> Result<()> {
             "no update targets selected; remove --no-self to include the Stoffel CLI or remove --no-project to include project dependencies"
         );
     }
-    let project = if args.no_project {
+    let project_root = if args.no_project {
         None
     } else {
-        Some(Project::discover(args.path.as_deref())?)
+        Some(update_dependency_root(args.path.as_deref())?)
     };
 
     if !args.no_self {
@@ -1241,8 +1635,8 @@ fn update(args: UpdateArgs) -> Result<()> {
         update_self(args.check, args.self_from_source)?;
     }
 
-    if let Some(project) = project {
-        update_project_dependencies(&project, args.check)?;
+    if let Some(root) = project_root {
+        update_project_dependencies(&root, args.check)?;
     }
     Ok(())
 }
@@ -1264,6 +1658,7 @@ fn configured_builder_for_source(
 struct RunSource {
     builder: Stoffel,
     bytecode_path: Option<PathBuf>,
+    source_path: Option<PathBuf>,
 }
 
 fn run_builder(args: &BuildArgs) -> Result<RunSource> {
@@ -1280,6 +1675,7 @@ fn run_builder(args: &BuildArgs) -> Result<RunSource> {
             return Ok(RunSource {
                 builder: apply_inline_build_config(builder, args),
                 bytecode_path: Some(path.clone()),
+                source_path: None,
             });
         }
         validate_explicit_run_path(path)?;
@@ -1297,17 +1693,20 @@ fn run_builder(args: &BuildArgs) -> Result<RunSource> {
                 return Ok(RunSource {
                     builder: apply_inline_build_config(builder, args),
                     bytecode_path: Some(bytecode),
+                    source_path: None,
                 });
             }
             return Ok(RunSource {
                 builder: configured_builder(&project, args)?,
                 bytecode_path: None,
+                source_path: Some(project.source_path().to_path_buf()),
             });
         }
         ensure_run_path(path)?;
         return Ok(RunSource {
             builder: configured_builder_for_source(&project, args, path)?,
             bytecode_path: None,
+            source_path: Some(path.to_path_buf()),
         });
     }
 
@@ -1317,11 +1716,13 @@ fn run_builder(args: &BuildArgs) -> Result<RunSource> {
         return Ok(RunSource {
             builder: apply_inline_build_config(builder, args),
             bytecode_path: Some(bytecode),
+            source_path: None,
         });
     }
     Ok(RunSource {
         builder: configured_builder(&project, args)?,
         bytecode_path: None,
+        source_path: Some(project.source_path().to_path_buf()),
     })
 }
 
@@ -1537,6 +1938,14 @@ fn validate_bytecode_output_path(project: &Project, output: &Path) -> Result<()>
             "--output must end in .stfb or .stflb for bytecode output; got {}",
             output.display()
         );
+    }
+    if let Some(parent) = output.parent() {
+        if parent.exists() && !parent.is_dir() {
+            anyhow::bail!(
+                "--output parent path {} is a file, not a directory",
+                parent.display()
+            );
+        }
     }
     if let Ok(relative) = output.strip_prefix(project.root()) {
         if relative
@@ -1771,13 +2180,15 @@ fn ensure_writable_project_dir(path: &Path, force: bool) -> Result<()> {
 fn is_bytecode_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension, "stflb" | "stfb"))
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("stflb") || extension.eq_ignore_ascii_case("stfb")
+        })
 }
 
 fn is_source_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension == "stfl")
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("stfl"))
 }
 
 fn apply_inputs(mut builder: Stoffel, inputs: &[InputArg]) -> Stoffel {
@@ -1856,6 +2267,35 @@ fn validate_entry_and_named_inputs(
     Ok(())
 }
 
+fn validate_entry_declared_in_source(
+    source: Option<&Path>,
+    _program: &Program,
+    entry: &str,
+    command: &str,
+) -> Result<()> {
+    let Some(source) = source else {
+        return Ok(());
+    };
+    if source_declares_function(source, entry)? {
+        return Ok(());
+    }
+    let available = declared_function_list(source)?;
+    if available.is_empty() {
+        anyhow::bail!(
+            "entry function '{entry}' is not declared in {}; define `def {entry}(...):` before running `{command}`",
+            source.display()
+        );
+    }
+    let hint = closest_name(entry, &available)
+        .map(|name| format!(" Did you mean --entry {name}?"))
+        .unwrap_or_else(|| format!(" Available source functions: {}.", available.join(", ")));
+    anyhow::bail!(
+        "entry function '{entry}' is not declared in {}.{}",
+        source.display(),
+        hint
+    );
+}
+
 fn named_input_help(command: &str, entry: &str, parameters: &[String]) -> String {
     if parameters.is_empty() {
         return "This function does not accept --input values.".to_owned();
@@ -1871,8 +2311,10 @@ fn named_input_help(command: &str, entry: &str, parameters: &[String]) -> String
 fn default_build_for_status(path: PathBuf) -> BuildArgs {
     BuildArgs {
         path: Some(path),
+        extra_paths: Vec::new(),
         output: None,
         disassemble: false,
+        binary: false,
         print_ir: false,
         opt_level: None,
         optimize: false,
@@ -1992,14 +2434,76 @@ fn update_self(check: bool, self_from_source: bool) -> Result<()> {
     )
 }
 
-fn update_project_dependencies(project: &Project, check: bool) -> Result<()> {
-    let root = project.root();
+fn update_dependency_root(path: Option<&Path>) -> Result<PathBuf> {
+    if let Some(root) = dependency_manifest_start_root(path)? {
+        return Ok(root);
+    }
+    match Project::discover(path) {
+        Ok(project) => Ok(project.root().to_path_buf()),
+        Err(project_error) => {
+            if let Some(root) = find_dependency_manifest_root(path)? {
+                return Ok(root);
+            }
+            Err(project_error)
+        }
+    }
+}
+
+fn dependency_manifest_start_root(path: Option<&Path>) -> Result<Option<PathBuf>> {
+    let root = match path {
+        Some(path) if !path.exists() => return Ok(None),
+        Some(path) if path.is_dir() => path.to_path_buf(),
+        Some(path) => path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        None => std::env::current_dir()?,
+    };
+    Ok(has_dependency_manifest(&root).then_some(root))
+}
+
+fn find_dependency_manifest_root(path: Option<&Path>) -> Result<Option<PathBuf>> {
+    let start = match path {
+        Some(path) if !path.exists() => return Ok(None),
+        Some(path) if path.is_dir() => path.to_path_buf(),
+        Some(path) => path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        None => std::env::current_dir()?,
+    };
+    let mut cursor = start.as_path();
+    loop {
+        if has_dependency_manifest(cursor) {
+            return Ok(Some(cursor.to_path_buf()));
+        }
+        let Some(parent) = cursor.parent() else {
+            return Ok(None);
+        };
+        if parent == cursor {
+            return Ok(None);
+        }
+        cursor = parent;
+    }
+}
+
+fn has_dependency_manifest(root: &Path) -> bool {
+    root.join("Cargo.toml").exists()
+        || root.join("package.json").exists()
+        || root.join("requirements.txt").exists()
+        || root.join("foundry.toml").exists()
+}
+
+fn update_project_dependencies(root: &Path, check: bool) -> Result<()> {
     let mut detected = false;
 
     if root.join("Cargo.toml").exists() {
         detected = true;
         if check {
-            println!("Project update: cargo dependencies detected");
+            println!(
+                "Project update: Cargo.toml detected; {}",
+                update_command_status("cargo")
+            );
         } else {
             run_command(root, "cargo", &["update"])?;
         }
@@ -2007,7 +2511,10 @@ fn update_project_dependencies(project: &Project, check: bool) -> Result<()> {
     if root.join("package.json").exists() {
         detected = true;
         if check {
-            println!("Project update: npm dependencies detected");
+            println!(
+                "Project update: package.json detected; {}",
+                update_command_status("npm")
+            );
         } else {
             run_command(root, "npm", &["update"])?;
         }
@@ -2015,24 +2522,21 @@ fn update_project_dependencies(project: &Project, check: bool) -> Result<()> {
     if root.join("requirements.txt").exists() {
         detected = true;
         if check {
-            println!("Project update: requirements.txt detected");
-        } else if command_exists("python3") {
-            run_command(
-                root,
-                "python3",
-                &[
-                    "-m",
-                    "pip",
-                    "install",
-                    "--upgrade",
-                    "-r",
-                    "requirements.txt",
-                ],
-            )?;
+            match python_command() {
+                Some(program) => {
+                    println!("Project update: requirements.txt detected; {program} available")
+                }
+                None => println!(
+                    "Project update: requirements.txt detected; required command 'python3' or 'python' not found in PATH"
+                ),
+            }
         } else {
+            let Some(program) = python_command() else {
+                anyhow::bail!("required command 'python3' or 'python' was not found in PATH");
+            };
             run_command(
                 root,
-                "python",
+                program,
                 &[
                     "-m",
                     "pip",
@@ -2047,7 +2551,10 @@ fn update_project_dependencies(project: &Project, check: bool) -> Result<()> {
     if root.join("foundry.toml").exists() {
         detected = true;
         if check {
-            println!("Project update: Foundry project detected");
+            println!(
+                "Project update: foundry.toml detected; {}",
+                update_command_status("forge")
+            );
         } else {
             run_command(root, "forge", &["update"])?;
         }
@@ -2057,6 +2564,24 @@ fn update_project_dependencies(project: &Project, check: bool) -> Result<()> {
         println!("Project update: no dependency manifests detected");
     }
     Ok(())
+}
+
+fn update_command_status(program: &str) -> String {
+    if command_exists(program) {
+        format!("{program} available")
+    } else {
+        format!("required command '{program}' not found in PATH")
+    }
+}
+
+fn python_command() -> Option<&'static str> {
+    if command_exists("python3") {
+        Some("python3")
+    } else if command_exists("python") {
+        Some("python")
+    } else {
+        None
+    }
 }
 
 fn run_command(cwd: &Path, program: &str, args: &[&str]) -> Result<()> {
@@ -2133,14 +2658,19 @@ fn parse_u64_arg(raw: &str) -> std::result::Result<u64, String> {
         .map_err(|_| format!("invalid value '{raw}'; use 0 or a positive whole number"))
 }
 
-fn parse_usize_arg(raw: &str) -> std::result::Result<usize, String> {
+fn parse_positive_usize_arg(raw: &str) -> std::result::Result<usize, String> {
     if raw.starts_with('-') {
         return Err(format!(
-            "'{raw}' is not valid here; use 0 or a positive whole number"
+            "'{raw}' is not valid here; use a positive whole number"
         ));
     }
-    raw.parse::<usize>()
-        .map_err(|_| format!("invalid value '{raw}'; use 0 or a positive whole number"))
+    let value = raw
+        .parse::<usize>()
+        .map_err(|_| format!("invalid value '{raw}'; use a positive whole number"))?;
+    if value == 0 {
+        return Err("0 is not valid here; use a positive whole number".to_owned());
+    }
+    Ok(value)
 }
 
 fn parse_positive_u64_arg(raw: &str) -> std::result::Result<u64, String> {
@@ -2156,6 +2686,57 @@ fn parse_positive_u64_arg(raw: &str) -> std::result::Result<u64, String> {
         return Err("0 is not valid here; use a positive whole number".to_owned());
     }
     Ok(value)
+}
+
+fn parse_entry_arg(raw: &str) -> std::result::Result<String, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(
+            "entry function name cannot be empty; use a function name like main".to_owned(),
+        );
+    }
+    if value.contains('(') || value.contains(')') {
+        return Err(format!(
+            "entry must be a function name, not a call expression; use --entry {}",
+            value
+                .split_once('(')
+                .map(|(name, _)| name.trim())
+                .filter(|name| !name.is_empty())
+                .unwrap_or("main")
+        ));
+    }
+    if value.chars().any(char::is_whitespace) {
+        return Err(
+            "entry function name cannot contain spaces; use a single function name like main"
+                .to_owned(),
+        );
+    }
+    if !is_identifier_like(value) {
+        return Err(
+            "entry function name must use letters, numbers, or '_' and must not start with a number"
+                .to_owned(),
+        );
+    }
+    Ok(value.to_owned())
+}
+
+fn is_identifier_like(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+fn parse_test_filter_arg(raw: &str) -> std::result::Result<String, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(
+            "--test value cannot be empty; pass a test function name or test file stem".to_owned(),
+        );
+    }
+    Ok(value.to_owned())
 }
 
 fn parse_value(value: &str) -> Result<Value> {
@@ -2258,16 +2839,24 @@ fn print_build_stats(
 
 fn remove_dir_if_exists(
     path: &Path,
+    dry_run: bool,
     removed: &mut Vec<PathBuf>,
     skipped: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    if path.exists() {
-        std::fs::remove_dir_all(path)
-            .with_context(|| format!("failed to remove {}", path.display()))?;
-        removed.push(path.to_path_buf());
-    } else {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
         skipped.push(path.to_path_buf());
+        return Ok(());
+    };
+    if !dry_run {
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            std::fs::remove_dir_all(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        } else {
+            std::fs::remove_file(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
     }
+    removed.push(path.to_path_buf());
     Ok(())
 }
 

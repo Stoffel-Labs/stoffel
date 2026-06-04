@@ -12,7 +12,6 @@ pub enum Template {
     Stoffel,
     Python,
     Rust,
-    TypeScript,
     SolidityFoundry,
     SolidityHardhat,
 }
@@ -104,18 +103,27 @@ impl Project {
         if path.exists() && !force && fs::read_dir(path)?.next().is_some() {
             anyhow::bail!("{}", init_target_not_empty_message(path));
         }
+        validate_init_project_dir_path(path)?;
+        validate_init_parent_dir(path)?;
         fs::create_dir_all(path)?;
         match template {
             Template::Stoffel => init_stoffel_project(path),
             Template::Python => init_python_project(path),
             Template::Rust => init_rust_project(path),
-            Template::TypeScript => init_typescript_project(path),
             Template::SolidityFoundry => init_solidity_foundry_project(path),
             Template::SolidityHardhat => init_solidity_hardhat_project(path),
         }
     }
 
     pub fn discover(path: Option<&Path>) -> Result<Self> {
+        Self::discover_with_options(path, false)
+    }
+
+    pub fn discover_for_clean(path: Option<&Path>) -> Result<Self> {
+        Self::discover_with_options(path, true)
+    }
+
+    fn discover_with_options(path: Option<&Path>, allow_existing_target_file: bool) -> Result<Self> {
         if let Some(path) = path {
             if !path.exists() {
                 anyhow::bail!("{}", missing_path_message(path));
@@ -130,14 +138,7 @@ impl Project {
             None => std::env::current_dir()?,
         };
         let root = find_root(&start)?;
-        let mut config = read_config(&root.join(CONFIG_FILE))?;
-        if config.package.name.trim().is_empty() {
-            config.package.name = root
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("stoffel-app")
-                .to_owned();
-        }
+        let config = read_config(&root.join(CONFIG_FILE), allow_existing_target_file)?;
         let source = root.join(&config.build.source);
         Ok(Self {
             root,
@@ -262,7 +263,7 @@ impl Project {
             .source
             .extension()
             .and_then(|extension| extension.to_str())
-            != Some("stfl")
+            .is_none_or(|extension| !extension.eq_ignore_ascii_case("stfl"))
     }
 
     pub fn default_bytecode_path_for_source(&self, source: &Path, release: bool) -> PathBuf {
@@ -303,8 +304,6 @@ impl Project {
     }
 
     pub fn find_bytecode(&self, release: bool) -> Result<Option<PathBuf>> {
-        let profile = if release { "release" } else { "debug" };
-        let dir = self.target_dir().join(profile);
         let preferred = self.default_bytecode_path(release);
         if self.is_fresh_bytecode(&preferred)? {
             return Ok(Some(preferred));
@@ -312,26 +311,6 @@ impl Project {
         let legacy_preferred = preferred.with_extension("stflb");
         if self.is_fresh_bytecode(&legacy_preferred)? {
             return Ok(Some(legacy_preferred));
-        }
-        if !dir.exists() {
-            return Ok(None);
-        }
-        let mut files = Vec::new();
-        for entry in fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| matches!(ext, "stflb" | "stfb"))
-            {
-                files.push(path);
-            }
-        }
-        files.sort();
-        for file in files {
-            if self.is_fresh_bytecode(&file)? {
-                return Ok(Some(file));
-            }
         }
         Ok(None)
     }
@@ -356,6 +335,40 @@ impl Project {
         }
         Ok(true)
     }
+}
+
+fn validate_init_parent_dir(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() || parent.exists() && parent.is_dir() {
+        return Ok(());
+    }
+    if parent.exists() {
+        anyhow::bail!(
+            "cannot create project at {}; parent path {} is a file, not a directory",
+            path.display(),
+            parent.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_init_project_dir_path(path: &Path) -> Result<()> {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return Ok(());
+    };
+    if matches!(
+        extension,
+        "stfl" | "stfb" | "stflb" | "toml" | "md" | "txt" | "json"
+    ) {
+        anyhow::bail!(
+            "{} looks like a file path; `stoffel init` creates a project directory. Pass a directory path such as {}",
+            path.display(),
+            path.with_extension("").display()
+        );
+    }
+    Ok(())
 }
 
 fn missing_path_message(path: &Path) -> String {
@@ -395,7 +408,7 @@ fn nearest_stoffel_source(path: &Path) -> Option<PathBuf> {
 fn is_stoffel_source_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension == "stfl")
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("stfl"))
 }
 
 fn levenshtein(left: &str, right: &str) -> usize {
@@ -470,45 +483,22 @@ fn init_rust_project(path: &Path) -> Result<()> {
     )?;
     write_new(
         path.join("stoffel/src/program.stfl"),
-        "def main(a: int64, b: int64) -> int64:\n  return a + b\n",
+        "def main(a: Share, b: Share) -> int64:\n  var sum = Share.add(a, b)\n  return sum.open()\n",
     )?;
     write_new(
         path.join("Cargo.toml"),
         &format!(
-            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel-rust-sdk = {{ git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\n",
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel-rust-sdk = {{ git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n",
             project_name(path)
         ),
     )?;
     write_new(
         path.join("src/main.rs"),
-        "use stoffel::prelude::*;\n\nfn main() -> stoffel::Result<()> {\n    let result = Stoffel::compile(include_str!(\"../stoffel/src/program.stfl\"))?\n        .with_inputs(&[(\"a\", 40_i64), (\"b\", 2_i64)])\n        .execute_clear()?;\n    println!(\"{}\", result[0]);\n    Ok(())\n}\n",
+        "use stoffel::prelude::*;\n\n#[tokio::main]\nasync fn main() -> stoffel::Result<()> {\n    let result = Stoffel::compile(include_str!(\"../stoffel/src/program.stfl\"))?\n        .parties(5)\n        .threshold(1)\n        .with_inputs(&[(\"a\", 40_i64), (\"b\", 2_i64)])\n        .execute_local()\n        .await?;\n    println!(\"{}\", result[0]);\n    Ok(())\n}\n",
     )?;
     write_new(
         path.join("README.md"),
-        "# Stoffel Rust Project\n\nThe Stoffel program lives in `stoffel/src/program.stfl` and has its own `stoffel/Stoffel.toml`.\n\nValidate the Stoffel program:\n\n```sh\nstoffel check stoffel\n```\n\nRun the Rust wrapper:\n\n```sh\ncargo run\n```\n",
-    )?;
-    Ok(())
-}
-
-fn init_typescript_project(path: &Path) -> Result<()> {
-    init_stoffel_project(path)?;
-    write_new(
-        path.join("package.json"),
-        &format!(
-            "{{\n  \"name\": \"{}\",\n  \"version\": \"0.1.0\",\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"build:stoffel\": \"stoffel build\"\n  }}\n}}\n",
-            project_name(path)
-        ),
-    )?;
-    write_new(
-        path.join("src/index.ts"),
-        "console.log(\"Stoffel TypeScript project\");\n",
-    )?;
-    write_new(
-        path.join("README.md"),
-        &format!(
-            "{}\nTypeScript wrapper files are included for SDK integration. The package script builds the Stoffel bytecode:\n\n```sh\nnpm run build:stoffel\n```\n",
-            default_readme_text("Stoffel TypeScript Project")
-        ),
+        "# Stoffel Rust Project\n\nThe Stoffel program lives in `stoffel/src/program.stfl` and has its own `stoffel/Stoffel.toml`.\n\nValidate the Stoffel program:\n\n```sh\nstoffel check stoffel\n```\n\nRun the Stoffel program through the CLI:\n\n```sh\nstoffel run stoffel --input a=40 --input b=2\n```\n\nRun the Rust local-MPC wrapper:\n\n```sh\ncargo run\n```\n",
     )?;
     Ok(())
 }
@@ -632,11 +622,13 @@ fn collect_nested_config_paths(
     Ok(())
 }
 
-fn read_config(path: &Path) -> Result<ProjectConfig> {
+fn read_config(path: &Path, allow_existing_target_file: bool) -> Result<ProjectConfig> {
     let raw =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut config: ProjectConfig =
+    let document: toml::Value =
         toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
+    let mut config = parse_project_config(&raw, path)?;
+    validate_package_config(&document, &config.package)?;
     if config.build.source.as_os_str().is_empty() {
         config.build.source = BuildConfig::default().source;
     }
@@ -647,10 +639,87 @@ fn read_config(path: &Path) -> Result<ProjectConfig> {
     validate_target_dir(
         path.parent().unwrap_or(Path::new(".")),
         &config.build.target_dir,
+        allow_existing_target_file,
     )?;
     validate_optimization_level(config.build.optimization_level)?;
     validate_mpc_config(&config.mpc)?;
     Ok(config)
+}
+
+fn parse_project_config(raw: &str, path: &Path) -> Result<ProjectConfig> {
+    toml::from_str(raw).map_err(|error| {
+        let mut message = format!("failed to parse {}: {error}", path.display());
+        if let Some(hint) = config_parse_hint(&error.to_string()) {
+            message.push_str(&format!("\nHint: {hint}"));
+        }
+        anyhow::anyhow!(message)
+    })
+}
+
+fn config_parse_hint(error: &str) -> Option<&'static str> {
+    if error.contains("expected usize") {
+        if error.contains("parties =") {
+            return Some("write [mpc].parties as an unquoted positive whole number, for example `parties = 5`.");
+        }
+        if error.contains("threshold =") {
+            return Some("write [mpc].threshold as an unquoted positive whole number, for example `threshold = 1`.");
+        }
+        return Some("write numeric config values as unquoted positive whole numbers.");
+    }
+    if error.contains("expected u64") && error.contains("instance_id =") {
+        return Some(
+            "write [mpc].instance_id as an unquoted whole number, for example `instance_id = 0`.",
+        );
+    }
+    let unknown = unknown_config_field(error)?;
+    match unknown {
+        "naem" => Some("did you mean [package].name?"),
+        "sorce" => Some("did you mean [build].source?"),
+        "main" => Some("did you mean [build].source?"),
+        "target" => Some("did you mean [build].target_dir or [build].output_dir?"),
+        "threshhold" => Some("did you mean [mpc].threshold?"),
+        "party_count" => Some("did you mean [mpc].parties?"),
+        "instance_id" => Some("did you mean [mpc].instance_id? Put instance_id under the [mpc] table, not [build]."),
+        "network" => Some("did you mean [mpc]? Network execution config is passed to `stoffel run --config`, not stored as [network] in Stoffel.toml."),
+        _ => None,
+    }
+}
+
+fn unknown_config_field(error: &str) -> Option<&str> {
+    let marker = "unknown field `";
+    let start = error.find(marker)? + marker.len();
+    let rest = &error[start..];
+    let end = rest.find('`')?;
+    Some(&rest[..end])
+}
+
+fn validate_package_config(document: &toml::Value, package: &PackageConfig) -> Result<()> {
+    if !document
+        .get("package")
+        .and_then(toml::Value::as_table)
+        .is_some()
+    {
+        anyhow::bail!(
+            "missing [package] table in Stoffel.toml; add [package] with name and version fields"
+        );
+    }
+    if package.name.trim().is_empty() {
+        anyhow::bail!("invalid [package].name; project name cannot be empty");
+    }
+    if !package
+        .name
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        anyhow::bail!(
+            "invalid [package].name {}; use only letters, numbers, '-' or '_' so build artifacts have safe file names",
+            package.name
+        );
+    }
+    if package.version.trim().is_empty() {
+        anyhow::bail!("invalid [package].version; version cannot be empty");
+    }
+    Ok(())
 }
 
 fn validate_source_config(source: &Path) -> Result<()> {
@@ -677,7 +746,7 @@ fn validate_source_config(source: &Path) -> Result<()> {
     if source
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension != "stfl")
+        .is_some_and(|extension| !extension.eq_ignore_ascii_case("stfl"))
     {
         anyhow::bail!(
             "invalid build.source {}; expected a .stfl source file or source directory",
@@ -715,7 +784,11 @@ fn validate_optimization_level(level: Option<u8>) -> Result<()> {
     Ok(())
 }
 
-fn validate_target_dir(root: &Path, target_dir: &Path) -> Result<()> {
+fn validate_target_dir(
+    root: &Path,
+    target_dir: &Path,
+    allow_existing_final_file: bool,
+) -> Result<()> {
     if target_dir.is_absolute() {
         anyhow::bail!(
             "invalid build.target_dir {}; expected a relative directory inside the project",
@@ -746,17 +819,21 @@ fn validate_target_dir(root: &Path, target_dir: &Path) -> Result<()> {
             target_dir.display()
         );
     }
-    let absolute = if target_dir.is_absolute() {
-        target_dir.to_path_buf()
-    } else {
-        root.join(target_dir)
-    };
-    if absolute.is_file() {
-        anyhow::bail!(
-            "invalid build.target_dir {}; {} is an existing file",
-            target_dir.display(),
-            absolute.display()
-        );
+    let mut absolute = root.to_path_buf();
+    let mut components = target_dir.components().peekable();
+    while let Some(component) = components.next() {
+        absolute.push(component.as_os_str());
+        let is_final = components.peek().is_none();
+        if absolute.exists()
+            && !absolute.is_dir()
+            && !(allow_existing_final_file && is_final)
+        {
+            anyhow::bail!(
+                "invalid build.target_dir {}; {} is an existing file",
+                target_dir.display(),
+                absolute.display()
+            );
+        }
     }
     Ok(())
 }
@@ -769,7 +846,7 @@ fn collect_stfl_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         } else if path
             .extension()
             .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension == "stfl")
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("stfl"))
         {
             files.push(path);
         }
@@ -779,7 +856,15 @@ fn collect_stfl_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 
 fn write_new(path: PathBuf, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        if parent.exists() && !parent.is_dir() {
+            anyhow::bail!(
+                "cannot write {}; parent path {} is a file, not a directory",
+                path.display(),
+                parent.display()
+            );
+        }
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     fs::write(&path, contents).with_context(|| format!("failed to write {}", path.display()))
 }
