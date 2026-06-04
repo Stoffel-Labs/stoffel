@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use stoffel::prelude::MpcBackend;
+use stoffel::prelude::{MpcBackend, MpcConfig as SdkMpcConfig};
 
 const CONFIG_FILE: &str = "Stoffel.toml";
 
@@ -95,6 +95,12 @@ impl Default for BuildConfig {
 
 impl Project {
     pub fn init(path: &Path, template: Template, force: bool) -> Result<()> {
+        if path.exists() && !path.is_dir() {
+            anyhow::bail!(
+                "{} is a file; pass a directory path for the new Stoffel project",
+                path.display()
+            );
+        }
         if path.exists() && !force && fs::read_dir(path)?.next().is_some() {
             anyhow::bail!("{}", init_target_not_empty_message(path));
         }
@@ -132,12 +138,7 @@ impl Project {
                 .unwrap_or("stoffel-app")
                 .to_owned();
         }
-        let source = match path {
-            Some(path) if path.is_dir() => root.join(&config.build.source),
-            Some(path) if path.is_file() => absolutize(path)?,
-            Some(path) if path.extension().is_some() => absolutize(path)?,
-            _ => root.join(&config.build.source),
-        };
+        let source = root.join(&config.build.source);
         Ok(Self {
             root,
             source,
@@ -182,15 +183,7 @@ impl Project {
             return Ok(Vec::new());
         }
         let mut files = Vec::new();
-        for entry in fs::read_dir(&tests_dir)? {
-            let path = entry?.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "stfl")
-            {
-                files.push(path);
-            }
-        }
+        collect_stfl_files(&tests_dir, &mut files)?;
         files.sort();
         Ok(files)
     }
@@ -206,6 +199,14 @@ impl Project {
         if files.is_empty() {
             files.push(self.source.clone());
         }
+        Ok(files)
+    }
+
+    pub fn source_files_under(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+        let dir = absolutize(dir)?;
+        let mut files = Vec::new();
+        collect_stfl_files(&dir, &mut files)?;
+        files.sort();
         Ok(files)
     }
 
@@ -331,7 +332,7 @@ fn init_stoffel_project(path: &Path) -> Result<()> {
     )?;
     write_new(
         path.join("README.md"),
-        "# Stoffel Project\n\nRun `stoffel run --input a=40 --input b=2` to execute through the local MPC coordinator.\n",
+        &default_readme_text("Stoffel Project"),
     )?;
     Ok(())
 }
@@ -347,7 +348,7 @@ pub fn init_library_project(path: &Path) -> Result<()> {
     )?;
     write_new(
         path.join("README.md"),
-        "# Stoffel Library\n\nRun `stoffel check` to compile the library source.\n",
+        "# Stoffel Library\n\nValidate the library source:\n\n```sh\nstoffel check\n```\n\nBuild bytecode when you need an artifact:\n\n```sh\nstoffel build\n```\n",
     )?;
     Ok(())
 }
@@ -358,6 +359,13 @@ fn init_python_project(path: &Path) -> Result<()> {
     write_new(
         path.join("app.py"),
         "print(\"Stoffel Python SDK project\")\n",
+    )?;
+    write_new(
+        path.join("README.md"),
+        &format!(
+            "{}\nPython wrapper files are included for SDK integration. Install Python dependencies with:\n\n```sh\npython3 -m pip install -r requirements.txt\n```\n",
+            default_readme_text("Stoffel Python Project")
+        ),
     )?;
     Ok(())
 }
@@ -384,7 +392,7 @@ fn init_rust_project(path: &Path) -> Result<()> {
     )?;
     write_new(
         path.join("README.md"),
-        "# Stoffel Rust Project\n\nThe Stoffel program lives in `stoffel/src/program.stfl`.\n",
+        "# Stoffel Rust Project\n\nThe Stoffel program lives in `stoffel/src/program.stfl` and has its own `stoffel/Stoffel.toml`.\n\nValidate the Stoffel program:\n\n```sh\nstoffel check stoffel\n```\n\nRun the Rust wrapper:\n\n```sh\ncargo run\n```\n",
     )?;
     Ok(())
 }
@@ -402,6 +410,13 @@ fn init_typescript_project(path: &Path) -> Result<()> {
         path.join("src/index.ts"),
         "console.log(\"Stoffel TypeScript project\");\n",
     )?;
+    write_new(
+        path.join("README.md"),
+        &format!(
+            "{}\nTypeScript wrapper files are included for SDK integration. The package script builds the Stoffel bytecode:\n\n```sh\nnpm run build:stoffel\n```\n",
+            default_readme_text("Stoffel TypeScript Project")
+        ),
+    )?;
     Ok(())
 }
 
@@ -414,6 +429,13 @@ fn init_solidity_foundry_project(path: &Path) -> Result<()> {
     write_new(
         path.join("contracts/StoffelApp.sol"),
         "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\ncontract StoffelApp {}\n",
+    )?;
+    write_new(
+        path.join("README.md"),
+        &format!(
+            "{}\nFoundry contract files are included under `contracts/`. Build the Solidity project with:\n\n```sh\nforge build\n```\n",
+            default_readme_text("Stoffel Foundry Project")
+        ),
     )?;
     Ok(())
 }
@@ -434,6 +456,13 @@ fn init_solidity_hardhat_project(path: &Path) -> Result<()> {
     write_new(
         path.join("contracts/StoffelApp.sol"),
         "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\ncontract StoffelApp {}\n",
+    )?;
+    write_new(
+        path.join("README.md"),
+        &format!(
+            "{}\nHardhat contract files are included under `contracts/`. Install JavaScript dependencies, then compile contracts:\n\n```sh\nnpm install\nnpx hardhat compile\n```\n",
+            default_readme_text("Stoffel Hardhat Project")
+        ),
     )?;
     Ok(())
 }
@@ -518,18 +547,7 @@ fn read_config(path: &Path) -> Result<ProjectConfig> {
     if config.build.source.as_os_str().is_empty() {
         config.build.source = BuildConfig::default().source;
     }
-    if config
-        .build
-        .source
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension != "stfl")
-    {
-        anyhow::bail!(
-            "invalid build.source {}; expected a .stfl source file or source directory",
-            config.build.source.display()
-        );
-    }
+    validate_source_config(&config.build.source)?;
     if config.build.target_dir.as_os_str().is_empty() {
         config.build.target_dir = BuildConfig::default().target_dir;
     }
@@ -537,7 +555,71 @@ fn read_config(path: &Path) -> Result<ProjectConfig> {
         path.parent().unwrap_or(Path::new(".")),
         &config.build.target_dir,
     )?;
+    validate_optimization_level(config.build.optimization_level)?;
+    validate_mpc_config(&config.mpc)?;
     Ok(config)
+}
+
+fn validate_source_config(source: &Path) -> Result<()> {
+    if source == Path::new(".") {
+        anyhow::bail!(
+            "invalid build.source .; choose a source file like src/main.stfl or a source directory like src"
+        );
+    }
+    if source.is_absolute() {
+        anyhow::bail!(
+            "invalid build.source {}; expected a relative path inside the project",
+            source.display()
+        );
+    }
+    if source
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        anyhow::bail!(
+            "invalid build.source {}; source paths must stay inside the project",
+            source.display()
+        );
+    }
+    if source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension != "stfl")
+    {
+        anyhow::bail!(
+            "invalid build.source {}; expected a .stfl source file or source directory",
+            source.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_mpc_config(config: &MpcConfig) -> Result<()> {
+    if matches!(config.threshold, Some(0)) {
+        anyhow::bail!("invalid [mpc] config: threshold must be greater than zero");
+    }
+    let mut builder = SdkMpcConfig::builder()
+        .parties(config.parties.unwrap_or(5))
+        .threshold(config.threshold.unwrap_or(1))
+        .backend(config.backend.unwrap_or_default());
+    if let Some(instance_id) = config.instance_id {
+        builder = builder.instance_id(instance_id);
+    }
+    builder
+        .build()
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("invalid [mpc] config: {error}"))
+}
+
+fn validate_optimization_level(level: Option<u8>) -> Result<()> {
+    if let Some(level) = level {
+        if level > 3 {
+            anyhow::bail!(
+                "invalid build.optimization_level {level}; expected an optimization level from 0 to 3"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_target_dir(root: &Path, target_dir: &Path) -> Result<()> {
@@ -611,6 +693,12 @@ fn write_new(path: PathBuf, contents: &str) -> Result<()> {
 
 fn default_config_text(name: String) -> String {
     config_text(name, "src/main.stfl")
+}
+
+fn default_readme_text(title: &str) -> String {
+    format!(
+        "# {title}\n\nValidate the Stoffel source:\n\n```sh\nstoffel check\n```\n\nRun the default local MPC example:\n\n```sh\nstoffel run --input a=40 --input b=2\n```\n\nRun the default example once with the development command:\n\n```sh\nstoffel dev --once --input a=40 --input b=2\n```\n\nBuild bytecode:\n\n```sh\nstoffel build\n```\n"
+    )
 }
 
 fn config_text(name: String, source: &str) -> String {

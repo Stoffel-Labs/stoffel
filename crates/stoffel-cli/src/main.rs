@@ -27,42 +27,42 @@ enum Command {
     /// Create a new Stoffel project.
     #[command(visible_alias = "new")]
     Init(InitArgs),
-    /// Compile source without writing bytecode.
-    Check(BuildArgs),
-    /// Compile a program into Stoffel bytecode.
+    /// Validate source and project MPC settings without writing bytecode.
+    Check(CheckArgs),
+    /// Write compiled bytecode for a project or source file.
     Compile(BuildArgs),
-    /// Compile the current project into target bytecode.
-    Build(BuildArgs),
-    /// Compile and run a program.
+    /// Build project bytecode under target/.
+    Build(ProjectBuildArgs),
+    /// Run source or bytecode through MPC execution.
     Run(RunArgs),
-    /// Compile and run the current project with local MPC nodes.
+    /// Watch a project and rerun it on local MPC when files change.
     Dev(DevArgs),
-    /// Run Stoffel source files under tests/.
+    /// Run no-argument Stoffel test functions.
     Test(TestArgs),
     /// Show project health and environment status.
     #[command(visible_alias = "doctor")]
     Status(StatusArgs),
     /// Remove generated build artifacts.
     Clean(CleanArgs),
-    /// Update the CLI and project dependencies.
+    /// Check or update the CLI and project dependencies.
     Update(UpdateArgs),
 }
 
 #[derive(Debug, Args)]
 struct InitArgs {
-    /// Directory to create. Defaults to the current directory.
+    /// Directory where the project files are created. Defaults to the current directory.
     path: Option<PathBuf>,
     /// Project template to create.
     #[arg(long, value_enum, default_value_t = TemplateArg::Stoffel, conflicts_with = "lib")]
     template: TemplateArg,
-    /// Create files in an existing non-empty directory.
+    /// Write template files into an existing directory without deleting unrelated files.
     #[arg(long)]
     force: bool,
     /// Create a library-style Stoffel project. Cannot be combined with --template.
     #[arg(long)]
     lib: bool,
-    /// Accept default answers for interactive setup.
-    #[arg(long)]
+    /// Reserved for future interactive setup.
+    #[arg(long, hide = true)]
     interactive: bool,
 }
 
@@ -78,18 +78,18 @@ enum TemplateArg {
 
 #[derive(Debug, Args, Clone)]
 struct BuildArgs {
-    /// Project directory or source file. Defaults to all src/*.stfl files from Stoffel.toml.
+    /// Project directory, source directory, or .stfl source file to compile. Defaults to source files from Stoffel.toml.
     path: Option<PathBuf>,
-    /// Output bytecode path. Only valid when compiling one source file.
+    /// Write bytecode to this .stfb/.stflb file. Only valid when one source file is selected.
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// Generate VM-compatible bytecode. This is the default for build/compile.
-    #[arg(short = 'b', long)]
+    /// Legacy no-op: build and compile always write VM bytecode.
+    #[arg(short = 'b', long, hide = true)]
     binary: bool,
-    /// Disassemble a compiled Stoffel bytecode file.
+    /// Print instructions from an existing .stfb/.stflb bytecode file instead of compiling source.
     #[arg(long)]
     disassemble: bool,
-    /// Print compiler intermediate representations.
+    /// Print compiler intermediate representation for debugging.
     #[arg(long)]
     print_ir: bool,
     /// Set optimization level (0-3). Accepts `-O3` or `-O 3`.
@@ -100,64 +100,169 @@ struct BuildArgs {
         value_name = "N"
     )]
     opt_level: Option<u8>,
-    /// Enable optimizations with the default level O2.
+    /// Use O2 optimization unless --release selects O3.
     #[arg(long, conflicts_with = "opt_level")]
     optimize: bool,
-    /// Build with release output path.
+    /// Write under target/release and use O3 unless --opt-level is set.
     #[arg(long)]
     release: bool,
-    /// MPC backend: honeybadger, avss, or avss:bls12_381.
+    /// Override [mpc].backend from Stoffel.toml for this compile.
     #[arg(long, alias = "protocol")]
     backend: Option<MpcBackend>,
-    /// Cryptographic field/curve. Non-default values select AVSS.
+    /// Override [mpc].curve from Stoffel.toml for this compile.
     #[arg(long, alias = "curve")]
     field: Option<Curve>,
-    /// Number of MPC parties.
+    /// Override [mpc].parties from Stoffel.toml for this compile.
     #[arg(long)]
     parties: Option<usize>,
-    /// Byzantine threshold.
+    /// Override [mpc].threshold from Stoffel.toml for this compile.
     #[arg(long)]
     threshold: Option<usize>,
-    /// MPC instance id.
+    /// Override [mpc].instance_id from Stoffel.toml for this compile.
     #[arg(long)]
     instance_id: Option<u64>,
-    /// Print a compact program summary after compiling.
+}
+
+#[derive(Debug, Args, Clone)]
+struct CheckArgs {
+    /// Project directory, source directory, or .stfl source file to validate. Defaults to source files from Stoffel.toml.
+    path: Option<PathBuf>,
+    /// Print compiler intermediate representation for debugging.
     #[arg(long)]
-    summary: bool,
+    print_ir: bool,
+    /// Override [mpc].backend from Stoffel.toml for this validation.
+    #[arg(long, alias = "protocol")]
+    backend: Option<MpcBackend>,
+    /// Override [mpc].curve from Stoffel.toml for this validation.
+    #[arg(long, alias = "curve")]
+    field: Option<Curve>,
+    /// Override [mpc].parties from Stoffel.toml for this validation.
+    #[arg(long)]
+    parties: Option<usize>,
+    /// Override [mpc].threshold from Stoffel.toml for this validation.
+    #[arg(long)]
+    threshold: Option<usize>,
+    /// Override [mpc].instance_id from Stoffel.toml for this validation.
+    #[arg(long)]
+    instance_id: Option<u64>,
+}
+
+impl CheckArgs {
+    fn to_build_args(&self) -> BuildArgs {
+        BuildArgs {
+            path: self.path.clone(),
+            output: None,
+            binary: true,
+            disassemble: false,
+            print_ir: self.print_ir,
+            opt_level: None,
+            optimize: false,
+            release: false,
+            backend: self.backend,
+            field: self.field,
+            parties: self.parties,
+            threshold: self.threshold,
+            instance_id: self.instance_id,
+        }
+    }
+}
+
+#[derive(Debug, Args, Clone)]
+struct ProjectBuildArgs {
+    /// Project directory, source directory, or .stfl source file to build. Defaults to source files from Stoffel.toml.
+    path: Option<PathBuf>,
+    /// Write bytecode to this .stfb/.stflb file. Only valid when one source file is selected.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Print compiler intermediate representation for debugging.
+    #[arg(long)]
+    print_ir: bool,
+    /// Set optimization level (0-3). Accepts `-O3` or `-O 3`.
+    #[arg(
+        short = 'O',
+        long = "opt-level",
+        value_parser = clap::value_parser!(u8).range(0..=3),
+        value_name = "N"
+    )]
+    opt_level: Option<u8>,
+    /// Use O2 optimization unless --release selects O3.
+    #[arg(long, conflicts_with = "opt_level")]
+    optimize: bool,
+    /// Write under target/release and use O3 unless --opt-level is set.
+    #[arg(long)]
+    release: bool,
+    /// Override [mpc].backend from Stoffel.toml for this build.
+    #[arg(long, alias = "protocol")]
+    backend: Option<MpcBackend>,
+    /// Override [mpc].curve from Stoffel.toml for this build.
+    #[arg(long, alias = "curve")]
+    field: Option<Curve>,
+    /// Override [mpc].parties from Stoffel.toml for this build.
+    #[arg(long)]
+    parties: Option<usize>,
+    /// Override [mpc].threshold from Stoffel.toml for this build.
+    #[arg(long)]
+    threshold: Option<usize>,
+    /// Override [mpc].instance_id from Stoffel.toml for this build.
+    #[arg(long)]
+    instance_id: Option<u64>,
+}
+
+impl ProjectBuildArgs {
+    fn to_build_args(&self) -> BuildArgs {
+        BuildArgs {
+            path: self.path.clone(),
+            output: self.output.clone(),
+            binary: true,
+            disassemble: false,
+            print_ir: self.print_ir,
+            opt_level: self.opt_level,
+            optimize: self.optimize,
+            release: self.release,
+            backend: self.backend,
+            field: self.field,
+            parties: self.parties,
+            threshold: self.threshold,
+            instance_id: self.instance_id,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
 struct RunArgs {
     #[command(flatten)]
-    build: BuildArgs,
-    /// Function entrypoint to run.
+    build: RunBuildArgs,
+    /// Function to execute from the compiled program.
     #[arg(long, default_value = "main")]
     entry: String,
-    /// Named function input, written as name=value.
+    /// Function argument value, written as NAME=VALUE. Repeat once per argument.
     #[arg(long = "input", value_name = "NAME=VALUE")]
     inputs: Vec<InputArg>,
-    /// Local ClientStore input, written as client_slot=value.
+    /// Local simulation input for a numeric client slot, written as SLOT=VALUE.
     #[arg(long = "client-input", value_name = "SLOT=VALUE")]
     client_inputs: Vec<ClientInputArg>,
-    /// Run through local MPC nodes. This is the default unless --network/--config is set.
+    /// Run on the local MPC simulator. This is the default unless --network or --config is set.
     #[arg(long, conflicts_with = "network")]
     local: bool,
-    /// Run against a real MPC network using --config.
+    /// Connect to an MPC network described by --config.
     #[arg(long, conflicts_with = "local")]
     network: bool,
-    /// Network/off-chain client TOML config for local or networked execution.
+    /// MPC network/off-chain client TOML file. Do not pass project Stoffel.toml here.
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Client id/client slot for networked execution.
+    /// Print function/instruction metadata before executing.
+    #[arg(long = "program-info", alias = "summary")]
+    program_info: bool,
+    /// Network client slot to use with --network.
     #[arg(long)]
     client_id: Option<u64>,
-    /// Network connection timeout in milliseconds.
+    /// Timeout for connecting to network nodes, in milliseconds.
     #[arg(long, default_value_t = 10_000)]
     connect_timeout_ms: u64,
-    /// Path to stoffel-run for local MPC execution.
+    /// Path to the stoffel-run helper binary for local MPC simulation.
     #[arg(long)]
     runner: Option<PathBuf>,
-    /// Local MPC timeout in seconds.
+    /// Timeout for local MPC execution, in seconds.
     #[arg(long, default_value_t = 180)]
     timeout_secs: u64,
     /// Catch positional input mistakes so we can explain --input NAME=VALUE.
@@ -166,41 +271,99 @@ struct RunArgs {
 }
 
 #[derive(Debug, Args, Clone)]
-struct DevArgs {
-    /// Project directory or source file. Defaults to src/main.stfl from Stoffel.toml.
+struct RunBuildArgs {
+    /// Project directory, .stfl source file, or .stfb/.stflb bytecode file to run. Defaults to the current project.
     path: Option<PathBuf>,
-    /// Function entrypoint to run.
-    #[arg(long, default_value = "main")]
-    entry: String,
-    /// Named function input, written as name=value.
-    #[arg(long = "input", value_name = "NAME=VALUE")]
-    inputs: Vec<InputArg>,
-    /// Local ClientStore input, written as client_slot=value.
-    #[arg(long = "client-input", value_name = "SLOT=VALUE")]
-    client_inputs: Vec<ClientInputArg>,
-    /// Path to stoffel-run for local MPC execution.
+    /// Print compiler intermediate representation when source must be compiled before running.
     #[arg(long)]
-    runner: Option<PathBuf>,
-    /// Number of MPC parties.
+    print_ir: bool,
+    /// Set optimization level (0-3). Accepts `-O3` or `-O 3`.
+    #[arg(
+        short = 'O',
+        long = "opt-level",
+        value_parser = clap::value_parser!(u8).range(0..=3),
+        value_name = "N"
+    )]
+    opt_level: Option<u8>,
+    /// Use O2 optimization unless --release selects O3.
+    #[arg(long, conflicts_with = "opt_level")]
+    optimize: bool,
+    /// Prefer target/release bytecode and use O3 when compiling source unless --opt-level is set.
     #[arg(long)]
-    parties: Option<usize>,
-    /// Byzantine threshold.
-    #[arg(long)]
-    threshold: Option<usize>,
-    /// MPC backend: honeybadger, avss, or avss:bls12_381.
+    release: bool,
+    /// Override [mpc].backend from Stoffel.toml when compiling source before running.
     #[arg(long, alias = "protocol")]
     backend: Option<MpcBackend>,
-    /// Cryptographic field/curve. Non-default values select AVSS.
+    /// Override [mpc].curve from Stoffel.toml when compiling source before running.
     #[arg(long, alias = "curve")]
     field: Option<Curve>,
-    /// Local MPC timeout in seconds.
+    /// Override [mpc].parties from Stoffel.toml for this run.
+    #[arg(long)]
+    parties: Option<usize>,
+    /// Override [mpc].threshold from Stoffel.toml for this run.
+    #[arg(long)]
+    threshold: Option<usize>,
+    /// Override [mpc].instance_id from Stoffel.toml for this run.
+    #[arg(long)]
+    instance_id: Option<u64>,
+}
+
+impl RunBuildArgs {
+    fn to_build_args(&self) -> BuildArgs {
+        BuildArgs {
+            path: self.path.clone(),
+            output: None,
+            binary: true,
+            disassemble: false,
+            print_ir: self.print_ir,
+            opt_level: self.opt_level,
+            optimize: self.optimize,
+            release: self.release,
+            backend: self.backend,
+            field: self.field,
+            parties: self.parties,
+            threshold: self.threshold,
+            instance_id: self.instance_id,
+        }
+    }
+}
+
+#[derive(Debug, Args, Clone)]
+struct DevArgs {
+    /// Project directory or .stfl source file to watch. Defaults to source files from Stoffel.toml.
+    path: Option<PathBuf>,
+    /// Function to execute after each reload.
+    #[arg(long, default_value = "main")]
+    entry: String,
+    /// Function argument value, written as NAME=VALUE. Repeat once per argument.
+    #[arg(long = "input", value_name = "NAME=VALUE")]
+    inputs: Vec<InputArg>,
+    /// Local simulation input for a numeric client slot, written as SLOT=VALUE.
+    #[arg(long = "client-input", value_name = "SLOT=VALUE")]
+    client_inputs: Vec<ClientInputArg>,
+    /// Path to the stoffel-run helper binary for local MPC simulation.
+    #[arg(long)]
+    runner: Option<PathBuf>,
+    /// Override [mpc].parties from Stoffel.toml for each dev run.
+    #[arg(long)]
+    parties: Option<usize>,
+    /// Override [mpc].threshold from Stoffel.toml for each dev run.
+    #[arg(long)]
+    threshold: Option<usize>,
+    /// Override [mpc].backend from Stoffel.toml for each dev compile.
+    #[arg(long, alias = "protocol")]
+    backend: Option<MpcBackend>,
+    /// Override [mpc].curve from Stoffel.toml for each dev compile.
+    #[arg(long, alias = "curve")]
+    field: Option<Curve>,
+    /// Timeout for local MPC execution, in seconds.
     #[arg(long, default_value_t = 180)]
     timeout_secs: u64,
-    /// Run once and exit instead of watching for changes.
+    /// Run once and exit; do not watch for file changes.
     #[arg(long)]
     once: bool,
-    /// Polling interval for hot reload file watching.
-    #[arg(long, default_value_t = 500)]
+    /// File-watch polling interval for hot reload, in milliseconds. Must be greater than zero.
+    #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u64).range(1..))]
     poll_ms: u64,
     /// Catch positional input mistakes so we can explain --input NAME=VALUE.
     #[arg(value_name = "INPUT", trailing_var_arg = true, hide = true)]
@@ -209,59 +372,62 @@ struct DevArgs {
 
 #[derive(Debug, Args)]
 struct TestArgs {
-    /// Project directory or specific test file. Defaults to all tests/*.stfl files.
+    /// Project directory or .stfl test file. Defaults to every test file recursively under tests/.
     path: Option<PathBuf>,
-    /// Run tests through local MPC nodes instead of clear execution.
+    /// Run tests through local MPC simulation instead of the fast clear test runner.
     #[arg(long)]
     local: bool,
-    /// Run a specific test function or file stem.
+    /// Run tests whose function name or file stem matches this value.
     #[arg(long = "test")]
     test: Option<String>,
-    /// Run integration tests only.
+    /// Run only test files marked as integration tests.
     #[arg(long)]
     integration: bool,
-    /// Print detailed test output.
+    /// Print each selected test and its result.
     #[arg(long, short)]
     verbose: bool,
-    /// Path to stoffel-run for local MPC execution.
+    /// Path to the stoffel-run helper binary for local MPC simulation.
     #[arg(long)]
     runner: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
 struct StatusArgs {
-    /// Project directory or file inside a project. Defaults to the current directory.
+    /// Project directory or any file inside a project. Defaults to the current directory.
     path: Option<PathBuf>,
-    /// Also show detailed dependency and network diagnostics.
+    /// Show dependency details and MPC configuration diagnostics.
     #[arg(long, short)]
     verbose: bool,
 }
 
 #[derive(Debug, Args)]
 struct CleanArgs {
-    /// Project directory or file inside a project. Defaults to the current directory.
+    /// Project directory or any file inside a project. Defaults to the current directory.
     path: Option<PathBuf>,
-    /// Also remove release artifacts. Kept for compatibility; clean removes target by default.
-    #[arg(long)]
+    /// Legacy no-op: plain clean already removes target/, including release artifacts.
+    #[arg(long, hide = true)]
     release: bool,
-    /// Deep clean target, local Stoffel cache, and known ecosystem build caches.
+    /// Also remove known ecosystem build caches such as node_modules and Rust target dirs.
     #[arg(long)]
     all: bool,
 }
 
 #[derive(Debug, Args)]
 struct UpdateArgs {
-    /// Project directory or file inside a project. Defaults to the current directory.
+    /// Project directory or any file inside a project. Defaults to the current directory.
     path: Option<PathBuf>,
-    /// Only check what would be updated.
+    /// Print available update actions without changing files.
     #[arg(long)]
     check: bool,
-    /// Skip updating/reinstalling the Stoffel CLI.
+    /// Do not check or update the Stoffel CLI executable.
     #[arg(long)]
     no_self: bool,
-    /// Skip project dependency updates.
+    /// Do not check or update project dependency files.
     #[arg(long)]
     no_project: bool,
+    /// Reinstall the Stoffel CLI from this source checkout. Required for source builds.
+    #[arg(long)]
+    self_from_source: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -329,7 +495,8 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Init(args) => init(args),
         Command::Check(args) => check(args),
-        Command::Compile(args) | Command::Build(args) => build(args),
+        Command::Compile(args) => build(args),
+        Command::Build(args) => build(args.to_build_args()),
         Command::Run(args) => run(args).await,
         Command::Dev(args) => dev(args).await,
         Command::Test(args) => test(args).await,
@@ -360,10 +527,8 @@ fn init(args: InitArgs) -> Result<()> {
     Ok(())
 }
 
-fn check(args: BuildArgs) -> Result<()> {
-    if args.disassemble {
-        return disassemble(args);
-    }
+fn check(args: CheckArgs) -> Result<()> {
+    let args = args.to_build_args();
     let project = Project::discover(args.path.as_deref())?;
     for source in selected_sources(&project, &args)? {
         let runtime = configured_builder_for_source(&project, &args, &source)?
@@ -393,7 +558,7 @@ fn build(args: BuildArgs) -> Result<()> {
             .clone()
             .map(|path| project_relative_output(&project, path))
             .unwrap_or_else(|| project.default_bytecode_path_for_source(&source, args.release));
-        validate_bytecode_output_path(&output)?;
+        validate_bytecode_output_path(&project, &output)?;
         let runtime = configured_builder_for_source(&project, &args, &source)?
             .build()
             .with_context(|| format!("failed to compile or configure {}", source.display()))?;
@@ -403,9 +568,6 @@ fn build(args: BuildArgs) -> Result<()> {
         }
         runtime.save_bytecode(&output)?;
         print_build_stats(&output, runtime.program(), &project, &args)?;
-        if args.summary {
-            print_program_summary(runtime.program());
-        }
     }
     Ok(())
 }
@@ -416,7 +578,8 @@ async fn run(args: RunArgs) -> Result<()> {
         return run_network(args).await;
     }
 
-    let run_source = run_builder(&args.build)?;
+    let build = args.build.to_build_args();
+    let run_source = run_builder(&build)?;
     let mut builder = apply_run_inputs(run_source.builder, &args.inputs, &args.client_inputs)?;
     if let Some(path) = args.runner {
         builder = builder.local_runner_path(path);
@@ -424,12 +587,12 @@ async fn run(args: RunArgs) -> Result<()> {
     let runtime = builder.clone().build().with_context(|| {
         execution_build_context(
             "stoffel run",
-            args.build.path.as_deref(),
+            build.path.as_deref(),
             run_source.bytecode_path.as_deref(),
         )
     })?;
     validate_entry_and_named_inputs(runtime.program(), &args.entry, &args.inputs, "stoffel run")?;
-    if args.build.summary {
+    if args.program_info {
         print_program_summary(runtime.program());
     }
     let result = builder
@@ -445,16 +608,26 @@ async fn run_network(args: RunArgs) -> Result<()> {
         .as_ref()
         .context("network execution requires --config")?;
     validate_network_config_path(config_path)?;
-    let run_source = run_builder(&args.build)?;
+    if !args.client_inputs.is_empty() {
+        anyhow::bail!("network execution accepts --input values for the configured client slot; --client-input is only used for local ClientStore runs");
+    }
+    let build = args.build.to_build_args();
+    let run_source = run_builder(&build)?;
     let builder = run_source.builder;
     let runtime = builder.build().with_context(|| {
         execution_build_context(
             "stoffel run --network",
-            args.build.path.as_deref(),
+            build.path.as_deref(),
             run_source.bytecode_path.as_deref(),
         )
     })?;
-    if args.build.summary {
+    validate_entry_and_named_inputs(
+        runtime.program(),
+        &args.entry,
+        &args.inputs,
+        "stoffel run --network",
+    )?;
+    if args.program_info {
         print_program_summary(runtime.program());
     }
     let inputs = args
@@ -462,9 +635,6 @@ async fn run_network(args: RunArgs) -> Result<()> {
         .iter()
         .map(|input| input.value.clone())
         .collect::<Vec<_>>();
-    if !args.client_inputs.is_empty() {
-        anyhow::bail!("network execution accepts --input values for the configured client slot; --client-input is only used for local ClientStore runs");
-    }
 
     match read_run_network_config(config_path)? {
         RunNetworkConfig::OffChain(config) => {
@@ -512,22 +682,26 @@ fn validate_run_args(args: &RunArgs) -> Result<()> {
         "stoffel run",
         args.build.path.as_deref(),
         &args.positional_inputs,
-    )?;
-    if args.build.output.is_some() {
-        anyhow::bail!(
-            "--output is only used by `stoffel build`/`stoffel compile`; `stoffel run` executes a program without writing bytecode"
-        );
-    }
-    if args.build.disassemble {
-        anyhow::bail!(
-            "--disassemble is only used by `stoffel compile`; run `stoffel compile --disassemble <BYTECODE>`"
-        );
-    }
-    Ok(())
+    )
 }
 
 fn validate_dev_args(args: &DevArgs) -> Result<()> {
-    validate_positional_inputs("stoffel dev", args.path.as_deref(), &args.positional_inputs)
+    validate_positional_inputs("stoffel dev", args.path.as_deref(), &args.positional_inputs)?;
+    if let Some(path) = args.path.as_deref() {
+        if path.exists() && !path.is_dir() && !is_source_path(path) {
+            if is_bytecode_path(path) {
+                anyhow::bail!(
+                    "stoffel dev watches project directories or .stfl source files; use `stoffel run {}` to execute bytecode",
+                    path.display()
+                );
+            }
+            anyhow::bail!(
+                "stoffel dev expected a project directory or .stfl source file; got {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn execution_build_context(
@@ -619,7 +793,6 @@ async fn run_dev_once(args: &DevArgs) -> Result<()> {
         parties: args.parties,
         threshold: args.threshold,
         instance_id: None,
-        summary: false,
     };
     let project = Project::discover(build.path.as_deref())?;
     let mut builder = apply_run_inputs(
@@ -645,7 +818,10 @@ async fn run_dev_once(args: &DevArgs) -> Result<()> {
 async fn test(args: TestArgs) -> Result<()> {
     let project = Project::discover(args.path.as_deref())?;
     let mut files = match args.path.as_deref() {
-        Some(path) if path.is_file() => vec![path.to_path_buf()],
+        Some(path) if path.is_file() => {
+            ensure_test_file_path(path)?;
+            vec![path.to_path_buf()]
+        }
         Some(path) if path.is_dir() => {
             select_test_files(&project, args.test.as_deref(), args.integration)?
         }
@@ -653,7 +829,10 @@ async fn test(args: TestArgs) -> Result<()> {
         None => select_test_files(&project, args.test.as_deref(), args.integration)?,
     };
     if files.is_empty() {
-        println!("No Stoffel tests found");
+        println!(
+            "{}",
+            no_tests_found_message(args.test.as_deref(), args.integration)
+        );
         return Ok(());
     }
     if let Some(name) = args.test.as_deref() {
@@ -711,6 +890,27 @@ async fn test(args: TestArgs) -> Result<()> {
         anyhow::bail!("{failures} Stoffel test(s) failed");
     }
     Ok(())
+}
+
+fn ensure_test_file_path(path: &Path) -> Result<()> {
+    if !is_source_path(path) {
+        anyhow::bail!(
+            "stoffel test expected a .stfl test file or project directory; got {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn no_tests_found_message(test: Option<&str>, integration: bool) -> String {
+    match (test, integration) {
+        (Some(name), true) => {
+            format!("No Stoffel integration tests matched --test '{name}' under tests/")
+        }
+        (Some(name), false) => format!("No Stoffel tests matched --test '{name}' under tests/"),
+        (None, true) => "No Stoffel integration tests found under tests/".to_owned(),
+        (None, false) => "No Stoffel tests found under tests/".to_owned(),
+    }
 }
 
 fn validate_test_entry_has_no_parameters(
@@ -790,6 +990,12 @@ fn status(args: StatusArgs) -> Result<()> {
     println!("Root: {}", project.root().display());
 
     println!("Config: ok ({})", project.config_path().display());
+    if args.verbose {
+        println!("Source: {}", project.source_path().display());
+        println!("Target: {}", project.target_dir().display());
+        println!("Cache: {}", project.cache_dir().display());
+        println!("Tests: {}", project.root().join("tests").display());
+    }
     let mpc = MpcConfig::builder()
         .parties(project.config().mpc.parties.unwrap_or(5))
         .threshold(project.config().mpc.threshold.unwrap_or(1))
@@ -808,7 +1014,7 @@ fn status(args: StatusArgs) -> Result<()> {
 
     let dependencies = dependency_statuses(&project);
     if dependencies.is_empty() {
-        println!("Dependencies: none detected");
+        println!("Dependencies: ok (none declared)");
     } else {
         let ready = dependencies.iter().filter(|dep| dep.ready).count();
         println!("Dependencies: {ready}/{} ready", dependencies.len());
@@ -869,18 +1075,25 @@ fn status(args: StatusArgs) -> Result<()> {
 }
 
 fn update(args: UpdateArgs) -> Result<()> {
+    if args.no_self && args.no_project {
+        anyhow::bail!(
+            "no update targets selected; remove --no-self to include the Stoffel CLI or remove --no-project to include project dependencies"
+        );
+    }
     let project = if args.no_project {
         None
     } else {
         Some(Project::discover(args.path.as_deref())?)
     };
-    println!("Stoffel CLI: {}", env!("CARGO_PKG_VERSION"));
-    if args.check {
-        println!("Update check: online version discovery is not configured for this source build");
-    }
 
     if !args.no_self {
-        update_self(args.check)?;
+        println!("Stoffel CLI: {}", env!("CARGO_PKG_VERSION"));
+        if args.check {
+            println!(
+                "Update check: online version discovery is not configured for this source build"
+            );
+        }
+        update_self(args.check, args.self_from_source)?;
     }
 
     if let Some(project) = project {
@@ -924,6 +1137,13 @@ fn run_builder(args: &BuildArgs) -> Result<RunSource> {
         }
         let project = Project::discover(Some(path))?;
         if path.is_dir() {
+            if !is_project_root_dir(&project, path)? {
+                anyhow::bail!(
+                    "stoffel run expected a project directory containing Stoffel.toml, a .stfl source file, or a .stfb/.stflb bytecode file; got directory {}. To run the current project, pass {}",
+                    path.display(),
+                    project.root().display()
+                );
+            }
             if let Some(bytecode) = project.find_bytecode(args.release)? {
                 let builder = load_bytecode_for_run(&bytecode)?;
                 return Ok(RunSource {
@@ -1032,7 +1252,19 @@ fn effective_opt_level(args: &BuildArgs, configured: Option<u8>) -> u8 {
 fn selected_sources(project: &Project, args: &BuildArgs) -> Result<Vec<PathBuf>> {
     if let Some(path) = &args.path {
         if path.is_dir() {
-            project.source_files()
+            if is_project_root_dir(project, path)? {
+                project.source_files()
+            } else {
+                let sources = project.source_files_under(path)?;
+                if sources.is_empty() {
+                    anyhow::bail!(
+                        "no .stfl source files found under {}; pass project directory {} to use build.source from Stoffel.toml",
+                        path.display(),
+                        project.root().display()
+                    );
+                }
+                Ok(sources)
+            }
         } else {
             ensure_source_path(path)?;
             Ok(vec![path.clone()])
@@ -1040,6 +1272,17 @@ fn selected_sources(project: &Project, args: &BuildArgs) -> Result<Vec<PathBuf>>
     } else {
         project.source_files()
     }
+}
+
+fn is_project_root_dir(project: &Project, path: &Path) -> Result<bool> {
+    let explicit = path
+        .canonicalize()
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    let root = project
+        .root()
+        .canonicalize()
+        .with_context(|| format!("failed to inspect {}", project.root().display()))?;
+    Ok(explicit == root)
 }
 
 fn ensure_source_path(path: &Path) -> Result<()> {
@@ -1070,7 +1313,7 @@ fn project_relative_output(project: &Project, output: PathBuf) -> PathBuf {
     }
 }
 
-fn validate_bytecode_output_path(output: &Path) -> Result<()> {
+fn validate_bytecode_output_path(project: &Project, output: &Path) -> Result<()> {
     if output.is_dir() {
         anyhow::bail!(
             "--output must be a .stfb/.stflb bytecode file path, but {} is a directory",
@@ -1082,6 +1325,22 @@ fn validate_bytecode_output_path(output: &Path) -> Result<()> {
             "--output must end in .stfb or .stflb for bytecode output; got {}",
             output.display()
         );
+    }
+    if let Ok(relative) = output.strip_prefix(project.root()) {
+        if relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            anyhow::bail!(
+                "--output must not contain parent-directory segments (`..`); got {}",
+                output.display()
+            );
+        }
+        if relative.starts_with("src") {
+            anyhow::bail!(
+                "--output must not write bytecode under src/; use a path under target/ instead"
+            );
+        }
     }
     Ok(())
 }
@@ -1187,6 +1446,12 @@ fn is_integration_test_file(path: &Path) -> bool {
 }
 
 fn ensure_writable_project_dir(path: &Path, force: bool) -> Result<()> {
+    if path.exists() && !path.is_dir() {
+        anyhow::bail!(
+            "{} is a file; pass a directory path for the new Stoffel project",
+            path.display()
+        );
+    }
     if path.exists() && !force && std::fs::read_dir(path)?.next().is_some() {
         if path.join("Stoffel.toml").exists() {
             anyhow::bail!(
@@ -1320,7 +1585,6 @@ fn default_build_for_status(path: PathBuf) -> BuildArgs {
         parties: None,
         threshold: None,
         instance_id: None,
-        summary: false,
     }
 }
 
@@ -1390,11 +1654,18 @@ fn network_status(project: &Project) -> Option<String> {
     ))
 }
 
-fn update_self(check: bool) -> Result<()> {
+fn update_self(check: bool, self_from_source: bool) -> Result<()> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     if check {
         println!(
             "CLI self-update: source checkout detected at {}",
+            manifest_dir.display()
+        );
+        return Ok(());
+    }
+    if !self_from_source {
+        println!(
+            "CLI self-update: source checkout detected at {}; skipped. Re-run with --self-from-source to reinstall from this checkout, or --no-self to skip this message.",
             manifest_dir.display()
         );
         return Ok(());
@@ -1503,18 +1774,24 @@ fn command_exists(program: &str) -> bool {
 }
 
 fn deep_clean_paths(project: &Project) -> Vec<PathBuf> {
-    [
-        ".stoffel",
-        "node_modules",
-        ".pytest_cache",
-        "__pycache__",
-        "out",
-        "cache",
-        "artifacts",
-    ]
-    .into_iter()
-    .map(|path| project.root().join(path))
-    .collect()
+    let root = project.root();
+    let mut paths = vec![
+        root.join(".stoffel"),
+        root.join("node_modules"),
+        root.join(".pytest_cache"),
+        root.join("__pycache__"),
+    ];
+    if root.join("foundry.toml").exists() {
+        paths.push(root.join("out"));
+        paths.push(root.join("cache"));
+    }
+    if root.join("hardhat.config.js").exists() || root.join("hardhat.config.ts").exists() {
+        paths.push(root.join("artifacts"));
+        paths.push(root.join("cache"));
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn parse_value(value: &str) -> Value {

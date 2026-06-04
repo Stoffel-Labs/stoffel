@@ -29,6 +29,11 @@ fn init_creates_default_project() {
 
     assert!(temp.path().join("hello/Stoffel.toml").exists());
     assert!(temp.path().join("hello/src/main.stfl").exists());
+    let readme = fs::read_to_string(temp.path().join("hello/README.md")).unwrap();
+    assert!(readme.contains("stoffel check"));
+    assert!(readme.contains("stoffel run --input a=40 --input b=2"));
+    assert!(readme.contains("stoffel dev --once --input a=40 --input b=2"));
+    assert!(readme.contains("stoffel build"));
 }
 
 #[test]
@@ -223,7 +228,7 @@ fn run_recompiles_when_project_source_is_newer_than_bytecode() {
         .arg("run")
         .arg(&project)
         .args([
-            "--summary",
+            "--program-info",
             "--timeout-secs",
             "0",
             "--input",
@@ -270,7 +275,7 @@ fn run_recompiles_when_project_config_is_newer_than_bytecode() {
         .arg("run")
         .arg(&project)
         .args([
-            "--summary",
+            "--program-info",
             "--timeout-secs",
             "0",
             "--input",
@@ -299,7 +304,7 @@ fn run_folder_compiles_project_when_bytecode_is_missing() {
         .arg("run")
         .arg(project)
         .args([
-            "--summary",
+            "--program-info",
             "--timeout-secs",
             "0",
             "--input",
@@ -314,6 +319,34 @@ fn run_folder_compiles_project_when_bytecode_is_missing() {
         .stderr(predicate::str::contains(
             "local network timeout must be greater than zero",
         ));
+}
+
+#[test]
+fn run_rejects_non_project_directories_inside_a_project() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    fs::create_dir_all(temp.path().join("target")).unwrap();
+
+    for path in [temp.path().join("src"), temp.path().join("target")] {
+        Command::cargo_bin("stoffel")
+            .unwrap()
+            .arg("run")
+            .arg(&path)
+            .args(["--program-info", "--timeout-secs", "0"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "expected a project directory containing Stoffel.toml",
+            ))
+            .stderr(predicate::str::contains("To run the current project, pass"))
+            .stdout(predicate::str::contains("Functions:").not());
+    }
 }
 
 #[test]
@@ -385,6 +418,57 @@ fn dev_once_explains_input_mistakes() {
 }
 
 #[test]
+fn dev_rejects_non_source_paths_and_invalid_poll_interval() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("app");
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(&project)
+        .assert()
+        .success();
+
+    fs::write(project.join("notes.txt"), "not source").unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("dev")
+        .arg(project.join("notes.txt"))
+        .arg("--once")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "expected a project directory or .stfl source file",
+        ));
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("build")
+        .arg(&project)
+        .assert()
+        .success();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("dev")
+        .arg(project.join("target/debug/app.stfb"))
+        .arg("--once")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "dev watches project directories or .stfl source files",
+        ))
+        .stderr(predicate::str::contains("stoffel run"));
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("dev")
+        .arg(&project)
+        .args(["--poll-ms", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value '0'"));
+}
+
+#[test]
 fn run_help_exposes_mpc_network_flags() {
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -397,11 +481,155 @@ fn run_help_exposes_mpc_network_flags() {
         .stdout(predicate::str::contains("--network"))
         .stdout(predicate::str::contains("--local"))
         .stdout(predicate::str::contains("--client-input"))
-        .stdout(predicate::str::contains("--connect-timeout-ms"));
+        .stdout(predicate::str::contains("--connect-timeout-ms"))
+        .stdout(predicate::str::contains("--output").not())
+        .stdout(predicate::str::contains("--disassemble").not())
+        .stdout(predicate::str::contains("--binary").not());
 }
 
 #[test]
-fn run_rejects_build_only_flags_and_honors_summary() {
+fn summary_flag_is_not_part_of_general_build_help() {
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["check", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--summary").not())
+        .stdout(predicate::str::contains("--output").not())
+        .stdout(predicate::str::contains("--disassemble").not())
+        .stdout(predicate::str::contains("--binary").not())
+        .stdout(predicate::str::contains("--release").not())
+        .stdout(predicate::str::contains("--optimize").not())
+        .stdout(predicate::str::contains("--opt-level").not())
+        .stdout(predicate::str::contains(
+            "Project directory, source directory, or .stfl source file to validate",
+        ))
+        .stdout(predicate::str::contains(
+            "Override [mpc].backend from Stoffel.toml",
+        ))
+        .stdout(predicate::str::contains("--print-ir"));
+
+    for command in ["compile", "build"] {
+        Command::cargo_bin("stoffel")
+            .unwrap()
+            .args([command, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--summary").not())
+            .stdout(predicate::str::contains("--binary").not())
+            .stdout(predicate::str::contains(
+                "Write bytecode to this .stfb/.stflb file",
+            ));
+    }
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["compile", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--disassemble"));
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["build", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--disassemble").not());
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["run", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--program-info"))
+        .stdout(predicate::str::contains("--summary").not())
+        .stdout(predicate::str::contains(
+            "Do not pass project Stoffel.toml here",
+        ))
+        .stdout(predicate::str::contains(
+            "Function argument value, written as NAME=VALUE",
+        ));
+}
+
+#[test]
+fn help_text_uses_foolproof_command_phrasing() {
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Validate source and project MPC settings without writing bytecode",
+        ))
+        .stdout(predicate::str::contains(
+            "Run source or bytecode through MPC execution",
+        ));
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("without deleting unrelated files"))
+        .stdout(predicate::str::contains("--interactive").not());
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["clean", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("known ecosystem build caches"))
+        .stdout(predicate::str::contains("--release").not());
+}
+
+#[test]
+fn check_rejects_build_only_flags_at_parse_time() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+
+    for flag in [
+        "--output",
+        "--disassemble",
+        "--binary",
+        "--release",
+        "--optimize",
+        "--opt-level",
+    ] {
+        let mut command = Command::cargo_bin("stoffel").unwrap();
+        command.arg("check").arg(temp.path()).arg(flag);
+        if flag == "--output" {
+            command.arg("target/debug/app.stfb");
+        }
+        if flag == "--opt-level" {
+            command.arg("3");
+        }
+        command
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(format!(
+                "unexpected argument '{flag}'"
+            )));
+    }
+}
+
+#[test]
+fn build_rejects_compile_only_disassemble_flag_at_parse_time() {
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["build", "--disassemble"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unexpected argument '--disassemble'",
+        ));
+}
+
+#[test]
+fn run_rejects_build_only_flags_and_honors_program_info() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
@@ -418,7 +646,7 @@ fn run_rejects_build_only_flags_and_honors_summary() {
         .args(["run", "--output", "target/debug/app.stfb"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--output is only used"));
+        .stderr(predicate::str::contains("unexpected argument '--output'"));
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -426,14 +654,16 @@ fn run_rejects_build_only_flags_and_honors_summary() {
         .args(["run", "--disassemble"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--disassemble is only used"));
+        .stderr(predicate::str::contains(
+            "unexpected argument '--disassemble'",
+        ));
 
     Command::cargo_bin("stoffel")
         .unwrap()
         .current_dir(temp.path())
         .args([
             "run",
-            "--summary",
+            "--program-info",
             "--timeout-secs",
             LOCAL_MPC_TEST_TIMEOUT_SECS,
             "--input",
@@ -460,6 +690,7 @@ fn run_validates_entry_and_inputs_before_timeout() {
 
     Command::cargo_bin("stoffel")
         .unwrap()
+        .current_dir(temp.path())
         .arg("run")
         .arg(temp.path())
         .args([
@@ -478,6 +709,7 @@ fn run_validates_entry_and_inputs_before_timeout() {
 
     Command::cargo_bin("stoffel")
         .unwrap()
+        .current_dir(temp.path())
         .arg("run")
         .arg(temp.path())
         .args([
@@ -498,6 +730,7 @@ fn run_validates_entry_and_inputs_before_timeout() {
 
     Command::cargo_bin("stoffel")
         .unwrap()
+        .current_dir(temp.path())
         .arg("run")
         .arg(temp.path())
         .args(["--timeout-secs", "0"])
@@ -510,6 +743,7 @@ fn run_validates_entry_and_inputs_before_timeout() {
 
     Command::cargo_bin("stoffel")
         .unwrap()
+        .current_dir(temp.path())
         .arg("run")
         .arg(temp.path())
         .args(["--input", "a=1", "--timeout-secs", "0"])
@@ -520,6 +754,7 @@ fn run_validates_entry_and_inputs_before_timeout() {
 
     Command::cargo_bin("stoffel")
         .unwrap()
+        .current_dir(temp.path())
         .arg("run")
         .arg(temp.path())
         .args(["--input", "a=", "--timeout-secs", "0"])
@@ -529,6 +764,7 @@ fn run_validates_entry_and_inputs_before_timeout() {
 
     Command::cargo_bin("stoffel")
         .unwrap()
+        .current_dir(temp.path())
         .arg("run")
         .arg(temp.path())
         .args(["--client-input", "0=", "--timeout-secs", "0"])
@@ -658,6 +894,73 @@ fn run_config_rejects_project_stoffel_toml() {
 }
 
 #[test]
+fn run_network_validates_program_before_parsing_config_contents() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    fs::write(temp.path().join("network.toml"), "not = [valid").unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(temp.path())
+        .arg("run")
+        .arg(temp.path())
+        .args([
+            "--network",
+            "--config",
+            "network.toml",
+            "--entry",
+            "missing",
+            "--input",
+            "a=1",
+            "--input",
+            "b=2",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("function 'missing' not found"))
+        .stderr(predicate::str::contains("failed to parse").not());
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(temp.path())
+        .arg("run")
+        .arg(temp.path())
+        .args(["--network", "--config", "network.toml", "--input", "a=1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("missing input 'b'"))
+        .stderr(predicate::str::contains(
+            "Pass inputs as: stoffel run --network --entry main",
+        ))
+        .stderr(predicate::str::contains("failed to parse").not());
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(temp.path())
+        .arg("run")
+        .arg(temp.path())
+        .args([
+            "--network",
+            "--config",
+            "network.toml",
+            "--client-input",
+            "0=1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--client-input is only used for local ClientStore runs",
+        ))
+        .stderr(predicate::str::contains("failed to parse").not());
+}
+
+#[test]
 fn run_network_accepts_network_config_and_attempts_connection() {
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
@@ -704,6 +1007,10 @@ random_shares = 1
             "network.toml",
             "--connect-timeout-ms",
             "50",
+            "--input",
+            "a=1",
+            "--input",
+            "b=2",
         ])
         .assert()
         .failure()
@@ -867,6 +1174,47 @@ fn build_and_check_accept_project_folder_paths() {
 }
 
 #[test]
+fn build_and_check_do_not_ignore_explicit_empty_source_directories() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    fs::create_dir_all(temp.path().join("empty-src")).unwrap();
+    fs::create_dir_all(temp.path().join("more-src")).unwrap();
+    fs::write(
+        temp.path().join("more-src/extra.stfl"),
+        "def main() -> int64:\n  return 7\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("build")
+        .arg(temp.path().join("more-src"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("extra.stfb"));
+
+    for command in ["build", "check"] {
+        Command::cargo_bin("stoffel")
+            .unwrap()
+            .arg(command)
+            .arg(temp.path().join("empty-src"))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "no .stfl source files found under",
+            ))
+            .stderr(predicate::str::contains("pass project directory"))
+            .stderr(predicate::str::contains("src/main.stfl").not());
+    }
+}
+
+#[test]
 fn build_output_is_relative_to_project_root() {
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app");
@@ -954,6 +1302,62 @@ fn build_rejects_configured_source_with_wrong_extension() {
 }
 
 #[test]
+fn build_rejects_unsafe_configured_source_paths() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    let config = fs::read_to_string(temp.path().join("Stoffel.toml")).unwrap();
+
+    for (source, expected) in [
+        (".", "choose a source file like src/main.stfl"),
+        ("..", "source paths must stay inside the project"),
+        ("../other", "source paths must stay inside the project"),
+    ] {
+        fs::write(
+            temp.path().join("Stoffel.toml"),
+            config.replace(
+                "source = \"src/main.stfl\"",
+                &format!("source = \"{source}\""),
+            ),
+        )
+        .unwrap();
+        Command::cargo_bin("stoffel")
+            .unwrap()
+            .arg("build")
+            .arg(temp.path())
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("invalid build.source"))
+            .stderr(predicate::str::contains(expected));
+    }
+
+    let absolute_source = temp.path().join("src/main.stfl");
+    fs::write(
+        temp.path().join("Stoffel.toml"),
+        config.replace(
+            "source = \"src/main.stfl\"",
+            &format!("source = \"{}\"", absolute_source.display()),
+        ),
+    )
+    .unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("build")
+        .arg(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid build.source"))
+        .stderr(predicate::str::contains(
+            "expected a relative path inside the project",
+        ));
+}
+
+#[test]
 fn build_rejects_unsafe_configured_target_dir() {
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
@@ -1028,6 +1432,43 @@ fn build_rejects_unsafe_configured_target_dir() {
 }
 
 #[test]
+fn build_rejects_configured_optimization_levels_outside_cli_range() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    let config = fs::read_to_string(temp.path().join("Stoffel.toml")).unwrap();
+    fs::write(
+        temp.path().join("Stoffel.toml"),
+        config.replace(
+            "target_dir = \"target\"",
+            "target_dir = \"target\"\noptimization_level = 9",
+        ),
+    )
+    .unwrap();
+
+    for command in ["check", "build", "run", "status"] {
+        let mut cmd = Command::cargo_bin("stoffel").unwrap();
+        cmd.arg(command).arg(temp.path());
+        if command == "run" {
+            cmd.args(["--input", "a=1", "--input", "b=2"]);
+        }
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "invalid build.optimization_level 9",
+            ))
+            .stderr(predicate::str::contains(
+                "expected an optimization level from 0 to 3",
+            ));
+    }
+}
+
+#[test]
 fn build_invalid_mpc_flags_report_configuration_context() {
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
@@ -1048,6 +1489,60 @@ fn build_invalid_mpc_flags_report_configuration_context() {
         .stderr(predicate::str::contains("failed to compile or configure"))
         .stderr(predicate::str::contains("parties must be at least 5"))
         .stderr(predicate::str::contains("4 * threshold + 1"));
+}
+
+#[test]
+fn project_config_rejects_invalid_mpc_values_before_running() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    let config = fs::read_to_string(temp.path().join("Stoffel.toml")).unwrap();
+
+    fs::write(
+        temp.path().join("Stoffel.toml"),
+        config.replace("threshold = 1", "threshold = 0"),
+    )
+    .unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("check")
+        .arg(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid [mpc] config"))
+        .stderr(predicate::str::contains(
+            "threshold must be greater than zero",
+        ));
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("run")
+        .arg(temp.path())
+        .args(["--input", "a=40", "--input", "b=2"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid [mpc] config"))
+        .stderr(predicate::str::contains(
+            "threshold must be greater than zero",
+        ));
+
+    fs::write(
+        temp.path().join("Stoffel.toml"),
+        config.replace("parties = 5", "parties = 3"),
+    )
+    .unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("status")
+        .arg(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid [mpc] config"))
+        .stderr(predicate::str::contains("parties must be at least 5"));
 }
 
 #[test]
@@ -1168,6 +1663,34 @@ fn build_rejects_output_directory() {
         .stderr(predicate::str::contains(
             "--output must end in .stfb or .stflb",
         ));
+
+    let outside_output = format!(
+        "../{}-outside.stfb",
+        temp.path().file_name().unwrap().to_string_lossy()
+    );
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("build")
+        .arg(temp.path())
+        .args(["--output", outside_output.as_str()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--output must not contain parent-directory segments",
+        ));
+    assert!(!temp.path().join(outside_output).exists());
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("build")
+        .arg(temp.path())
+        .args(["--output", "src/generated.stfb"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--output must not write bytecode under src/",
+        ));
+    assert!(!temp.path().join("src/generated.stfb").exists());
 }
 
 #[test]
@@ -1266,12 +1789,42 @@ fn project_discovery_errors_name_the_search_directory() {
 #[test]
 fn init_supports_declared_templates_and_library_mode() {
     let temp = TempDir::new().unwrap();
-    for (name, marker) in [
-        ("python", "requirements.txt"),
-        ("rust", "Cargo.toml"),
-        ("typescript", "package.json"),
-        ("solidity-foundry", "foundry.toml"),
-        ("solidity-hardhat", "hardhat.config.js"),
+    for (name, marker, readme_markers) in [
+        (
+            "python",
+            "requirements.txt",
+            &[
+                "stoffel run --input a=40 --input b=2",
+                "python3 -m pip install -r requirements.txt",
+            ][..],
+        ),
+        (
+            "rust",
+            "Cargo.toml",
+            &["stoffel check stoffel", "cargo run"][..],
+        ),
+        (
+            "typescript",
+            "package.json",
+            &[
+                "stoffel run --input a=40 --input b=2",
+                "npm run build:stoffel",
+            ][..],
+        ),
+        (
+            "solidity-foundry",
+            "foundry.toml",
+            &["stoffel run --input a=40 --input b=2", "forge build"][..],
+        ),
+        (
+            "solidity-hardhat",
+            "hardhat.config.js",
+            &[
+                "stoffel run --input a=40 --input b=2",
+                "npm install",
+                "npx hardhat compile",
+            ][..],
+        ),
     ] {
         let path = temp.path().join(name);
         Command::cargo_bin("stoffel")
@@ -1280,6 +1833,13 @@ fn init_supports_declared_templates_and_library_mode() {
             .assert()
             .success();
         assert!(path.join(marker).exists());
+        let readme = fs::read_to_string(path.join("README.md")).unwrap();
+        for marker in readme_markers {
+            assert!(
+                readme.contains(marker),
+                "{name} README should contain `{marker}`"
+            );
+        }
     }
 
     let library = temp.path().join("library");
@@ -1289,6 +1849,10 @@ fn init_supports_declared_templates_and_library_mode() {
         .assert()
         .success();
     assert!(library.join("src/lib.stfl").exists());
+    let readme = fs::read_to_string(library.join("README.md")).unwrap();
+    assert!(readme.contains("stoffel check"));
+    assert!(readme.contains("stoffel build"));
+    assert!(!readme.contains("stoffel run"));
 }
 
 #[test]
@@ -1366,6 +1930,24 @@ fn init_errors_explain_existing_project_vs_nonempty_directory() {
         .stderr(predicate::str::contains("already exists and is not empty"))
         .stderr(predicate::str::contains("Stoffel template files"))
         .stderr(predicate::str::contains("preserving unrelated files"));
+
+    let file_target = temp.path().join("not-a-directory");
+    fs::write(&file_target, "notes").unwrap();
+    for args in [
+        vec!["init", file_target.to_str().unwrap()],
+        vec!["init", file_target.to_str().unwrap(), "--force"],
+        vec!["init", file_target.to_str().unwrap(), "--lib"],
+    ] {
+        Command::cargo_bin("stoffel")
+            .unwrap()
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("is a file"))
+            .stderr(predicate::str::contains(
+                "pass a directory path for the new Stoffel project",
+            ));
+    }
 }
 
 #[test]
@@ -1413,6 +1995,12 @@ fn test_discovers_stfl_tests() {
         "def main() -> int64:\n  return 7\n",
     )
     .unwrap();
+    fs::create_dir_all(temp.path().join("tests/math/nested")).unwrap();
+    fs::write(
+        temp.path().join("tests/math/nested/mul.stfl"),
+        "def main() -> int64:\n  return 9\n",
+    )
+    .unwrap();
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -1420,7 +2008,17 @@ fn test_discovers_stfl_tests() {
         .arg("test")
         .assert()
         .success()
-        .stdout(predicate::str::contains("ok"));
+        .stdout(predicate::str::contains("add.stfl"))
+        .stdout(predicate::str::contains("mul.stfl"));
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["test", "--test", "mul"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mul.stfl"))
+        .stdout(predicate::str::contains("add.stfl").not());
 }
 
 #[test]
@@ -1450,6 +2048,29 @@ fn test_rejects_parameterized_programs_with_run_guidance() {
 }
 
 #[test]
+fn test_rejects_non_source_file_paths() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    fs::write(temp.path().join("notes.txt"), "not a Stoffel test").unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("test")
+        .arg(temp.path().join("notes.txt"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "expected a .stfl test file or project directory",
+        ));
+}
+
+#[test]
 fn test_accepts_project_folder_path() {
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app");
@@ -1473,6 +2094,40 @@ fn test_accepts_project_folder_path() {
         .assert()
         .success()
         .stdout(predicate::str::contains("add.stfl"));
+}
+
+#[test]
+fn test_empty_filters_explain_what_was_searched() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    fs::create_dir_all(temp.path().join("tests")).unwrap();
+    fs::write(
+        temp.path().join("tests/basic.stfl"),
+        "def main() -> int64:\n  return 1\n",
+    )
+    .unwrap();
+    fs::create_dir_all(temp.path().join("tests/nested")).unwrap();
+    fs::write(
+        temp.path().join("tests/nested/basic_integration.stfl"),
+        "def main() -> int64:\n  return 2\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("test")
+        .arg(temp.path())
+        .arg("--integration")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("basic_integration.stfl"))
+        .stdout(predicate::str::contains("basic.stfl").not());
 }
 
 #[test]
@@ -1578,7 +2233,8 @@ fn dev_help_exposes_hot_reload_controls() {
         .success()
         .stdout(predicate::str::contains("--once"))
         .stdout(predicate::str::contains("--poll-ms"))
-        .stdout(predicate::str::contains("watching"));
+        .stdout(predicate::str::contains("watch for file changes"))
+        .stdout(predicate::str::contains("greater than zero"));
 }
 
 #[test]
@@ -1600,8 +2256,32 @@ fn status_reports_project_health() {
         .success()
         .stdout(predicate::str::contains("Project:"))
         .stdout(predicate::str::contains("Config: ok"))
+        .stdout(predicate::str::contains("Dependencies: ok (none declared)"))
         .stdout(predicate::str::contains("Compile: ok"))
         .stdout(predicate::str::contains("Network:"));
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(temp.path())
+        .args(["status", "--verbose"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Source:"))
+        .stdout(predicate::str::contains("Target:"))
+        .stdout(predicate::str::contains("Cache:"))
+        .stdout(predicate::str::contains("Tests:"));
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("status")
+        .arg(temp.path().join("README.md"))
+        .arg("--verbose")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            temp.path().join("src/main.stfl").display().to_string(),
+        ))
+        .stdout(predicate::str::contains("README.md").not());
 }
 
 #[test]
@@ -1652,8 +2332,9 @@ fn status_uses_consistent_mpc_validation_errors() {
         .arg(temp.path())
         .assert()
         .failure()
-        .stdout(predicate::str::contains("4 * threshold"))
-        .stdout(predicate::str::contains("3 * threshold").not());
+        .stderr(predicate::str::contains("invalid [mpc] config"))
+        .stderr(predicate::str::contains("4 * threshold"))
+        .stderr(predicate::str::contains("3 * threshold").not());
 }
 
 #[test]
@@ -1708,6 +2389,9 @@ fn clean_removes_target_and_cache_directories() {
     fs::create_dir_all(temp.path().join("target/debug")).unwrap();
     fs::create_dir_all(temp.path().join(".stoffel/cache")).unwrap();
     fs::create_dir_all(temp.path().join("node_modules")).unwrap();
+    fs::create_dir_all(temp.path().join("out")).unwrap();
+    fs::create_dir_all(temp.path().join("cache")).unwrap();
+    fs::create_dir_all(temp.path().join("artifacts")).unwrap();
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -1727,6 +2411,63 @@ fn clean_removes_target_and_cache_directories() {
     assert!(!temp.path().join("target").exists());
     assert!(!temp.path().join(".stoffel").exists());
     assert!(!temp.path().join("node_modules").exists());
+    assert!(temp.path().join("out").exists());
+    assert!(temp.path().join("cache").exists());
+    assert!(temp.path().join("artifacts").exists());
+}
+
+#[test]
+fn clean_all_removes_framework_outputs_only_when_detected() {
+    let temp = TempDir::new().unwrap();
+    let foundry = temp.path().join("foundry-app");
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args([
+            "init",
+            foundry.to_str().unwrap(),
+            "--template",
+            "solidity-foundry",
+        ])
+        .assert()
+        .success();
+    fs::create_dir_all(foundry.join("out")).unwrap();
+    fs::create_dir_all(foundry.join("cache")).unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["clean", "--all"])
+        .arg(&foundry)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("out"))
+        .stdout(predicate::str::contains("cache"));
+    assert!(!foundry.join("out").exists());
+    assert!(!foundry.join("cache").exists());
+
+    let hardhat = temp.path().join("hardhat-app");
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args([
+            "init",
+            hardhat.to_str().unwrap(),
+            "--template",
+            "solidity-hardhat",
+        ])
+        .assert()
+        .success();
+    fs::create_dir_all(hardhat.join("artifacts")).unwrap();
+    fs::create_dir_all(hardhat.join("cache")).unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["clean", "--all"])
+        .arg(&hardhat)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("artifacts"))
+        .stdout(predicate::str::contains("cache"));
+    assert!(!hardhat.join("artifacts").exists());
+    assert!(!hardhat.join("cache").exists());
 }
 
 #[test]
@@ -1748,6 +2489,43 @@ fn update_check_reports_detected_update_targets() {
         .success()
         .stdout(predicate::str::contains("Stoffel CLI:"))
         .stdout(predicate::str::contains("Update check:"));
+}
+
+#[test]
+fn update_source_self_update_requires_explicit_opt_in() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["update"])
+        .arg(temp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("source checkout detected"))
+        .stdout(predicate::str::contains("--self-from-source"))
+        .stdout(predicate::str::contains("cargo install").not())
+        .stdout(predicate::str::contains("Running:").not());
+}
+
+#[test]
+fn update_rejects_empty_target_selection() {
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["update", "--check", "--no-self", "--no-project"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no update targets selected"))
+        .stderr(predicate::str::contains("remove --no-self"))
+        .stderr(predicate::str::contains("remove --no-project"))
+        .stdout(predicate::str::contains("Stoffel CLI:").not())
+        .stdout(predicate::str::contains("Update check:").not());
 }
 
 #[test]
@@ -1792,11 +2570,19 @@ fn utility_help_lists_status_clean_update_options() {
 
     Command::cargo_bin("stoffel")
         .unwrap()
+        .args(["update", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--self-from-source"))
+        .stdout(predicate::str::contains("Required for source builds"));
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
         .args(["test", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Project directory or specific test file",
+            "Project directory or .stfl test file",
         ));
 
     Command::cargo_bin("stoffel")
@@ -1804,12 +2590,16 @@ fn utility_help_lists_status_clean_update_options() {
         .args(["build", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Project directory or source file"));
+        .stdout(predicate::str::contains(
+            "Project directory, source directory, or .stfl source file",
+        ));
 
     Command::cargo_bin("stoffel")
         .unwrap()
         .args(["dev", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Project directory or source file"));
+        .stdout(predicate::str::contains(
+            "Project directory or .stfl source file to watch",
+        ));
 }
