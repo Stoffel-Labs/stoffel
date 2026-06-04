@@ -1145,6 +1145,7 @@ async fn dev(args: DevArgs) -> Result<()> {
         return run_dev_once(&args).await;
     }
 
+    prepare_dev_run(&args)?;
     println!("Starting Stoffel dev server. Press Ctrl-C to stop.");
     let mut snapshot = WatchSnapshot::capture(args.path.as_deref())?;
     loop {
@@ -1160,6 +1161,15 @@ async fn dev(args: DevArgs) -> Result<()> {
 }
 
 async fn run_dev_once(args: &DevArgs) -> Result<()> {
+    let builder = prepare_dev_run(args)?;
+    let result = builder
+        .execute_local_function_with_timeout(&args.entry, Duration::from_secs(args.timeout_secs))
+        .await?;
+    print_values(&result);
+    Ok(())
+}
+
+fn prepare_dev_run(args: &DevArgs) -> Result<Stoffel> {
     let build = BuildArgs {
         path: args.path.clone(),
         extra_paths: Vec::new(),
@@ -1197,11 +1207,7 @@ async fn run_dev_once(args: &DevArgs) -> Result<()> {
         "stoffel dev",
     )?;
     validate_entry_and_named_inputs(runtime.program(), &args.entry, &args.inputs, "stoffel dev")?;
-    let result = builder
-        .execute_local_function_with_timeout(&args.entry, Duration::from_secs(args.timeout_secs))
-        .await?;
-    print_values(&result);
-    Ok(())
+    Ok(builder)
 }
 
 fn dev_source_path(project: &Project, path: Option<&Path>) -> PathBuf {

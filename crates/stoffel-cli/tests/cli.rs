@@ -604,6 +604,31 @@ fn dev_once_explains_input_mistakes() {
 }
 
 #[test]
+fn dev_watch_explains_input_mistakes_before_starting() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("app");
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(&project)
+        .assert()
+        .success();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("dev")
+        .arg(&project)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("missing input 'a'"))
+        .stderr(predicate::str::contains(
+            "Pass inputs as: stoffel dev --entry main --input a=<value> --input b=<value>",
+        ))
+        .stdout(predicate::str::contains("Starting Stoffel dev server").not())
+        .stdout(predicate::str::contains("Watching for changes").not());
+}
+
+#[test]
 fn dev_once_uses_explicit_source_file() {
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app");
