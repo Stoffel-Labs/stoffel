@@ -146,6 +146,26 @@ impl<'a> SemanticAnalyzer<'a> {
         Self::is_share_alias_type(src) && matches!(dst, SymbolType::Secret(_))
     }
 
+    fn share_expr_can_initialize_secret(expr: Option<&AstNode>, dst: &SymbolType) -> bool {
+        let Some(AstNode::FunctionCall { function, .. }) = expr else {
+            return false;
+        };
+        let AstNode::Identifier(name, _) = function.as_ref() else {
+            return false;
+        };
+
+        match name.as_str() {
+            "Share.random" => dst.is_secret() && dst.is_integer(),
+            "ClientStore.take_share" | "Share.from_clear" | "Share.from_clear_int" => {
+                dst.is_secret() && dst.is_integer()
+            }
+            "ClientStore.take_share_fixed" | "Share.from_clear_fixed" => {
+                matches!(dst, SymbolType::Secret(inner) if inner.underlying_type() == &SymbolType::Float)
+            }
+            _ => false,
+        }
+    }
+
     fn requires_explicit_reveal(src: &SymbolType, dst: &SymbolType) -> bool {
         matches!(src, SymbolType::Secret(_))
             && !matches!(dst, SymbolType::Secret(_) | SymbolType::Unknown)
@@ -228,7 +248,15 @@ impl<'a> SemanticAnalyzer<'a> {
         inferred_type: &SymbolType,
         expected_type: &SymbolType,
     ) -> (AstNode, SymbolType) {
-        let refined_type = Self::refine_type_with_expected(inferred_type, expected_type);
+        let refined_type = match (&expr, inferred_type, expected_type) {
+            (AstNode::FunctionCall { function, .. }, inferred, expected)
+                if Self::is_share_alias_type(inferred)
+                    && Self::share_expr_can_initialize_secret(Some(&expr), expected) =>
+            {
+                expected.clone()
+            }
+            _ => Self::refine_type_with_expected(inferred_type, expected_type),
+        };
 
         let refined_expr = match expr {
             AstNode::FunctionCall {
@@ -336,14 +364,17 @@ impl<'a> SemanticAnalyzer<'a> {
         location: crate::errors::SourceLocation,
     ) -> Result<(), ()> {
         if Self::requires_explicit_reveal(src_type, dst_type) {
-            self.error_reporter.add_error(CompilerError::type_error(
-                format!(
-                    "Cannot implicitly reveal '{}' as '{}'",
-                    declared_type_to_string(src_type),
-                    declared_type_to_string(dst_type)
-                ),
-                location,
-            ).with_hint("Call .reveal() to explicitly reveal a secret value"));
+            self.error_reporter.add_error(
+                CompilerError::type_error(
+                    format!(
+                        "Cannot implicitly reveal '{}' as '{}'",
+                        declared_type_to_string(src_type),
+                        declared_type_to_string(dst_type)
+                    ),
+                    location,
+                )
+                .with_hint("Call .reveal() to explicitly reveal a secret value"),
+            );
             return Err(());
         }
 
@@ -388,6 +419,24 @@ impl<'a> SemanticAnalyzer<'a> {
             }
         }
         // Fallback: check type compatibility (handles Unknown in collections)
+        let share_random_in_bad_context = matches!(
+            src_node,
+            Some(AstNode::FunctionCall { function, .. })
+                if matches!(function.as_ref(), AstNode::Identifier(name, _) if name == "Share.random")
+                    && !(dst_type.is_secret() && dst_type.is_integer())
+        );
+        if Self::is_share_alias_type(src_type) && share_random_in_bad_context {
+            self.error_reporter.add_error(CompilerError::type_error(
+                format!(
+                    "Type mismatch. Expected '{}', found '{}'",
+                    declared_type_to_string(dst_type),
+                    declared_type_to_string(src_type)
+                ),
+                location,
+            ));
+            return Err(());
+        }
+
         if !Self::types_compatible(src_type, dst_type) {
             self.error_reporter.add_error(CompilerError::type_error(
                 format!(
@@ -739,6 +788,22 @@ impl<'a> SemanticAnalyzer<'a> {
                         checked_value_node = Some(Box::new(refined_value));
                         value_type = refined_type;
                     }
+                }
+
+                if checked_value_node.as_deref().is_some_and(|node| {
+                    matches!(
+                        node,
+                        AstNode::FunctionCall { function, .. }
+                            if matches!(function.as_ref(), AstNode::Identifier(name, _) if name == "Share.random")
+                    )
+                }) && !(declared_type.is_secret() && declared_type.is_integer())
+                {
+                    self.error_reporter.add_error(CompilerError::type_error(
+                        "Share.random() requires an expected secret integer type".to_string(),
+                        location.clone(),
+                    )
+                    .with_hint("Add a type annotation such as 'var s: secret int64 = Share.random()'"));
+                    return Err(());
                 }
 
                 // 3. Check for type consistency (with integer width/range rules)

@@ -550,11 +550,16 @@ impl VMState {
         }
 
         let result_value = match move_kind {
-            RegisterMoveKind::ClearToSecret if !matches!(src_value, Value::Share(_, _)) => {
-                self.convert_to_share(&src_value)?
-            }
+            RegisterMoveKind::ClearToSecret => match src_value {
+                Value::Share(_, _) => src_value,
+                Value::Object(_) => {
+                    let (share_type, share_data) = self.extract_share_data(&src_value)?;
+                    Value::Share(share_type, share_data)
+                }
+                _ => self.convert_to_share(&src_value)?,
+            },
             RegisterMoveKind::SecretToClear => self.reveal_share_immediate(&src_value)?,
-            RegisterMoveKind::Copy | RegisterMoveKind::ClearToSecret => src_value,
+            RegisterMoveKind::Copy => src_value,
         };
 
         self.write_mov_result(dest, src, result_value, hooks_enabled)

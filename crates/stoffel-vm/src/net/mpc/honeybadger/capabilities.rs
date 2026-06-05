@@ -59,6 +59,11 @@ where
         crate::net::try_block_on_current(self.random_share_async_impl(ty))
             .map_mpc_engine_operation("random_share")
     }
+
+    fn random_integer_share(&self, ty: ShareType) -> MpcEngineResult<ShareData> {
+        crate::net::try_block_on_current(self.random_integer_share_async_impl(ty))
+            .map_mpc_engine_operation("random_integer_share")
+    }
 }
 
 impl<F, G> MpcEngineOpenInExponent for HoneyBadgerMpcEngine<F, G>

@@ -276,6 +276,8 @@ pub(crate) trait ForeignMpcServices {
 
     fn random_share_data(&self, ty: ShareType) -> VmResult<ShareData>;
 
+    fn random_integer_share_data(&self, ty: ShareType) -> VmResult<ShareData>;
+
     fn open_share_as_field_data(&self, ty: ShareType, share_data: &ShareData) -> VmResult<Vec<u8>>;
 
     fn open_share_in_exp_data(
@@ -432,6 +434,10 @@ impl ForeignMpcServices for VMState {
 
     fn random_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
         VMState::random_share_data(self, ty)
+    }
+
+    fn random_integer_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
+        VMState::random_integer_share_data(self, ty)
     }
 
     fn open_share_as_field_data(&self, ty: ShareType, share_data: &ShareData) -> VmResult<Vec<u8>> {

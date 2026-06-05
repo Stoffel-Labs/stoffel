@@ -1,5 +1,5 @@
-use super::format::ensure_homogeneous_share_data_format;
 use super::MpcShareRuntime;
+use super::format::ensure_homogeneous_share_data_format;
 use crate::error::{MpcBackendResultExt, VmError, VmResult};
 use crate::net::mpc_engine::MpcExponentGroup;
 use stoffel_vm_types::core_types::{ClearShareValue, ShareData, ShareType, Value};
@@ -49,6 +49,15 @@ impl MpcShareRuntime<'_> {
             .map_mpc_backend_err("randomness_ops")?
             .random_share(ty)
             .map_mpc_backend_err("random_share")
+    }
+
+    pub(crate) fn random_integer_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
+        self.ensure_ready()?;
+        self.engine
+            .randomness_ops()
+            .map_mpc_backend_err("randomness_ops")?
+            .random_integer_share(ty)
+            .map_mpc_backend_err("random_integer_share")
     }
 
     pub(crate) fn open_share_as_field_data(

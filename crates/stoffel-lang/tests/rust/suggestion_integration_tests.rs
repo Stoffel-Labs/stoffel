@@ -182,7 +182,10 @@ def main() -> None:
 "#;
 
     let errors = compile_and_get_errors(source);
-    assert!(errors.is_empty(), "explicit reveal should compile: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "explicit reveal should compile: {errors:?}"
+    );
 }
 
 // ===========================================

@@ -6,8 +6,8 @@ use ark_std::rand::SeedableRng;
 use std::sync::atomic::Ordering;
 use stoffel_vm_types::core_types::{ShareData, ShareType};
 use stoffelmpc_mpc::common::PreprocessingMPCProtocol;
-use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::HoneyBadgerError;
+use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 
 fn ensure_decoded_count(label: &str, actual: usize, expected: u32) -> Result<(), String> {
     let expected = usize::try_from(expected)
@@ -334,6 +334,30 @@ where
         }
     }
 
+    pub(super) async fn reserve_prandint_shares(
+        &self,
+        num_shares: usize,
+    ) -> Result<Vec<RobustShare<F>>, String> {
+        loop {
+            let attempt = {
+                let node = self.clone_node().await;
+                let mut prep_material = node.preprocessing_material.lock().await;
+                prep_material.take_prandint_shares(num_shares)
+            };
+
+            match attempt {
+                Ok(shares) => return Ok(shares),
+                Err(HoneyBadgerError::NotEnoughPreprocessing) => {
+                    self.regenerate_prandint_shares(num_shares).await?;
+                    continue;
+                }
+                Err(other) => {
+                    return Err(format!("Failed to take PRandInt shares: {:?}", other));
+                }
+            }
+        }
+    }
+
     async fn regenerate_random_shares(&self, needed: usize) -> Result<(), String> {
         let mut node = self.clone_node().await;
         {
@@ -350,6 +374,27 @@ where
             .map_err(|e| format!("Failed to regenerate preprocessing material: {:?}", e))
     }
 
+    async fn regenerate_prandint_shares(&self, needed: usize) -> Result<(), String> {
+        let mut node = self.clone_node().await;
+        {
+            let current = node.preprocessing_material.lock().await.len().3;
+            let target = current + needed;
+            if node.params.n_prandint < target {
+                node.params.n_prandint = target;
+            }
+        }
+
+        let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
+        node.run_preprocessing(self.net.clone(), &mut rng)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to regenerate PRandInt preprocessing material: {:?}",
+                    e
+                )
+            })
+    }
+
     /// Pull one pre-generated random share from the preprocessing pool.
     /// If the pool is empty, `reserve_random_shares` auto-regenerates via
     /// the RanSha protocol over the network.
@@ -358,6 +403,15 @@ where
         _ty: ShareType,
     ) -> Result<ShareData, String> {
         let shares = self.reserve_random_shares(1).await?;
+        Self::encode_share(&shares[0]).map(ShareData::Opaque)
+    }
+
+    /// Pull one pre-generated PRandInt share from the preprocessing pool.
+    pub(super) async fn random_integer_share_async_impl(
+        &self,
+        _ty: ShareType,
+    ) -> Result<ShareData, String> {
+        let shares = self.reserve_prandint_shares(1).await?;
         Self::encode_share(&shares[0]).map(ShareData::Opaque)
     }
 }

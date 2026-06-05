@@ -1,5 +1,5 @@
-use super::mpc_runtime::ClientShareRequest;
 use super::VMState;
+use super::mpc_runtime::ClientShareRequest;
 use crate::error::VmResult;
 use crate::net::client_store::{
     ClientInputHydrationCount, ClientInputIndex, ClientOutputShareCount, ClientShare,
@@ -212,6 +212,10 @@ impl VMState {
 
     pub(crate) fn random_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
         self.share_runtime()?.random_share_data(ty)
+    }
+
+    pub(crate) fn random_integer_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
+        self.share_runtime()?.random_integer_share_data(ty)
     }
 
     pub(crate) fn open_share_as_field_data(

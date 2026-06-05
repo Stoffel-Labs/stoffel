@@ -6,7 +6,7 @@ builtin object ClientStore:
   def get_number_clients() -> int64 {.builtin.}:
 
 builtin object MpcOutput:
-  def send_to_client(client_id: int64, value: list[Share]) -> bool {.builtin.}:
+  def send_to_client[T](client_id: int64, value: T) -> bool {.builtin.}:
 
 builtin object Share:
   def from_clear(value: int64) -> Share {.builtin.}:

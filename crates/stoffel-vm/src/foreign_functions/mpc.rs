@@ -105,6 +105,10 @@ impl<'a> ForeignFunctionContext<'a> {
         self.services.random_share_data(ty)
     }
 
+    pub(crate) fn random_integer_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
+        self.services.random_integer_share_data(ty)
+    }
+
     pub(crate) fn open_share_as_field_data(
         &self,
         ty: ShareType,

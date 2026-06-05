@@ -805,6 +805,115 @@ var revealed: uint64 = share.reveal()
 }
 
 #[test]
+fn test_compile_share_random_contextual_secret_int64_lowers_to_typed_random() {
+    let source = r#"
+def main() -> secret int64:
+  var s: secret int64 = Share.random()
+  return s
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.random_int"),
+        "typed Share.random should lower to VM Share.random_int, got {call_names:?}"
+    );
+}
+
+#[test]
+fn test_compile_share_random_contextual_secret_uint8_lowers_to_typed_random() {
+    let source = r#"
+def main() -> secret uint8:
+  var s: secret uint8 = Share.random()
+  return s
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.random_int"),
+        "typed Share.random should lower to VM Share.random_int, got {call_names:?}"
+    );
+}
+
+#[test]
+fn test_compile_share_random_untyped_requires_secret_integer_context() {
+    let source = r#"
+var s = Share.random()
+"#;
+    assert!(expect_error_containing(
+        source,
+        "Share.random() requires an expected secret integer type"
+    ));
+}
+
+#[test]
+fn test_compile_share_random_share_annotation_is_rejected() {
+    let source = r#"
+var s: Share = Share.random()
+"#;
+    assert!(expect_error_containing(
+        source,
+        "Share.random() requires an expected secret integer type"
+    ));
+}
+
+#[test]
+fn test_compile_share_random_rejects_secret_float_context() {
+    let source = r#"
+var s: secret float = Share.random()
+"#;
+    assert!(expect_error_containing(
+        source,
+        "Share.random() requires an expected secret integer type"
+    ));
+}
+
+#[test]
+fn test_compile_additive_share_program_uses_contextual_share_random() {
+    let source = r#"
+object AdditiveShare:
+  player: int64
+  share: secret int64
+
+def main(a: secret int64, b: secret int64) -> secret int64:
+  var s: secret int64 = Share.random()
+  var acc: secret int64
+
+  var additive_shares: list[AdditiveShare]
+
+  for i in 0..ClientStore.get_number_clients():
+    var additive_share: AdditiveShare
+    additive_share.player = i
+    var sub_share: secret int64 = 0
+    if i == ClientStore.get_number_clients()-1:
+      sub_share = s - acc
+    else:
+      sub_share = Share.random()
+      acc += sub_share
+    MpcOutput.send_to_client(i, sub_share)
+    additive_share.share = sub_share
+    additive_shares.append(additive_share)
+
+  for i in additive_shares:
+    var sub_share: secret int64 = ClientStore.take_share(i.player, 0)
+    var acc: secret int64 = 0
+    if i.share.reveal() == sub_share.reveal():
+      print("additive shares match")
+      acc += sub_share
+
+    print(s.reveal())
+    print(acc.reveal())
+
+  return s
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.random_int"),
+        "additive share program should use typed random, got {call_names:?}"
+    );
+}
+
+#[test]
 fn test_semantic_secret_uint64_requires_explicit_reveal() {
     let source = r#"
 var share: secret uint64 = ClientStore.take_share(0, 0)
@@ -1899,6 +2008,24 @@ def main() -> int64:
             0,
             vec![ShareType::default_secret_fixed_point(); 3],
             vec![ShareType::default_secret_fixed_point(); 3],
+        )],
+    );
+}
+
+#[test]
+fn test_compile_mpc_output_send_to_client_accepts_single_secret_share() {
+    let source = r#"
+def main() -> int64:
+  var share: secret int64 = ClientStore.take_share(0, 0)
+  MpcOutput.send_to_client(0, share)
+  return 0
+"#;
+    assert_client_io_manifest(
+        source,
+        &[(
+            0,
+            vec![ShareType::default_secret_int()],
+            vec![ShareType::default_secret_int()],
         )],
     );
 }

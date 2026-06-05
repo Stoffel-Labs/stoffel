@@ -3,6 +3,7 @@ use crate::core_vm::VirtualMachine;
 use crate::error::VirtualMachineErrorKind;
 use crate::error::VmError;
 use crate::foreign_functions::{ForeignFunction, ForeignFunctionCallbackError, Function};
+use crate::mpc_values::share_object;
 use crate::net::client_store::{ClientOutputShareCount, ClientShare, ClientShareIndex};
 use crate::net::curve::{MpcCurveConfig, MpcFieldKind};
 use crate::net::mpc_engine::{
@@ -1969,6 +1970,32 @@ fn register_layout_controls_clear_to_secret_mov_boundary() {
         engine.input_calls.lock().unwrap().as_slice(),
         &[(ShareType::secret_int(64), Value::I64(5))]
     );
+}
+
+#[test]
+fn clear_to_secret_mov_extracts_share_object_payload() {
+    let mut vm = VMState::new();
+    vm.set_register_layout(RegisterLayout::new(8));
+    let ty = ShareType::secret_int(64);
+    let data = ShareData::Opaque(vec![1, 2, 3]);
+    let share_ref =
+        share_object::create_share_object_ref(vm.table_memory.as_mut(), ty, data.clone(), 0)
+            .expect("create share object");
+
+    let mut registers = RegisterFile::new(RegisterLayout::new(8), 9);
+    *registers.get_mut(r(0)).expect("clear register r0") = Value::from(share_ref);
+    vm.push_activation_record(ActivationRecord::with_registers(
+        "test",
+        registers,
+        vec![],
+        None,
+    ));
+
+    vm.execute_mov(runtime_reg(8, 9), runtime_reg(0, 9), false)
+        .expect("share object should move into a secret register");
+
+    let record = vm.current_activation_record().unwrap();
+    assert_eq!(record.register(r(8)), Some(&Value::Share(ty, data)));
 }
 
 #[test]

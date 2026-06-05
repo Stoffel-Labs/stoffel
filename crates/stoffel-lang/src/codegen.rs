@@ -46,6 +46,18 @@ fn infer_single_share_type(node: &AstNode) -> Option<ShareType> {
     }
 }
 
+fn share_type_for_secret_integer_symbol_type(ty: &SymbolType) -> Option<ShareType> {
+    if !ty.is_secret() || !ty.is_integer() {
+        return None;
+    }
+    ty.bit_width()
+        .map(|bit_width| ShareType::secret_int(usize::from(bit_width)))
+}
+
+fn is_share_random_call(function: &AstNode) -> bool {
+    matches!(function, AstNode::Identifier(name, _) if name == "Share.random")
+}
+
 #[derive(Debug)]
 struct CodeGenerator {
     // Holds instructions using VirtualRegisters during generation for a scope.
@@ -170,10 +182,28 @@ impl CodeGenerator {
                     Ok((array_vr, false))
                 }
                 _ => {
-                    let vr = self.allocate_virtual_register(is_secret_register);
-                    self.identified_constants.push(Constant::Unit);
-                    self.emit(Instruction::LDI(vr.0, crate::core_types::Value::Unit));
-                    Ok((vr, is_secret_register))
+                    if is_secret_register {
+                        let clear_constant = match ty.underlying_type() {
+                            SymbolType::Float => Constant::Float(crate::bytecode::F64::new(0.0)),
+                            SymbolType::Bool => Constant::Bool(false),
+                            ty if ty.is_integer() => Constant::I64(0),
+                            _ => Constant::Unit,
+                        };
+                        let clear_vr = self.allocate_virtual_register(false);
+                        self.identified_constants.push(clear_constant.clone());
+                        self.emit(Instruction::LDI(
+                            clear_vr.0,
+                            crate::core_types::Value::from(clear_constant),
+                        ));
+                        let secret_vr = self.allocate_virtual_register(true);
+                        self.emit(Instruction::MOV(secret_vr.0, clear_vr.0));
+                        Ok((secret_vr, true))
+                    } else {
+                        let vr = self.allocate_virtual_register(false);
+                        self.identified_constants.push(Constant::Unit);
+                        self.emit(Instruction::LDI(vr.0, crate::core_types::Value::Unit));
+                        Ok((vr, false))
+                    }
                 }
             }
         }
@@ -325,7 +355,13 @@ impl CodeGenerator {
     fn share_type_for_node(&self, node: &AstNode) -> Option<ShareType> {
         match node {
             AstNode::Identifier(name, _) => self.variable_share_types.get(name).copied(),
-            AstNode::FunctionCall { .. } => infer_single_share_type(node),
+            AstNode::FunctionCall {
+                resolved_return_type,
+                ..
+            } => resolved_return_type
+                .as_ref()
+                .and_then(share_type_for_secret_integer_symbol_type)
+                .or_else(|| infer_single_share_type(node)),
             AstNode::BinaryOperation { left, right, .. } => {
                 let left = self.share_type_for_node(left);
                 let right = self.share_type_for_node(right);
@@ -575,7 +611,8 @@ impl CodeGenerator {
                     // Builtin objects like ClientStore don't need registers - they're accessed via methods
                     // Just return a dummy register (this shouldn't be reached for properly transformed code)
                     Err(CompilerError::internal_error(format!(
-                        "Codegen failed: Symbol '{}' passed semantic analysis but not found in codegen symbol table", name
+                        "Codegen failed: Symbol '{}' passed semantic analysis but not found in codegen symbol table",
+                        name
                     )))
                 }
             }
@@ -686,7 +723,7 @@ impl CodeGenerator {
                             format!("Unsupported unary operator: {}", op),
                             location.clone(),
                         )
-                        .with_hint("Supported unary operators are: - and not"))
+                        .with_hint("Supported unary operators are: - and not"));
                     }
                 }
 
@@ -890,6 +927,32 @@ impl CodeGenerator {
                 location: _,
                 resolved_return_type,
             } => {
+                if arguments.is_empty() && is_share_random_call(function) {
+                    if let Some(return_type) = resolved_return_type.as_ref() {
+                        if let Some(share_type) =
+                            share_type_for_secret_integer_symbol_type(return_type)
+                        {
+                            let bit_length = match share_type {
+                                ShareType::SecretInt { bit_length } => bit_length,
+                                ShareType::SecretFixedPoint { .. } => unreachable!(),
+                            };
+                            let bit_length_vr = self.allocate_virtual_register(false);
+                            self.identified_constants
+                                .push(Constant::I64(bit_length as i64));
+                            self.emit(Instruction::LDI(
+                                bit_length_vr.0,
+                                crate::core_types::Value::from(Constant::I64(bit_length as i64)),
+                            ));
+                            self.emit(Instruction::PUSHARG(bit_length_vr.0));
+                            self.emit(Instruction::CALL("Share.random_int".to_string()));
+
+                            let result_vr = self.allocate_virtual_register(true);
+                            self.emit(Instruction::MOV(result_vr.0, 0));
+                            return Ok((result_vr, true));
+                        }
+                    }
+                }
+
                 if let (
                     AstNode::Identifier(function_name, _),
                     Some(SymbolType::Object(object_name)),
@@ -1445,7 +1508,7 @@ impl CodeGenerator {
                     Err(AllocationError::PoolExhausted(_, _)) => {
                         return Err(CompilerError::internal_error(
                             "Register allocation failed: Pool exhausted".to_string(),
-                        ))
+                        ));
                     }
                 };
 
@@ -1704,7 +1767,7 @@ impl CodeGenerator {
             Err(AllocationError::PoolExhausted(_, _)) => {
                 return Err(CompilerError::internal_error(
                     "Register allocation failed: Pool exhausted".to_string(),
-                ))
+                ));
             }
         };
 
