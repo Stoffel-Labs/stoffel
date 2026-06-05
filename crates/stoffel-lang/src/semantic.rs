@@ -166,6 +166,85 @@ impl<'a> SemanticAnalyzer<'a> {
         }
     }
 
+    fn is_unrefined_share_random_call(node: &AstNode) -> bool {
+        matches!(
+            node,
+            AstNode::FunctionCall {
+                function,
+                resolved_return_type,
+                ..
+            } if matches!(function.as_ref(), AstNode::Identifier(name, _) if name == "Share.random")
+                && !resolved_return_type
+                    .as_ref()
+                    .is_some_and(|ty| ty.is_secret() && ty.is_integer())
+        )
+    }
+
+    fn contains_unrefined_share_random_call(node: &AstNode) -> bool {
+        if Self::is_unrefined_share_random_call(node) {
+            return true;
+        }
+        match node {
+            AstNode::FunctionCall { arguments, .. } | AstNode::CommandCall { arguments, .. } => {
+                arguments.iter().any(Self::contains_unrefined_share_random_call)
+            }
+            AstNode::NamedArgument { value, .. } => {
+                Self::contains_unrefined_share_random_call(value)
+            }
+            AstNode::ListLiteral { elements, .. }
+            | AstNode::TupleLiteral(elements)
+            | AstNode::SetLiteral(elements) => {
+                elements.iter().any(Self::contains_unrefined_share_random_call)
+            }
+            AstNode::DictLiteral { pairs, .. } => pairs.iter().any(|(key, value)| {
+                Self::contains_unrefined_share_random_call(key)
+                    || Self::contains_unrefined_share_random_call(value)
+            }),
+            AstNode::Assignment { target, value, .. } => {
+                Self::contains_unrefined_share_random_call(target)
+                    || Self::contains_unrefined_share_random_call(value)
+            }
+            AstNode::VariableDeclaration { value, .. } | AstNode::Return { value, .. } => value
+                .as_deref()
+                .is_some_and(Self::contains_unrefined_share_random_call),
+            AstNode::BinaryOperation { left, right, .. } => {
+                Self::contains_unrefined_share_random_call(left)
+                    || Self::contains_unrefined_share_random_call(right)
+            }
+            AstNode::UnaryOperation { operand, .. } => {
+                Self::contains_unrefined_share_random_call(operand)
+            }
+            AstNode::IfExpression {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                Self::contains_unrefined_share_random_call(condition)
+                    || Self::contains_unrefined_share_random_call(then_branch)
+                    || else_branch
+                        .as_deref()
+                        .is_some_and(Self::contains_unrefined_share_random_call)
+            }
+            AstNode::WhileLoop {
+                condition, body, ..
+            } => {
+                Self::contains_unrefined_share_random_call(condition)
+                    || Self::contains_unrefined_share_random_call(body)
+            }
+            AstNode::Block(statements) => {
+                statements.iter().any(Self::contains_unrefined_share_random_call)
+            }
+            AstNode::FieldAccess { object, .. } => {
+                Self::contains_unrefined_share_random_call(object)
+            }
+            AstNode::IndexAccess { base, index, .. } => {
+                Self::contains_unrefined_share_random_call(base)
+                    || Self::contains_unrefined_share_random_call(index)
+            }
+            _ => false,
+        }
+    }
+
     fn requires_explicit_reveal(src: &SymbolType, dst: &SymbolType) -> bool {
         matches!(src, SymbolType::Secret(_))
             && !matches!(dst, SymbolType::Secret(_) | SymbolType::Unknown)
@@ -250,7 +329,8 @@ impl<'a> SemanticAnalyzer<'a> {
     ) -> (AstNode, SymbolType) {
         let refined_type = match (&expr, inferred_type, expected_type) {
             (AstNode::FunctionCall { function, .. }, inferred, expected)
-                if Self::is_share_alias_type(inferred)
+                if (Self::is_share_alias_type(inferred)
+                    || matches!(function.as_ref(), AstNode::Identifier(name, _) if name == "Share.random"))
                     && Self::share_expr_can_initialize_secret(Some(&expr), expected) =>
             {
                 expected.clone()
@@ -281,10 +361,82 @@ impl<'a> SemanticAnalyzer<'a> {
                 location,
                 resolved_return_type: Some(refined_type.clone()),
             },
+            AstNode::ListLiteral { elements, location } => {
+                let elements = if let SymbolType::List(expected_elem) = expected_type {
+                    elements
+                        .into_iter()
+                        .map(|element| {
+                            let (refined_element, _) = Self::refine_expression_type_with_expected(
+                                element,
+                                &SymbolType::Unknown,
+                                expected_elem,
+                            );
+                            refined_element
+                        })
+                        .collect()
+                } else {
+                    elements
+                };
+                AstNode::ListLiteral { elements, location }
+            }
+            AstNode::DictLiteral { pairs, location } => {
+                let pairs =
+                    if let SymbolType::Dict(expected_key, expected_value) = expected_type {
+                        pairs
+                            .into_iter()
+                            .map(|(key, value)| {
+                                let (refined_key, _) = Self::refine_expression_type_with_expected(
+                                    key,
+                                    &SymbolType::Unknown,
+                                    expected_key,
+                                );
+                                let (refined_value, _) =
+                                    Self::refine_expression_type_with_expected(
+                                        value,
+                                        &SymbolType::Unknown,
+                                        expected_value,
+                                    );
+                                (refined_key, refined_value)
+                            })
+                            .collect()
+                    } else {
+                        pairs
+                    };
+                AstNode::DictLiteral { pairs, location }
+            }
             other => other,
         };
 
         (refined_expr, refined_type)
+    }
+
+    fn contains_type_var(ty: &SymbolType) -> bool {
+        match ty {
+            SymbolType::TypeVar(_) => true,
+            SymbolType::Secret(inner) | SymbolType::List(inner) => Self::contains_type_var(inner),
+            SymbolType::Dict(key, value) => {
+                Self::contains_type_var(key) || Self::contains_type_var(value)
+            }
+            SymbolType::Generic(_, params) => params.iter().any(Self::contains_type_var),
+            _ => false,
+        }
+    }
+
+    fn refine_argument_with_expected(
+        argument: &mut AstNode,
+        argument_type: &mut SymbolType,
+        expected_type: &SymbolType,
+    ) {
+        if Self::contains_type_var(expected_type) {
+            return;
+        }
+        let (refined_arg, refined_type) = Self::refine_expression_type_with_expected(
+            argument.clone(),
+            argument_type,
+            expected_type,
+        );
+        *argument = refined_arg;
+        *argument_type = refined_type;
     }
 
     fn check_generic_compat(
@@ -705,6 +857,19 @@ impl<'a> SemanticAnalyzer<'a> {
                     (checked_value, value_type)
                 };
 
+                if Self::contains_unrefined_share_random_call(&checked_value) {
+                    self.error_reporter.add_error(
+                        CompilerError::type_error(
+                            "Share.random() requires an expected secret integer type".to_string(),
+                            location.clone(),
+                        )
+                        .with_hint(
+                            "Add a typed secret integer context such as 'var s: secret int64 = Share.random()'",
+                        ),
+                    );
+                    return Err(());
+                }
+
                 // Type check assignments when the target has a known static type.
                 let loc = location.clone();
                 if matches!(
@@ -790,13 +955,9 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 }
 
-                if checked_value_node.as_deref().is_some_and(|node| {
-                    matches!(
-                        node,
-                        AstNode::FunctionCall { function, .. }
-                            if matches!(function.as_ref(), AstNode::Identifier(name, _) if name == "Share.random")
-                    )
-                }) && !(declared_type.is_secret() && declared_type.is_integer())
+                if checked_value_node
+                    .as_deref()
+                    .is_some_and(Self::contains_unrefined_share_random_call)
                 {
                     self.error_reporter.add_error(CompilerError::type_error(
                         "Share.random() requires an expected secret integer type".to_string(),
@@ -1321,6 +1482,22 @@ impl<'a> SemanticAnalyzer<'a> {
                         }
                         // Integer-aware compatibility (includes literal range check)
                         let loc = node.location();
+                        if checked_expr_node
+                            .as_deref()
+                            .is_some_and(Self::contains_unrefined_share_random_call)
+                        {
+                            self.error_reporter.add_error(
+                                CompilerError::type_error(
+                                    "Share.random() requires an expected secret integer type"
+                                        .to_string(),
+                                    loc.clone(),
+                                )
+                                .with_hint(
+                                    "Add a typed secret integer context such as 'var s: secret int64 = Share.random()'",
+                                ),
+                            );
+                            return Err(());
+                        }
                         if self
                             .check_integer_compat(
                                 checked_expr_node.as_deref(),
@@ -1422,6 +1599,12 @@ impl<'a> SemanticAnalyzer<'a> {
                                         };
 
                                     let (checked_value, value_type) = self.analyze_node(*value)?;
+                                    let (checked_value, value_type) =
+                                        Self::refine_expression_type_with_expected(
+                                            checked_value,
+                                            &value_type,
+                                            &field_type,
+                                        );
                                     if self
                                         .check_integer_compat(
                                             Some(&checked_value),
@@ -1709,19 +1892,39 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 // 5. Validate arguments, binding any function-level type parameters per call
                 let mut generic_bindings = HashMap::new();
-                for (idx, (expected_ty, actual_ty)) in expected_param_types
-                    .iter()
-                    .zip(argument_types.iter())
-                    .enumerate()
-                {
+                for idx in 0..expected_param_types.len() {
+                    let expected_ty = &expected_param_types[idx];
                     let mut arg_loc = checked_arguments[idx].location();
                     if arg_loc.line == 0 {
                         arg_loc = location.clone();
                     }
+
+                    let expected_after_bindings =
+                        Self::substitute_type_vars(expected_ty, &generic_bindings);
+                    Self::refine_argument_with_expected(
+                        &mut checked_arguments[idx],
+                        &mut argument_types[idx],
+                        &expected_after_bindings,
+                    );
+
+                    if Self::contains_unrefined_share_random_call(&checked_arguments[idx]) {
+                        self.error_reporter.add_error(
+                            CompilerError::type_error(
+                                "Share.random() requires an expected secret integer type"
+                                    .to_string(),
+                                arg_loc,
+                            )
+                            .with_hint(
+                                "Assign it to a typed secret integer before passing it, such as 'var s: secret int64 = Share.random()'",
+                            ),
+                        );
+                        return Err(());
+                    }
+
                     if self
                         .check_generic_compat(
                             Some(&checked_arguments[idx]),
-                            actual_ty,
+                            &argument_types[idx],
                             expected_ty,
                             &mut generic_bindings,
                             arg_loc,
@@ -1840,16 +2043,35 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 // 5. Validate arguments, binding any function-level type parameters per call
                 let mut generic_bindings = HashMap::new();
-                for (idx, (expected_ty, actual_ty)) in expected_param_types
-                    .iter()
-                    .zip(argument_types.iter())
-                    .enumerate()
-                {
+                for idx in 0..expected_param_types.len() {
+                    let expected_ty = &expected_param_types[idx];
                     let arg_loc = checked_arguments[idx].location();
+                    let expected_after_bindings =
+                        Self::substitute_type_vars(expected_ty, &generic_bindings);
+                    Self::refine_argument_with_expected(
+                        &mut checked_arguments[idx],
+                        &mut argument_types[idx],
+                        &expected_after_bindings,
+                    );
+
+                    if Self::contains_unrefined_share_random_call(&checked_arguments[idx]) {
+                        self.error_reporter.add_error(
+                            CompilerError::type_error(
+                                "Share.random() requires an expected secret integer type"
+                                    .to_string(),
+                                arg_loc.clone(),
+                            )
+                            .with_hint(
+                                "Assign it to a typed secret integer before passing it, such as 'var s: secret int64 = Share.random()'",
+                            ),
+                        );
+                        return Err(());
+                    }
+
                     if self
                         .check_generic_compat(
                             Some(&checked_arguments[idx]),
-                            actual_ty,
+                            &argument_types[idx],
                             expected_ty,
                             &mut generic_bindings,
                             arg_loc,

@@ -876,6 +876,78 @@ var s = Share.random()
 }
 
 #[test]
+fn test_compile_share_random_in_secret_int_list_append_lowers_to_typed_random() {
+    let source = r#"
+def main() -> secret int64:
+  var values: list[secret int64]
+  values.append(Share.random())
+  return values[0]
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.random_int"),
+        "Share.random in list append should lower to VM Share.random_int, got {call_names:?}"
+    );
+    assert!(
+        call_names.iter().all(|name| name != "Share.random"),
+        "typed list append context must not leave raw Share.random calls, got {call_names:?}"
+    );
+}
+
+#[test]
+fn test_compile_context_refines_share_random_in_secret_int_function_argument() {
+    let source = r#"
+def id_secret(value: secret int64) -> secret int64:
+  return value
+
+def main() -> secret int64:
+  return id_secret(Share.random())
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.random_int"),
+        "secret int64 function parameter should contextualize Share.random, got {call_names:?}"
+    );
+    assert!(
+        call_names.iter().all(|name| name != "Share.random"),
+        "typed function argument context must not leave raw Share.random calls, got {call_names:?}"
+    );
+}
+
+#[test]
+fn test_compile_context_refines_share_random_in_secret_int_list_literal() {
+    let source = r#"
+def main() -> secret int64:
+  var values: list[secret int64] = [Share.random()]
+  return values[0]
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.random_int"),
+        "secret int64 list literal should contextualize Share.random, got {call_names:?}"
+    );
+    assert!(
+        call_names.iter().all(|name| name != "Share.random"),
+        "typed list literal context must not leave raw Share.random calls, got {call_names:?}"
+    );
+}
+
+#[test]
+fn test_compile_context_refines_empty_list_literal_in_function_argument() {
+    let source = r#"
+def count(values: list[int64]) -> int64:
+  return 0
+
+def main() -> int64:
+  return count([])
+"#;
+    assert!(compile(source, "test.stfl", &default_options()).is_ok());
+}
+
+#[test]
 fn test_compile_share_random_share_annotation_is_rejected() {
     let source = r#"
 var s: Share = Share.random()

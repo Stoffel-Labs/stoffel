@@ -824,7 +824,17 @@ async fn run(args: RunArgs) -> Result<()> {
     }
 
     let build = args.build.to_build_args();
-    let run_source = run_builder(&build)?;
+    let mut run_source = run_builder(&build)?;
+    if !args.inputs.is_empty() {
+        if let (Some(_bytecode_path), Some(source_path)) = (
+            run_source.bytecode_path.as_ref(),
+            run_source.source_path.clone(),
+        ) {
+            let project = Project::discover(build.path.as_deref())?;
+            run_source.builder = configured_builder_for_source(&project, &build, &source_path)?;
+            run_source.bytecode_path = None;
+        }
+    }
     let mut builder = apply_run_inputs(run_source.builder, &args.inputs, &args.client_inputs)?;
     if let Some(path) = args.runner {
         builder = builder.local_runner_path(path);
@@ -1699,7 +1709,7 @@ fn run_builder(args: &BuildArgs) -> Result<RunSource> {
                 return Ok(RunSource {
                     builder: apply_inline_build_config(builder, args),
                     bytecode_path: Some(bytecode),
-                    source_path: None,
+                    source_path: Some(project.source_path().to_path_buf()),
                 });
             }
             return Ok(RunSource {
@@ -1722,7 +1732,7 @@ fn run_builder(args: &BuildArgs) -> Result<RunSource> {
         return Ok(RunSource {
             builder: apply_inline_build_config(builder, args),
             bytecode_path: Some(bytecode),
-            source_path: None,
+            source_path: Some(project.source_path().to_path_buf()),
         });
     }
     Ok(RunSource {

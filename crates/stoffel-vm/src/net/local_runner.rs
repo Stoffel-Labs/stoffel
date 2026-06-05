@@ -308,9 +308,16 @@ impl LocalCoordinatorRunner {
             ));
         }
         if self.binary.client_io_manifest.clients.is_empty() {
-            return Err(LocalCoordinatorRunnerError::Configuration(
-                "client inputs require a program with ClientStore input metadata".to_owned(),
-            ));
+            let mut seen_slots = HashSet::with_capacity(self.client_inputs.len());
+            for client in &self.client_inputs {
+                if !seen_slots.insert(client.client_slot) {
+                    return Err(LocalCoordinatorRunnerError::Configuration(format!(
+                        "client slot {} was provided more than once",
+                        client.client_slot
+                    )));
+                }
+            }
+            return Ok(());
         }
         let mut seen_slots = HashSet::with_capacity(self.client_inputs.len());
         for client in &self.client_inputs {
@@ -366,6 +373,35 @@ impl LocalCoordinatorRunner {
     ) -> LocalCoordinatorRunnerResult<(u64, Vec<Vec<u8>>, InputAssignment)> {
         let mut input_slots = Vec::new();
         let mut output_clients = Vec::new();
+        if self.binary.client_io_manifest.clients.is_empty() {
+            for input in &self.client_inputs {
+                let client = client_bindings
+                    .iter()
+                    .find_map(|(slot, identity)| {
+                        (*slot == input.client_slot).then(|| identity.clone())
+                    })
+                    .ok_or_else(|| {
+                        LocalCoordinatorRunnerError::Configuration(format!(
+                            "client slot {} does not have a local client identity",
+                            input.client_slot
+                        ))
+                    })?;
+
+                output_clients.push(client.clone());
+                for input_ordinal in 0..input.values.len() {
+                    input_slots.push(InputSlotAssignment {
+                        client: client.clone(),
+                        label: input_ordinal as u64,
+                    });
+                }
+            }
+            return Ok((
+                input_slots.len() as u64,
+                output_clients,
+                InputAssignment { input_slots },
+            ));
+        }
+
         for schema in &self.binary.client_io_manifest.clients {
             let client = client_bindings
                 .iter()

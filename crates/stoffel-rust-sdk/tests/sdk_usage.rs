@@ -1665,17 +1665,18 @@ def main() -> int64:
             if message.contains("client slot 0 expects 1 inputs, got 2")
     ));
 
-    let undeclared_input = Stoffel::compile("def main() -> int64:\n  return 7")?
+    let duplicate_dynamic_slot = Stoffel::compile("def main() -> int64:\n  return 7")?
         .parties(5)
         .threshold(1)
         .with_client_input(0, &[42_i64])
+        .with_client_input(0, &[58_i64])
         .execute_local()
         .await
         .unwrap_err();
     assert!(matches!(
-        undeclared_input,
+        duplicate_dynamic_slot,
         stoffel::Error::Configuration(message)
-            if message.contains("client inputs require a program with ClientStore input metadata")
+            if message.contains("client slot 0 was provided more than once")
     ));
 
     let unsupported_value = Stoffel::compile(source)?

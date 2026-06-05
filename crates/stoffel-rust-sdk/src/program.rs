@@ -289,9 +289,15 @@ impl Program {
             ));
         }
         if !has_declared_clients {
-            return Err(Error::Configuration(
-                "client inputs require a program with ClientStore input metadata".to_owned(),
-            ));
+            let mut seen_slots = std::collections::HashSet::with_capacity(inputs.len());
+            for (client_slot, _values) in inputs {
+                if !seen_slots.insert(*client_slot) {
+                    return Err(Error::Configuration(format!(
+                        "client slot {client_slot} was provided more than once"
+                    )));
+                }
+            }
+            return Ok(());
         }
 
         let mut seen_slots = std::collections::HashSet::with_capacity(inputs.len());
@@ -432,11 +438,15 @@ impl Program {
             instructions,
         });
 
-        binary.client_io_manifest.clients = vec![ClientIoSchema {
-            client_slot: 0,
-            inputs: vec![ShareType::default_secret_int(); input_count],
-            outputs: Vec::new(),
-        }];
+        binary.client_io_manifest.clients = if input_count == 0 {
+            Vec::new()
+        } else {
+            vec![ClientIoSchema {
+                client_slot: 0,
+                inputs: vec![ShareType::default_secret_int(); input_count],
+                outputs: Vec::new(),
+            }]
+        };
 
         Ok(Self::new(binary))
     }
@@ -783,6 +793,10 @@ mod tests {
             .expect("wrapper function should be present");
 
         assert!(wrapper.register_count < DEFAULT_SECRET_REGISTER_START);
+        assert!(
+            wrapped.binary.client_io_manifest.clients.is_empty(),
+            "clear-only named input wrappers must not declare client input metadata"
+        );
 
         Ok(())
     }

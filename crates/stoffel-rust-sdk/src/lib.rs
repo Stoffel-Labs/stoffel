@@ -515,8 +515,13 @@ impl Stoffel {
             probe_runtime
                 .program()
                 .with_local_client_input_wrapper(name, &entry, &input_shapes)?;
+        let local_client_inputs = if client_inputs.is_empty() {
+            Vec::new()
+        } else {
+            vec![(0, client_inputs)]
+        };
         Ok((
-            probe_runtime.with_program_and_client_inputs(wrapped_program, vec![(0, client_inputs)]),
+            probe_runtime.with_program_and_client_inputs(wrapped_program, local_client_inputs),
             entry,
         ))
     }
