@@ -8,7 +8,7 @@
 
 def main() -> bytes:
   var client_count = ClientStore.get_number_clients()
-  var secret_key = Share.random()
+  var secret_key: secret int64 = Share.random()
   var public_key = secret_key.get_commitment(0)
 
   var message = Bytes.from_string("stoffel-avss-threshold-ecdsa-demo-message-v1")
@@ -18,8 +18,8 @@ def main() -> bytes:
     var message_share = ClientStore.take_share(0, 0)
     message_field = message_share.open_field()
 
-  var gamma = Share.random()
-  var nonce = Share.random()
+  var gamma: secret int64 = Share.random()
+  var nonce: secret int64 = Share.random()
   var delta_share = gamma.mul(nonce)
   var delta = delta_share.open_field()
   var delta_inverse = Crypto.field_inv(delta, "secp256k1")

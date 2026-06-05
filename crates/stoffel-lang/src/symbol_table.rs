@@ -474,8 +474,10 @@ impl SymbolTable {
         receiver_type: &SymbolType,
         method_name: &str,
     ) -> Option<&ObjectMethodInfo> {
-        let SymbolType::Object(receiver_name) = receiver_type.underlying_type() else {
-            return None;
+        let receiver_name = match receiver_type.underlying_type() {
+            SymbolType::Object(receiver_name) => receiver_name.as_str(),
+            _ if receiver_type.is_secret() => "Share",
+            _ => return None,
         };
 
         let method = self.lookup_builtin_method(receiver_name, method_name)?;

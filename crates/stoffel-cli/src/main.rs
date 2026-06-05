@@ -830,9 +830,11 @@ async fn run(args: RunArgs) -> Result<()> {
             run_source.bytecode_path.as_ref(),
             run_source.source_path.clone(),
         ) {
-            let project = Project::discover(build.path.as_deref())?;
-            run_source.builder = configured_builder_for_source(&project, &build, &source_path)?;
-            run_source.bytecode_path = None;
+            if run_source.builder.clone().build().is_ok() {
+                let project = Project::discover(build.path.as_deref())?;
+                run_source.builder = configured_builder_for_source(&project, &build, &source_path)?;
+                run_source.bytecode_path = None;
+            }
         }
     }
     let mut builder = apply_run_inputs(run_source.builder, &args.inputs, &args.client_inputs)?;

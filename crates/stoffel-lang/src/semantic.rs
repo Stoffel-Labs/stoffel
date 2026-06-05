@@ -95,6 +95,9 @@ impl<'a> SemanticAnalyzer<'a> {
         if Self::share_to_secret_compatible(src, dst) {
             return true;
         }
+        if Self::secret_to_share_compatible(src, dst) {
+            return true;
+        }
 
         match (src.underlying_type(), dst.underlying_type()) {
             // List types: compatible if element types are compatible
@@ -144,6 +147,10 @@ impl<'a> SemanticAnalyzer<'a> {
 
     fn share_to_secret_compatible(src: &SymbolType, dst: &SymbolType) -> bool {
         Self::is_share_alias_type(src) && matches!(dst, SymbolType::Secret(_))
+    }
+
+    fn secret_to_share_compatible(src: &SymbolType, dst: &SymbolType) -> bool {
+        matches!(src, SymbolType::Secret(_)) && Self::is_share_alias_type(dst)
     }
 
     fn share_expr_can_initialize_secret(expr: Option<&AstNode>, dst: &SymbolType) -> bool {
@@ -248,6 +255,7 @@ impl<'a> SemanticAnalyzer<'a> {
     fn requires_explicit_reveal(src: &SymbolType, dst: &SymbolType) -> bool {
         matches!(src, SymbolType::Secret(_))
             && !matches!(dst, SymbolType::Secret(_) | SymbolType::Unknown)
+            && !Self::is_share_alias_type(dst)
     }
 
     fn substitute_type_vars(ty: &SymbolType, bindings: &HashMap<String, SymbolType>) -> SymbolType {

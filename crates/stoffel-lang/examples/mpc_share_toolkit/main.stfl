@@ -3,7 +3,7 @@ def main() -> int64:
   var base = Share.from_clear_int(125, 64)
   var adjustment = Share.from_clear(17)
   var fixed_weight = Share.from_clear_fixed(1.25, 64, 16)
-  var random_mask = Share.random()
+  var random_mask: secret int64 = Share.random()
 
   var score = base.add(adjustment)
   score = score.sub(Share.from_clear_int(5, 64))
