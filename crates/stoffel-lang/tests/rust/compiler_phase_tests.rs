@@ -4,7 +4,7 @@
 //! as a unit, testing real code snippets rather than manually constructed ASTs.
 
 use stoffel_vm_types::compiled_binary::{MpcBackend, MpcCurve};
-use stoffel_vm_types::core_types::ShareType;
+use stoffel_vm_types::core_types::{ShareType, Value};
 use stoffel_vm_types::instructions::Instruction;
 use stoffel_vm_types::registers::DEFAULT_SECRET_REGISTER_START;
 use stoffellang::ast::AstNode;
@@ -248,6 +248,36 @@ fn collect_call_names(instructions: &[Instruction]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+fn assert_no_unit_moves_into_secret_register(instructions: &[Instruction]) {
+    let mut unit_registers = std::collections::HashSet::new();
+
+    for instruction in instructions {
+        match instruction {
+            Instruction::LDI(register, Value::Unit) => {
+                unit_registers.insert(*register);
+            }
+            Instruction::LDI(register, _) => {
+                unit_registers.remove(register);
+            }
+            Instruction::MOV(dest, src)
+                if *dest >= DEFAULT_SECRET_REGISTER_START && unit_registers.contains(src) =>
+            {
+                panic!(
+                    "unit value from r{src} was moved into secret register r{dest}: {instructions:?}"
+                );
+            }
+            Instruction::MOV(dest, src) => {
+                if unit_registers.contains(src) {
+                    unit_registers.insert(*dest);
+                } else {
+                    unit_registers.remove(dest);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Checks if compilation produces an error containing the given substring
@@ -911,6 +941,7 @@ def main(a: secret int64, b: secret int64) -> secret int64:
         call_names.iter().any(|name| name == "Share.random_int"),
         "additive share program should use typed random, got {call_names:?}"
     );
+    assert_no_unit_moves_into_secret_register(&program.main_chunk.instructions);
 }
 
 #[test]

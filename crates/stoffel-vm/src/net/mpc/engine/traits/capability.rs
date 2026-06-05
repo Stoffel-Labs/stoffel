@@ -172,11 +172,11 @@ pub trait MpcEngineClientOutput: MpcEngine {
 pub trait MpcEngineReservation: MpcEngine {
     /// Initialize or restore reservation state for a program.
     async fn init_reservations(&self, program_hash: [u8; 32], capacity: u64)
-    -> MpcEngineResult<()>;
+        -> MpcEngineResult<()>;
 
     /// Reserve `n` consecutive mask indices for a client.
     async fn reserve_masks(&self, client_id: ClientId, n: u64)
-    -> MpcEngineResult<ReservationGrant>;
+        -> MpcEngineResult<ReservationGrant>;
 
     /// Get this node's mask share at a given index as serialized bytes.
     async fn get_mask_share(&self, index: u64) -> MpcEngineResult<Vec<u8>>;

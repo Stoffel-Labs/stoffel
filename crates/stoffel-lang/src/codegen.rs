@@ -141,6 +141,13 @@ impl CodeGenerator {
         vr
     }
 
+    fn emit_unit_value(&mut self) -> (VirtualRegister, bool) {
+        let vr = self.allocate_virtual_register(false);
+        self.identified_constants.push(Constant::Unit);
+        self.emit(Instruction::LDI(vr.0, crate::core_types::Value::Unit));
+        (vr, false)
+    }
+
     fn compile_default_value_for_type(
         &mut self,
         ty: &SymbolType,
@@ -855,20 +862,13 @@ impl CodeGenerator {
                         // based on the source and destination register halves.
                         self.emit(Instruction::MOV(dest_vr_index, value_vr.0));
 
-                        // The destination VR retains its original secrecy property,
-                        let dest_vr = VirtualRegister(dest_vr_index);
-                        let dest_is_secret = *self
-                            .vr_secrecy
-                            .get(&dest_vr)
-                            .expect("Destination VR missing from secrecy map in assignment");
-
                         // Assignment itself doesn't produce a value/register to be used further.
                         if let Some(value) = int_literal_u64(Some(value.as_ref())) {
                             self.clear_int_constants.insert(name.clone(), value);
                         } else {
                             self.clear_int_constants.remove(name);
                         }
-                        Ok((dest_vr, dest_is_secret))
+                        Ok(self.emit_unit_value())
                     }
                     AstNode::FieldAccess {
                         object,
@@ -877,7 +877,7 @@ impl CodeGenerator {
                     } => {
                         // Compile object and value
                         let (obj_vr, _obj_is_secret) = self.compile_node(object)?;
-                        let (val_vr, val_is_secret) = self.compile_node(value)?;
+                        let (val_vr, _val_is_secret) = self.compile_node(value)?;
 
                         // Load field name as string constant
                         let field_const = Constant::String(field_name.clone());
@@ -894,7 +894,7 @@ impl CodeGenerator {
                         self.emit(Instruction::PUSHARG(val_vr.0));
                         self.emit(Instruction::CALL("set_field".to_string()));
 
-                        Ok((val_vr, val_is_secret))
+                        Ok(self.emit_unit_value())
                     }
                     AstNode::IndexAccess {
                         base,
@@ -904,7 +904,7 @@ impl CodeGenerator {
                         // Compile base, index, and value
                         let (base_vr, _base_is_secret) = self.compile_node(base)?;
                         let (idx_vr, _idx_is_secret) = self.compile_node(index)?;
-                        let (val_vr, val_is_secret) = self.compile_node(value)?;
+                        let (val_vr, _val_is_secret) = self.compile_node(value)?;
 
                         // Call set_field(base, index, value)
                         self.emit(Instruction::PUSHARG(base_vr.0));
@@ -912,7 +912,7 @@ impl CodeGenerator {
                         self.emit(Instruction::PUSHARG(val_vr.0));
                         self.emit(Instruction::CALL("set_field".to_string()));
 
-                        Ok((val_vr, val_is_secret))
+                        Ok(self.emit_unit_value())
                     }
                     _ => Err(CompilerError::semantic_error(
                         "Invalid assignment target",

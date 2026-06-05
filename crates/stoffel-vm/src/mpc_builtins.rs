@@ -62,6 +62,7 @@ const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Share.get_party_id",
     "Share.open_exp",
     "Share.random",
+    "Share.random_int",
     "Share.get_commitment",
     "Share.commitment_count",
     "Share.has_commitments",

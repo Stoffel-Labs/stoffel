@@ -173,6 +173,11 @@ pub trait AsyncMpcEngine: MpcEngine {
         ))
     }
 
+    /// Generate an integer random secret share suitable for typed integer reveals.
+    async fn random_integer_share_async(&self, ty: ShareType) -> MpcEngineResult<ShareData> {
+        self.random_share_async(ty).await
+    }
+
     /// Reconstruct a secret as raw field-element bytes asynchronously.
     async fn open_share_as_field_async(
         &self,

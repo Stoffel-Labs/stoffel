@@ -1,5 +1,5 @@
-use super::VMState;
 use super::mpc_runtime::ClientShareRequest;
+use super::VMState;
 use crate::error::VmResult;
 use crate::net::client_store::{
     ClientInputHydrationCount, ClientInputIndex, ClientOutputShareCount, ClientShare,

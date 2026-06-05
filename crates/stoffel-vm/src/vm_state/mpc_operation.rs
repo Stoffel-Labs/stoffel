@@ -111,6 +111,9 @@ pub(super) enum PendingMpcBuiltinOperation {
     Random {
         share_type: ShareType,
     },
+    RandomInt {
+        share_type: ShareType,
+    },
     OpenField {
         share_type: ShareType,
         share_data: ShareData,
@@ -154,6 +157,10 @@ pub(super) struct CompletedMpcBuiltinCall {
 pub(super) enum CompletedMpcBuiltinResult {
     Value(Value),
     ShareObject {
+        share_type: ShareType,
+        share_data: ShareData,
+    },
+    ShareValue {
         share_type: ShareType,
         share_data: ShareData,
     },
@@ -388,6 +395,16 @@ impl PendingMpcBuiltinCall {
                     share_data,
                 }
             }
+            PendingMpcBuiltinOperation::RandomInt { share_type } => {
+                let share_data = engine
+                    .random_integer_share_async(share_type)
+                    .await
+                    .map_mpc_backend_err("async_random_integer_share")?;
+                CompletedMpcBuiltinResult::ShareValue {
+                    share_type,
+                    share_data,
+                }
+            }
             PendingMpcBuiltinOperation::OpenField {
                 share_type,
                 share_data,
@@ -503,6 +520,11 @@ impl PendingMpcBuiltinCall {
                     .map_mpc_backend_err("open_in_exp_ops")?;
             }
             PendingMpcBuiltinOperation::Random { .. } => {
+                engine
+                    .randomness_ops()
+                    .map_mpc_backend_err("randomness_ops")?;
+            }
+            PendingMpcBuiltinOperation::RandomInt { .. } => {
                 engine
                     .randomness_ops()
                     .map_mpc_backend_err("randomness_ops")?;
@@ -680,6 +702,10 @@ impl VMState {
                     .id();
                 self.create_share_object_value(share_type, share_data, party_id)
             }
+            CompletedMpcBuiltinResult::ShareValue {
+                share_type,
+                share_data,
+            } => Ok(Value::Share(share_type, share_data)),
             CompletedMpcBuiltinResult::BatchOpen(values) => {
                 let revealed: Vec<Value> = values
                     .into_iter()

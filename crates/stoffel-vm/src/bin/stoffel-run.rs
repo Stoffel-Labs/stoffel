@@ -4740,7 +4740,11 @@ async fn main() {
                 if let Some(ref mut coord) = coord_opt {
                     handled_by_coordinator = true;
                     // Coordinator output delivery
-                    let output_share = coordinator_output_share_bytes(&mut vm, &result);
+                    let output_share = if input_ids.is_empty() {
+                        None
+                    } else {
+                        coordinator_output_share_bytes(&mut vm, &result)
+                    };
                     let captured_outputs = if let Some(engine) = hb_bls12381_coord_engine.as_ref() {
                         engine.drain_client_output_records().await
                     } else {
@@ -4808,14 +4812,17 @@ async fn main() {
                                 );
                             }
                         }
-                    } else {
-                        println!("Program returned: {:?}", result);
                     }
+                    print_vm_result(&mut vm, result.clone());
                 }
 
                 if let Some(ref mut coord) = on_chain_coord_opt {
                     handled_by_coordinator = true;
-                    let output_share = coordinator_output_share_bytes(&mut vm, &result);
+                    let output_share = if on_chain_output_clients.is_empty() {
+                        None
+                    } else {
+                        coordinator_output_share_bytes(&mut vm, &result)
+                    };
 
                     if let Some(output_share) = output_share {
                         if as_leader {
@@ -4852,7 +4859,7 @@ async fn main() {
                             }
                         }
                     } else {
-                        println!("Program returned: {:?}", result);
+                        print_vm_result(&mut vm, result.clone());
                     }
                 }
 

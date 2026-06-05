@@ -201,6 +201,12 @@ where
             .map_mpc_engine_operation("async_random_share")
     }
 
+    async fn random_integer_share_async(&self, ty: ShareType) -> MpcEngineResult<ShareData> {
+        self.random_integer_share_async_impl(ty)
+            .await
+            .map_mpc_engine_operation("async_random_integer_share")
+    }
+
     async fn open_share_in_exp_async(
         &self,
         ty: ShareType,

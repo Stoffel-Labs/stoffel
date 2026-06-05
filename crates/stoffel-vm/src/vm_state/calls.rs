@@ -577,6 +577,13 @@ impl VMState {
             MpcOnlineBuiltin::Random => Ok(PendingMpcBuiltinOperation::Random {
                 share_type: ShareType::default_secret_int(),
             }),
+            MpcOnlineBuiltin::RandomInt => {
+                args.require_exact(1, "1 argument: bit_length")?;
+                let bit_length = args.usize(0, "bit_length")?;
+                Ok(PendingMpcBuiltinOperation::RandomInt {
+                    share_type: ShareType::try_secret_int(bit_length)?,
+                })
+            }
             MpcOnlineBuiltin::OpenField => {
                 args.require_exact(1, "1 argument: share")?;
                 let share_value = args.cloned(0)?;

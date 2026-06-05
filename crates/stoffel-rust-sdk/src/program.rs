@@ -382,22 +382,22 @@ impl Program {
                 "local client input wrapper entry '{entry_name}' already exists"
             )));
         }
-        let Some(target_function) = binary
+        let Some(_target_function) = binary
             .functions
             .iter()
             .find(|function| function.name == call_name)
         else {
             return Err(Error::FunctionNotFound(call_name.to_owned()));
         };
-        let open_return = function_returns_secret_register(target_function);
         let input_count = input_shapes
             .iter()
             .map(LocalInputShape::share_count)
             .sum::<usize>();
 
         let mut instructions = Vec::with_capacity(input_count * 8 + input_shapes.len() + 2);
-        let first_arg_register = 2;
-        let mut next_register = first_arg_register;
+        let first_clear_arg_register = 2;
+        let mut next_clear_register = first_clear_arg_register;
+        let mut next_secret_register = DEFAULT_SECRET_REGISTER_START;
         let mut next_share_index = 0usize;
         let mut arg_registers = Vec::with_capacity(input_shapes.len());
         for shape in input_shapes {
@@ -406,7 +406,8 @@ impl Program {
                 &mut binary,
                 &mut instructions,
                 &mut next_share_index,
-                &mut next_register,
+                &mut next_clear_register,
+                &mut next_secret_register,
             )?;
             arg_registers.push(register);
         }
@@ -414,13 +415,13 @@ impl Program {
             instructions.push(CompiledInstruction::PUSHARG(register));
         }
         instructions.push(CompiledInstruction::CALL(call_name.to_owned()));
-        if open_return {
-            instructions.push(CompiledInstruction::PUSHARG(0));
-            instructions.push(CompiledInstruction::CALL("Share.open".to_owned()));
-        }
         instructions.push(CompiledInstruction::RET(0));
 
-        let register_count = next_register.max(first_arg_register);
+        let register_count = if next_secret_register == DEFAULT_SECRET_REGISTER_START {
+            next_clear_register.max(first_clear_arg_register)
+        } else {
+            next_clear_register.max(next_secret_register)
+        };
         binary.functions.push(CompiledFunction {
             name: entry_name.to_owned(),
             register_count,
@@ -588,28 +589,17 @@ fn bytecode_curve_name(curve: stoffel_vm_types::compiled_binary::MpcCurve) -> &'
     }
 }
 
-fn function_returns_secret_register(function: &CompiledFunction) -> bool {
-    function
-        .instructions
-        .iter()
-        .rev()
-        .find_map(|instruction| match instruction {
-            CompiledInstruction::RET(register) => Some(*register >= DEFAULT_SECRET_REGISTER_START),
-            _ => None,
-        })
-        .unwrap_or(false)
-}
-
 fn emit_local_input_shape(
     shape: &LocalInputShape,
     binary: &mut CompiledBinary,
     instructions: &mut Vec<CompiledInstruction>,
     next_share_index: &mut usize,
-    next_register: &mut usize,
+    next_clear_register: &mut usize,
+    next_secret_register: &mut usize,
 ) -> Result<usize> {
     match shape {
         LocalInputShape::Clear(value) => {
-            let dest = allocate_wrapper_register(next_register);
+            let dest = allocate_wrapper_register(next_clear_register);
             let const_index = binary.constants.len();
             binary
                 .constants
@@ -618,7 +608,7 @@ fn emit_local_input_shape(
             Ok(dest)
         }
         LocalInputShape::Share => {
-            let dest = allocate_wrapper_register(next_register);
+            let dest = allocate_wrapper_register(next_secret_register);
             let client_index_const = binary.constants.len();
             binary.constants.push(VmValue::U64(0));
             let share_index_const = binary.constants.len();
@@ -637,7 +627,7 @@ fn emit_local_input_shape(
             Ok(dest)
         }
         LocalInputShape::List(items) => {
-            let dest = allocate_wrapper_register(next_register);
+            let dest = allocate_wrapper_register(next_clear_register);
             instructions.push(CompiledInstruction::CALL("create_array".to_owned()));
             instructions.push(CompiledInstruction::MOV(dest, 0));
             for item in items {
@@ -646,7 +636,8 @@ fn emit_local_input_shape(
                     binary,
                     instructions,
                     next_share_index,
-                    next_register,
+                    next_clear_register,
+                    next_secret_register,
                 )?;
                 instructions.push(CompiledInstruction::PUSHARG(dest));
                 instructions.push(CompiledInstruction::PUSHARG(item_register));
@@ -655,11 +646,11 @@ fn emit_local_input_shape(
             Ok(dest)
         }
         LocalInputShape::Object(fields) => {
-            let dest = allocate_wrapper_register(next_register);
+            let dest = allocate_wrapper_register(next_clear_register);
             instructions.push(CompiledInstruction::CALL("create_object".to_owned()));
             instructions.push(CompiledInstruction::MOV(dest, 0));
             for (field_name, field_shape) in fields {
-                let key_register = allocate_wrapper_register(next_register);
+                let key_register = allocate_wrapper_register(next_clear_register);
                 let key_const = binary.constants.len();
                 binary.constants.push(VmValue::String(field_name.clone()));
                 instructions.push(CompiledInstruction::LDI(key_register, key_const));
@@ -668,7 +659,8 @@ fn emit_local_input_shape(
                     binary,
                     instructions,
                     next_share_index,
-                    next_register,
+                    next_clear_register,
+                    next_secret_register,
                 )?;
                 instructions.push(CompiledInstruction::PUSHARG(dest));
                 instructions.push(CompiledInstruction::PUSHARG(key_register));
@@ -701,4 +693,97 @@ fn allocate_wrapper_register(next_register: &mut usize) -> usize {
     let register = *next_register;
     *next_register += 1;
     register
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::MpcBackend;
+
+    #[test]
+    fn local_client_input_wrapper_places_secret_inputs_in_secret_registers() -> Result<()> {
+        let program = crate::compiler::compile_source(
+            "def main(a: secret int64, b: secret int64) -> secret int64:\n  return a + b",
+            "test.stfl",
+            MpcBackend::HoneyBadger,
+        )?;
+
+        let wrapped = program.with_local_client_input_wrapper(
+            "main",
+            "__stoffel_sdk_local_entry",
+            &[LocalInputShape::Share, LocalInputShape::Share],
+        )?;
+        let wrapper = wrapped
+            .binary
+            .functions
+            .iter()
+            .find(|function| function.name == "__stoffel_sdk_local_entry")
+            .expect("wrapper function should be present");
+
+        assert!(wrapper.register_count >= DEFAULT_SECRET_REGISTER_START + 2);
+        assert!(
+            wrapper
+                .instructions
+                .contains(&CompiledInstruction::MOV(DEFAULT_SECRET_REGISTER_START, 0)),
+            "first ClientStore share must be moved into a secret register"
+        );
+        assert!(
+            wrapper.instructions.contains(&CompiledInstruction::MOV(
+                DEFAULT_SECRET_REGISTER_START + 1,
+                0
+            )),
+            "second ClientStore share must be moved into a secret register"
+        );
+
+        let main_call = wrapper
+            .instructions
+            .iter()
+            .position(|instruction| {
+                matches!(instruction, CompiledInstruction::CALL(name) if name == "main")
+            })
+            .expect("wrapper should call main");
+        assert_eq!(
+            &wrapper.instructions[main_call - 2..main_call],
+            &[
+                CompiledInstruction::PUSHARG(DEFAULT_SECRET_REGISTER_START),
+                CompiledInstruction::PUSHARG(DEFAULT_SECRET_REGISTER_START + 1),
+            ]
+        );
+        assert!(
+            !wrapper.instructions.iter().any(
+                |instruction| matches!(instruction, CompiledInstruction::CALL(name) if name == "Share.open")
+            ),
+            "the local wrapper should return the VM value and leave share reveals to the runner"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn local_client_input_wrapper_keeps_clear_only_inputs_in_clear_registers() -> Result<()> {
+        let program = crate::compiler::compile_source(
+            "def main(a: int64, b: int64) -> int64:\n  return a + b",
+            "test.stfl",
+            MpcBackend::HoneyBadger,
+        )?;
+
+        let wrapped = program.with_local_client_input_wrapper(
+            "main",
+            "__stoffel_sdk_local_entry",
+            &[
+                LocalInputShape::Clear(Value::I64(1)),
+                LocalInputShape::Clear(Value::I64(2)),
+            ],
+        )?;
+        let wrapper = wrapped
+            .binary
+            .functions
+            .iter()
+            .find(|function| function.name == "__stoffel_sdk_local_entry")
+            .expect("wrapper function should be present");
+
+        assert!(wrapper.register_count < DEFAULT_SECRET_REGISTER_START);
+
+        Ok(())
+    }
 }

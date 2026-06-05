@@ -1,5 +1,4 @@
 use super::result::create_result_share_object;
-use crate::VirtualMachineResult;
 use crate::core_vm::VirtualMachine;
 use crate::foreign_functions::{
     ForeignFunctionCallbackResult, ForeignFunctionContext, MpcOnlineBuiltin,
@@ -7,6 +6,7 @@ use crate::foreign_functions::{
 use crate::net::client_store::ClientOutputShareCount;
 use crate::net::mpc_engine::MpcExponentGenerator;
 use crate::value_conversions::value_to_usize;
+use crate::VirtualMachineResult;
 use stoffel_vm_types::core_types::{ShareType, Value};
 
 pub(super) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
@@ -32,7 +32,7 @@ pub(super) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         share_open_exp,
     )?;
     vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::Random, share_random)?;
-    vm.try_register_typed_foreign_function("Share.random_int", share_random_int)?;
+    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::RandomInt, share_random_int)?;
     vm.try_register_mpc_online_foreign_method(
         "Share",
         "open_field",
