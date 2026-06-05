@@ -4,7 +4,7 @@
 # - Secret integer handling
 # - Branchless conditional selection (MPC-safe)
 # - List operations using functions (not methods)
-# - Implicit reveal via assignment to clear variables
+# - Explicit reveal with .reveal()
 #
 # Algorithm: Greedy selection of items that fit within capacity
 # Items are assumed to be sorted by weight (descending)
@@ -64,9 +64,8 @@ def main() -> None:
   var n: int64 = 5
   var result: secret int64 = greedy_knapsack(weights, thresholds, n)
 
-  # Reveal by assigning secret to clear variable
-  # This triggers implicit reveal - no .reveal() method needed
-  var revealed: int64 = result
+  # Explicitly reveal the secret result into a clear variable
+  var revealed: int64 = result.reveal()
 
   print("Total weight of selected items:")
   # Note: print expects string, so we just print the message

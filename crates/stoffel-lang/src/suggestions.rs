@@ -302,8 +302,7 @@ mod tests {
     fn test_method_to_function_reveal() {
         let table = SymbolTable::new();
         let result = suggest_method_to_function("reveal", &table);
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("clear"));
+        assert_eq!(result, None);
     }
 
     #[test]

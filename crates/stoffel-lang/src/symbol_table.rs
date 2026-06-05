@@ -549,12 +549,8 @@ impl SymbolTable {
         self.method_suggestions
             .insert("set".to_string(), "arr[index] = value".to_string());
         self.method_suggestions.insert(
-            "reveal".to_string(),
-            "assign to a clear (non-secret) variable to implicitly reveal".to_string(),
-        );
-        self.method_suggestions.insert(
             "open".to_string(),
-            "Share.open(value) or assign to clear variable".to_string(),
+            "Share.open(value) or value.reveal()".to_string(),
         );
     }
 
@@ -1264,10 +1260,9 @@ mod tests {
     fn test_method_suggestion_reveal() {
         let table = SymbolTable::new();
 
-        // "reveal" should suggest using clear variables
+        // "reveal" is a real builtin now, not an unsupported-method suggestion.
         let suggestion = table.get_method_suggestion("reveal");
-        assert!(suggestion.is_some());
-        assert!(suggestion.unwrap().contains("clear"));
+        assert!(suggestion.is_none());
     }
 
     // ===========================================

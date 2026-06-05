@@ -241,6 +241,32 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             value: Box::new(transform_ufcs(*value)),
             location,
         },
+        AstNode::IndexAccess {
+            base,
+            index,
+            location,
+        } => AstNode::IndexAccess {
+            base: Box::new(transform_ufcs(*base)),
+            index: Box::new(transform_ufcs(*index)),
+            location,
+        },
+        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
+            elements: elements.into_iter().map(transform_ufcs).collect(),
+            location,
+        },
+        AstNode::TupleLiteral(elements) => {
+            AstNode::TupleLiteral(elements.into_iter().map(transform_ufcs).collect())
+        }
+        AstNode::SetLiteral(elements) => {
+            AstNode::SetLiteral(elements.into_iter().map(transform_ufcs).collect())
+        }
+        AstNode::DictLiteral { pairs, location } => AstNode::DictLiteral {
+            pairs: pairs
+                .into_iter()
+                .map(|(key, value)| (transform_ufcs(key), transform_ufcs(value)))
+                .collect(),
+            location,
+        },
         _ => node,
     }
 }

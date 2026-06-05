@@ -174,19 +174,15 @@ def main() -> None:
 }
 
 #[test]
-fn test_method_reveal_suggests_assignment() {
+fn test_method_reveal_compiles_as_explicit_reveal() {
     let source = r#"
 def main() -> None:
-  var x: secret int64 = 42
-  var y: int64 = x.reveal()
+  var x: secret uint64 = ClientStore.take_share(0, 0)
+  var y: uint64 = x.reveal()
 "#;
 
     let errors = compile_and_get_errors(source);
-    assert!(errors_contain(&errors, "reveal"), "Should mention 'reveal'");
-    assert!(
-        errors_contain(&errors, "clear"),
-        "Should mention assigning to clear variable"
-    );
+    assert!(errors.is_empty(), "explicit reveal should compile: {errors:?}");
 }
 
 // ===========================================

@@ -1,3 +1,5 @@
+def reveal[T](value: secret T) -> T {.builtin: "Share.open".}:
+
 builtin object ClientStore:
   def take_share(client_id: int64, share_id: int64) -> Share {.builtin.}:
   def take_share_fixed(client_id: int64, share_id: int64) -> Share {.builtin.}:
@@ -17,6 +19,7 @@ builtin object Share:
   def mul_scalar(share: Share, scalar: int64) -> Share {.builtin.}:
   def mul(share1: Share, share2: Share) -> Share {.builtin.}:
   def open(share: Share) -> int64 {.builtin.}:
+  def reveal[T](share: Share) -> T {.builtin: "Share.open".}:
   def open_fixed(share: Share) -> float {.builtin: "Share.open".}:
   def send_to_client(share: Share, client_id: int64) -> bool {.builtin.}:
   def interpolate_local(shares: list[Share]) -> int64 {.builtin.}:

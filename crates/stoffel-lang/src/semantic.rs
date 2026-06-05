@@ -88,6 +88,14 @@ impl<'a> SemanticAnalyzer<'a> {
             return true;
         }
 
+        if Self::requires_explicit_reveal(src, dst) {
+            return false;
+        }
+
+        if Self::share_to_secret_compatible(src, dst) {
+            return true;
+        }
+
         match (src.underlying_type(), dst.underlying_type()) {
             // List types: compatible if element types are compatible
             (SymbolType::List(src_elem), SymbolType::List(dst_elem)) => {
@@ -125,6 +133,22 @@ impl<'a> SemanticAnalyzer<'a> {
             // For all other types, require exact match
             (s, d) => s == d,
         }
+    }
+
+    fn is_share_alias_type(ty: &SymbolType) -> bool {
+        matches!(
+            ty.underlying_type(),
+            SymbolType::Object(name) | SymbolType::TypeName(name) if name == "Share"
+        )
+    }
+
+    fn share_to_secret_compatible(src: &SymbolType, dst: &SymbolType) -> bool {
+        Self::is_share_alias_type(src) && matches!(dst, SymbolType::Secret(_))
+    }
+
+    fn requires_explicit_reveal(src: &SymbolType, dst: &SymbolType) -> bool {
+        matches!(src, SymbolType::Secret(_))
+            && !matches!(dst, SymbolType::Secret(_) | SymbolType::Unknown)
     }
 
     fn substitute_type_vars(ty: &SymbolType, bindings: &HashMap<String, SymbolType>) -> SymbolType {
@@ -311,6 +335,18 @@ impl<'a> SemanticAnalyzer<'a> {
         dst_type: &SymbolType,
         location: crate::errors::SourceLocation,
     ) -> Result<(), ()> {
+        if Self::requires_explicit_reveal(src_type, dst_type) {
+            self.error_reporter.add_error(CompilerError::type_error(
+                format!(
+                    "Cannot implicitly reveal '{}' as '{}'",
+                    declared_type_to_string(src_type),
+                    declared_type_to_string(dst_type)
+                ),
+                location,
+            ).with_hint("Call .reveal() to explicitly reveal a secret value"));
+            return Err(());
+        }
+
         // Only enforce special rules if destination is integer
         if dst_type.is_integer() {
             // 1) Literal fits check

@@ -449,6 +449,21 @@ impl CodeGenerator {
     fn type_hint_for_node(&self, node: &AstNode) -> Option<SymbolType> {
         match node {
             AstNode::Identifier(name, _) => self.symbol_types.get(name).cloned(),
+            AstNode::FieldAccess {
+                object, field_name, ..
+            } => self
+                .type_hint_for_node(object)
+                .and_then(|object_type| self.field_type_for_object_type(&object_type, field_name)),
+            AstNode::IndexAccess { base, .. } => {
+                self.type_hint_for_node(base).and_then(|base_type| {
+                    match base_type.underlying_type() {
+                        SymbolType::List(element_type) => Some(element_type.as_ref().clone()),
+                        SymbolType::String => Some(SymbolType::String),
+                        SymbolType::Dict(_, value_type) => Some(value_type.as_ref().clone()),
+                        _ => None,
+                    }
+                })
+            }
             AstNode::FunctionCall {
                 resolved_return_type,
                 ..
@@ -488,6 +503,22 @@ impl CodeGenerator {
             },
             _ => None,
         }
+    }
+
+    fn field_type_for_object_type(
+        &self,
+        object_type: &SymbolType,
+        field_name: &str,
+    ) -> Option<SymbolType> {
+        let object_name = match object_type.underlying_type() {
+            SymbolType::Object(name) | SymbolType::TypeName(name) => name,
+            _ => return None,
+        };
+        self.object_field_types.get(object_name).and_then(|fields| {
+            fields
+                .iter()
+                .find_map(|(name, ty)| (name == field_name).then(|| ty.clone()))
+        })
     }
 
     /// Compiles an AST node, returning the VirtualRegister holding the result
@@ -1072,8 +1103,9 @@ impl CodeGenerator {
                 self.emit(Instruction::PUSHARG(field_vr.0));
                 self.emit(Instruction::CALL("get_field".to_string()));
 
-                // TODO: Determine result secrecy based on field type
-                let result_is_secret = false;
+                let result_is_secret = self
+                    .type_hint_for_node(node)
+                    .is_some_and(|ty| ty.uses_secret_register());
                 let result_vr = self.allocate_virtual_register(result_is_secret);
                 self.emit(Instruction::MOV(result_vr.0, 0)); // Result is in r0
 
@@ -1140,7 +1172,7 @@ impl CodeGenerator {
                 body,
                 location,
             } => {
-                // Support: single var over range a .. b (inclusive) or over a list/array
+                // Support: single var over range a .. b (exclusive) or over a list/array
                 if variables.len() != 1 {
                     return Err(CompilerError::semantic_error(
                         "For-loop with multiple variables not supported yet",
@@ -1158,7 +1190,7 @@ impl CodeGenerator {
                         right,
                         location: _,
                     } if op == ".." => {
-                        // Range iteration: for i in start..end
+                        // Range iteration: for i in start..end, excluding end
                         let (start_vr, start_is_secret) = self.compile_node(left)?;
                         let (end_vr, end_is_secret) = self.compile_node(right)?;
                         if start_is_secret || end_is_secret {
@@ -1183,9 +1215,10 @@ impl CodeGenerator {
                         // Start label
                         self.add_label(loop_start_label.clone());
 
-                        // If i > end: exit
+                        // If i >= end: exit
                         self.emit(Instruction::CMP(loop_vr.0, end_vr.0));
                         self.emit(Instruction::JMPGT(loop_end_label.clone()));
+                        self.emit(Instruction::JMPEQ(loop_end_label.clone()));
 
                         // Body
                         let (_body_vr, _body_is_secret) = self.compile_node(body)?;
@@ -1569,7 +1602,11 @@ impl CodeGenerator {
                 self.emit(Instruction::PUSHARG(index_vr.0));
                 self.emit(Instruction::CALL("get_field".to_string()));
 
-                let result_is_secret = base_is_secret || index_is_secret;
+                let result_is_secret = base_is_secret
+                    || index_is_secret
+                    || self
+                        .type_hint_for_node(node)
+                        .is_some_and(|ty| ty.uses_secret_register());
                 let result_vr = self.allocate_virtual_register(result_is_secret);
                 self.emit(Instruction::MOV(result_vr.0, 0)); // Result is in r0
 

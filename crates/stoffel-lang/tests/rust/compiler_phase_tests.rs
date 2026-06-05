@@ -777,6 +777,58 @@ def main() -> int64:
 }
 
 #[test]
+fn test_compile_share_reveal_method_lowers_to_vm_open() {
+    let source = r#"
+var share = ClientStore.take_share(0, 0)
+var revealed: uint64 = share.reveal()
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.open"),
+        "Share reveal method should lower to VM Share.open, got {call_names:?}"
+    );
+}
+
+#[test]
+fn test_compile_secret_uint64_reveal_method_lowers_to_vm_open() {
+    let source = r#"
+var share: secret uint64 = ClientStore.take_share(0, 0)
+var revealed: uint64 = share.reveal()
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.open"),
+        "secret uint64 reveal method should lower to VM Share.open, got {call_names:?}"
+    );
+}
+
+#[test]
+fn test_semantic_secret_uint64_requires_explicit_reveal() {
+    let source = r#"
+var share: secret uint64 = ClientStore.take_share(0, 0)
+var revealed: uint64 = share
+"#;
+    let errors = analyze_source(source).expect_err("implicit reveal should fail");
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("Cannot implicitly reveal")),
+        "expected implicit reveal rejection, got {errors:?}"
+    );
+}
+
+#[test]
+fn test_compile_reveal_method_inside_list_literal() {
+    let source = r#"
+var share: secret uint64 = ClientStore.take_share(0, 0)
+var revealed: list[uint64] = [share.reveal()]
+"#;
+    assert!(compile_source(source).is_ok());
+}
+
+#[test]
 fn test_semantic_nested_list_generic_rejects_inconsistent_t_list_binding() {
     let source = r#"
 def choose_nested[T](left: list[list[T]], right: list[T]) -> list[T]:
@@ -1265,6 +1317,36 @@ def main():
 fn test_semantic_secret_assignment_valid() {
     let source = r#"
 var share: Share = ClientStore.take_share(0, 0)
+"#;
+    assert!(analyze_source(source).is_ok());
+}
+
+#[test]
+fn test_semantic_share_can_assign_to_secret_int() {
+    let source = r#"
+var share: secret int64 = ClientStore.take_share(0, 0)
+"#;
+    assert!(analyze_source(source).is_ok());
+}
+
+#[test]
+fn test_semantic_share_can_flow_to_secret_int_parameter() {
+    let source = r#"
+def process(value: secret int64) -> secret int64:
+  return value
+
+var share = ClientStore.take_share(0, 0)
+var processed = process(share)
+"#;
+    assert!(analyze_source(source).is_ok());
+}
+
+#[test]
+fn test_semantic_share_can_initialize_secret_int_list() {
+    let source = r#"
+var first = ClientStore.take_share(0, 0)
+var second = ClientStore.take_share(0, 1)
+var shares: list[secret int64] = [first, second]
 "#;
     assert!(analyze_source(source).is_ok());
 }
