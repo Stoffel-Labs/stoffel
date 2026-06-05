@@ -603,6 +603,30 @@ print(msg)
 }
 
 #[test]
+fn test_semantic_builtin_print_accepts_multiple_mixed_arguments() {
+    let source = r#"
+var label = "answer"
+var value = 42
+print(label, "=", value, True)
+"#;
+    assert!(analyze_source(source).is_ok());
+}
+
+#[test]
+fn test_semantic_builtin_print_rejects_untyped_share_random_argument() {
+    let source = r#"
+print("random", Share.random())
+"#;
+    let errors = analyze_source_errors(source);
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .contains("Share.random() requires an expected secret integer type")),
+        "expected untyped Share.random() error, got: {errors:?}"
+    );
+}
+
+#[test]
 fn test_semantic_array_operations() {
     let source = r#"
 var arr = []

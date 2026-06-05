@@ -153,6 +153,10 @@ impl<'a> SemanticAnalyzer<'a> {
         matches!(src, SymbolType::Secret(_)) && Self::is_share_alias_type(dst)
     }
 
+    fn is_variadic_builtin(name: &str) -> bool {
+        matches!(name, "print")
+    }
+
     fn share_expr_can_initialize_secret(expr: Option<&AstNode>, dst: &SymbolType) -> bool {
         let Some(AstNode::FunctionCall { function, .. }) = expr else {
             return false;
@@ -193,16 +197,18 @@ impl<'a> SemanticAnalyzer<'a> {
         }
         match node {
             AstNode::FunctionCall { arguments, .. } | AstNode::CommandCall { arguments, .. } => {
-                arguments.iter().any(Self::contains_unrefined_share_random_call)
+                arguments
+                    .iter()
+                    .any(Self::contains_unrefined_share_random_call)
             }
             AstNode::NamedArgument { value, .. } => {
                 Self::contains_unrefined_share_random_call(value)
             }
             AstNode::ListLiteral { elements, .. }
             | AstNode::TupleLiteral(elements)
-            | AstNode::SetLiteral(elements) => {
-                elements.iter().any(Self::contains_unrefined_share_random_call)
-            }
+            | AstNode::SetLiteral(elements) => elements
+                .iter()
+                .any(Self::contains_unrefined_share_random_call),
             AstNode::DictLiteral { pairs, .. } => pairs.iter().any(|(key, value)| {
                 Self::contains_unrefined_share_random_call(key)
                     || Self::contains_unrefined_share_random_call(value)
@@ -238,9 +244,9 @@ impl<'a> SemanticAnalyzer<'a> {
                 Self::contains_unrefined_share_random_call(condition)
                     || Self::contains_unrefined_share_random_call(body)
             }
-            AstNode::Block(statements) => {
-                statements.iter().any(Self::contains_unrefined_share_random_call)
-            }
+            AstNode::Block(statements) => statements
+                .iter()
+                .any(Self::contains_unrefined_share_random_call),
             AstNode::FieldAccess { object, .. } => {
                 Self::contains_unrefined_share_random_call(object)
             }
@@ -388,28 +394,26 @@ impl<'a> SemanticAnalyzer<'a> {
                 AstNode::ListLiteral { elements, location }
             }
             AstNode::DictLiteral { pairs, location } => {
-                let pairs =
-                    if let SymbolType::Dict(expected_key, expected_value) = expected_type {
-                        pairs
-                            .into_iter()
-                            .map(|(key, value)| {
-                                let (refined_key, _) = Self::refine_expression_type_with_expected(
-                                    key,
-                                    &SymbolType::Unknown,
-                                    expected_key,
-                                );
-                                let (refined_value, _) =
-                                    Self::refine_expression_type_with_expected(
-                                        value,
-                                        &SymbolType::Unknown,
-                                        expected_value,
-                                    );
-                                (refined_key, refined_value)
-                            })
-                            .collect()
-                    } else {
-                        pairs
-                    };
+                let pairs = if let SymbolType::Dict(expected_key, expected_value) = expected_type {
+                    pairs
+                        .into_iter()
+                        .map(|(key, value)| {
+                            let (refined_key, _) = Self::refine_expression_type_with_expected(
+                                key,
+                                &SymbolType::Unknown,
+                                expected_key,
+                            );
+                            let (refined_value, _) = Self::refine_expression_type_with_expected(
+                                value,
+                                &SymbolType::Unknown,
+                                expected_value,
+                            );
+                            (refined_key, refined_value)
+                        })
+                        .collect()
+                } else {
+                    pairs
+                };
                 AstNode::DictLiteral { pairs, location }
             }
             other => other,
@@ -967,11 +971,15 @@ impl<'a> SemanticAnalyzer<'a> {
                     .as_deref()
                     .is_some_and(Self::contains_unrefined_share_random_call)
                 {
-                    self.error_reporter.add_error(CompilerError::type_error(
-                        "Share.random() requires an expected secret integer type".to_string(),
-                        location.clone(),
-                    )
-                    .with_hint("Add a type annotation such as 'var s: secret int64 = Share.random()'"));
+                    self.error_reporter.add_error(
+                        CompilerError::type_error(
+                            "Share.random() requires an expected secret integer type".to_string(),
+                            location.clone(),
+                        )
+                        .with_hint(
+                            "Add a type annotation such as 'var s: secret int64 = Share.random()'",
+                        ),
+                    );
                     return Err(());
                 }
 
@@ -1885,7 +1893,9 @@ impl<'a> SemanticAnalyzer<'a> {
                     };
 
                 // 4. Validate argument count
-                if expected_param_types.len() != argument_types.len() {
+                if !Self::is_variadic_builtin(&function_name)
+                    && expected_param_types.len() != argument_types.len()
+                {
                     self.error_reporter.add_error(CompilerError::semantic_error(
                         format!(
                             "Function '{}' expects {} arguments, but {} were provided",
@@ -1900,8 +1910,19 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 // 5. Validate arguments, binding any function-level type parameters per call
                 let mut generic_bindings = HashMap::new();
-                for idx in 0..expected_param_types.len() {
-                    let expected_ty = &expected_param_types[idx];
+                let arg_check_len = if Self::is_variadic_builtin(&function_name) {
+                    argument_types.len()
+                } else {
+                    expected_param_types.len()
+                };
+                for idx in 0..arg_check_len {
+                    let expected_fallback;
+                    let expected_ty = if Self::is_variadic_builtin(&function_name) {
+                        expected_fallback = SymbolType::Unknown;
+                        &expected_fallback
+                    } else {
+                        &expected_param_types[idx]
+                    };
                     let mut arg_loc = checked_arguments[idx].location();
                     if arg_loc.line == 0 {
                         arg_loc = location.clone();
@@ -1929,17 +1950,19 @@ impl<'a> SemanticAnalyzer<'a> {
                         return Err(());
                     }
 
-                    if self
-                        .check_generic_compat(
-                            Some(&checked_arguments[idx]),
-                            &argument_types[idx],
-                            expected_ty,
-                            &mut generic_bindings,
-                            arg_loc,
-                        )
-                        .is_err()
-                    {
-                        return Err(());
+                    if !Self::is_variadic_builtin(&function_name) {
+                        if self
+                            .check_generic_compat(
+                                Some(&checked_arguments[idx]),
+                                &argument_types[idx],
+                                expected_ty,
+                                &mut generic_bindings,
+                                arg_loc,
+                            )
+                            .is_err()
+                        {
+                            return Err(());
+                        }
                     }
                 }
 
@@ -2036,7 +2059,9 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 };
 
-                if expected_param_types.len() != argument_types.len() {
+                if !Self::is_variadic_builtin(&function_name)
+                    && expected_param_types.len() != argument_types.len()
+                {
                     self.error_reporter.add_error(CompilerError::semantic_error(
                         format!(
                             "Function '{}' expects {} arguments, but {} were provided",
@@ -2051,8 +2076,19 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 // 5. Validate arguments, binding any function-level type parameters per call
                 let mut generic_bindings = HashMap::new();
-                for idx in 0..expected_param_types.len() {
-                    let expected_ty = &expected_param_types[idx];
+                let arg_check_len = if Self::is_variadic_builtin(&function_name) {
+                    argument_types.len()
+                } else {
+                    expected_param_types.len()
+                };
+                for idx in 0..arg_check_len {
+                    let expected_fallback;
+                    let expected_ty = if Self::is_variadic_builtin(&function_name) {
+                        expected_fallback = SymbolType::Unknown;
+                        &expected_fallback
+                    } else {
+                        &expected_param_types[idx]
+                    };
                     let arg_loc = checked_arguments[idx].location();
                     let expected_after_bindings =
                         Self::substitute_type_vars(expected_ty, &generic_bindings);
@@ -2076,17 +2112,19 @@ impl<'a> SemanticAnalyzer<'a> {
                         return Err(());
                     }
 
-                    if self
-                        .check_generic_compat(
-                            Some(&checked_arguments[idx]),
-                            &argument_types[idx],
-                            expected_ty,
-                            &mut generic_bindings,
-                            arg_loc,
-                        )
-                        .is_err()
-                    {
-                        return Err(());
+                    if !Self::is_variadic_builtin(&function_name) {
+                        if self
+                            .check_generic_compat(
+                                Some(&checked_arguments[idx]),
+                                &argument_types[idx],
+                                expected_ty,
+                                &mut generic_bindings,
+                                arg_loc,
+                            )
+                            .is_err()
+                        {
+                            return Err(());
+                        }
                     }
                 }
 
