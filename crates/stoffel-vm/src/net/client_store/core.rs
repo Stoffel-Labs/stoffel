@@ -32,11 +32,13 @@ impl ClientInputStore {
     {
         let mut total_shares = 0;
         let timestamp = SystemTime::now();
+        let mut input_clients = Vec::new();
         let mut entries = self.entries.write();
         entries.clear();
 
         for (client_id, shares) in inputs {
             total_shares += shares.len();
+            input_clients.push(client_id);
             entries.insert(
                 client_id,
                 ClientInputEntry {
@@ -47,7 +49,7 @@ impl ClientInputStore {
             );
         }
         drop(entries);
-        self.set_client_roster_from_inputs();
+        self.add_known_clients(input_clients);
 
         total_shares
     }
@@ -202,8 +204,12 @@ impl ClientInputStore {
         }
     }
 
-    fn set_client_roster_from_inputs(&self) {
-        let clients = self.entries.read().keys().copied().collect::<Vec<_>>();
-        self.set_client_roster(clients);
+    fn add_known_clients<I>(&self, clients: I)
+    where
+        I: IntoIterator<Item = ClientId>,
+    {
+        let mut roster = self.client_roster.read().clone();
+        roster.extend(clients);
+        self.set_client_roster(roster);
     }
 }

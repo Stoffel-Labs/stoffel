@@ -179,6 +179,27 @@ fn stored_inputs_extend_client_roster_in_sorted_order() {
 }
 
 #[test]
+fn replacing_inputs_preserves_output_only_roster_slots() {
+    let store = ClientInputStore::new();
+
+    store.set_client_roster([2]);
+    store.replace_client_shares([(0, vec![ClientShare::untyped_bytes(vec![7])])]);
+
+    assert_eq!(store.len(), 2);
+    assert_eq!(store.client_ids(), vec![0, 2]);
+    assert_eq!(
+        store
+            .get_client_share_data(0, ClientShareIndex::new(0))
+            .map(|share| share.bytes().to_vec()),
+        Some(vec![7])
+    );
+    assert_eq!(
+        store.get_client_share_data(2, ClientShareIndex::new(0)),
+        None
+    );
+}
+
+#[test]
 fn client_share_metadata_round_trips_without_flattening_to_bytes() {
     let store = ClientInputStore::new();
     let share_type = ShareType::default_secret_fixed_point();

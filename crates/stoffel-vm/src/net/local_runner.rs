@@ -448,7 +448,10 @@ impl LocalCoordinatorRunner {
         client_bindings: &[(u64, Vec<u8>)],
     ) -> LocalCoordinatorRunnerResult<(u64, Vec<Vec<u8>>, InputAssignment)> {
         let mut input_slots = Vec::new();
-        let mut output_clients = Vec::new();
+        let output_clients = client_bindings
+            .iter()
+            .map(|(_slot, identity)| identity.clone())
+            .collect::<Vec<_>>();
         if self.binary.client_io_manifest.clients.is_empty() {
             for input in &self.client_inputs {
                 let client = client_bindings
@@ -463,7 +466,6 @@ impl LocalCoordinatorRunner {
                         ))
                     })?;
 
-                output_clients.push(client.clone());
                 for input_ordinal in 0..input.values.len() {
                     input_slots.push(InputSlotAssignment {
                         client: client.clone(),
@@ -491,9 +493,6 @@ impl LocalCoordinatorRunner {
                     ))
                 })?;
 
-            if !schema.outputs.is_empty() {
-                output_clients.push(client.clone());
-            }
             for input_ordinal in 0..schema.inputs.len() {
                 input_slots.push(InputSlotAssignment {
                     client: client.clone(),
@@ -1268,4 +1267,86 @@ fn socket_with_port_pair() -> std::io::Result<SocketAddr> {
 
 fn port_is_free(port: u16) -> bool {
     TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use stoffel_vm_types::compiled_binary::{ClientIoSchema, CompiledFunction};
+    use stoffel_vm_types::core_types::ShareType;
+
+    fn test_runner(mut binary: CompiledBinary) -> LocalCoordinatorRunnerBuilder {
+        binary.functions.push(CompiledFunction {
+            name: "main".to_owned(),
+            register_count: 0,
+            parameters: Vec::new(),
+            upvalues: Vec::new(),
+            parent: None,
+            labels: HashMap::new(),
+            instructions: Vec::new(),
+        });
+        LocalCoordinatorRunner::builder("/bin/sh", binary)
+    }
+
+    #[test]
+    fn expected_clients_create_output_identities_for_dynamic_outputs() {
+        let runner = test_runner(CompiledBinary::new())
+            .expected_clients(2)
+            .build()
+            .expect("runner");
+
+        let known_clients = runner.known_client_inputs();
+        assert_eq!(
+            known_clients
+                .iter()
+                .map(|client| client.client_slot)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(known_clients.iter().all(|client| client.values.is_empty()));
+
+        let (n_inputs, output_clients, assignment) = runner
+            .coordinator_client_io_binding(&[(0, vec![10]), (1, vec![11])])
+            .expect("binding");
+        assert_eq!(n_inputs, 0);
+        assert_eq!(output_clients, vec![vec![10], vec![11]]);
+        assert!(assignment.input_slots.is_empty());
+    }
+
+    #[test]
+    fn expected_clients_union_keeps_manifest_inputs_and_output_only_slots() {
+        let mut binary = CompiledBinary::new();
+        binary.client_io_manifest.clients = vec![ClientIoSchema {
+            client_slot: 0,
+            inputs: vec![ShareType::default_secret_int()],
+            outputs: Vec::new(),
+        }];
+
+        let runner = test_runner(binary)
+            .expected_clients(2)
+            .client_input(0, [42])
+            .build()
+            .expect("runner");
+
+        let known_clients = runner.known_client_inputs();
+        assert_eq!(
+            known_clients
+                .iter()
+                .map(|client| client.client_slot)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(known_clients[0].values, vec!["42".to_owned()]);
+        assert!(known_clients[1].values.is_empty());
+
+        let (n_inputs, output_clients, assignment) = runner
+            .coordinator_client_io_binding(&[(0, vec![10]), (1, vec![11])])
+            .expect("binding");
+        assert_eq!(n_inputs, 1);
+        assert_eq!(output_clients, vec![vec![10], vec![11]]);
+        assert_eq!(assignment.input_slots.len(), 1);
+        assert_eq!(assignment.input_slots[0].client, vec![10]);
+        assert_eq!(assignment.input_slots[0].label, 0);
+    }
 }
