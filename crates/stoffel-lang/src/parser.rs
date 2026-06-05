@@ -11,10 +11,12 @@ struct Parser<'a> {
     current_token_info: Option<&'a TokenInfo>, // Store the current token info
     last_location: SourceLocation,
     node_id_counter: usize, // Counter for assigning unique node IDs
+    recover: bool,
+    errors: Vec<CompilerError>,
 }
 
 impl<'a> Parser<'a> {
-    fn new(tokens: &'a [TokenInfo], filename: &str) -> Self {
+    fn new(tokens: &'a [TokenInfo], filename: &str, recover: bool) -> Self {
         let mut iter = tokens.iter().peekable();
         let current = iter.next();
         Parser {
@@ -26,6 +28,8 @@ impl<'a> Parser<'a> {
                 column: 1,
             },
             node_id_counter: 0, // Initialize counter
+            recover,
+            errors: Vec::new(),
         }
     }
 
@@ -44,7 +48,7 @@ impl<'a> Parser<'a> {
     fn check(&self, kind: &TokenKind) -> bool {
         match self.current_token_info {
             Some(info) => mem::discriminant(&info.kind) == mem::discriminant(kind),
-            None => false,
+            None => matches!(kind, TokenKind::Eof),
         }
     }
 
@@ -131,21 +135,125 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn report_recoverable_error(&mut self, error: CompilerError) -> CompilerResult<()> {
+        if self.recover {
+            self.errors.push(error);
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
+    fn is_statement_start(&self) -> bool {
+        match self.current_token_info {
+            Some(TokenInfo {
+                kind: TokenKind::Keyword(keyword),
+                ..
+            }) => matches!(
+                keyword.as_str(),
+                "var"
+                    | "def"
+                    | "main"
+                    | "builtin"
+                    | "type"
+                    | "object"
+                    | "enum"
+                    | "secret"
+                    | "if"
+                    | "while"
+                    | "for"
+                    | "return"
+                    | "discard"
+                    | "import"
+                    | "else"
+                    | "elif"
+            ),
+            Some(TokenInfo {
+                kind:
+                    TokenKind::Identifier(_)
+                    | TokenKind::IntLiteral { .. }
+                    | TokenKind::FloatLiteral(_)
+                    | TokenKind::StringLiteral(_)
+                    | TokenKind::BoolLiteral(_)
+                    | TokenKind::NilLiteral
+                    | TokenKind::LParen
+                    | TokenKind::LBracket
+                    | TokenKind::LBrace,
+                ..
+            }) => true,
+            _ => false,
+        }
+    }
+
+    fn synchronize_after_error(&mut self, error_location: &SourceLocation) {
+        if self
+            .current_token_info
+            .is_some_and(|token| token.location == *error_location)
+        {
+            self.advance();
+        }
+
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+
+        if self.check(&TokenKind::Dedent)
+            || self.check(&TokenKind::Eof)
+            || self.is_statement_start()
+        {
+            return;
+        }
+
+        while !self.check(&TokenKind::Newline)
+            && !self.check(&TokenKind::Dedent)
+            && !self.check(&TokenKind::Eof)
+        {
+            self.advance();
+        }
+
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+    }
+
     // Helper to parse an indented block of statements
     fn parse_indented_block(&mut self) -> CompilerResult<AstNode> {
         // Allow multiple newlines before the indented block starts
-        self.consume(
+        if let Err(error) = self.consume(
             &TokenKind::Newline,
             "Expected newline after ':' before indented block",
-        )?;
+        ) {
+            if self.recover {
+                self.errors.push(error);
+                self.synchronize_after_error(&self.last_location.clone());
+                return Ok(AstNode::Block(Vec::new()));
+            }
+            return Err(error);
+        }
         while self.check(&TokenKind::Newline) {
             self.advance(); // Skip extra blank lines
         }
-        self.consume(&TokenKind::Indent, "Expected indentation for block")?;
+        if let Err(error) = self.consume(&TokenKind::Indent, "Expected indentation for block") {
+            if self.recover {
+                self.errors.push(error);
+                self.synchronize_after_error(&self.last_location.clone());
+                return Ok(AstNode::Block(Vec::new()));
+            }
+            return Err(error);
+        }
 
         let mut statements = Vec::new();
         while !self.check(&TokenKind::Dedent) && !self.check(&TokenKind::Eof) {
-            statements.push(self.parse_statement_or_declaration()?);
+            match self.parse_statement_or_declaration() {
+                Ok(statement) => statements.push(statement),
+                Err(error) if self.recover => {
+                    let error_location = error.location.clone();
+                    self.errors.push(error);
+                    self.synchronize_after_error(&error_location);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
             // Skip optional newlines within the block
             while self.check(&TokenKind::Newline) {
                 self.advance();
@@ -169,7 +277,16 @@ impl<'a> Parser<'a> {
         let mut statements = Vec::new();
         while !self.check(&TokenKind::Eof) && !self.check(&TokenKind::Dedent) {
             // Stop at EOF or Dedent
-            statements.push(self.parse_statement_or_declaration()?);
+            match self.parse_statement_or_declaration() {
+                Ok(statement) => statements.push(statement),
+                Err(error) if self.recover => {
+                    let error_location = error.location.clone();
+                    self.errors.push(error);
+                    self.synchronize_after_error(&error_location);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
             // Skip optional newlines between statements
             while self.check(&TokenKind::Newline) {
                 self.advance();
@@ -1073,11 +1190,29 @@ impl<'a> Parser<'a> {
         })?;
 
         match &token_info.kind {
-            TokenKind::IntLiteral { value, kind, .. } => Ok(AstNode::Literal(Value::Int { value: *value, kind: kind.clone() })),
-            TokenKind::FloatLiteral(f) => Ok(AstNode::Literal(Value::Float(*f))),
-            TokenKind::StringLiteral(s) => Ok(AstNode::Literal(Value::String(s.clone()))),
-            TokenKind::BoolLiteral(b) => Ok(AstNode::Literal(Value::Bool(*b))),
-            TokenKind::NilLiteral => Ok(AstNode::Literal(Value::Nil)),
+            TokenKind::IntLiteral { value, kind, .. } => Ok(AstNode::Literal {
+                value: Value::Int {
+                    value: *value,
+                    kind: kind.clone(),
+                },
+                location: token_info.location.clone(),
+            }),
+            TokenKind::FloatLiteral(f) => Ok(AstNode::Literal {
+                value: Value::Float(*f),
+                location: token_info.location.clone(),
+            }),
+            TokenKind::StringLiteral(s) => Ok(AstNode::Literal {
+                value: Value::String(s.clone()),
+                location: token_info.location.clone(),
+            }),
+            TokenKind::BoolLiteral(b) => Ok(AstNode::Literal {
+                value: Value::Bool(*b),
+                location: token_info.location.clone(),
+            }),
+            TokenKind::NilLiteral => Ok(AstNode::Literal {
+                value: Value::Nil,
+                location: token_info.location.clone(),
+            }),
             TokenKind::Identifier(name) => Ok(AstNode::Identifier(name.clone(), token_info.location.clone())),
             TokenKind::Keyword(name) if name == "type" => Ok(AstNode::Identifier(name.clone(), token_info.location.clone())),
             TokenKind::LParen => {
@@ -1101,7 +1236,10 @@ impl<'a> Parser<'a> {
 
                 // Empty list literals [] are now supported
                 // Type will be inferred from context or explicit annotation
-                Ok(AstNode::ListLiteral(elements))
+                Ok(AstNode::ListLiteral {
+                    elements,
+                    location: token_info.location.clone(),
+                })
             }
             TokenKind::LBrace => {
                 // Dict literal: {key1: val1, key2: val2, ...}
@@ -1119,7 +1257,10 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.consume(&TokenKind::RBrace, "Expected '}' after dict entries")?;
-                Ok(AstNode::DictLiteral(pairs))
+                Ok(AstNode::DictLiteral {
+                    pairs,
+                    location: token_info.location.clone(),
+                })
             }
             TokenKind::Operator(op) => {
                 // Handle prefix operators (e.g., '-', 'not')
@@ -1423,7 +1564,35 @@ impl<'a> Parser<'a> {
                 if self.check(&TokenKind::LBracket) {
                     self.advance(); // Consume '['
 
-                    match base_name.as_str() {
+                    let normalized_base = match base_name.as_str() {
+                        "List" => {
+                            self.report_recoverable_error(
+                                CompilerError::syntax_error(
+                                    format!("Unknown generic type: {}", base_name),
+                                    type_location.clone(),
+                                )
+                                .with_hint(
+                                    "Did you mean 'list'? Generic types use lowercase Python spelling",
+                                ),
+                            )?;
+                            "list"
+                        }
+                        "Dict" => {
+                            self.report_recoverable_error(
+                                CompilerError::syntax_error(
+                                    format!("Unknown generic type: {}", base_name),
+                                    type_location.clone(),
+                                )
+                                .with_hint(
+                                    "Did you mean 'dict'? Generic types use lowercase Python spelling",
+                                ),
+                            )?;
+                            "dict"
+                        }
+                        other => other,
+                    };
+
+                    match normalized_base {
                         "list" => {
                             let element_type = self.parse_type_annotation()?;
                             self.consume(
@@ -1450,21 +1619,6 @@ impl<'a> Parser<'a> {
                             }
                         }
                         _ => {
-                            // Check if this is a capitalization error for list/dict
-                            if base_name == "List" {
-                                return Err(CompilerError::syntax_error(
-                                    format!("Unknown generic type: {}", base_name),
-                                    type_location,
-                                )
-                                .with_hint("Did you mean 'list'? Generic types use lowercase Python spelling"));
-                            } else if base_name == "Dict" {
-                                return Err(CompilerError::syntax_error(
-                                    format!("Unknown generic type: {}", base_name),
-                                    type_location,
-                                )
-                                .with_hint("Did you mean 'dict'? Generic types use lowercase Python spelling"));
-                            }
-
                             // General generic type: Name[T1, T2, ...]
                             let mut type_params = Vec::new();
                             loop {
@@ -1665,7 +1819,7 @@ impl<'a> Parser<'a> {
 }
 
 pub fn parse(tokens: &[TokenInfo], filename: &str) -> CompilerResult<AstNode> {
-    let mut parser = Parser::new(tokens, filename);
+    let mut parser = Parser::new(tokens, filename, false);
     // The top-level parsing function (e.g., parse_program or parse_module)
     let root_node = parser.parse_program()?;
 
@@ -1682,5 +1836,41 @@ pub fn parse(tokens: &[TokenInfo], filename: &str) -> CompilerResult<AstNode> {
         ))
     } else {
         Ok(root_node)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ParseOutput {
+    pub ast: AstNode,
+    pub errors: Vec<CompilerError>,
+}
+
+pub fn parse_recovering(tokens: &[TokenInfo], filename: &str) -> ParseOutput {
+    let mut parser = Parser::new(tokens, filename, true);
+    let root_node = match parser.parse_program() {
+        Ok(root) => root,
+        Err(error) => {
+            let error_location = error.location.clone();
+            parser.errors.push(error);
+            parser.synchronize_after_error(&error_location);
+            AstNode::Block(Vec::new())
+        }
+    };
+
+    if !parser.check(&TokenKind::Eof) {
+        let (found_str, location) = match parser.current_token_info {
+            Some(token) => (format!("{:?}", token), token.location.clone()),
+            None => ("end of file".to_string(), parser.last_location.clone()),
+        };
+
+        parser.errors.push(CompilerError::syntax_error(
+            format!("Unexpected token after parsing finished: {}", found_str),
+            location,
+        ));
+    }
+
+    ParseOutput {
+        ast: root_node,
+        errors: parser.errors,
     }
 }

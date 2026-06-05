@@ -2746,6 +2746,20 @@ fn parse_test_filter_arg(raw: &str) -> std::result::Result<String, String> {
 }
 
 fn parse_value(value: &str) -> Result<Value> {
+    let value = value.trim();
+    if value.starts_with('[') {
+        return parse_list_value(value);
+    }
+    if value.starts_with('{') {
+        return parse_object_value(value);
+    }
+    if let Some(quoted) = parse_quoted_string(value)? {
+        return Ok(Value::String(quoted));
+    }
+    let comma_parts = split_top_level_commas(value)?;
+    if comma_parts.len() > 1 {
+        return parse_bare_list_value(comma_parts);
+    }
     if let Some(hex) = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
@@ -2765,6 +2779,197 @@ fn parse_value(value: &str) -> Result<Value> {
         return Ok(Value::Float(value));
     }
     Ok(Value::String(value.to_owned()))
+}
+
+fn parse_object_value(value: &str) -> Result<Value> {
+    if !value.ends_with('}') {
+        anyhow::bail!("object input must end with '}}'");
+    }
+    let inner = &value[1..value.len() - 1];
+    let mut fields = BTreeMap::new();
+    for field in split_top_level_commas(inner)? {
+        let field = field.trim();
+        if field.is_empty() {
+            anyhow::bail!("object input contains an empty field");
+        }
+        let Some((key, value)) = split_top_level_once(field, ':')? else {
+            anyhow::bail!("object field '{field}' must be written as key: value");
+        };
+        let key = parse_object_key(key.trim())?;
+        if key.is_empty() {
+            anyhow::bail!("object field name cannot be empty");
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            anyhow::bail!("object field '{key}' must include a value");
+        }
+        if fields.insert(key.clone(), parse_value(value)?).is_some() {
+            anyhow::bail!("object input contains duplicate field '{key}'");
+        }
+    }
+    Ok(Value::Object(fields))
+}
+
+fn parse_list_value(value: &str) -> Result<Value> {
+    if !value.ends_with(']') {
+        anyhow::bail!("list input must end with ']'");
+    }
+    let inner = &value[1..value.len() - 1];
+    let mut values = Vec::new();
+    for item in split_top_level_commas(inner)? {
+        let item = item.trim();
+        if item.is_empty() {
+            anyhow::bail!("list input contains an empty element");
+        }
+        values.push(parse_value(item)?);
+    }
+    Ok(Value::List(values))
+}
+
+fn parse_bare_list_value(parts: Vec<&str>) -> Result<Value> {
+    let mut values = Vec::with_capacity(parts.len());
+    for item in parts {
+        let item = item.trim();
+        if item.is_empty() {
+            anyhow::bail!("comma-separated list input contains an empty element");
+        }
+        values.push(parse_value(item)?);
+    }
+    Ok(Value::List(values))
+}
+
+fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, character) in value.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match character {
+            '"' => in_string = true,
+            '[' | '{' => depth += 1,
+            ']' | '}' => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| anyhow::anyhow!("input has an unexpected closing delimiter"))?;
+            }
+            ',' if depth == 0 => {
+                parts.push(&value[start..index]);
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    if in_string {
+        anyhow::bail!("list input contains an unterminated string");
+    }
+    if depth != 0 {
+        anyhow::bail!("input contains an unterminated nested list or object");
+    }
+    if !value.is_empty() {
+        parts.push(&value[start..]);
+    }
+    Ok(parts)
+}
+
+fn split_top_level_once(value: &str, delimiter: char) -> Result<Option<(&str, &str)>> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, character) in value.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match character {
+            '"' => in_string = true,
+            '[' | '{' => depth += 1,
+            ']' | '}' => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| anyhow::anyhow!("input has an unexpected closing delimiter"))?;
+            }
+            character if character == delimiter && depth == 0 => {
+                let next = index + character.len_utf8();
+                return Ok(Some((&value[..index], &value[next..])));
+            }
+            _ => {}
+        }
+    }
+
+    if in_string {
+        anyhow::bail!("input contains an unterminated string");
+    }
+    if depth != 0 {
+        anyhow::bail!("input contains an unterminated nested list or object");
+    }
+    Ok(None)
+}
+
+fn parse_object_key(value: &str) -> Result<String> {
+    if let Some(quoted) = parse_quoted_string(value)? {
+        return Ok(quoted);
+    }
+    if is_identifier_like(value) {
+        return Ok(value.to_owned());
+    }
+    anyhow::bail!("object field name '{value}' must be an identifier or quoted string")
+}
+
+fn parse_quoted_string(value: &str) -> Result<Option<String>> {
+    if !value.starts_with('"') {
+        return Ok(None);
+    }
+    if !value.ends_with('"') || value.len() == 1 {
+        anyhow::bail!("string input must end with '\"'");
+    }
+
+    let mut out = String::new();
+    let mut escaped = false;
+    for character in value[1..value.len() - 1].chars() {
+        if escaped {
+            match character {
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                other => {
+                    anyhow::bail!("unsupported string escape '\\{other}'");
+                }
+            }
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else {
+            out.push(character);
+        }
+    }
+    if escaped {
+        anyhow::bail!("string input ends with an incomplete escape");
+    }
+    Ok(Some(out))
 }
 
 fn parse_hex_bytes(raw: &str) -> Result<Vec<u8>> {
@@ -2787,6 +2992,63 @@ fn parse_hex_bytes(raw: &str) -> Result<Vec<u8>> {
         bytes.push(byte);
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_value_accepts_bracketed_lists() {
+        assert_eq!(
+            parse_value("[1, true, 0x0a]").unwrap(),
+            Value::List(vec![
+                Value::I64(1),
+                Value::Bool(true),
+                Value::Bytes(vec![10])
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_value_accepts_bare_comma_lists() {
+        assert_eq!(
+            parse_value("1,10").unwrap(),
+            Value::List(vec![Value::I64(1), Value::I64(10)])
+        );
+    }
+
+    #[test]
+    fn parse_value_accepts_nested_lists_and_quoted_strings() {
+        assert_eq!(
+            parse_value(r#"[[1, 2], "hello, world"]"#).unwrap(),
+            Value::List(vec![
+                Value::List(vec![Value::I64(1), Value::I64(2)]),
+                Value::String("hello, world".to_owned())
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_value_accepts_object_literals() {
+        let mut expected = BTreeMap::new();
+        expected.insert("n".to_owned(), Value::I64(1));
+        expected.insert(
+            "coeffs".to_owned(),
+            Value::List(vec![Value::I64(1), Value::I64(10)]),
+        );
+
+        assert_eq!(
+            parse_value(r#"{n: 1, "coeffs": [1, 10]}"#).unwrap(),
+            Value::Object(expected)
+        );
+    }
+
+    #[test]
+    fn parse_value_rejects_malformed_lists() {
+        let err = parse_value("[1, ]").unwrap_err().to_string();
+        assert!(err.contains("empty element"));
+    }
 }
 
 fn print_values(values: &[Value]) {

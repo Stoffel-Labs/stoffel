@@ -477,6 +477,7 @@ impl Stoffel {
                     .to_owned(),
             ));
         }
+        let parameter_types = local_source_parameter_types(&self.source, name)?;
         let mut probe = self.clone();
         probe.inputs.clear();
         let probe_runtime = probe.build()?;
@@ -494,17 +495,154 @@ impl Stoffel {
         let ordered_inputs =
             ordered_inputs_for_parameters(&self.inputs, name, function.parameters())?;
         let entry = unique_local_entry_name(probe_runtime.program(), "__stoffel_sdk_local_entry");
-        let wrapped_program = probe_runtime.program().with_local_client_input_wrapper(
-            name,
-            &entry,
-            ordered_inputs.len(),
-        )?;
-        Ok((
+        let input_shapes = ordered_inputs
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                if parameter_types
+                    .as_ref()
+                    .and_then(|types| types.get(index))
+                    .is_some_and(|ty| !local_parameter_type_is_secret(ty))
+                {
+                    crate::program::LocalInputShape::clear_from_value(value)
+                } else {
+                    crate::program::LocalInputShape::secret_from_value(value)
+                }
+            })
+            .collect::<Vec<_>>();
+        let client_inputs = flatten_local_named_inputs(&ordered_inputs, &input_shapes)?;
+        let wrapped_program =
             probe_runtime
-                .with_program_and_client_inputs(wrapped_program, vec![(0, ordered_inputs)]),
+                .program()
+                .with_local_client_input_wrapper(name, &entry, &input_shapes)?;
+        Ok((
+            probe_runtime.with_program_and_client_inputs(wrapped_program, vec![(0, client_inputs)]),
             entry,
         ))
     }
+}
+
+fn flatten_local_named_inputs(
+    values: &[Value],
+    shapes: &[crate::program::LocalInputShape],
+) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for (value, shape) in values.iter().zip(shapes) {
+        flatten_local_named_input(value, shape, &mut out)?;
+    }
+    Ok(out)
+}
+
+fn flatten_local_named_input(
+    value: &Value,
+    shape: &crate::program::LocalInputShape,
+    out: &mut Vec<Value>,
+) -> Result<()> {
+    match (value, shape) {
+        (_, crate::program::LocalInputShape::Clear(_)) => Ok(()),
+        (Value::List(values), crate::program::LocalInputShape::List(shapes)) => {
+            for (value, shape) in values.iter().zip(shapes) {
+                flatten_local_named_input(value, shape, out)?;
+            }
+            Ok(())
+        }
+        (Value::Object(fields), crate::program::LocalInputShape::Object(shapes)) => {
+            for (name, shape) in shapes {
+                if let Some(value) = fields.get(name) {
+                    flatten_local_named_input(value, shape, out)?;
+                }
+            }
+            Ok(())
+        }
+        (_, crate::program::LocalInputShape::Share) => {
+            out.push(value.clone());
+            Ok(())
+        }
+        _ => Err(Error::InvalidInput(
+            "local named-input wrapper shape does not match input value".to_owned(),
+        )),
+    }
+}
+
+fn local_source_parameter_types(
+    source: &Option<ProgramSource>,
+    function_name: &str,
+) -> Result<Option<Vec<String>>> {
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    let source = match source {
+        ProgramSource::Source { source, .. } => source.clone(),
+        ProgramSource::File { path } => std::fs::read_to_string(path)?,
+        ProgramSource::Bytecode(_) => return Ok(None),
+    };
+    Ok(parse_function_parameter_types(&source, function_name))
+}
+
+fn parse_function_parameter_types(source: &str, function_name: &str) -> Option<Vec<String>> {
+    let prefix = format!("def {function_name}(");
+    let start = source.find(&prefix)? + prefix.len();
+    let mut depth = 1usize;
+    let mut end = start;
+    for (offset, character) in source[start..].char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    end = start + offset;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+
+    let params = &source[start..end];
+    let mut types = Vec::new();
+    for param in split_parameter_list(params) {
+        let (_, ty) = param.split_once(':')?;
+        types.push(ty.trim().to_owned());
+    }
+    Some(types)
+}
+
+fn split_parameter_list(params: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    for (index, character) in params.char_indices() {
+        match character {
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let part = params[start..index].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let part = params[start..].trim();
+    if !part.is_empty() {
+        parts.push(part);
+    }
+    parts
+}
+
+fn local_parameter_type_is_secret(ty: &str) -> bool {
+    ty.split(|character: char| {
+        !(character.is_ascii_alphanumeric()
+            || character == '_'
+            || character == '['
+            || character == ']')
+    })
+    .any(|token| token == "secret" || token == "Share" || token.contains("secret"))
 }
 
 fn ordered_inputs_for_parameters(

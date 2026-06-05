@@ -341,7 +341,7 @@ fn run_recompiles_when_project_source_is_newer_than_bytecode() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Instructions: 14"))
+        .stdout(predicate::str::contains("Instructions: 16"))
         .stdout(predicate::str::contains("5"));
 }
 
@@ -391,7 +391,7 @@ fn run_ignores_stray_bytecode_when_project_source_is_newer() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Instructions: 2"))
+        .stdout(predicate::str::contains("Instructions: 4"))
         .stdout(predicate::str::contains("100"))
         .stdout(predicate::str::contains("Instructions: 9").not());
 }

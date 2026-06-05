@@ -74,7 +74,7 @@ fn collect_referenced_vars(node: &AstNode, vars: &mut HashSet<String>) {
             collect_referenced_vars(base, vars);
             collect_referenced_vars(index, vars);
         }
-        AstNode::ListLiteral(elements) => {
+        AstNode::ListLiteral { elements, .. } => {
             for elem in elements {
                 collect_referenced_vars(elem, vars);
             }
@@ -274,7 +274,10 @@ fn create_batch_reveal_statements(group: &[RevealCandidate]) -> Vec<AstNode> {
     let location = group[0].location.clone();
 
     // Create the list of share expressions: [s1, s2, s3, ...]
-    let share_list = AstNode::ListLiteral(group.iter().map(|c| c.share_expr.clone()).collect());
+    let share_list = AstNode::ListLiteral {
+        elements: group.iter().map(|c| c.share_expr.clone()).collect(),
+        location: location.clone(),
+    };
 
     // Create: let __batch_reveal_N = Share.batch_open([s1, s2, ...])
     let batch_call = AstNode::FunctionCall {
@@ -302,10 +305,13 @@ fn create_batch_reveal_statements(group: &[RevealCandidate]) -> Vec<AstNode> {
     for (idx, candidate) in group.iter().enumerate() {
         let index_access = AstNode::IndexAccess {
             base: Box::new(AstNode::Identifier(temp_name.clone(), location.clone())),
-            index: Box::new(AstNode::Literal(crate::ast::Value::Int {
-                value: idx as u128,
-                kind: None,
-            })),
+            index: Box::new(AstNode::Literal {
+                value: crate::ast::Value::Int {
+                    value: idx as u128,
+                    kind: None,
+                },
+                location: candidate.location.clone(),
+            }),
             location: candidate.location.clone(),
         };
 
@@ -879,6 +885,13 @@ mod tests {
         AstNode::Identifier(name.to_string(), make_loc())
     }
 
+    fn make_int_literal(value: u128) -> AstNode {
+        AstNode::Literal {
+            value: crate::ast::Value::Int { value, kind: None },
+            location: make_loc(),
+        }
+    }
+
     fn make_share_open(share_expr: AstNode) -> AstNode {
         AstNode::FunctionCall {
             function: Box::new(make_identifier("Share.open")),
@@ -1150,26 +1163,12 @@ mod tests {
             make_var_decl("a", make_identifier("s1")), // reveal
             make_var_decl(
                 "x",
-                make_binary_op(
-                    make_identifier("a"),
-                    "*",
-                    AstNode::Literal(crate::ast::Value::Int {
-                        value: 2,
-                        kind: None,
-                    }),
-                ),
+                make_binary_op(make_identifier("a"), "*", make_int_literal(2)),
             ), // uses a
             make_var_decl("b", make_identifier("s2")), // reveal
             make_var_decl(
                 "y",
-                make_binary_op(
-                    make_identifier("b"),
-                    "*",
-                    AstNode::Literal(crate::ast::Value::Int {
-                        value: 3,
-                        kind: None,
-                    }),
-                ),
+                make_binary_op(make_identifier("b"), "*", make_int_literal(3)),
             ), // uses b
         ]);
 
@@ -1211,25 +1210,11 @@ mod tests {
             make_var_decl("a", make_identifier("s1")), // reveal
             make_var_decl(
                 "x",
-                make_binary_op(
-                    make_identifier("a"),
-                    "*",
-                    AstNode::Literal(crate::ast::Value::Int {
-                        value: 2,
-                        kind: None,
-                    }),
-                ),
+                make_binary_op(make_identifier("a"), "*", make_int_literal(2)),
             ),
             make_var_decl(
                 "y",
-                make_binary_op(
-                    make_identifier("x"),
-                    "+",
-                    AstNode::Literal(crate::ast::Value::Int {
-                        value: 1,
-                        kind: None,
-                    }),
-                ),
+                make_binary_op(make_identifier("x"), "+", make_int_literal(1)),
             ),
         ]);
 
@@ -1267,28 +1252,11 @@ mod tests {
             make_var_decl("a", make_identifier("s1")), // reveal
             make_var_decl(
                 "z",
-                make_binary_op(
-                    AstNode::Literal(crate::ast::Value::Int {
-                        value: 5,
-                        kind: None,
-                    }),
-                    "+",
-                    AstNode::Literal(crate::ast::Value::Int {
-                        value: 3,
-                        kind: None,
-                    }),
-                ),
+                make_binary_op(make_int_literal(5), "+", make_int_literal(3)),
             ), // independent
             make_var_decl(
                 "x",
-                make_binary_op(
-                    make_identifier("a"),
-                    "*",
-                    AstNode::Literal(crate::ast::Value::Int {
-                        value: 2,
-                        kind: None,
-                    }),
-                ),
+                make_binary_op(make_identifier("a"), "*", make_int_literal(2)),
             ), // uses a
         ]);
 

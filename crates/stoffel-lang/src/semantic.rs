@@ -64,7 +64,11 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     fn int_literal_value(node: &AstNode) -> Option<i128> {
-        if let AstNode::Literal(Value::Int { value, .. }) = node {
+        if let AstNode::Literal {
+            value: Value::Int { value, .. },
+            ..
+        } = node
+        {
             if *value <= i128::MAX as u128 {
                 Some(*value as i128)
             } else {
@@ -444,8 +448,11 @@ impl<'a> SemanticAnalyzer<'a> {
     fn analyze_node(&mut self, node: AstNode) -> Result<(AstNode, SymbolType), ()> {
         match node {
             // --- Leaf Nodes ---
-            AstNode::Literal(value) => Ok((
-                AstNode::Literal(value.clone()),
+            AstNode::Literal { value, location } => Ok((
+                AstNode::Literal {
+                    value: value.clone(),
+                    location,
+                },
                 match value {
                     Value::Int { kind, .. } => match kind {
                         Some(crate::ast::IntKind::Signed(w)) => match w {
@@ -1097,7 +1104,10 @@ impl<'a> SemanticAnalyzer<'a> {
                             // Note: We cannot reconstruct the original `stmt` here because it's moved by match,
                             // so we push a placeholder no-op statement to maintain block length.
                             // If a proper NoOp node exists, prefer that; otherwise use an empty literal.
-                            checked_statements.push(AstNode::Literal(Value::Nil));
+                            checked_statements.push(AstNode::Literal {
+                                value: Value::Nil,
+                                location: SourceLocation::default(),
+                            });
                         }
                     }
                 }
@@ -1877,7 +1887,7 @@ impl<'a> SemanticAnalyzer<'a> {
             }
 
             // --- Collection Literals and Access ---
-            AstNode::ListLiteral(elements) => {
+            AstNode::ListLiteral { elements, location } => {
                 let mut checked_elements = Vec::with_capacity(elements.len());
                 let mut element_type = SymbolType::Unknown;
 
@@ -1892,12 +1902,15 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
 
                 Ok((
-                    AstNode::ListLiteral(checked_elements),
+                    AstNode::ListLiteral {
+                        elements: checked_elements,
+                        location,
+                    },
                     SymbolType::List(Box::new(element_type)),
                 ))
             }
 
-            AstNode::DictLiteral(pairs) => {
+            AstNode::DictLiteral { pairs, location } => {
                 let mut checked_pairs = Vec::with_capacity(pairs.len());
                 let mut key_type = SymbolType::Unknown;
                 let mut value_type = SymbolType::Unknown;
@@ -1917,7 +1930,10 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
 
                 Ok((
-                    AstNode::DictLiteral(checked_pairs),
+                    AstNode::DictLiteral {
+                        pairs: checked_pairs,
+                        location,
+                    },
                     SymbolType::Dict(Box::new(key_type), Box::new(value_type)),
                 ))
             }

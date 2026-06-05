@@ -6,6 +6,7 @@ use crate::net::client_store::{ClientInputIndex, ClientOutputShareCount, ClientS
 use crate::runtime_hooks::HookEvent;
 use crate::value_conversions::{usize_to_vm_i64, value_to_i64, value_to_usize};
 use crate::VirtualMachineResult;
+use std::collections::HashSet;
 use stoffel_vm_types::core_types::{ShareData, ShareType, TableRef, Value};
 
 const OUTPUT_SHARE_LIST_MAGIC: &[u8; 5] = b"VMOS1";
@@ -402,17 +403,14 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         Ok(Value::Unit)
     });
 
-    register_standard_builtin!("print", |ctx| {
-        let args = ctx.args();
+    register_standard_builtin!("print", |mut ctx| {
+        let args = ctx.args().to_vec();
         let mut output = String::new();
         for (i, arg) in args.iter().enumerate() {
             if i > 0 {
                 output.push(' ');
             }
-            match arg {
-                Value::String(s) => output.push_str(s),
-                _ => output.push_str(&format!("{:?}", arg)),
-            }
+            output.push_str(&format_print_value(&mut ctx, arg, 3, &mut HashSet::new())?);
         }
         ctx.write_output_line(&output)?;
         Ok(Value::Unit)
@@ -426,6 +424,96 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     });
 
     Ok(())
+}
+
+fn format_print_value(
+    ctx: &mut ForeignFunctionContext<'_>,
+    value: &Value,
+    max_depth: usize,
+    active_tables: &mut HashSet<TableRef>,
+) -> ForeignFunctionCallbackResult<String> {
+    match value {
+        Value::String(s) => Ok(s.clone()),
+        Value::Array(array_ref) => {
+            let table_ref = TableRef::from(*array_ref);
+            if !active_tables.insert(table_ref) {
+                return Ok(format!("Array({}) <cycle>", array_ref.id()));
+            }
+            let formatted = format_print_array(ctx, *array_ref, max_depth, active_tables);
+            active_tables.remove(&table_ref);
+            formatted
+        }
+        Value::Object(object_ref) => {
+            let table_ref = TableRef::from(*object_ref);
+            if !active_tables.insert(table_ref) {
+                return Ok(format!("Object({}) <cycle>", object_ref.id()));
+            }
+            let formatted = format_print_object(ctx, *object_ref, max_depth, active_tables);
+            active_tables.remove(&table_ref);
+            formatted
+        }
+        _ => Ok(format!("{:?}", value)),
+    }
+}
+
+fn format_print_array(
+    ctx: &mut ForeignFunctionContext<'_>,
+    array_ref: stoffel_vm_types::core_types::ArrayRef,
+    max_depth: usize,
+    active_tables: &mut HashSet<TableRef>,
+) -> ForeignFunctionCallbackResult<String> {
+    let len = ctx.read_array_ref_len(array_ref)?;
+    if max_depth == 0 {
+        return Ok(format!("[...{} elements]", len));
+    }
+
+    let display_count = len.min(16);
+    let mut parts = Vec::with_capacity(display_count);
+    for index in 0..display_count {
+        let value = ctx
+            .read_table_field(TableRef::from(array_ref), &Value::I64(index as i64))?
+            .unwrap_or(Value::Unit);
+        parts.push(format_print_value(
+            ctx,
+            &value,
+            max_depth - 1,
+            active_tables,
+        )?);
+    }
+
+    if len > display_count {
+        parts.push(format!("...({} more)", len - display_count));
+    }
+    Ok(format!("[{}]", parts.join(", ")))
+}
+
+fn format_print_object(
+    ctx: &mut ForeignFunctionContext<'_>,
+    object_ref: stoffel_vm_types::core_types::ObjectRef,
+    max_depth: usize,
+    active_tables: &mut HashSet<TableRef>,
+) -> ForeignFunctionCallbackResult<String> {
+    let len = ctx.read_object_ref_len(object_ref)?;
+    if max_depth == 0 {
+        return Ok(format!("{{...{} fields}}", len));
+    }
+
+    let entries = ctx.read_object_ref_entries(object_ref, 16)?;
+    let truncated = len > entries.len();
+    let mut parts = Vec::with_capacity(entries.len() + usize::from(truncated));
+    for (key, value) in entries {
+        let key = match key {
+            Value::String(key) => key,
+            key => format_print_value(ctx, &key, 0, active_tables)?,
+        };
+        let value = format_print_value(ctx, &value, max_depth - 1, active_tables)?;
+        parts.push(format!("{key}: {value}"));
+    }
+
+    if truncated {
+        parts.push(format!("...({} more)", len - parts.len()));
+    }
+    Ok(format!("{{{}}}", parts.join(", ")))
 }
 
 pub(crate) fn encode_output_share_list(shares: &[ShareData]) -> Result<Vec<u8>, String> {
@@ -669,6 +757,41 @@ mod tests {
         .expect("print should write through output sink");
 
         assert_eq!(lines.lock().as_slice(), &["answer 42"]);
+    }
+
+    #[test]
+    fn print_formats_arrays_and_objects() {
+        let output_sink = RecordingOutputSink::default();
+        let lines = Arc::clone(&output_sink.lines);
+        let mut vm = VirtualMachine::builder()
+            .with_output_sink(output_sink)
+            .try_build()
+            .expect("build VM");
+        let object = vm.execute_with_args("create_object", &[]).expect("object");
+        let array = vm.execute_with_args("create_array", &[]).expect("array");
+        vm.execute_with_args("append", &[array.clone(), Value::I64(1)])
+            .expect("append first");
+        vm.execute_with_args("append", &[array.clone(), Value::I64(10)])
+            .expect("append second");
+        vm.execute_with_args(
+            "set_field",
+            &[object.clone(), Value::String("n".to_owned()), Value::I64(1)],
+        )
+        .expect("set n");
+        vm.execute_with_args(
+            "set_field",
+            &[
+                object.clone(),
+                Value::String("coeffs".to_owned()),
+                array.clone(),
+            ],
+        )
+        .expect("set coeffs");
+
+        vm.execute_with_args("print", &[object])
+            .expect("print should write rich output");
+
+        assert_eq!(lines.lock().as_slice(), &["{coeffs: [1, 10], n: 1}"]);
     }
 
     #[test]

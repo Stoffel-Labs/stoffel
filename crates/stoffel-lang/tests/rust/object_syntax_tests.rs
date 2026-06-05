@@ -611,7 +611,7 @@ fn test_parse_assignment_to_field() {
             assert!(
                 matches!(&**target, AstNode::FieldAccess { field_name, .. } if field_name == "field")
             );
-            assert!(matches!(&**value, AstNode::Literal(_)));
+            assert!(matches!(&**value, AstNode::Literal { .. }));
         }
         _ => panic!("Expected Assignment, got {:?}", statements[0]),
     }

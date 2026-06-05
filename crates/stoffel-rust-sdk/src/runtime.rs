@@ -283,10 +283,7 @@ impl StoffelRuntime {
         LocalNetworkBuilder::new(self)
     }
 
-    pub(crate) fn input_values_for_function(
-        &self,
-        function_name: &str,
-    ) -> Result<Vec<stoffel_vm_types::core_types::Value>> {
+    pub(crate) fn input_values_for_function(&self, function_name: &str) -> Result<Vec<Value>> {
         let function = self
             .program
             .function(function_name)
@@ -317,7 +314,7 @@ impl StoffelRuntime {
                     "duplicate input '{parameter}' for function '{function_name}'"
                 )));
             }
-            values.push(value.to_vm_value()?);
+            values.push(value.clone());
         }
 
         Ok(values)

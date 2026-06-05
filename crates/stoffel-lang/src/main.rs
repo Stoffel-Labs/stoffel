@@ -254,7 +254,8 @@ fn main() {
             }
         }
         Err(errors) => {
-            eprintln!("\n{}", errors::format_error_header(errors.len())); // Use helper for consistent header
+            eprintln!();
+            let error_count = errors.len();
             for error in errors {
                 // Create a mutable copy to add the snippet
                 let mut error_with_snippet = error.clone();
@@ -264,6 +265,7 @@ fn main() {
                 // Print the error using the enhanced formatter
                 eprintln!("{}", error_with_snippet.format_with_colors());
             }
+            eprintln!("{}", errors::format_error_header(error_count));
             process::exit(1);
         }
     }

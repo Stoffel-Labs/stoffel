@@ -4,6 +4,7 @@
 //! The crypto wrapper types are intentionally small handles around protocol data
 //! owned by the VM and MPC protocol crates.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -97,6 +98,7 @@ pub enum Value {
     String(String),
     Bytes(Vec<u8>),
     List(Vec<Value>),
+    Object(BTreeMap<String, Value>),
     Unit,
 }
 
@@ -117,6 +119,7 @@ impl Value {
             Value::String(_) => "string",
             Value::Bytes(_) => "bytes",
             Value::List(_) => "list",
+            Value::Object(_) => "object",
             Value::Unit => "unit",
         }
     }
@@ -126,6 +129,7 @@ impl Value {
             kind: self.kind().to_owned(),
             item_count: match self {
                 Value::List(values) => Some(values.len()),
+                Value::Object(fields) => Some(fields.len()),
                 _ => None,
             },
             byte_len: match self {
@@ -185,6 +189,13 @@ impl Value {
         }
     }
 
+    pub fn as_object(&self) -> Option<&BTreeMap<String, Value>> {
+        match self {
+            Value::Object(fields) => Some(fields),
+            _ => None,
+        }
+    }
+
     pub fn is_unit(&self) -> bool {
         matches!(self, Value::Unit)
     }
@@ -210,20 +221,10 @@ impl Value {
         }
     }
 
-    pub(crate) fn to_vm_value(&self) -> Result<stoffel_vm_types::core_types::Value> {
+    pub fn into_object(self) -> Option<BTreeMap<String, Value>> {
         match self {
-            Value::I64(value) => Ok(stoffel_vm_types::core_types::Value::I64(*value)),
-            Value::U64(value) => Ok(stoffel_vm_types::core_types::Value::U64(*value)),
-            Value::Bool(value) => Ok(stoffel_vm_types::core_types::Value::Bool(*value)),
-            Value::Float(value) => Ok(stoffel_vm_types::core_types::Value::Float((*value).into())),
-            Value::String(value) => Ok(stoffel_vm_types::core_types::Value::String(value.clone())),
-            Value::Bytes(_) => Err(Error::InvalidInput(
-                "byte inputs are only supported for local coordinator client inputs".to_owned(),
-            )),
-            Value::List(_) => Err(Error::InvalidInput(
-                "list inputs are not supported by clear VM execution yet".to_owned(),
-            )),
-            Value::Unit => Ok(stoffel_vm_types::core_types::Value::Unit),
+            Value::Object(fields) => Some(fields),
+            _ => None,
         }
     }
 
@@ -264,6 +265,16 @@ impl fmt::Display for Value {
                     write!(f, "{value}")?;
                 }
                 write!(f, "]")
+            }
+            Value::Object(fields) => {
+                write!(f, "{{")?;
+                for (index, (name, value)) in fields.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{name}: {value}")?;
+                }
+                write!(f, "}}")
             }
             Value::Unit => write!(f, "()"),
         }
@@ -381,6 +392,12 @@ impl From<&String> for Value {
 impl From<String> for Value {
     fn from(value: String) -> Self {
         Value::String(value)
+    }
+}
+
+impl From<BTreeMap<String, Value>> for Value {
+    fn from(value: BTreeMap<String, Value>) -> Self {
+        Value::Object(value)
     }
 }
 

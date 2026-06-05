@@ -24,6 +24,67 @@ pub struct Program {
     binary: CompiledBinary,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LocalInputShape {
+    Clear(Value),
+    Share,
+    List(Vec<LocalInputShape>),
+    Object(Vec<(String, LocalInputShape)>),
+}
+
+impl LocalInputShape {
+    pub(crate) fn secret_from_value(value: &Value) -> Self {
+        match value {
+            Value::List(values) => Self::List(
+                values
+                    .iter()
+                    .map(Self::secret_from_value)
+                    .collect::<Vec<_>>(),
+            ),
+            Value::Object(fields) => Self::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), Self::secret_from_value(value)))
+                    .collect(),
+            ),
+            Value::I64(_)
+            | Value::U64(_)
+            | Value::Bool(_)
+            | Value::Float(_)
+            | Value::String(_)
+            | Value::Bytes(_)
+            | Value::Unit => Self::Share,
+        }
+    }
+
+    pub(crate) fn clear_from_value(value: &Value) -> Self {
+        match value {
+            Value::List(values) => Self::List(
+                values
+                    .iter()
+                    .map(Self::clear_from_value)
+                    .collect::<Vec<_>>(),
+            ),
+            Value::Object(fields) => Self::Object(
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), Self::clear_from_value(value)))
+                    .collect(),
+            ),
+            value => Self::Clear(value.clone()),
+        }
+    }
+
+    fn share_count(&self) -> usize {
+        match self {
+            Self::Clear(_) => 0,
+            Self::Share => 1,
+            Self::List(items) => items.iter().map(Self::share_count).sum(),
+            Self::Object(fields) => fields.iter().map(|(_, shape)| shape.share_count()).sum(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgramSummary {
     pub function_count: usize,
@@ -303,9 +364,9 @@ impl Program {
         &self,
         call_name: &str,
         entry_name: &str,
-        input_count: usize,
+        input_shapes: &[LocalInputShape],
     ) -> Result<Self> {
-        if input_count == 0 {
+        if input_shapes.is_empty() {
             return Err(Error::Configuration(
                 "local client input wrapper requires at least one input".to_owned(),
             ));
@@ -329,25 +390,28 @@ impl Program {
             return Err(Error::FunctionNotFound(call_name.to_owned()));
         };
         let open_return = function_returns_secret_register(target_function);
+        let input_count = input_shapes
+            .iter()
+            .map(LocalInputShape::share_count)
+            .sum::<usize>();
 
-        let mut instructions = Vec::with_capacity(input_count * 5 + input_count + 2);
+        let mut instructions = Vec::with_capacity(input_count * 8 + input_shapes.len() + 2);
         let first_arg_register = 2;
-        for index in 0..input_count {
-            let client_index_const = binary.constants.len();
-            binary.constants.push(VmValue::U64(0));
-            let share_index_const = binary.constants.len();
-            binary.constants.push(VmValue::U64(index as u64));
-            instructions.push(CompiledInstruction::LDI(0, client_index_const));
-            instructions.push(CompiledInstruction::LDI(1, share_index_const));
-            instructions.push(CompiledInstruction::PUSHARG(0));
-            instructions.push(CompiledInstruction::PUSHARG(1));
-            instructions.push(CompiledInstruction::CALL(
-                "ClientStore.take_share".to_owned(),
-            ));
-            instructions.push(CompiledInstruction::MOV(first_arg_register + index, 0));
+        let mut next_register = first_arg_register;
+        let mut next_share_index = 0usize;
+        let mut arg_registers = Vec::with_capacity(input_shapes.len());
+        for shape in input_shapes {
+            let register = emit_local_input_shape(
+                shape,
+                &mut binary,
+                &mut instructions,
+                &mut next_share_index,
+                &mut next_register,
+            )?;
+            arg_registers.push(register);
         }
-        for index in 0..input_count {
-            instructions.push(CompiledInstruction::PUSHARG(first_arg_register + index));
+        for register in arg_registers {
+            instructions.push(CompiledInstruction::PUSHARG(register));
         }
         instructions.push(CompiledInstruction::CALL(call_name.to_owned()));
         if open_return {
@@ -356,7 +420,7 @@ impl Program {
         }
         instructions.push(CompiledInstruction::RET(0));
 
-        let register_count = first_arg_register + input_count;
+        let register_count = next_register.max(first_arg_register);
         binary.functions.push(CompiledFunction {
             name: entry_name.to_owned(),
             register_count,
@@ -534,4 +598,107 @@ fn function_returns_secret_register(function: &CompiledFunction) -> bool {
             _ => None,
         })
         .unwrap_or(false)
+}
+
+fn emit_local_input_shape(
+    shape: &LocalInputShape,
+    binary: &mut CompiledBinary,
+    instructions: &mut Vec<CompiledInstruction>,
+    next_share_index: &mut usize,
+    next_register: &mut usize,
+) -> Result<usize> {
+    match shape {
+        LocalInputShape::Clear(value) => {
+            let dest = allocate_wrapper_register(next_register);
+            let const_index = binary.constants.len();
+            binary
+                .constants
+                .push(clear_sdk_value_to_vm_constant(value)?);
+            instructions.push(CompiledInstruction::LDI(dest, const_index));
+            Ok(dest)
+        }
+        LocalInputShape::Share => {
+            let dest = allocate_wrapper_register(next_register);
+            let client_index_const = binary.constants.len();
+            binary.constants.push(VmValue::U64(0));
+            let share_index_const = binary.constants.len();
+            binary
+                .constants
+                .push(VmValue::U64(*next_share_index as u64));
+            *next_share_index += 1;
+            instructions.push(CompiledInstruction::LDI(0, client_index_const));
+            instructions.push(CompiledInstruction::LDI(1, share_index_const));
+            instructions.push(CompiledInstruction::PUSHARG(0));
+            instructions.push(CompiledInstruction::PUSHARG(1));
+            instructions.push(CompiledInstruction::CALL(
+                "ClientStore.take_share".to_owned(),
+            ));
+            instructions.push(CompiledInstruction::MOV(dest, 0));
+            Ok(dest)
+        }
+        LocalInputShape::List(items) => {
+            let dest = allocate_wrapper_register(next_register);
+            instructions.push(CompiledInstruction::CALL("create_array".to_owned()));
+            instructions.push(CompiledInstruction::MOV(dest, 0));
+            for item in items {
+                let item_register = emit_local_input_shape(
+                    item,
+                    binary,
+                    instructions,
+                    next_share_index,
+                    next_register,
+                )?;
+                instructions.push(CompiledInstruction::PUSHARG(dest));
+                instructions.push(CompiledInstruction::PUSHARG(item_register));
+                instructions.push(CompiledInstruction::CALL("array_push".to_owned()));
+            }
+            Ok(dest)
+        }
+        LocalInputShape::Object(fields) => {
+            let dest = allocate_wrapper_register(next_register);
+            instructions.push(CompiledInstruction::CALL("create_object".to_owned()));
+            instructions.push(CompiledInstruction::MOV(dest, 0));
+            for (field_name, field_shape) in fields {
+                let key_register = allocate_wrapper_register(next_register);
+                let key_const = binary.constants.len();
+                binary.constants.push(VmValue::String(field_name.clone()));
+                instructions.push(CompiledInstruction::LDI(key_register, key_const));
+                let value_register = emit_local_input_shape(
+                    field_shape,
+                    binary,
+                    instructions,
+                    next_share_index,
+                    next_register,
+                )?;
+                instructions.push(CompiledInstruction::PUSHARG(dest));
+                instructions.push(CompiledInstruction::PUSHARG(key_register));
+                instructions.push(CompiledInstruction::PUSHARG(value_register));
+                instructions.push(CompiledInstruction::CALL("set_field".to_owned()));
+            }
+            Ok(dest)
+        }
+    }
+}
+
+fn clear_sdk_value_to_vm_constant(value: &Value) -> Result<VmValue> {
+    match value {
+        Value::I64(value) => Ok(VmValue::I64(*value)),
+        Value::U64(value) => Ok(VmValue::U64(*value)),
+        Value::Bool(value) => Ok(VmValue::Bool(*value)),
+        Value::Float(value) => Ok(VmValue::Float((*value).into())),
+        Value::String(value) => Ok(VmValue::String(value.clone())),
+        Value::Unit => Ok(VmValue::Unit),
+        Value::Bytes(_) => Err(Error::InvalidInput(
+            "clear byte values cannot be embedded in local named-input wrappers".to_owned(),
+        )),
+        Value::List(_) | Value::Object(_) => Err(Error::InvalidInput(
+            "internal error: structured clear value was not lowered recursively".to_owned(),
+        )),
+    }
+}
+
+fn allocate_wrapper_register(next_register: &mut usize) -> usize {
+    let register = *next_register;
+    *next_register += 1;
+    register
 }

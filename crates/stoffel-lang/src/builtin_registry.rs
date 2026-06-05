@@ -277,7 +277,10 @@ fn has_builtin_pragma(pragmas: &[Pragma]) -> bool {
 fn builtin_vm_symbol(pragmas: &[Pragma]) -> Option<String> {
     pragmas.iter().find_map(|pragma| match pragma {
         Pragma::KeyValue(name, value, _) if name == "builtin" => match value.as_ref() {
-            AstNode::Literal(Value::String(value)) => Some(value.clone()),
+            AstNode::Literal {
+                value: Value::String(value),
+                ..
+            } => Some(value.clone()),
             _ => None,
         },
         _ => None,

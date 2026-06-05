@@ -10,7 +10,7 @@ use stoffel_vm_types::registers::DEFAULT_SECRET_REGISTER_START;
 use stoffellang::ast::AstNode;
 use stoffellang::compiler::{compile, CompilerOptions};
 use stoffellang::convert_to_binary;
-use stoffellang::errors::ErrorReporter;
+use stoffellang::errors::{CompilerError, ErrorReporter};
 use stoffellang::lexer::tokenize;
 use stoffellang::parser::parse;
 use stoffellang::semantic::analyze;
@@ -52,6 +52,15 @@ fn analyze_source(source: &str) -> Result<(), Vec<String>> {
             .collect::<Vec<_>>()
     })?;
     Ok(())
+}
+
+fn analyze_source_errors(source: &str) -> Vec<CompilerError> {
+    let tokens = tokenize(source, "test.stfl").expect("test source should lex");
+    let ast = parse(&tokens, "test.stfl").expect("test source should parse");
+    let transformed = transform_ufcs(ast);
+    let mut reporter = ErrorReporter::new();
+    analyze(transformed, &mut reporter, "test.stfl").expect_err("test source should fail");
+    reporter.get_all().into_iter().cloned().collect()
 }
 
 fn analyze_source_ast(source: &str) -> Result<AstNode, Vec<String>> {
@@ -150,14 +159,14 @@ fn collect_call_return_types(node: &AstNode, function_name: &str, out: &mut Vec<
             collect_call_return_types(base, function_name, out);
             collect_call_return_types(index, function_name, out);
         }
-        AstNode::ListLiteral(elements)
+        AstNode::ListLiteral { elements, .. }
         | AstNode::TupleLiteral(elements)
         | AstNode::SetLiteral(elements) => {
             for element in elements {
                 collect_call_return_types(element, function_name, out);
             }
         }
-        AstNode::DictLiteral(pairs) => {
+        AstNode::DictLiteral { pairs, .. } => {
             for (key, value) in pairs {
                 collect_call_return_types(key, function_name, out);
                 collect_call_return_types(value, function_name, out);
@@ -182,6 +191,10 @@ fn compile_source(source: &str) -> Result<(), Vec<String>> {
     compile(source, "test.stfl", &default_options())
         .map(|_| ())
         .map_err(|errors| errors.iter().map(|e| e.message.clone()).collect())
+}
+
+fn compile_source_errors(source: &str) -> Vec<CompilerError> {
+    compile(source, "test.stfl", &default_options()).expect_err("test source should fail")
 }
 
 fn assert_client_io_manifest(source: &str, expected: &[(u64, Vec<ShareType>, Vec<ShareType>)]) {
@@ -1136,6 +1149,112 @@ def foo(a: int64, b: int64) -> int64:
 var x = foo(1)
 "#;
     assert!(expect_error_containing(source, "argument"));
+}
+
+#[test]
+fn test_semantic_error_literal_condition_has_source_location() {
+    let source = "def main():\n  if 123:\n    var value = 1\n";
+    let errors = analyze_source_errors(source);
+    let error = errors
+        .iter()
+        .find(|error| error.message.contains("If-condition"))
+        .expect("expected if-condition error");
+
+    assert_eq!(error.location.file, "test.stfl");
+    assert_eq!(error.location.line, 2);
+    assert_eq!(error.location.column, 6);
+}
+
+#[test]
+fn test_semantic_error_empty_list_condition_has_source_location() {
+    let source = "def main():\n  if []:\n    var value = 1\n";
+    let errors = analyze_source_errors(source);
+    let error = errors
+        .iter()
+        .find(|error| error.message.contains("If-condition"))
+        .expect("expected if-condition error");
+
+    assert_eq!(error.location.file, "test.stfl");
+    assert_eq!(error.location.line, 2);
+    assert_eq!(error.location.column, 6);
+}
+
+#[test]
+fn test_compile_recovers_from_capitalized_list_and_reports_later_errors() {
+    let source = r#"
+def main():
+  var xs: List[int64] = []
+  var a: int64 = "nope"
+  if []:
+    var value = 1
+"#;
+    let errors = compile_source_errors(source);
+    let messages = errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Unknown generic type: List")),
+        "expected recoverable parse error, got {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Expected 'int64', found 'string'")),
+        "expected later type mismatch, got {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("If-condition must be of type 'bool'")),
+        "expected later if-condition error, got {messages:?}"
+    );
+}
+
+#[test]
+fn test_compile_recovers_at_statement_boundary_after_missing_expression() {
+    let source = r#"
+def main():
+  var broken =
+  var a: int64 = "nope"
+  if 123:
+    var value = 1
+  var ok = 1
+  unknown_call(ok)
+"#;
+    let errors = compile_source_errors(source);
+    let messages = errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Expected expression, found Newline")),
+        "expected missing expression parse error, got {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Expected 'int64', found 'string'")),
+        "expected next statement type mismatch, got {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("If-condition must be of type 'bool'")),
+        "expected later if-condition error, got {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("unknown_call")),
+        "expected later unknown function error, got {messages:?}"
+    );
 }
 
 // ===========================================

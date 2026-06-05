@@ -17,7 +17,10 @@ type PragmaHandler = fn(&mut CodeGenerator, &AstNode, &Pragma) -> CompilerResult
 
 fn int_literal_u64(node: Option<&AstNode>) -> Option<u64> {
     match node {
-        Some(AstNode::Literal(crate::ast::Value::Int { value, .. })) => u64::try_from(*value).ok(),
+        Some(AstNode::Literal {
+            value: crate::ast::Value::Int { value, .. },
+            ..
+        }) => u64::try_from(*value).ok(),
         _ => None,
     }
 }
@@ -57,6 +60,8 @@ struct CodeGenerator {
     symbol_table: HashMap<String, usize>,
     // Source-level types for variables in this scope.
     symbol_types: HashMap<String, SymbolType>,
+    // User object fields available for default construction in this scope.
+    object_field_types: HashMap<String, Vec<(String, SymbolType)>>,
     // Compiled functions.
     compiled_functions: HashMap<String, BytecodeChunk>,
     // If present, this chunk represents `def main(...)` promoted to the program entry.
@@ -89,6 +94,7 @@ impl CodeGenerator {
             // Symbol table starts empty for each new generator instance (e.g., per function)
             symbol_table: HashMap::new(),
             symbol_types: HashMap::new(),
+            object_field_types: HashMap::new(),
             compiled_functions: HashMap::new(),
             main_proc_chunk: None,
             entry_main_chunk: None,
@@ -121,6 +127,80 @@ impl CodeGenerator {
         self.next_virtual_reg += 1;
         self.vr_secrecy.insert(vr, is_secret);
         vr
+    }
+
+    fn compile_default_value_for_type(
+        &mut self,
+        ty: &SymbolType,
+        is_secret_register: bool,
+    ) -> CompilerResult<(VirtualRegister, bool)> {
+        if let Some(object_name) = self.default_object_type_name(ty) {
+            self.emit(Instruction::CALL("create_object".to_string()));
+            let object_vr = self.allocate_virtual_register(false);
+            self.emit(Instruction::MOV(object_vr.0, 0));
+
+            if let Some(fields) = self.object_field_types.get(&object_name).cloned() {
+                for (field_name, field_type) in fields {
+                    if let Some((field_vr, _)) =
+                        self.compile_default_field_value_for_type(&field_type)?
+                    {
+                        let field_const = Constant::String(field_name);
+                        self.identified_constants.push(field_const.clone());
+                        let field_name_vr = self.allocate_virtual_register(false);
+                        self.emit(Instruction::LDI(
+                            field_name_vr.0,
+                            crate::core_types::Value::from(field_const),
+                        ));
+
+                        self.emit(Instruction::PUSHARG(object_vr.0));
+                        self.emit(Instruction::PUSHARG(field_name_vr.0));
+                        self.emit(Instruction::PUSHARG(field_vr.0));
+                        self.emit(Instruction::CALL("set_field".to_string()));
+                    }
+                }
+            }
+
+            Ok((object_vr, false))
+        } else {
+            match ty.underlying_type() {
+                SymbolType::List(_) => {
+                    self.emit(Instruction::CALL("create_array".to_string()));
+                    let array_vr = self.allocate_virtual_register(false);
+                    self.emit(Instruction::MOV(array_vr.0, 0));
+                    Ok((array_vr, false))
+                }
+                _ => {
+                    let vr = self.allocate_virtual_register(is_secret_register);
+                    self.identified_constants.push(Constant::Unit);
+                    self.emit(Instruction::LDI(vr.0, crate::core_types::Value::Unit));
+                    Ok((vr, is_secret_register))
+                }
+            }
+        }
+    }
+
+    fn compile_default_field_value_for_type(
+        &mut self,
+        ty: &SymbolType,
+    ) -> CompilerResult<Option<(VirtualRegister, bool)>> {
+        match ty.underlying_type() {
+            SymbolType::List(_) => self.compile_default_value_for_type(ty, false).map(Some),
+            _ if self.default_object_type_name(ty).is_some() => {
+                self.compile_default_value_for_type(ty, false).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn default_object_type_name(&self, ty: &SymbolType) -> Option<String> {
+        match ty.underlying_type() {
+            SymbolType::Object(name) | SymbolType::TypeName(name)
+                if self.object_field_types.contains_key(name) =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        }
     }
 
     /// Adds an instruction to the current temporary list.
@@ -202,7 +282,7 @@ impl CodeGenerator {
 
     fn input_ordinals_for_node(&self, node: Option<&AstNode>) -> Option<Vec<u64>> {
         match node? {
-            AstNode::Literal(_) => int_literal_u64(node).map(|ordinal| vec![ordinal]),
+            AstNode::Literal { .. } => int_literal_u64(node).map(|ordinal| vec![ordinal]),
             AstNode::Identifier(name, _) => {
                 self.active_loop_bounds
                     .iter()
@@ -284,7 +364,7 @@ impl CodeGenerator {
                         .map(|ty| vec![ty])
                 })
                 .unwrap_or_else(|| vec![ShareType::default_secret_int()]),
-            AstNode::ListLiteral(elements) => elements
+            AstNode::ListLiteral { elements, .. } => elements
                 .iter()
                 .map(|element| {
                     self.share_type_for_node(element)
@@ -373,7 +453,7 @@ impl CodeGenerator {
                 resolved_return_type,
                 ..
             } => resolved_return_type.clone(),
-            AstNode::Literal(value) => match value {
+            AstNode::Literal { value, .. } => match value {
                 crate::ast::Value::Int { kind, .. } => match kind {
                     Some(crate::ast::IntKind::Signed(crate::ast::IntWidth::W8)) => {
                         Some(SymbolType::Int8)
@@ -415,7 +495,7 @@ impl CodeGenerator {
     fn compile_node(&mut self, node: &AstNode) -> CompilerResult<(VirtualRegister, bool)> {
         match node {
             // --- Literals ---
-            AstNode::Literal(lit) => {
+            AstNode::Literal { value: lit, .. } => {
                 // Literals are initially clear
                 let vr = self.allocate_virtual_register(false); // Literals are clear
                 let constant = match lit {
@@ -497,7 +577,7 @@ impl CodeGenerator {
                     .as_deref()
                     .and_then(|expr| self.share_type_for_node(expr));
                 let value_share_list = value.as_deref().and_then(|expr| match expr {
-                    AstNode::ListLiteral(elements) => Some(
+                    AstNode::ListLiteral { elements, .. } => Some(
                         elements
                             .iter()
                             .map(|element| {
@@ -520,13 +600,7 @@ impl CodeGenerator {
                         self.emit(Instruction::MOV(target_vr.0, vr.0));
                         (target_vr, needs_secret)
                     }
-                    None => {
-                        // No initial value, load default (Nil for now)
-                        let vr = self.allocate_virtual_register(explicit_secret);
-                        self.identified_constants.push(Constant::Unit);
-                        self.emit(Instruction::LDI(vr.0, crate::core_types::Value::Unit)); // Load Unit
-                        (vr, explicit_secret)
-                    }
+                    None => self.compile_default_value_for_type(&final_type, explicit_secret)?,
                 };
 
                 // Store the variable name and its register in the symbol table.
@@ -1271,6 +1345,7 @@ impl CodeGenerator {
                 }
                 // --- Compile the function body ---
                 let mut function_generator = CodeGenerator::new();
+                function_generator.object_field_types = self.object_field_types.clone();
 
                 // --- Add parameters to the function_generator's symbol table ---
                 let mut param_vrs: Vec<VirtualRegister> = Vec::new();
@@ -1284,9 +1359,11 @@ impl CodeGenerator {
                     let param_is_secret = param_type.uses_secret_register();
                     // Allocate a virtual register for the parameter. These will typically
                     let param_vr = function_generator.allocate_virtual_register(param_is_secret);
+                    let local_vr = function_generator.allocate_virtual_register(param_is_secret);
+                    function_generator.emit(Instruction::MOV(local_vr.0, param_vr.0));
                     function_generator
                         .symbol_table
-                        .insert(param.name.clone(), param_vr.0); // Store VR index
+                        .insert(param.name.clone(), local_vr.0); // Store copied local VR index
                     function_generator
                         .symbol_types
                         .insert(param.name.clone(), param_type);
@@ -1400,7 +1477,7 @@ impl CodeGenerator {
                 Ok((VirtualRegister(usize::MAX), false)) // Return dummy VR
             }
             AstNode::ObjectDefinition {
-                name: _,
+                name,
                 base_type: _,
                 fields,
                 is_secret: _,
@@ -1413,8 +1490,17 @@ impl CodeGenerator {
                 // For now, we just register the object type's field information for later use
                 // when compiling object instantiation and field access.
                 //
-                // Store field names for potential future use (e.g., for object creation)
-                let _field_names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                let field_types = fields
+                    .iter()
+                    .map(|field| {
+                        let mut field_type = SymbolType::from_ast(&field.type_annotation);
+                        if field.is_secret && !field_type.is_secret() {
+                            field_type = field_type.with_secret_modifier();
+                        }
+                        (field.name.clone(), field_type)
+                    })
+                    .collect::<Vec<_>>();
+                self.object_field_types.insert(name.clone(), field_types);
 
                 // Object definition doesn't produce a runtime value
                 Ok((VirtualRegister(usize::MAX), false))
@@ -1425,7 +1511,7 @@ impl CodeGenerator {
                 // These declarations are compile-time metadata only.
                 Ok((VirtualRegister(usize::MAX), false))
             }
-            AstNode::ListLiteral(elements) => {
+            AstNode::ListLiteral { elements, .. } => {
                 // Create array with capacity
                 let capacity_const = Constant::I64(elements.len() as i64);
                 self.identified_constants.push(capacity_const.clone());
@@ -1450,7 +1536,7 @@ impl CodeGenerator {
 
                 Ok((array_vr, false))
             }
-            AstNode::DictLiteral(pairs) => {
+            AstNode::DictLiteral { pairs, .. } => {
                 // Create object
                 self.emit(Instruction::CALL("create_object".to_string()));
 
@@ -1636,8 +1722,10 @@ fn collect_upvalue_names(node: &AstNode) -> Vec<String> {
             } => {
                 if let AstNode::Identifier(name, _) = function.as_ref() {
                     if matches!(name.as_str(), "get_upvalue" | "set_upvalue") {
-                        if let Some(AstNode::Literal(crate::ast::Value::String(upvalue))) =
-                            arguments.first()
+                        if let Some(AstNode::Literal {
+                            value: crate::ast::Value::String(upvalue),
+                            ..
+                        }) = arguments.first()
                         {
                             if !out.contains(upvalue) {
                                 out.push(upvalue.clone());
@@ -1701,14 +1789,14 @@ fn collect_upvalue_names(node: &AstNode) -> Vec<String> {
                 visit(base, out);
                 visit(index, out);
             }
-            AstNode::ListLiteral(elements)
+            AstNode::ListLiteral { elements, .. }
             | AstNode::TupleLiteral(elements)
             | AstNode::SetLiteral(elements) => {
                 for element in elements {
                     visit(element, out);
                 }
             }
-            AstNode::DictLiteral(pairs) => {
+            AstNode::DictLiteral { pairs, .. } => {
                 for (key, value) in pairs {
                     visit(key, out);
                     visit(value, out);

@@ -65,15 +65,11 @@ pub fn compile(
     }
 
     // 2. Parsing
-    let ast_root = match parser::parse(&tokens, filename) {
-        Ok(ast) => ast,
-        Err(e) => {
-            error_reporter.add_error(e);
-            // Stop if parsing fails fundamentally.
-            // If we want resilience, parser needs to return partial AST + errors.
-            return Err(error_reporter.get_all().into_iter().cloned().collect());
-        }
-    };
+    let parse_output = parser::parse_recovering(&tokens, filename);
+    for error in parse_output.errors {
+        error_reporter.add_error(error);
+    }
+    let ast_root = parse_output.ast;
     if options.print_ir {
         println!("--- Initial AST ---");
         println!("{:#?}", ast_root);
@@ -97,6 +93,9 @@ pub fn compile(
             return Err(error_reporter.get_all().into_iter().cloned().collect());
         }
     };
+    if error_reporter.has_errors() {
+        return Err(error_reporter.get_all().into_iter().cloned().collect());
+    }
     if options.print_ir {
         println!("--- Analyzed AST (Semantic Check) ---");
         println!("{:#?}", analyzed_ast);

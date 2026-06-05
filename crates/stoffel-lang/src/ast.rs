@@ -53,7 +53,10 @@ pub struct EnumMember {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AstNode {
-    Literal(Value),
+    Literal {
+        value: Value,
+        location: SourceLocation,
+    },
     Identifier(String, SourceLocation),
     Assignment {
         target: Box<AstNode>,
@@ -129,10 +132,16 @@ pub enum AstNode {
         index: Box<AstNode>,
         location: SourceLocation,
     },
-    ListLiteral(Vec<AstNode>),
+    ListLiteral {
+        elements: Vec<AstNode>,
+        location: SourceLocation,
+    },
     TupleLiteral(Vec<AstNode>),
     SetLiteral(Vec<AstNode>),
-    DictLiteral(Vec<(AstNode, AstNode)>),
+    DictLiteral {
+        pairs: Vec<(AstNode, AstNode)>,
+        location: SourceLocation,
+    },
     TypeAlias {
         name: String,
         target_type: Box<AstNode>,
@@ -241,12 +250,12 @@ impl AstNode {
 
     pub fn is_expression(&self) -> bool {
         match self {
-            AstNode::Literal(_) | AstNode::Identifier(_, _) => true,
+            AstNode::Literal { .. } | AstNode::Identifier(_, _) => true,
             AstNode::BinaryOperation { .. } | AstNode::UnaryOperation { .. } => true,
             AstNode::FunctionCall { .. } | AstNode::CommandCall { .. } => true,
             AstNode::FieldAccess { .. } | AstNode::IndexAccess { .. } => true,
-            AstNode::ListLiteral(_) | AstNode::TupleLiteral(_) => true,
-            AstNode::SetLiteral(_) | AstNode::DictLiteral(_) => true,
+            AstNode::ListLiteral { .. } | AstNode::TupleLiteral(_) => true,
+            AstNode::SetLiteral(_) | AstNode::DictLiteral { .. } => true,
             AstNode::IfExpression { .. } => true,
             AstNode::Block(nodes) => nodes.last().is_some_and(|n| n.is_expression()),
             AstNode::Assignment { .. } | AstNode::VariableDeclaration { .. } => false,
@@ -298,6 +307,13 @@ impl AstNode {
             AstNode::Import { location: loc, .. } => loc.clone(),
             AstNode::CommandCall { location: loc, .. } => loc.clone(),
             AstNode::DiscardStatement { location: loc, .. } => loc.clone(),
+            AstNode::Literal { location: loc, .. } => loc.clone(),
+            AstNode::ListLiteral { location: loc, .. } => loc.clone(),
+            AstNode::DictLiteral { location: loc, .. } => loc.clone(),
+            AstNode::IfExpression { condition, .. } => condition.location(),
+            AstNode::Block(nodes) => nodes
+                .first()
+                .map_or_else(SourceLocation::default, AstNode::location),
             AstNode::Return {
                 value: Some(expr),
                 location: _,
@@ -306,7 +322,6 @@ impl AstNode {
                 value: None,
                 location,
             } => location.clone(),
-            AstNode::Literal(_) => SourceLocation::default(),
             _ => SourceLocation::default(),
         }
     }

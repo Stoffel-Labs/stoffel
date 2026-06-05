@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -1220,13 +1221,65 @@ fn clear_vm_nested_array_outputs_are_preserved_as_lists() -> stoffel::Result<()>
 }
 
 #[test]
-fn list_inputs_fail_explicitly_before_clear_vm_execution() -> stoffel::Result<()> {
-    let err = Stoffel::compile("def main(values: list[int64]) -> int64:\n  return values[0]")?
+fn list_inputs_execute_as_clear_vm_arrays() -> stoffel::Result<()> {
+    let result = Stoffel::compile("def main(values: list[int64]) -> int64:\n  return values[0]")?
         .with_input("values", Value::List(vec![Value::I64(7)]))
-        .execute_clear()
-        .unwrap_err();
+        .execute_clear()?;
 
-    assert!(matches!(err, stoffel::Error::InvalidInput(_)));
+    assert_eq!(result, vec![Value::I64(7)]);
+    Ok(())
+}
+
+#[test]
+fn object_inputs_execute_as_clear_vm_objects() -> stoffel::Result<()> {
+    let mut point = BTreeMap::new();
+    point.insert("x".to_owned(), Value::I64(7));
+    point.insert("y".to_owned(), Value::I64(5));
+
+    let result = Stoffel::compile(
+        r#"
+object point:
+  x: int64
+  y: int64
+
+def main(value: point) -> int64:
+  return value.x
+"#,
+    )?
+    .with_input("value", Value::Object(point))
+    .execute_clear()?;
+
+    assert_eq!(result, vec![Value::I64(7)]);
+    Ok(())
+}
+
+#[test]
+fn object_locals_default_construct_and_preserve_parameters_across_calls() -> stoffel::Result<()> {
+    let result = Stoffel::compile(
+        r#"
+object polynomial:
+  n: int64
+  coeffs: list[int64]
+
+def main(n: int64, coeffs: list[int64]) -> int64:
+  var p: polynomial
+  p.n = n
+  p.coeffs = coeffs
+
+  var q: polynomial
+  q.n = n
+
+  var r: polynomial
+  r.n = q.n
+  r.coeffs.append(p.coeffs[0] + p.coeffs[1])
+  return r.n + r.coeffs[0]
+"#,
+    )?
+    .with_input("n", 1_i64)
+    .with_input("coeffs", Value::List(vec![Value::I64(10), Value::I64(90)]))
+    .execute_clear()?;
+
+    assert_eq!(result, vec![Value::I64(101)]);
     Ok(())
 }
 
@@ -1242,14 +1295,13 @@ fn byte_inputs_fail_explicitly_before_clear_vm_execution() -> stoffel::Result<()
 }
 
 #[test]
-fn cyclic_vm_array_outputs_fail_without_recursing_forever() -> stoffel::Result<()> {
-    let err =
+fn clear_array_inputs_and_outputs_round_trip_without_recursing_forever() -> stoffel::Result<()> {
+    let result =
         Stoffel::compile("def main(a: int64, b: int64) -> list[int64]:\n  return [a, b, a + b]")?
             .with_inputs(&[("a", 2_i64), ("b", 3_i64)])
-            .execute_clear()
-            .unwrap_err();
+            .execute_clear()?;
 
-    assert!(matches!(err, stoffel::Error::Computation(_)));
+    assert_eq!(result, vec![Value::I64(2), Value::I64(3), Value::I64(5)]);
     Ok(())
 }
 
@@ -3048,6 +3100,66 @@ async fn secret_parameter_named_inputs_are_adapted_before_runner_lookup() -> sto
         .execute_local()
         .await
         .unwrap_err();
+
+    assert!(
+        matches!(
+        err,
+            stoffel::Error::Unsupported(ref message) if message.contains("stoffel-run")
+        ),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn secret_list_named_inputs_are_adapted_before_runner_lookup() -> stoffel::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let runner_path = dir.path().join("missing-stoffel-run");
+
+    let err = Stoffel::compile(
+        r#"
+def main(values: list[Share]) -> int64:
+  return values[0].open()
+"#,
+    )?
+    .parties(5)
+    .threshold(1)
+    .local_runner_path(&runner_path)
+    .with_input("values", Value::List(vec![Value::I64(42), Value::I64(58)]))
+    .execute_local()
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(
+        err,
+            stoffel::Error::Unsupported(ref message) if message.contains("stoffel-run")
+        ),
+        "unexpected error: {err:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mixed_clear_and_secret_list_named_inputs_are_adapted_before_runner_lookup(
+) -> stoffel::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let runner_path = dir.path().join("missing-stoffel-run");
+
+    let err = Stoffel::compile(
+        r#"
+def main(n: int64, values: list[Share]) -> int64:
+  return n
+"#,
+    )?
+    .parties(5)
+    .threshold(1)
+    .local_runner_path(&runner_path)
+    .with_input("n", 2_i64)
+    .with_input("values", Value::List(vec![Value::I64(42), Value::I64(58)]))
+    .execute_local()
+    .await
+    .unwrap_err();
 
     assert!(
         matches!(
