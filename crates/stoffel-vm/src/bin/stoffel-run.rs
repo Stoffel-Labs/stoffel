@@ -202,6 +202,7 @@ fn store_reserved_client_inputs<F, I>(
     client_to_indices: &std::collections::HashMap<I, Vec<u64>>,
     client_inputs: std::collections::HashMap<I, Vec<RobustShare<F>>>,
     client_input_count: usize,
+    client_input_slots: &[usize],
 ) where
     F: ark_ff::FftField,
     I: Eq + std::hash::Hash + std::fmt::Debug,
@@ -295,10 +296,14 @@ fn store_reserved_client_inputs<F, I>(
             shares.push(share);
         }
 
-        if let Err(error) = vm.try_store_client_input(client_store_index, shares) {
+        let client_slot = client_input_slots
+            .get(client_store_index)
+            .copied()
+            .unwrap_or(client_store_index);
+        if let Err(error) = vm.try_store_client_input(client_slot, shares) {
             eprintln!(
-                "Failed to store input shares for reserved client index {}: {}",
-                client_store_index, error
+                "Failed to store input shares for client slot {}: {}",
+                client_slot, error
             );
             exit(13);
         }
@@ -309,6 +314,7 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
     client_to_indices: &std::collections::HashMap<I, Vec<u64>>,
     client_inputs: std::collections::HashMap<I, Vec<FeldmanShamirShare<F, G>>>,
     client_input_count: usize,
+    client_input_slots: &[usize],
 ) where
     F: SupportedMpcField,
     G: CurveGroup<ScalarField = F>,
@@ -405,10 +411,14 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
             shares.push(share);
         }
 
-        if let Err(error) = vm.try_store_client_input_feldman(client_store_index, shares) {
+        let client_slot = client_input_slots
+            .get(client_store_index)
+            .copied()
+            .unwrap_or(client_store_index);
+        if let Err(error) = vm.try_store_client_input_feldman(client_slot, shares) {
             eprintln!(
-                "Failed to store AVSS input shares for reserved client index {}: {}",
-                client_store_index, error
+                "Failed to store AVSS input shares for client slot {}: {}",
+                client_slot, error
             );
             exit(13);
         }
@@ -2996,7 +3006,7 @@ where
         .wait_for_inputs(input_ids.len() as u64, mask_shares)
         .await
         .map_err(|e| e.to_string())?;
-    store_reserved_client_inputs_feldman::<F, G, _>(vm, &client_to_indices, client_inputs, 1);
+    store_reserved_client_inputs_feldman::<F, G, _>(vm, &client_to_indices, client_inputs, 1, &[]);
 
     if as_leader {
         coord.start_mpc().await.map_err(|e| e.to_string())?;
@@ -3220,6 +3230,8 @@ async fn main() {
     let mut cert_der: Option<Vec<u8>> = None;
     let mut timestamp: Option<u64> = None;
     let mut expected_clients: Vec<String> = Vec::new();
+    let mut client_roster: Vec<usize> = Vec::new();
+    let mut client_input_slots: Vec<usize> = Vec::new();
     let mut eth_node_addr: Option<String> = None;
     let mut wallet_sk_str: Option<String> = None;
     let mut contract_addr: Option<String> = None;
@@ -3270,6 +3282,8 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--cert") {
         } else if let Some(_rest) = arg.strip_prefix("--timestamp") {
         } else if let Some(_rest) = arg.strip_prefix("--expected-clients") {
+        } else if let Some(_rest) = arg.strip_prefix("--client-roster") {
+        } else if let Some(_rest) = arg.strip_prefix("--client-input-slots") {
         } else if let Some(_rest) = arg.strip_prefix("--client-index") {
         } else if let Some(_rest) = arg.strip_prefix("--preproc-store") {
         } else if let Some(_rest) = arg.strip_prefix("--local-store") {
@@ -3470,6 +3484,24 @@ async fn main() {
             "--expected-clients" => {
                 if let Some(v) = args_iter.next() {
                     expected_clients = v.split(',').map(|s| s.trim().to_string()).collect();
+                }
+            }
+            "--client-roster" => {
+                if let Some(v) = args_iter.next() {
+                    client_roster = v
+                        .split(',')
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.trim().parse().expect("Invalid --client-roster slot"))
+                        .collect();
+                }
+            }
+            "--client-input-slots" => {
+                if let Some(v) = args_iter.next() {
+                    client_input_slots = v
+                        .split(',')
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.trim().parse().expect("Invalid --client-input-slots slot"))
+                        .collect();
                 }
             }
             "--advertise" => {
@@ -4469,6 +4501,7 @@ async fn main() {
                                 &client_to_indices,
                                 client_inputs,
                                 client_input_count,
+                                &client_input_slots,
                             );
                         }
                     }
@@ -4578,6 +4611,7 @@ async fn main() {
                                 &client_to_indices,
                                 client_inputs,
                                 client_input_count,
+                                &[],
                             );
                         }
                     }
@@ -4730,6 +4764,9 @@ async fn main() {
     }
 
     eprintln!("Starting VM execution of '{}'...", agreed_entry);
+    if !client_roster.is_empty() {
+        vm.set_client_roster(client_roster.clone());
+    }
 
     // Execute entry function
     match vm.execute(&agreed_entry) {

@@ -1420,6 +1420,74 @@ def main() -> int64:
 }
 
 #[test]
+fn runtime_allows_static_output_only_clients_without_inputs() -> stoffel::Result<()> {
+    let runtime = Stoffel::compile(
+        r#"
+def main() -> int64:
+  var share = Share.from_clear_int(7, 64)
+  MpcOutput.send_to_client(0, [share])
+  return ClientStore.get_number_clients()
+"#,
+    )?
+    .parties(5)
+    .threshold(1)
+    .build()?;
+
+    assert_eq!(runtime.program().minimum_expected_clients(), 1);
+    runtime.validate_client_inputs()?;
+    Ok(())
+}
+
+#[test]
+fn runtime_rejects_expected_clients_below_static_manifest_slots() -> stoffel::Result<()> {
+    let error = Stoffel::compile(
+        r#"
+def main() -> int64:
+  var share = Share.from_clear_int(7, 64)
+  MpcOutput.send_to_client(1, [share])
+  return ClientStore.get_number_clients()
+"#,
+    )?
+    .parties(5)
+    .threshold(1)
+    .expected_clients(1)
+    .build()
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        stoffel::Error::Configuration(message)
+            if message.contains("expected_clients >= 2")
+    ));
+    Ok(())
+}
+
+#[test]
+fn runtime_accepts_explicit_expected_clients_for_dynamic_outputs() -> stoffel::Result<()> {
+    let runtime = Stoffel::compile(
+        r#"
+def main() -> int64:
+  var count = ClientStore.get_number_clients()
+  var i = 0
+  while i < count:
+    var share = Share.from_clear_int(i, 64)
+    MpcOutput.send_to_client(i, [share])
+    i = i + 1
+  return count
+"#,
+    )?
+    .parties(5)
+    .threshold(1)
+    .expected_clients(2)
+    .build()?;
+
+    assert_eq!(runtime.program().minimum_expected_clients(), 0);
+    assert_eq!(runtime.configured_expected_clients(), Some(2));
+    runtime.validate_client_inputs()?;
+    Ok(())
+}
+
+#[test]
 fn stoffel_builder_can_validate_local_client_inputs_before_execution() -> stoffel::Result<()> {
     let source = r#"
 def main() -> int64:

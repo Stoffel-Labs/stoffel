@@ -756,6 +756,7 @@ fn run_help_exposes_mpc_network_flags() {
         .stdout(predicate::str::contains("--network"))
         .stdout(predicate::str::contains("--local"))
         .stdout(predicate::str::contains("--client-input"))
+        .stdout(predicate::str::contains("--expected-clients"))
         .stdout(predicate::str::contains("--connect-timeout-ms"))
         .stdout(predicate::str::contains("--program-info"))
         .stdout(predicate::str::contains("aliases: --inspect, --info"))
@@ -845,6 +846,18 @@ fn summary_flag_is_not_part_of_general_build_help() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("unexpected argument '--summary'"));
+}
+
+#[test]
+fn run_rejects_zero_expected_clients() {
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["run", "--expected-clients", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "0 is not valid here; use a positive whole number",
+        ));
 }
 
 #[test]

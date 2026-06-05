@@ -174,6 +174,13 @@ impl MpcRuntimeState {
         Arc::clone(&self.client_store)
     }
 
+    pub(super) fn set_client_roster<I>(&self, clients: I)
+    where
+        I: IntoIterator<Item = ClientId>,
+    {
+        self.client_store.set_client_roster(clients);
+    }
+
     pub(super) fn client_id_at_index(&self, index: ClientInputIndex) -> Option<ClientId> {
         self.client_store.client_id_at(index)
     }

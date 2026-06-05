@@ -256,6 +256,64 @@ fn local_runner_rejects_missing_clientstore_inputs_before_spawning_parties() {
 }
 
 #[test]
+fn local_runner_accepts_static_output_only_clients_without_inputs() {
+    let mut binary = CompiledBinary::from_vm_functions(&[VMFunction::new(
+        "main".to_owned(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        1,
+        vec![Instruction::LDI(0, Value::I64(7)), Instruction::RET(0)],
+        HashMap::new(),
+    )]);
+    binary.client_io_manifest = ClientIoManifest {
+        mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+        mpc_curve: stoffel_vm_types::compiled_binary::MpcCurve::Bls12_381,
+        clients: vec![ClientIoSchema {
+            client_slot: 0,
+            inputs: Vec::new(),
+            outputs: vec![ShareType::default_secret_int()],
+        }],
+    };
+
+    LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+        .build()
+        .expect("output-only client manifests should not require client input");
+}
+
+#[test]
+fn local_runner_rejects_expected_clients_below_static_manifest_slots() {
+    let mut binary = CompiledBinary::from_vm_functions(&[VMFunction::new(
+        "main".to_owned(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        1,
+        vec![Instruction::LDI(0, Value::I64(7)), Instruction::RET(0)],
+        HashMap::new(),
+    )]);
+    binary.client_io_manifest = ClientIoManifest {
+        mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+        mpc_curve: stoffel_vm_types::compiled_binary::MpcCurve::Bls12_381,
+        clients: vec![ClientIoSchema {
+            client_slot: 2,
+            inputs: Vec::new(),
+            outputs: vec![ShareType::default_secret_int()],
+        }],
+    };
+
+    let err = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+        .expected_clients(2)
+        .build()
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("expected_clients >= 3"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn local_runner_rejects_duplicate_client_input_slots() {
     let mut binary = CompiledBinary::from_vm_functions(&[VMFunction::new(
         "main".to_owned(),

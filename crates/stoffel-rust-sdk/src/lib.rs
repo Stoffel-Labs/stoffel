@@ -127,6 +127,7 @@ pub struct Stoffel {
     config_error: Option<String>,
     inputs: Vec<(String, Value)>,
     client_inputs: Vec<(u64, Vec<Value>)>,
+    expected_clients: Option<usize>,
     compiler_options: CompilationOptions,
 }
 
@@ -290,6 +291,12 @@ impl Stoffel {
         self
     }
 
+    /// Declare output-capable client slots `0..n-1` for local execution.
+    pub fn expected_clients(mut self, n: usize) -> Self {
+        self.expected_clients = Some(n);
+        self
+    }
+
     /// Attach explicit network configuration.
     pub fn network_config(mut self, config: NetworkConfig) -> Self {
         self.network_config = Some(config);
@@ -357,6 +364,14 @@ impl Stoffel {
                 "program must contain at least one function".to_owned(),
             ));
         }
+        if let Some(expected_clients) = self.expected_clients {
+            if expected_clients == 0 {
+                return Err(Error::Configuration(
+                    "expected_clients must be greater than 0".to_owned(),
+                ));
+            }
+            program.validate_expected_clients(expected_clients)?;
+        }
         if let Some(config) = &self.network_config {
             validate_program_network_config(&program, config)?;
         }
@@ -367,6 +382,7 @@ impl Stoffel {
             self.local_runner_path,
             self.inputs,
             self.client_inputs,
+            self.expected_clients,
         ))
     }
 
@@ -463,6 +479,7 @@ impl Stoffel {
             config_error: None,
             inputs: Vec::new(),
             client_inputs: Vec::new(),
+            expected_clients: None,
             compiler_options: CompilationOptions::default(),
         }
     }

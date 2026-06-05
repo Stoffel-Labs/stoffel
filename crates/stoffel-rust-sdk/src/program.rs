@@ -282,7 +282,10 @@ impl Program {
         if !has_declared_clients && inputs.is_empty() {
             return Ok(());
         }
-        if has_declared_clients && inputs.is_empty() {
+        if has_declared_clients
+            && inputs.is_empty()
+            && self.clients().any(|metadata| metadata.input_count() > 0)
+        {
             return Err(Error::Configuration(
                 "program declares ClientStore input metadata; provide local client inputs"
                     .to_owned(),
@@ -322,7 +325,7 @@ impl Program {
         }
 
         for metadata in self.clients() {
-            if !seen_slots.contains(&metadata.client_slot()) {
+            if metadata.input_count() > 0 && !seen_slots.contains(&metadata.client_slot()) {
                 return Err(Error::Configuration(format!(
                     "client slot {} is declared in the program client IO manifest but no input was provided",
                     metadata.client_slot()

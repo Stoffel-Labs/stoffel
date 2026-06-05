@@ -18,6 +18,8 @@ impl ClientInputStore {
 
         let mut entries = self.entries.write();
         entries.insert(client_id, entry);
+        drop(entries);
+        self.add_known_client(client_id);
     }
 
     /// Replace every stored client input with VM share payloads.
@@ -44,6 +46,8 @@ impl ClientInputStore {
                 },
             );
         }
+        drop(entries);
+        self.set_client_roster_from_inputs();
 
         total_shares
     }
@@ -139,29 +143,67 @@ impl ClientInputStore {
     pub fn clear(&self) {
         let mut entries = self.entries.write();
         entries.clear();
+        drop(entries);
+        self.client_roster.write().clear();
     }
 
-    /// Get the total number of clients in the store.
+    /// Get the total number of known clients in the store.
     pub fn len(&self) -> usize {
-        let entries = self.entries.read();
-        entries.len()
+        let roster = self.client_roster.read();
+        if roster.is_empty() {
+            self.entries.read().len()
+        } else {
+            roster.len()
+        }
     }
 
     /// Check if the store is empty.
     pub fn is_empty(&self) -> bool {
-        let entries = self.entries.read();
-        entries.is_empty()
+        self.len() == 0
     }
 
     /// Return the client ID at a given index in sorted order.
     pub fn client_id_at(&self, index: ClientInputIndex) -> Option<ClientId> {
-        let entries = self.entries.read();
-        entries.keys().nth(index.index()).copied()
+        let roster = self.client_roster.read();
+        if roster.is_empty() {
+            self.entries.read().keys().nth(index.index()).copied()
+        } else {
+            roster.get(index.index()).copied()
+        }
     }
 
     /// Return all client IDs in sorted order.
     pub fn client_ids(&self) -> Vec<ClientId> {
-        let entries = self.entries.read();
-        entries.keys().copied().collect()
+        let roster = self.client_roster.read();
+        if roster.is_empty() {
+            self.entries.read().keys().copied().collect()
+        } else {
+            roster.clone()
+        }
+    }
+
+    /// Replace the VM-facing known client roster.
+    pub fn set_client_roster<I>(&self, clients: I)
+    where
+        I: IntoIterator<Item = ClientId>,
+    {
+        let mut clients = clients.into_iter().collect::<Vec<_>>();
+        clients.sort_unstable();
+        clients.dedup();
+        *self.client_roster.write() = clients;
+    }
+
+    /// Add one known client while preserving deterministic client-slot order.
+    pub fn add_known_client(&self, client_id: ClientId) {
+        let mut roster = self.client_roster.write();
+        match roster.binary_search(&client_id) {
+            Ok(_) => {}
+            Err(index) => roster.insert(index, client_id),
+        }
+    }
+
+    fn set_client_roster_from_inputs(&self) {
+        let clients = self.entries.read().keys().copied().collect::<Vec<_>>();
+        self.set_client_roster(clients);
     }
 }

@@ -27,6 +27,7 @@ pub use share::{
 #[derive(Debug, Default)]
 pub struct ClientInputStore {
     entries: RwLock<BTreeMap<ClientId, ClientInputEntry>>,
+    client_roster: RwLock<Vec<ClientId>>,
 }
 
 #[cfg(test)]

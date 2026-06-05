@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -71,6 +71,7 @@ pub struct LocalCoordinatorRunner {
     timeout: Duration,
     auth_token: String,
     client_inputs: Vec<LocalClientInput>,
+    expected_clients: Option<usize>,
 }
 
 impl LocalCoordinatorRunner {
@@ -91,6 +92,7 @@ impl LocalCoordinatorRunner {
                 timeout: DEFAULT_TIMEOUT,
                 auth_token: DEFAULT_AUTH_TOKEN.to_owned(),
                 client_inputs: Vec::new(),
+                expected_clients: None,
             },
         }
     }
@@ -111,7 +113,8 @@ impl LocalCoordinatorRunner {
             .iter()
             .map(|identity| public_key_from_cert(&identity.cert_der))
             .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?;
-        let local_clients = write_client_identities(temp.path(), &self.client_inputs)?;
+        let known_client_inputs = self.known_client_inputs();
+        let local_clients = write_client_identities(temp.path(), &known_client_inputs)?;
         let client_bindings = local_clients
             .iter()
             .map(|client| Ok((client.client_slot, public_key_from_cert(&client.cert_der)?)))
@@ -119,7 +122,7 @@ impl LocalCoordinatorRunner {
 
         let coord_port = reserve_port()?;
         let coord_cert = self_signed_certs::server_cert();
-        let coord_state = if self.client_inputs.is_empty() {
+        let coord_state = if local_clients.is_empty() {
             FakeCoordinatorRPCServerSharedBase::new(
                 program_id,
                 self.parties as u64,
@@ -190,29 +193,41 @@ impl LocalCoordinatorRunner {
 
         let client_results = match self.backend {
             MpcBackendKind::HoneyBadger => {
-                futures::future::join_all(local_clients.iter().cloned().map(|client| {
-                    run_honeybadger_offchain_client(
-                        client,
-                        node_rpc_addrs.clone(),
-                        coord_port,
-                        coord.get_timestamp(),
-                        self.threshold,
-                        self.timeout,
-                    )
-                }))
+                futures::future::join_all(
+                    local_clients
+                        .iter()
+                        .filter(|client| client.input.has_input())
+                        .cloned()
+                        .map(|client| {
+                            run_honeybadger_offchain_client(
+                                client,
+                                node_rpc_addrs.clone(),
+                                coord_port,
+                                coord.get_timestamp(),
+                                self.threshold,
+                                self.timeout,
+                            )
+                        }),
+                )
                 .await
             }
             MpcBackendKind::Avss => {
-                futures::future::join_all(local_clients.iter().cloned().map(|client| {
-                    run_avss_offchain_client(
-                        client,
-                        node_rpc_addrs.clone(),
-                        coord_port,
-                        coord.get_timestamp(),
-                        self.threshold,
-                        self.timeout,
-                    )
-                }))
+                futures::future::join_all(
+                    local_clients
+                        .iter()
+                        .filter(|client| client.input.has_input())
+                        .cloned()
+                        .map(|client| {
+                            run_avss_offchain_client(
+                                client,
+                                node_rpc_addrs.clone(),
+                                coord_port,
+                                coord.get_timestamp(),
+                                self.threshold,
+                                self.timeout,
+                            )
+                        }),
+                )
                 .await
             }
         };
@@ -293,7 +308,34 @@ impl LocalCoordinatorRunner {
                 "timeout must be greater than zero".to_owned(),
             ));
         }
+        self.validate_expected_clients()?;
         self.validate_client_inputs()?;
+        Ok(())
+    }
+
+    fn validate_expected_clients(&self) -> LocalCoordinatorRunnerResult<()> {
+        let Some(expected_clients) = self.expected_clients else {
+            return Ok(());
+        };
+        if expected_clients == 0 {
+            return Err(LocalCoordinatorRunnerError::Configuration(
+                "--expected-clients must be greater than 0".to_owned(),
+            ));
+        }
+        let minimum = self
+            .binary
+            .client_io_manifest
+            .clients
+            .iter()
+            .map(|schema| usize::try_from(schema.client_slot).unwrap_or(usize::MAX))
+            .map(|slot| slot.saturating_add(1))
+            .max()
+            .unwrap_or(0);
+        if minimum > expected_clients {
+            return Err(LocalCoordinatorRunnerError::Configuration(format!(
+                "program declares ClientStore slot(s) requiring expected_clients >= {minimum}, but expected_clients is {expected_clients}"
+            )));
+        }
         Ok(())
     }
 
@@ -301,7 +343,15 @@ impl LocalCoordinatorRunner {
         if self.binary.client_io_manifest.clients.is_empty() && self.client_inputs.is_empty() {
             return Ok(());
         }
-        if !self.binary.client_io_manifest.clients.is_empty() && self.client_inputs.is_empty() {
+        if !self.binary.client_io_manifest.clients.is_empty()
+            && self.client_inputs.is_empty()
+            && self
+                .binary
+                .client_io_manifest
+                .clients
+                .iter()
+                .any(|schema| !schema.inputs.is_empty())
+        {
             return Err(LocalCoordinatorRunnerError::Configuration(
                 "program declares ClientStore input metadata; provide local client inputs"
                     .to_owned(),
@@ -349,7 +399,7 @@ impl LocalCoordinatorRunner {
             }
         }
         for schema in &self.binary.client_io_manifest.clients {
-            if !seen_slots.contains(&schema.client_slot) {
+            if !schema.inputs.is_empty() && !seen_slots.contains(&schema.client_slot) {
                 return Err(LocalCoordinatorRunnerError::Configuration(format!(
                     "client slot {} is declared in the program client IO manifest but no input was provided",
                     schema.client_slot
@@ -357,6 +407,32 @@ impl LocalCoordinatorRunner {
             }
         }
         Ok(())
+    }
+
+    fn known_client_inputs(&self) -> Vec<LocalClientInput> {
+        let mut slots = BTreeSet::new();
+        for client in &self.client_inputs {
+            slots.insert(client.client_slot);
+        }
+        for schema in &self.binary.client_io_manifest.clients {
+            slots.insert(schema.client_slot);
+        }
+        if let Some(expected_clients) = self.expected_clients {
+            for client_slot in 0..expected_clients {
+                slots.insert(client_slot as u64);
+            }
+        }
+
+        slots
+            .into_iter()
+            .map(|client_slot| {
+                self.client_inputs
+                    .iter()
+                    .find(|input| input.client_slot == client_slot)
+                    .cloned()
+                    .unwrap_or_else(|| LocalClientInput::raw(client_slot, Vec::<String>::new()))
+            })
+            .collect()
     }
 
     fn binary_bytes(&self) -> LocalCoordinatorRunnerResult<Vec<u8>> {
@@ -479,6 +555,23 @@ impl LocalCoordinatorRunner {
                 )
                 .arg("--client-input-count")
                 .arg(self.max_client_input_count().to_string());
+            command.arg("--client-roster").arg(
+                context
+                    .clients
+                    .iter()
+                    .map(|client| client.client_slot.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            command.arg("--client-input-slots").arg(
+                context
+                    .clients
+                    .iter()
+                    .filter(|client| client.input.has_input())
+                    .map(|client| client.client_slot.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
         }
 
         match context.role {
@@ -568,6 +661,11 @@ impl LocalCoordinatorRunnerBuilder {
         self
     }
 
+    pub fn expected_clients(mut self, expected_clients: usize) -> Self {
+        self.runner.expected_clients = Some(expected_clients);
+        self
+    }
+
     pub fn build(self) -> LocalCoordinatorRunnerResult<LocalCoordinatorRunner> {
         self.runner.validate()?;
         Ok(self.runner)
@@ -593,6 +691,10 @@ impl LocalClientInput {
             client_slot,
             values: values.into_iter().map(Into::into).collect(),
         }
+    }
+
+    fn has_input(&self) -> bool {
+        !self.values.is_empty()
     }
 }
 

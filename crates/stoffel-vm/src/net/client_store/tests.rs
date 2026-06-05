@@ -150,6 +150,35 @@ fn test_list_and_clear() {
 }
 
 #[test]
+fn client_roster_counts_output_only_clients() {
+    let store = ClientInputStore::new();
+
+    store.set_client_roster([2, 0, 1]);
+
+    assert_eq!(store.len(), 3);
+    assert_eq!(store.client_id_at(ClientInputIndex::new(0)), Some(0));
+    assert_eq!(store.client_id_at(ClientInputIndex::new(1)), Some(1));
+    assert_eq!(store.client_id_at(ClientInputIndex::new(2)), Some(2));
+    assert_eq!(
+        store.get_client_share_data(0, ClientShareIndex::new(0)),
+        None
+    );
+}
+
+#[test]
+fn stored_inputs_extend_client_roster_in_sorted_order() {
+    let store = ClientInputStore::new();
+
+    store.set_client_roster([2]);
+    store.store_client_input_bytes(0, vec![vec![7]]);
+
+    assert_eq!(store.len(), 2);
+    assert_eq!(store.client_ids(), vec![0, 2]);
+    assert_eq!(store.client_id_at(ClientInputIndex::new(0)), Some(0));
+    assert_eq!(store.client_id_at(ClientInputIndex::new(1)), Some(2));
+}
+
+#[test]
 fn client_share_metadata_round_trips_without_flattening_to_bytes() {
     let store = ClientInputStore::new();
     let share_type = ShareType::default_secret_fixed_point();

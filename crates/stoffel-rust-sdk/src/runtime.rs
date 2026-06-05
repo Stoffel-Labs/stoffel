@@ -24,6 +24,7 @@ pub struct RuntimeSummary {
     pub network: Option<NetworkConfigSummary>,
     pub named_input_count: usize,
     pub client_input_count: usize,
+    pub expected_clients: Option<usize>,
     pub local_runner_configured: bool,
 }
 
@@ -35,6 +36,7 @@ pub struct StoffelRuntime {
     local_runner_path: Option<PathBuf>,
     inputs: Vec<(String, Value)>,
     client_inputs: Vec<(u64, Vec<Value>)>,
+    expected_clients: Option<usize>,
 }
 
 impl StoffelRuntime {
@@ -45,6 +47,7 @@ impl StoffelRuntime {
         local_runner_path: Option<PathBuf>,
         inputs: Vec<(String, Value)>,
         client_inputs: Vec<(u64, Vec<Value>)>,
+        expected_clients: Option<usize>,
     ) -> Self {
         Self {
             program,
@@ -53,6 +56,7 @@ impl StoffelRuntime {
             local_runner_path,
             inputs,
             client_inputs,
+            expected_clients,
         }
     }
 
@@ -197,6 +201,7 @@ impl StoffelRuntime {
             network: self.network_summary()?,
             named_input_count: self.inputs.len(),
             client_input_count: self.client_inputs.len(),
+            expected_clients: self.expected_clients,
             local_runner_configured: self.local_runner_path.is_some(),
         })
     }
@@ -213,7 +218,19 @@ impl StoffelRuntime {
         &self.client_inputs
     }
 
+    pub fn configured_expected_clients(&self) -> Option<usize> {
+        self.expected_clients
+    }
+
     pub fn validate_client_inputs(&self) -> Result<()> {
+        if let Some(expected_clients) = self.expected_clients {
+            if expected_clients == 0 {
+                return Err(Error::Configuration(
+                    "expected_clients must be greater than 0".to_owned(),
+                ));
+            }
+            self.program.validate_expected_clients(expected_clients)?;
+        }
         self.program
             .validate_owned_client_inputs(&self.client_inputs)
     }
@@ -265,6 +282,12 @@ impl StoffelRuntime {
                 )
             })
             .collect();
+        self
+    }
+
+    /// Declare output-capable client slots `0..n-1` for local execution.
+    pub fn expected_clients(mut self, n: usize) -> Self {
+        self.expected_clients = Some(n);
         self
     }
 

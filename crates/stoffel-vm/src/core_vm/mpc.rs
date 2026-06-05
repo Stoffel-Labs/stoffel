@@ -33,6 +33,15 @@ impl VirtualMachine {
     pub fn clear_client_inputs(&self) {
         self.state.clear_client_inputs();
     }
+
+    /// Replace the VM-facing known client roster used by `ClientStore`.
+    pub fn set_client_roster<I>(&self, clients: I)
+    where
+        I: IntoIterator<Item = stoffelnet::network_utils::ClientId>,
+    {
+        self.state.set_client_roster(clients);
+    }
+
     pub(crate) fn client_input_store_for_async_engine<E: AsyncMpcEngine + ?Sized>(
         &self,
         engine: &E,

@@ -295,6 +295,9 @@ struct RunArgs {
         allow_hyphen_values = true
     )]
     client_inputs: Vec<ClientInputArg>,
+    /// Declare local output-capable client slots 0..N-1 for ClientStore programs.
+    #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
+    expected_clients: Option<usize>,
     /// Run on the local MPC simulator. This is the default unless --network or --config is set.
     #[arg(long)]
     local: bool,
@@ -838,6 +841,9 @@ async fn run(args: RunArgs) -> Result<()> {
         }
     }
     let mut builder = apply_run_inputs(run_source.builder, &args.inputs, &args.client_inputs)?;
+    if let Some(expected_clients) = args.expected_clients {
+        builder = builder.expected_clients(expected_clients);
+    }
     if let Some(path) = args.runner {
         builder = builder.local_runner_path(path);
     }
@@ -874,6 +880,9 @@ async fn run_network(args: RunArgs) -> Result<()> {
     validate_network_config_path(&config_path)?;
     if !args.client_inputs.is_empty() {
         anyhow::bail!("network execution accepts --input values for the configured client slot; --client-input is only used for local ClientStore runs");
+    }
+    if args.expected_clients.is_some() {
+        anyhow::bail!("network execution uses network/off-chain client configuration; --expected-clients is only used for local ClientStore runs");
     }
     let build = args.build.to_build_args();
     let run_source = run_builder(&build)?;
