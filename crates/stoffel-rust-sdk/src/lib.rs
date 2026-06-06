@@ -292,6 +292,15 @@ impl Stoffel {
     }
 
     /// Declare output-capable client slots `0..n-1` for local execution.
+    pub fn expected_output_clients(mut self, n: usize) -> Self {
+        self.expected_clients = Some(n);
+        self
+    }
+
+    /// Declare output-capable client slots `0..n-1` for local execution.
+    ///
+    /// Prefer [`Self::expected_output_clients`] for local ClientStore output
+    /// rosters. This alias is retained for compatibility.
     pub fn expected_clients(mut self, n: usize) -> Self {
         self.expected_clients = Some(n);
         self

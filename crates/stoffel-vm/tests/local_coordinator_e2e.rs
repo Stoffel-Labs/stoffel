@@ -282,7 +282,7 @@ fn local_runner_accepts_static_output_only_clients_without_inputs() {
 }
 
 #[test]
-fn local_runner_rejects_expected_clients_below_static_manifest_slots() {
+fn local_runner_rejects_expected_output_clients_below_static_manifest_slots() {
     let mut binary = CompiledBinary::from_vm_functions(&[VMFunction::new(
         "main".to_owned(),
         Vec::new(),
@@ -303,7 +303,7 @@ fn local_runner_rejects_expected_clients_below_static_manifest_slots() {
     };
 
     let err = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
-        .expected_clients(2)
+        .expected_output_clients(2)
         .build()
         .unwrap_err();
 

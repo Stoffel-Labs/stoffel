@@ -257,6 +257,7 @@ Run compiled bytecode or project tests:
 stoffel run target/debug/hello-mpc.stfb --entry main --input a=40 --input b=2
 stoffel run --input a=40 --input b=2
 stoffel run program.stfl --local --client-input 0=42 --parties 5 --threshold 1
+stoffel run program.stfl --local --expected-output-clients 2
 stoffel run target/debug/program.stfb --network --config offchain-client.toml --input x=42
 stoffel run target/debug/program.stfb --network --config party-network.toml --connect-timeout-ms 1000
 stoffel test
@@ -265,7 +266,10 @@ stoffel test --test selected --verbose
 
 `run` accepts `.stfl` source or `.stfb`/`.stflb` bytecode. By default it runs
 through the local MPC coordinator; `--local` is accepted as an explicit local
-mode selector. Use `--client-input SLOT=VALUE` for `ClientStore` programs.
+mode selector. Use `--client-input SLOT=VALUE` for `ClientStore` input
+providers. Use `--expected-output-clients N` to declare output-capable local
+client slots `0..N-1` for dynamic output loops or output-only runs; this does
+not synthesize client inputs.
 `--network --config` uses SDK network configuration: an off-chain client config
 executes through the coordinator/node RPC path, while a network config validates
 and connects to real node addresses.

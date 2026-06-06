@@ -319,7 +319,7 @@ impl LocalCoordinatorRunner {
         };
         if expected_clients == 0 {
             return Err(LocalCoordinatorRunnerError::Configuration(
-                "--expected-clients must be greater than 0".to_owned(),
+                "--expected-output-clients must be greater than 0".to_owned(),
             ));
         }
         let minimum = self
@@ -660,9 +660,13 @@ impl LocalCoordinatorRunnerBuilder {
         self
     }
 
-    pub fn expected_clients(mut self, expected_clients: usize) -> Self {
+    pub fn expected_output_clients(mut self, expected_clients: usize) -> Self {
         self.runner.expected_clients = Some(expected_clients);
         self
+    }
+
+    pub fn expected_clients(self, expected_clients: usize) -> Self {
+        self.expected_output_clients(expected_clients)
     }
 
     pub fn build(self) -> LocalCoordinatorRunnerResult<LocalCoordinatorRunner> {

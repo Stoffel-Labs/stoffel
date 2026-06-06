@@ -162,7 +162,7 @@ pub(crate) async fn execute_local_with_options(
         runner = runner.timeout(timeout);
     }
     if let Some(expected_clients) = runtime.configured_expected_clients() {
-        runner = runner.expected_clients(expected_clients);
+        runner = runner.expected_output_clients(expected_clients);
     }
     runner = runner.client_inputs(local_client_inputs);
 

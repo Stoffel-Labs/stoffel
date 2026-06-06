@@ -1463,7 +1463,7 @@ def main() -> int64:
 }
 
 #[test]
-fn runtime_accepts_explicit_expected_clients_for_dynamic_outputs() -> stoffel::Result<()> {
+fn runtime_accepts_explicit_expected_output_clients_for_dynamic_outputs() -> stoffel::Result<()> {
     let runtime = Stoffel::compile(
         r#"
 def main() -> int64:
@@ -1478,7 +1478,7 @@ def main() -> int64:
     )?
     .parties(5)
     .threshold(1)
-    .expected_clients(2)
+    .expected_output_clients(2)
     .build()?;
 
     assert_eq!(runtime.program().minimum_expected_clients(), 0);
