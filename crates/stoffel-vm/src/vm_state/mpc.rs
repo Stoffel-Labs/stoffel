@@ -73,6 +73,17 @@ impl VMState {
     pub(crate) fn client_store_len(&self) -> usize {
         self.mpc_runtime.client_store_len()
     }
+
+    #[inline]
+    pub(crate) fn input_client_count(&self) -> usize {
+        self.mpc_runtime.input_client_count()
+    }
+
+    #[inline]
+    pub(crate) fn output_client_count(&self) -> usize {
+        self.mpc_runtime.output_client_count()
+    }
+
     pub(crate) fn client_input_store(&self) -> Arc<crate::net::client_store::ClientInputStore> {
         self.mpc_runtime.client_store()
     }

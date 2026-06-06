@@ -499,7 +499,7 @@ def main() -> int64:
 #[test]
 fn bytecode_round_trip_supports_cli_compatible_load_path() -> stoffel::Result<()> {
     let dir = tempdir()?;
-    let bytecode_path = dir.path().join("program.stfb");
+    let bytecode_path = dir.path().join("program.stflb");
     let runtime = Stoffel::compile(ADD_SOURCE)?.build()?;
     let bytecode = runtime.to_bytecode()?;
     runtime.save_bytecode(&bytecode_path)?;
@@ -536,7 +536,7 @@ fn bytecode_round_trip_supports_cli_compatible_load_path() -> stoffel::Result<()
 #[test]
 fn bytecode_load_rejects_trailing_data() -> stoffel::Result<()> {
     let dir = tempdir()?;
-    let bytecode_path = dir.path().join("corrupt.stfb");
+    let bytecode_path = dir.path().join("corrupt.stflb");
     let runtime = Stoffel::compile(ADD_SOURCE)?.build()?;
     let mut bytecode = runtime.program().to_bytecode()?;
     bytecode.extend_from_slice(b"trailing");

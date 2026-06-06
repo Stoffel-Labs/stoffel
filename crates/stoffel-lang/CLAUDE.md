@@ -7,7 +7,7 @@ This file provides guidance to Claude Code when working with the Stoffel-Lang re
 `Stoffel-Lang` is the compiler for the Stoffel programming language. It compiles `.stfl` source files to bytecode compatible with StoffelVM. The language features modern syntax inspired by Rust, Python, and JavaScript, with strong static typing and type inference.
 
 **Crate name:** `stoffellang`
-**Output formats:** Text bytecode (`.bc`), binary bytecode (`.stfb`/`.stfbin`)
+**Output formats:** Text bytecode (`.bc`), binary bytecode (`.stflb`/`.stfbin`)
 **Primary consumers:** Stoffel CLI, all SDKs
 
 ## Development Commands
@@ -86,7 +86,7 @@ Code Generation (codegen.rs)
     ↓ Bytecode
 Binary Converter (binary_converter.rs)
     ↓
-Output (.stfb / .bc)
+Output (.stflb / .bc)
 ```
 
 ### Key Components
@@ -130,7 +130,7 @@ Bytecode generation from typed AST:
 
 ### `src/binary_converter.rs`
 Binary format serialization:
-- Converts bytecode to `.stfb` format
+- Converts bytecode to `.stflb` format
 - Compatible with StoffelVM binary loader
 - Includes function metadata, constants
 
@@ -218,7 +218,7 @@ cargo test test_name
 
 # Verify binary output with VM
 ./target/release/stoffellang -b tests/example.stfl
-stoffel-run tests/example.stfb
+stoffel-run tests/example.stflb
 ```
 
 ## Dependencies

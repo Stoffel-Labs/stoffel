@@ -397,7 +397,7 @@ such as `function_names()`, `total_instruction_count()`, and
 Use `runtime.program().summary()` for a serializable view of function counts,
 function names, bytecode backend, and ClientStore input/output metadata.
 For CLI-compatible bytecode artifacts, use `runtime.to_bytecode()` or
-`runtime.save_bytecode("program.stfb")`; these delegate to the underlying
+`runtime.save_bytecode("program.stflb")`; these delegate to the underlying
 `Program` serialization. Use `runtime.bytecode_summary()?` for a
 serde-friendly artifact summary that includes byte length and program metadata.
 

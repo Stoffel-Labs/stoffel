@@ -12,6 +12,14 @@ impl<'a> ForeignFunctionContext<'a> {
         self.services.client_store_len()
     }
 
+    pub(crate) fn input_client_count(&self) -> usize {
+        self.services.input_client_count()
+    }
+
+    pub(crate) fn output_client_count(&self) -> usize {
+        self.services.output_client_count()
+    }
+
     pub(crate) fn client_id_at_index(&self, index: ClientInputIndex) -> Option<ClientId> {
         self.services.client_id_at_index(index)
     }

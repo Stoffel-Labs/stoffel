@@ -170,6 +170,15 @@ impl MpcRuntimeState {
     pub(super) fn client_store_len(&self) -> usize {
         self.client_store.len()
     }
+
+    pub(super) fn input_client_count(&self) -> usize {
+        self.client_store.input_client_count()
+    }
+
+    pub(super) fn output_client_count(&self) -> usize {
+        self.client_store.output_client_count()
+    }
+
     pub(super) fn client_store(&self) -> Arc<ClientInputStore> {
         Arc::clone(&self.client_store)
     }

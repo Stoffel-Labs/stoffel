@@ -228,6 +228,10 @@ impl ForeignLocalStorageServices for VMState {
 pub(crate) trait ForeignMpcServices {
     fn client_store_len(&self) -> usize;
 
+    fn input_client_count(&self) -> usize;
+
+    fn output_client_count(&self) -> usize;
+
     fn client_id_at_index(&self, index: ClientInputIndex) -> Option<ClientId>;
 
     fn load_client_share(
@@ -356,6 +360,14 @@ pub(crate) trait ForeignMpcServices {
 impl ForeignMpcServices for VMState {
     fn client_store_len(&self) -> usize {
         VMState::client_store_len(self)
+    }
+
+    fn input_client_count(&self) -> usize {
+        VMState::input_client_count(self)
+    }
+
+    fn output_client_count(&self) -> usize {
+        VMState::output_client_count(self)
     }
 
     fn client_id_at_index(&self, index: ClientInputIndex) -> Option<ClientId> {

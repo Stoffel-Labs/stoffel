@@ -159,6 +159,16 @@ impl ClientInputStore {
         }
     }
 
+    /// Get the number of clients that have provided input material.
+    pub fn input_client_count(&self) -> usize {
+        self.entries.read().len()
+    }
+
+    /// Get the number of output-capable clients known to the VM.
+    pub fn output_client_count(&self) -> usize {
+        self.len()
+    }
+
     /// Check if the store is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0

@@ -156,6 +156,8 @@ fn client_roster_counts_output_only_clients() {
     store.set_client_roster([2, 0, 1]);
 
     assert_eq!(store.len(), 3);
+    assert_eq!(store.input_client_count(), 0);
+    assert_eq!(store.output_client_count(), 3);
     assert_eq!(store.client_id_at(ClientInputIndex::new(0)), Some(0));
     assert_eq!(store.client_id_at(ClientInputIndex::new(1)), Some(1));
     assert_eq!(store.client_id_at(ClientInputIndex::new(2)), Some(2));
@@ -173,6 +175,8 @@ fn stored_inputs_extend_client_roster_in_sorted_order() {
     store.store_client_input_bytes(0, vec![vec![7]]);
 
     assert_eq!(store.len(), 2);
+    assert_eq!(store.input_client_count(), 1);
+    assert_eq!(store.output_client_count(), 2);
     assert_eq!(store.client_ids(), vec![0, 2]);
     assert_eq!(store.client_id_at(ClientInputIndex::new(0)), Some(0));
     assert_eq!(store.client_id_at(ClientInputIndex::new(1)), Some(2));
@@ -186,6 +190,8 @@ fn replacing_inputs_preserves_output_only_roster_slots() {
     store.replace_client_shares([(0, vec![ClientShare::untyped_bytes(vec![7])])]);
 
     assert_eq!(store.len(), 2);
+    assert_eq!(store.input_client_count(), 1);
+    assert_eq!(store.output_client_count(), 2);
     assert_eq!(store.client_ids(), vec![0, 2]);
     assert_eq!(
         store

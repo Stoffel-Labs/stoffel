@@ -52,11 +52,11 @@ cargo build --release
 The compiler can generate binary files that are compatible with the StoffelVM:
 
 ```bash
-# Generate a VM-compatible binary (outputs to source.stfb by default)
+# Generate a VM-compatible binary (outputs to source.stflb by default)
 ./stoffellang -b path/to/source.stfl
 
 # Specify output file
-./stoffellang -b -o output.stfb path/to/source.stfl
+./stoffellang -b -o output.stflb path/to/source.stfl
 ```
 
 ## Language Examples

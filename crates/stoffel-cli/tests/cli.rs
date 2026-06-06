@@ -174,14 +174,14 @@ fn build_writes_bytecode_to_target() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .current_dir(temp.path())
-        .args(["build", "--output", "target/debug/app.stfb"])
+        .args(["build", "--output", "target/debug/app.stflb"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Built"))
         .stdout(predicate::str::contains("Bytecode size:"))
         .stdout(predicate::str::contains("Optimization: O2"));
 
-    assert!(temp.path().join("target/debug/app.stfb").exists());
+    assert!(temp.path().join("target/debug/app.stflb").exists());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -199,7 +199,7 @@ fn build_writes_bytecode_to_target() {
             "build",
             "--prod",
             "--output",
-            "target/release/prod-alias.stfb",
+            "target/release/prod-alias.stflb",
         ])
         .assert()
         .success()
@@ -213,7 +213,7 @@ fn build_writes_bytecode_to_target() {
             "compile",
             "--production",
             "--output",
-            "target/release/production-alias.stfb",
+            "target/release/production-alias.stflb",
         ])
         .assert()
         .success()
@@ -223,7 +223,7 @@ fn build_writes_bytecode_to_target() {
     let release_artifacts = fs::read_dir(temp.path().join("target/release"))
         .unwrap()
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("stfb"))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("stflb"))
         .collect::<Vec<_>>();
     assert!(!release_artifacts.is_empty());
 }
@@ -243,7 +243,7 @@ fn run_executes_bytecode_file() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .current_dir(temp.path())
-        .args(["build", "--output", "target/debug/app.stfb"])
+        .args(["build", "--output", "target/debug/app.stflb"])
         .assert()
         .success();
 
@@ -252,7 +252,7 @@ fn run_executes_bytecode_file() {
         .current_dir(temp.path())
         .args([
             "run",
-            "target/debug/app.stfb",
+            "target/debug/app.stflb",
             "--timeout-secs",
             LOCAL_MPC_TEST_TIMEOUT_SECS,
             "--input",
@@ -371,8 +371,8 @@ fn run_ignores_stray_bytecode_when_project_source_is_newer() {
     )
     .unwrap();
     fs::copy(
-        project.join("target/debug/app.stfb"),
-        project.join("target/debug/zzz.stfb"),
+        project.join("target/debug/app.stflb"),
+        project.join("target/debug/zzz.stflb"),
     )
     .unwrap();
 
@@ -694,7 +694,7 @@ fn dev_rejects_non_source_paths_and_invalid_poll_interval() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("dev")
-        .arg(project.join("target/debug/app.stfb"))
+        .arg(project.join("target/debug/app.stflb"))
         .arg("--once")
         .assert()
         .failure()
@@ -800,7 +800,7 @@ fn summary_flag_is_not_part_of_general_build_help() {
             .stdout(predicate::str::contains("Use -O3, -O 3, or --opt-level 3"))
             .stdout(predicate::str::contains("Accepts `-O3`").not())
             .stdout(predicate::str::contains(
-                "Write bytecode to this .stfb/.stflb file",
+                "Write bytecode to this .stflb file",
             ))
             .stdout(predicate::str::contains("aliases: --out"))
             .stdout(predicate::str::contains("aliases: --prod, --production"));
@@ -1020,11 +1020,11 @@ fn common_flag_aliases_work_or_explain_defaults() {
         .unwrap()
         .arg("build")
         .arg(temp.path())
-        .args(["--out", "target/debug/alias.stfb"])
+        .args(["--out", "target/debug/alias.stflb"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("alias.stfb"));
-    assert!(temp.path().join("target/debug/alias.stfb").exists());
+        .stdout(predicate::str::contains("alias.stflb"));
+    assert!(temp.path().join("target/debug/alias.stflb").exists());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -1130,7 +1130,7 @@ fn check_rejects_build_only_flags_at_parse_time() {
         let mut command = Command::cargo_bin("stoffel").unwrap();
         command.arg("check").arg(temp.path()).arg(flag);
         if flag == "--output" {
-            command.arg("target/debug/app.stfb");
+            command.arg("target/debug/app.stflb");
         }
         if flag == "--opt-level" {
             command.arg("3");
@@ -1253,7 +1253,7 @@ fn run_rejects_build_only_flags_and_honors_program_info() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .current_dir(temp.path())
-        .args(["run", "--output", "target/debug/app.stfb"])
+        .args(["run", "--output", "target/debug/app.stflb"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unexpected argument '--output'"));
@@ -2168,14 +2168,14 @@ fn compile_disassembles_bytecode() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .current_dir(temp.path())
-        .args(["compile", "-O2", "--output", "target/debug/app.stfb"])
+        .args(["compile", "-O2", "--output", "target/debug/app.stflb"])
         .assert()
         .success();
 
     Command::cargo_bin("stoffel")
         .unwrap()
         .current_dir(temp.path())
-        .args(["compile", "--disassemble", "target/debug/app.stfb"])
+        .args(["compile", "--disassemble", "target/debug/app.stflb"])
         .assert()
         .success()
         .stdout(predicate::str::contains("main"));
@@ -2184,20 +2184,20 @@ fn compile_disassembles_bytecode() {
         &[
             "compile",
             "--disassemble",
-            "target/debug/app.stfb",
+            "target/debug/app.stflb",
             "--output",
-            "target/debug/ignored.stfb",
+            "target/debug/ignored.stflb",
         ][..],
         &[
             "compile",
             "--disassemble",
-            "target/debug/app.stfb",
+            "target/debug/app.stflb",
             "--release",
         ][..],
         &[
             "compile",
             "--disassemble",
-            "target/debug/app.stfb",
+            "target/debug/app.stflb",
             "--parties",
             "5",
         ][..],
@@ -2233,7 +2233,7 @@ fn disassemble_rejects_source_files_with_actionable_error() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "--disassemble requires .stfb or .stflb bytecode",
+            "--disassemble requires .stflb bytecode",
         ));
 
     Command::cargo_bin("stoffel")
@@ -2243,7 +2243,7 @@ fn disassemble_rejects_source_files_with_actionable_error() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "--disassemble requires .stfb or .stflb bytecode",
+            "--disassemble requires .stflb bytecode",
         ));
 }
 
@@ -2273,10 +2273,10 @@ fn build_compiles_all_project_sources() {
     let built_files = fs::read_dir(temp.path().join("target/debug"))
         .unwrap()
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("stfb"))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("stflb"))
         .collect::<Vec<_>>();
     assert!(built_files.len() >= 2);
-    assert!(temp.path().join("target/debug/second.stfb").exists());
+    assert!(temp.path().join("target/debug/second.stflb").exists());
 }
 
 #[test]
@@ -2302,8 +2302,8 @@ fn source_and_bytecode_extensions_are_case_insensitive() {
         .arg(temp.path().join("src/upper.STFL"))
         .assert()
         .success()
-        .stdout(predicate::str::contains("upper.stfb"));
-    assert!(temp.path().join("target/debug/upper.stfb").exists());
+        .stdout(predicate::str::contains("upper.stflb"));
+    assert!(temp.path().join("target/debug/upper.stflb").exists());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -2322,8 +2322,12 @@ fn source_and_bytecode_extensions_are_case_insensitive() {
         .success()
         .stdout(predicate::str::contains("5"));
 
-    let upper_bytecode = temp.path().join("target/debug/UPPER_COPY.STFB");
-    fs::copy(temp.path().join("target/debug/upper.stfb"), &upper_bytecode).unwrap();
+    let upper_bytecode = temp.path().join("target/debug/UPPER_COPY.STFLB");
+    fs::copy(
+        temp.path().join("target/debug/upper.stflb"),
+        &upper_bytecode,
+    )
+    .unwrap();
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("run")
@@ -2372,8 +2376,8 @@ fn build_preserves_nested_source_paths_to_avoid_artifact_collisions() {
         .assert()
         .success();
 
-    assert!(temp.path().join("target/debug/a/calc.stfb").exists());
-    assert!(temp.path().join("target/debug/b/calc.stfb").exists());
+    assert!(temp.path().join("target/debug/a/calc.stflb").exists());
+    assert!(temp.path().join("target/debug/b/calc.stflb").exists());
 }
 
 #[test]
@@ -2394,7 +2398,7 @@ fn build_and_check_accept_project_folder_paths() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Built"));
-    assert!(project.join("target/debug/app.stfb").exists());
+    assert!(project.join("target/debug/app.stflb").exists());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -2447,7 +2451,7 @@ fn build_and_check_do_not_ignore_explicit_empty_source_directories() {
         .arg(temp.path().join("more-src"))
         .assert()
         .success()
-        .stdout(predicate::str::contains("extra.stfb"));
+        .stdout(predicate::str::contains("extra.stflb"));
 
     for command in ["build", "check"] {
         Command::cargo_bin("stoffel")
@@ -2482,18 +2486,18 @@ fn build_output_is_relative_to_project_root() {
         .current_dir(&workdir)
         .arg("build")
         .arg(&project)
-        .args(["--output", "target/debug/custom.stfb"])
+        .args(["--output", "target/debug/custom.stflb"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
             project
-                .join("target/debug/custom.stfb")
+                .join("target/debug/custom.stflb")
                 .display()
                 .to_string(),
         ));
 
-    assert!(project.join("target/debug/custom.stfb").exists());
-    assert!(!workdir.join("target/debug/custom.stfb").exists());
+    assert!(project.join("target/debug/custom.stflb").exists());
+    assert!(!workdir.join("target/debug/custom.stflb").exists());
 }
 
 #[test]
@@ -3006,7 +3010,7 @@ fn cli_mpc_overrides_reject_zero_values_before_execution() {
     let bytecode = fs::read_dir(temp.path().join("target/debug"))
         .unwrap()
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("stfb"))
+        .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("stflb"))
         .unwrap();
 
     Command::cargo_bin("stoffel")
@@ -3086,7 +3090,7 @@ fn explicit_wrong_file_types_report_actionable_errors() {
         .unwrap()
         .arg("build")
         .arg(temp.path())
-        .args(["--output", "target/debug/app.stfb"])
+        .args(["--output", "target/debug/app.stflb"])
         .assert()
         .success();
 
@@ -3101,7 +3105,7 @@ fn explicit_wrong_file_types_report_actionable_errors() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("check")
-        .arg(temp.path().join("target/debug/app.stfb"))
+        .arg(temp.path().join("target/debug/app.stflb"))
         .assert()
         .failure()
         .stderr(predicate::str::contains("expected a .stfl source file"));
@@ -3114,7 +3118,7 @@ fn explicit_wrong_file_types_report_actionable_errors() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "expected a .stfl source file, .stfb/.stflb bytecode file, or project directory",
+            "expected a .stfl source file, .stflb bytecode file, or project directory",
         ));
 
     for command in ["build", "check"] {
@@ -3187,7 +3191,7 @@ fn build_rejects_output_directory() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "--output must be a .stfb/.stflb bytecode file path",
+            "--output must be a .stflb bytecode file path",
         ));
 
     Command::cargo_bin("stoffel")
@@ -3197,9 +3201,7 @@ fn build_rejects_output_directory() {
         .args(["--output", "out.txt"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "--output must end in .stfb or .stflb",
-        ));
+        .stderr(predicate::str::contains("--output must end in .stflb"));
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -3208,12 +3210,10 @@ fn build_rejects_output_directory() {
         .args(["--output", "target/debug"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "--output must end in .stfb or .stflb",
-        ));
+        .stderr(predicate::str::contains("--output must end in .stflb"));
 
     let outside_output = format!(
-        "../{}-outside.stfb",
+        "../{}-outside.stflb",
         temp.path().file_name().unwrap().to_string_lossy()
     );
     Command::cargo_bin("stoffel")
@@ -3232,13 +3232,13 @@ fn build_rejects_output_directory() {
         .unwrap()
         .arg("build")
         .arg(temp.path())
-        .args(["--output", "src/generated.stfb"])
+        .args(["--output", "src/generated.stflb"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
             "--output must not write bytecode under src/",
         ));
-    assert!(!temp.path().join("src/generated.stfb").exists());
+    assert!(!temp.path().join("src/generated.stflb").exists());
 
     let parent_file = temp.path().join("parent-file");
     fs::write(&parent_file, "not a directory").unwrap();
@@ -3246,7 +3246,7 @@ fn build_rejects_output_directory() {
         .unwrap()
         .arg("build")
         .arg(temp.path())
-        .args(["--output", "parent-file/app.stfb"])
+        .args(["--output", "parent-file/app.stflb"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("--output parent path"))
@@ -3291,7 +3291,7 @@ fn run_missing_bytecode_artifact_suggests_building_first() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("run")
-        .arg(temp.path().join("target/debug/app.stfb"))
+        .arg(temp.path().join("target/debug/app.stflb"))
         .assert()
         .failure()
         .stderr(predicate::str::contains("does not exist"))
@@ -3303,7 +3303,7 @@ fn run_missing_bytecode_artifact_suggests_building_first() {
 #[test]
 fn run_invalid_bytecode_suggests_rebuilding_or_using_source() {
     let temp = TempDir::new().unwrap();
-    let bytecode = temp.path().join("bad.stfb");
+    let bytecode = temp.path().join("bad.stflb");
     fs::write(&bytecode, "not bytecode").unwrap();
 
     Command::cargo_bin("stoffel")
@@ -3329,7 +3329,7 @@ fn run_auto_discovered_invalid_bytecode_suggests_rebuilding() {
         .arg(&project)
         .assert()
         .success();
-    let bytecode = project.join("target/debug/app.stfb");
+    let bytecode = project.join("target/debug/app.stflb");
     fs::create_dir_all(bytecode.parent().unwrap()).unwrap();
     thread::sleep(Duration::from_secs(1));
     fs::write(&bytecode, "not bytecode").unwrap();
@@ -3636,7 +3636,7 @@ fn init_errors_explain_existing_project_vs_nonempty_directory() {
 
     for file_like in [
         temp.path().join("main.stfl"),
-        temp.path().join("program.stfb"),
+        temp.path().join("program.stflb"),
         temp.path().join("Stoffel.toml"),
         temp.path().join("README.md"),
     ] {
@@ -3873,8 +3873,8 @@ fn project_config_rejects_missing_or_unsafe_package_metadata() {
             .assert()
             .failure()
             .stderr(predicate::str::contains(expected));
-        assert!(!temp.path().join("target/debug/nested/app.stfb").exists());
-        assert!(!temp.path().join("target/debug/..stfb").exists());
+        assert!(!temp.path().join("target/debug/nested/app.stflb").exists());
+        assert!(!temp.path().join("target/debug/..stflb").exists());
     }
 }
 

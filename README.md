@@ -98,7 +98,9 @@ Stoffel VM registers the following general runtime builtins by default:
 - `call_closure`: Call a closure
 - `get_upvalue`: Read a captured upvalue from a closure
 - `set_upvalue`: Update a captured upvalue in a closure
-- `ClientStore.get_number_clients`: Get the number of connected clients
+- `ClientStore.get_number_clients`: Get the number of known local client slots
+- `ClientStore.get_number_input_clients`: Get the number of clients with input material
+- `ClientStore.get_number_output_clients`: Get the number of output-capable clients
 - `ClientStore.take_share`: Load a client share into the VM
 - `ClientStore.take_share_fixed`: Load a client fixed-point share into the VM
 - `MpcOutput.send_to_client`: Send a share result to a client
@@ -232,8 +234,8 @@ Compile project bytecode, validate source, or inspect bytecode:
 ```bash
 stoffel build
 stoffel check
-stoffel compile src/main.stfl -O2 --output target/debug/hello-mpc.stfb
-stoffel compile --disassemble target/debug/hello-mpc.stfb
+stoffel compile src/main.stfl -O2 --output target/debug/hello-mpc.stflb
+stoffel compile --disassemble target/debug/hello-mpc.stflb
 ```
 
 `build` and `compile` default to all `src/**/*.stfl` files when no source path is
@@ -254,17 +256,17 @@ then rebuilds and reruns whenever a `.stfl` file or project config changes. Use
 Run compiled bytecode or project tests:
 
 ```bash
-stoffel run target/debug/hello-mpc.stfb --entry main --input a=40 --input b=2
+stoffel run target/debug/hello-mpc.stflb --entry main --input a=40 --input b=2
 stoffel run --input a=40 --input b=2
 stoffel run program.stfl --local --client-input 0=42 --parties 5 --threshold 1
 stoffel run program.stfl --local --expected-output-clients 2
-stoffel run target/debug/program.stfb --network --config offchain-client.toml --input x=42
-stoffel run target/debug/program.stfb --network --config party-network.toml --connect-timeout-ms 1000
+stoffel run target/debug/program.stflb --network --config offchain-client.toml --input x=42
+stoffel run target/debug/program.stflb --network --config party-network.toml --connect-timeout-ms 1000
 stoffel test
 stoffel test --test selected --verbose
 ```
 
-`run` accepts `.stfl` source or `.stfb`/`.stflb` bytecode. By default it runs
+`run` accepts `.stfl` source or `.stflb` bytecode. By default it runs
 through the local MPC coordinator; `--local` is accepted as an explicit local
 mode selector. Use `--client-input SLOT=VALUE` for `ClientStore` input
 providers. Use `--expected-output-clients N` to declare output-capable local
@@ -293,7 +295,7 @@ project dependency update commands; use `--check` to inspect without changing
 files.
 
 The CLI reads `Stoffel.toml`, defaults to `src/main.stfl`, and writes bytecode to
-`target/debug/<package>.stfb` or `target/release/<package>.stfb`.
+`target/debug/<package>.stflb` or `target/release/<package>.stflb`.
 
 ## VM Runner CLI
 

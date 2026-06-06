@@ -22,6 +22,8 @@ pub(crate) const FUNCTION_NAMES: &[&str] = &[
     "len",
     "range",
     "ClientStore.get_number_clients",
+    "ClientStore.get_number_input_clients",
+    "ClientStore.get_number_output_clients",
     "ClientStore.take_share",
     "ClientStore.take_share_fixed",
     "LocalStorage.store",
@@ -229,6 +231,16 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     register_standard_builtin!("ClientStore.get_number_clients", |ctx| {
         let count = ctx.client_store_len();
         Ok(Value::I64(usize_to_vm_i64(count, "client count")?))
+    });
+
+    register_standard_builtin!("ClientStore.get_number_input_clients", |ctx| {
+        let count = ctx.input_client_count();
+        Ok(Value::I64(usize_to_vm_i64(count, "input client count")?))
+    });
+
+    register_standard_builtin!("ClientStore.get_number_output_clients", |ctx| {
+        let count = ctx.output_client_count();
+        Ok(Value::I64(usize_to_vm_i64(count, "output client count")?))
     });
 
     register_standard_builtin!("ClientStore.take_share", |ctx| {

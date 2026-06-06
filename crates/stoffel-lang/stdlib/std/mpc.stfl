@@ -4,6 +4,8 @@ builtin object ClientStore:
   def take_share(client_id: int64, share_id: int64) -> Share {.builtin.}:
   def take_share_fixed(client_id: int64, share_id: int64) -> Share {.builtin.}:
   def get_number_clients() -> int64 {.builtin.}:
+  def get_number_input_clients() -> int64 {.builtin.}:
+  def get_number_output_clients() -> int64 {.builtin.}:
 
 builtin object MpcOutput:
   def send_to_client[T](client_id: int64, value: T) -> bool {.builtin.}:

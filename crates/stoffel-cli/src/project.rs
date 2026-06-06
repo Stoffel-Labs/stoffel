@@ -174,7 +174,7 @@ impl Project {
         let profile = if release { "release" } else { "debug" };
         self.target_dir()
             .join(profile)
-            .join(format!("{}.stfb", self.config.package.name))
+            .join(format!("{}.stflb", self.config.package.name))
     }
 
     pub fn config(&self) -> &ProjectConfig {
@@ -284,7 +284,7 @@ impl Project {
             return self
                 .target_dir()
                 .join(profile)
-                .join(format!("{}.stfb", self.config.package.name));
+                .join(format!("{}.stflb", self.config.package.name));
         }
         if let Ok(relative) = source_path.strip_prefix(self.source_dir()) {
             if relative
@@ -295,7 +295,7 @@ impl Project {
                     .target_dir()
                     .join(profile)
                     .join(relative)
-                    .with_extension("stfb");
+                    .with_extension("stflb");
             }
         }
         let name = if stem == "main" {
@@ -303,17 +303,15 @@ impl Project {
         } else {
             stem
         };
-        self.target_dir().join(profile).join(format!("{name}.stfb"))
+        self.target_dir()
+            .join(profile)
+            .join(format!("{name}.stflb"))
     }
 
     pub fn find_bytecode(&self, release: bool) -> Result<Option<PathBuf>> {
         let preferred = self.default_bytecode_path(release);
         if self.is_fresh_bytecode(&preferred)? {
             return Ok(Some(preferred));
-        }
-        let legacy_preferred = preferred.with_extension("stflb");
-        if self.is_fresh_bytecode(&legacy_preferred)? {
-            return Ok(Some(legacy_preferred));
         }
         Ok(None)
     }
@@ -361,10 +359,7 @@ fn validate_init_project_dir_path(path: &Path) -> Result<()> {
     let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
         return Ok(());
     };
-    if matches!(
-        extension,
-        "stfl" | "stfb" | "stflb" | "toml" | "md" | "txt" | "json"
-    ) {
+    if matches!(extension, "stfl" | "stflb" | "toml" | "md" | "txt" | "json") {
         anyhow::bail!(
             "{} looks like a file path; `stoffel init` creates a project directory. Pass a directory path such as {}",
             path.display(),

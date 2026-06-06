@@ -117,10 +117,10 @@ struct BuildArgs {
     /// Catch extra positional paths so we can explain that compile accepts one path.
     #[arg(value_name = "EXTRA_PATH", hide = true)]
     extra_paths: Vec<PathBuf>,
-    /// Write bytecode to this .stfb/.stflb file. Only valid when one source file is selected.
+    /// Write bytecode to this .stflb file. Only valid when one source file is selected.
     #[arg(short, long, visible_alias = "out")]
     output: Option<PathBuf>,
-    /// Print instructions from an existing .stfb/.stflb bytecode file instead of compiling source.
+    /// Print instructions from an existing .stflb bytecode file instead of compiling source.
     #[arg(long)]
     disassemble: bool,
     /// Legacy flag from the old CLI. Modern compile writes bytecode by default.
@@ -213,7 +213,7 @@ struct ProjectBuildArgs {
     /// Catch extra positional paths so we can explain that build accepts one path.
     #[arg(value_name = "EXTRA_PATH", hide = true)]
     extra_paths: Vec<PathBuf>,
-    /// Write bytecode to this .stfb/.stflb file. Only valid when one source file is selected.
+    /// Write bytecode to this .stflb file. Only valid when one source file is selected.
     #[arg(short, long, visible_alias = "out")]
     output: Option<PathBuf>,
     /// Print compiler intermediate representation for debugging.
@@ -343,7 +343,7 @@ struct RunArgs {
 
 #[derive(Debug, Args, Clone)]
 struct RunBuildArgs {
-    /// Project directory, .stfl source file, or .stfb/.stflb bytecode file to run. Defaults to the current project.
+    /// Project directory, .stfl source file, or .stflb bytecode file to run. Defaults to the current project.
     path: Option<PathBuf>,
     /// Print compiler intermediate representation when source must be compiled before running.
     #[arg(long)]
@@ -792,7 +792,7 @@ fn build(command: &str, args: BuildArgs) -> Result<()> {
     validate_single_build_path_arg(command, args.path.as_deref(), &args.extra_paths)?;
     if args.binary {
         anyhow::bail!(
-            "{command} writes bytecode by default; remove -b/--binary. Use --output <FILE.stfb> to choose the bytecode file path."
+            "{command} writes bytecode by default; remove -b/--binary. Use --output <FILE.stflb> to choose the bytecode file path."
         );
     }
     if args.disassemble {
@@ -1714,7 +1714,7 @@ fn run_builder(args: &BuildArgs) -> Result<RunSource> {
         if path.is_dir() {
             if !is_project_root_dir(&project, path)? {
                 anyhow::bail!(
-                    "stoffel run expected a project directory containing Stoffel.toml, a .stfl source file, or a .stfb/.stflb bytecode file; got directory {}. To run the current project, pass {}",
+                    "stoffel run expected a project directory containing Stoffel.toml, a .stfl source file, or a .stflb bytecode file; got directory {}. To run the current project, pass {}",
                     path.display(),
                     project.root().display()
                 );
@@ -1930,7 +1930,7 @@ fn ensure_run_path(path: &Path) -> Result<()> {
     }
     if !is_source_path(path) {
         anyhow::bail!(
-            "expected a .stfl source file, .stfb/.stflb bytecode file, or project directory; got {}",
+            "expected a .stfl source file, .stflb bytecode file, or project directory; got {}",
             path.display()
         );
     }
@@ -1960,13 +1960,13 @@ fn project_relative_output(project: &Project, output: PathBuf) -> PathBuf {
 fn validate_bytecode_output_path(project: &Project, output: &Path) -> Result<()> {
     if output.is_dir() {
         anyhow::bail!(
-            "--output must be a .stfb/.stflb bytecode file path, but {} is a directory",
+            "--output must be a .stflb bytecode file path, but {} is a directory",
             output.display()
         );
     }
     if !is_bytecode_path(output) {
         anyhow::bail!(
-            "--output must end in .stfb or .stflb for bytecode output; got {}",
+            "--output must end in .stflb for bytecode output; got {}",
             output.display()
         );
     }
@@ -2005,7 +2005,7 @@ fn disassemble(args: BuildArgs) -> Result<()> {
         .context("--disassemble requires a bytecode path")?;
     if !is_bytecode_path(path) {
         anyhow::bail!(
-            "--disassemble requires .stfb or .stflb bytecode; run `stoffel build` first or omit --disassemble to compile source"
+            "--disassemble requires .stflb bytecode; run `stoffel build` first or omit --disassemble to compile source"
         );
     }
     if !path.exists() {
@@ -2211,9 +2211,7 @@ fn ensure_writable_project_dir(path: &Path, force: bool) -> Result<()> {
 fn is_bytecode_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("stflb") || extension.eq_ignore_ascii_case("stfb")
-        })
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("stflb"))
 }
 
 fn is_source_path(path: &Path) -> bool {

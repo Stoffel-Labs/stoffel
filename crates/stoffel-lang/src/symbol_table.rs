@@ -939,6 +939,20 @@ mod tests {
         let method = get_number_clients.unwrap();
         assert!(method.parameters.is_empty());
         assert_eq!(method.return_type, SymbolType::Int64);
+
+        let get_number_input_clients =
+            table.lookup_builtin_method("ClientStore", "get_number_input_clients");
+        assert!(get_number_input_clients.is_some());
+        let method = get_number_input_clients.unwrap();
+        assert!(method.parameters.is_empty());
+        assert_eq!(method.return_type, SymbolType::Int64);
+
+        let get_number_output_clients =
+            table.lookup_builtin_method("ClientStore", "get_number_output_clients");
+        assert!(get_number_output_clients.is_some());
+        let method = get_number_output_clients.unwrap();
+        assert!(method.parameters.is_empty());
+        assert_eq!(method.return_type, SymbolType::Int64);
     }
 
     #[test]
@@ -1202,7 +1216,13 @@ mod tests {
         let table = SymbolTable::new();
         let client_store = table.lookup_builtin_object("ClientStore").unwrap();
 
-        let expected_methods = ["take_share", "take_share_fixed", "get_number_clients"];
+        let expected_methods = [
+            "take_share",
+            "take_share_fixed",
+            "get_number_clients",
+            "get_number_input_clients",
+            "get_number_output_clients",
+        ];
 
         for method_name in expected_methods {
             assert!(
@@ -1211,7 +1231,7 @@ mod tests {
                 method_name
             );
         }
-        assert_eq!(client_store.methods.len(), 3);
+        assert_eq!(client_store.methods.len(), 5);
     }
 
     #[test]

@@ -7,7 +7,7 @@ fn main() -> stoffel::Result<()> {
     let runtime = Stoffel::compile(source)?.build()?;
 
     let bytecode_path = std::env::temp_dir().join(format!(
-        "stoffel-sdk-bytecode-{}-{}.stfb",
+        "stoffel-sdk-bytecode-{}-{}.stflb",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
