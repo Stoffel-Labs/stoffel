@@ -298,7 +298,6 @@ struct RunArgs {
     /// Declare local output-capable client slots 0..N-1 for ClientStore programs.
     #[arg(
         long = "expected-output-clients",
-        visible_alias = "expected-clients",
         value_parser = parse_positive_usize_arg,
         allow_hyphen_values = true
     )]

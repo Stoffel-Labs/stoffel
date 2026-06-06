@@ -601,9 +601,10 @@ impl LocalCoordinatorRunner {
     fn max_client_input_count(&self) -> usize {
         self.client_inputs
             .iter()
+            .filter(|client| !client.values.is_empty())
             .map(|client| client.values.len())
             .max()
-            .unwrap_or(1)
+            .unwrap_or(0)
     }
 }
 
@@ -663,10 +664,6 @@ impl LocalCoordinatorRunnerBuilder {
     pub fn expected_output_clients(mut self, expected_clients: usize) -> Self {
         self.runner.expected_clients = Some(expected_clients);
         self
-    }
-
-    pub fn expected_clients(self, expected_clients: usize) -> Self {
-        self.expected_output_clients(expected_clients)
     }
 
     pub fn build(self) -> LocalCoordinatorRunnerResult<LocalCoordinatorRunner> {
@@ -1296,7 +1293,7 @@ mod tests {
     #[test]
     fn expected_clients_create_output_identities_for_dynamic_outputs() {
         let runner = test_runner(CompiledBinary::new())
-            .expected_clients(2)
+            .expected_output_clients(2)
             .build()
             .expect("runner");
 
@@ -1328,7 +1325,7 @@ mod tests {
         }];
 
         let runner = test_runner(binary)
-            .expected_clients(2)
+            .expected_output_clients(2)
             .client_input(0, [42])
             .build()
             .expect("runner");

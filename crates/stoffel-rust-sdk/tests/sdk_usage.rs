@@ -1439,7 +1439,7 @@ def main() -> int64:
 }
 
 #[test]
-fn runtime_rejects_expected_clients_below_static_manifest_slots() -> stoffel::Result<()> {
+fn runtime_rejects_expected_output_clients_below_static_manifest_slots() -> stoffel::Result<()> {
     let error = Stoffel::compile(
         r#"
 def main() -> int64:
@@ -1450,7 +1450,7 @@ def main() -> int64:
     )?
     .parties(5)
     .threshold(1)
-    .expected_clients(1)
+    .expected_output_clients(1)
     .build()
     .unwrap_err();
 

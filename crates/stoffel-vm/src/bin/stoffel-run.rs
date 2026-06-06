@@ -933,6 +933,31 @@ fn normalize_client_ids(mut ids: Vec<ClientId>) -> Vec<ClientId> {
     ids.dedup();
     ids
 }
+
+fn input_client_ids_from_output_ids(
+    output_ids: &[Vec<u8>],
+    client_roster: &[usize],
+    client_input_slots: &[usize],
+    client_input_count: usize,
+) -> Vec<Vec<u8>> {
+    if client_input_count == 0 {
+        return Vec::new();
+    }
+    if client_input_slots.is_empty() {
+        return output_ids.to_vec();
+    }
+
+    let input_slots = client_input_slots.iter().copied().collect::<HashSet<_>>();
+    output_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, client_id)| {
+            let slot = client_roster.get(ordinal).copied().unwrap_or(ordinal);
+            input_slots.contains(&slot).then(|| client_id.clone())
+        })
+        .collect()
+}
+
 fn encode_client_set_sync(msg: &ClientSetSyncMessage) -> Result<Vec<u8>, String> {
     let payload = bincode::serialize(msg)
         .map_err(|e| format!("Failed to serialize client-set sync payload: {}", e))?;
@@ -4178,6 +4203,7 @@ async fn main() {
     let mut coord_opt: Option<HbOffChainCoordinator<ark_bls12_381::Fr>> = None;
     let mut node_rpc_opt: Option<HbOffChainNodeRpcServer<ark_bls12_381::Fr>> = None;
     let mut input_ids: Vec<Vec<u8>> = Vec::new();
+    let mut output_ids: Vec<Vec<u8>> = Vec::new();
     let mut on_chain_input_ids: Vec<Address> = Vec::new();
     let mut on_chain_output_clients: Vec<(Vec<u8>, Address)> = Vec::new();
     let mut hb_bls12381_coord_engine: Option<
@@ -4252,10 +4278,17 @@ async fn main() {
             });
             coord_opt = Some(coord);
 
-            input_ids = expected_clients
+            output_ids = expected_clients
                 .iter()
+                .filter(|path| !path.trim().is_empty())
                 .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
                 .collect();
+            input_ids = input_client_ids_from_output_ids(
+                &output_ids,
+                &client_roster,
+                &client_input_slots,
+                client_input_count,
+            );
 
             if let Some(ref rpc) = rpc_addr {
                 let node_rpc = HbOffChainNodeRpcServer::<ark_bls12_381::Fr>::start(
@@ -4372,7 +4405,7 @@ async fn main() {
                             t,
                             instance_id,
                             expected_client_count: None, // coordinator handles clients
-                            coordinator_client_count_hint: input_ids.len(),
+                            coordinator_client_count_hint: output_ids.len(),
                             client_input_count,
                             program_hash: program_id,
                             preproc_store_path: preproc_store_path.as_deref(),
@@ -4777,7 +4810,7 @@ async fn main() {
                 if let Some(ref mut coord) = coord_opt {
                     handled_by_coordinator = true;
                     // Coordinator output delivery
-                    let output_share = if input_ids.is_empty() {
+                    let output_share = if output_ids.is_empty() {
                         None
                     } else {
                         coordinator_output_share_bytes(&mut vm, &result)
@@ -4791,7 +4824,7 @@ async fn main() {
                     if output_share.is_some() || !captured_outputs.is_empty() {
                         let mut output_shares_by_client: Vec<
                             Vec<HbCoordinatorShare<ark_bls12_381::Fr>>,
-                        > = vec![Vec::new(); input_ids.len()];
+                        > = vec![Vec::new(); output_ids.len()];
 
                         if let Some(output_share) = output_share {
                             let share: HbCoordinatorShare<ark_bls12_381::Fr> =
@@ -4826,7 +4859,7 @@ async fn main() {
                             .unwrap();
 
                         for (cid, output_shares) in
-                            input_ids.iter().zip(output_shares_by_client.into_iter())
+                            output_ids.iter().zip(output_shares_by_client.into_iter())
                         {
                             if output_shares.is_empty() {
                                 continue;
@@ -5034,8 +5067,8 @@ Examples:
 #[cfg(test)]
 mod tests {
     use super::{
-        field_outputs_to_hex, format_coordinator_outputs, render_fixed_point_i64,
-        CoordinatorOutputFormat,
+        field_outputs_to_hex, format_coordinator_outputs, input_client_ids_from_output_ids,
+        render_fixed_point_i64, CoordinatorOutputFormat,
     };
     use stoffel_vm::net::MpcCurveConfig;
 
@@ -5046,6 +5079,33 @@ mod tests {
             format_coordinator_outputs(&outputs, CoordinatorOutputFormat::FieldInteger),
             "[-10]"
         );
+    }
+
+    #[test]
+    fn output_only_clients_do_not_become_input_clients() {
+        let output_ids = vec![vec![10], vec![11], vec![12]];
+
+        let input_ids = input_client_ids_from_output_ids(&output_ids, &[0, 1, 2], &[], 0);
+
+        assert!(input_ids.is_empty());
+    }
+
+    #[test]
+    fn client_input_slots_select_sparse_input_clients_from_output_roster() {
+        let output_ids = vec![vec![20], vec![21], vec![22]];
+
+        let input_ids = input_client_ids_from_output_ids(&output_ids, &[0, 2, 5], &[2], 1);
+
+        assert_eq!(input_ids, vec![vec![21]]);
+    }
+
+    #[test]
+    fn missing_client_input_slots_preserves_legacy_all_clients_are_inputs() {
+        let output_ids = vec![vec![30], vec![31]];
+
+        let input_ids = input_client_ids_from_output_ids(&output_ids, &[], &[], 1);
+
+        assert_eq!(input_ids, output_ids);
     }
 
     #[test]

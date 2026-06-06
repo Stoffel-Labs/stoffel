@@ -757,7 +757,7 @@ fn run_help_exposes_mpc_network_flags() {
         .stdout(predicate::str::contains("--local"))
         .stdout(predicate::str::contains("--client-input"))
         .stdout(predicate::str::contains("--expected-output-clients"))
-        .stdout(predicate::str::contains("aliases: --expected-clients"))
+        .stdout(predicate::str::contains("--expected-clients").not())
         .stdout(predicate::str::contains("--connect-timeout-ms"))
         .stdout(predicate::str::contains("--program-info"))
         .stdout(predicate::str::contains("aliases: --inspect, --info"))
@@ -862,14 +862,14 @@ fn run_rejects_zero_expected_output_clients() {
 }
 
 #[test]
-fn run_accepts_legacy_expected_clients_alias_validation() {
+fn run_rejects_legacy_expected_clients_flag() {
     Command::cargo_bin("stoffel")
         .unwrap()
-        .args(["run", "--expected-clients", "0"])
+        .args(["run", "--expected-clients", "1"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "0 is not valid here; use a positive whole number",
+            "unexpected argument '--expected-clients'",
         ));
 }
 
