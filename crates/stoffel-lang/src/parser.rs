@@ -1151,7 +1151,7 @@ impl<'a> Parser<'a> {
                 kind: TokenKind::Operator(op),
                 ..
             }) => match op.as_str() {
-                "or" => 1,
+                "or" | "xor" => 1,
                 "and" => 2,
                 "==" | "!=" | "<" | "<=" | ">" | ">=" | "is" | "in" => 3, // Comparison operators
                 ".." => 4,                                                // Range operator

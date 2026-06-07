@@ -8,7 +8,7 @@ use crate::net::mpc_engine::{
 use crate::net::share_runtime::ensure_matching_share_data_format;
 use crate::runtime_hooks::{HookCallTarget, HookEvent};
 use crate::runtime_instruction::{RuntimeBinaryOp, RuntimeInstruction, RuntimeRegister};
-use crate::runtime_value_ops::matching_share_pair;
+use crate::runtime_value_ops::{bool_or_data, bool_xor_data, matching_share_pair};
 use crate::value_conversions::{u64_to_vm_i64, usize_to_vm_i64};
 use stoffel_vm_types::core_types::{
     ClearShareInput, ClearShareValue, ShareData, ShareType, TableRef, Value,
@@ -24,6 +24,13 @@ pub(super) enum PendingMpcOperation {
         dest: RuntimeRegister,
     },
     Multiply {
+        share_type: ShareType,
+        left_data: ShareData,
+        right_data: ShareData,
+        dest: RuntimeRegister,
+    },
+    BooleanBit {
+        op: RuntimeBinaryOp,
         share_type: ShareType,
         left_data: ShareData,
         right_data: ShareData,
@@ -48,6 +55,14 @@ pub(super) enum CompletedMpcOperation {
     Multiply {
         share_type: ShareType,
         share_data: ShareData,
+        dest: RuntimeRegister,
+    },
+    BooleanBit {
+        op: RuntimeBinaryOp,
+        share_type: ShareType,
+        left_data: ShareData,
+        right_data: ShareData,
+        product_data: ShareData,
         dest: RuntimeRegister,
     },
     Open {
@@ -223,6 +238,40 @@ impl PendingMpcOperation {
         }))
     }
 
+    fn boolean_bit_share(
+        op: RuntimeBinaryOp,
+        dest: RuntimeRegister,
+        left: Value,
+        right: Value,
+    ) -> VmResult<Option<PendingMpcOperation>> {
+        let operation = match op {
+            RuntimeBinaryOp::BitAnd => "AND",
+            RuntimeBinaryOp::BitOr => "OR",
+            RuntimeBinaryOp::BitXor => "XOR",
+            _ => return Ok(None),
+        };
+        let Some(pair) = matching_share_pair(operation, &left, &right)? else {
+            return Ok(None);
+        };
+
+        if pair.share_type != ShareType::boolean() {
+            return Ok(None);
+        }
+
+        ensure_matching_share_data_format(
+            "async_boolean_bit_share",
+            pair.left_data,
+            pair.right_data,
+        )?;
+        Ok(Some(PendingMpcOperation::BooleanBit {
+            op,
+            share_type: pair.share_type,
+            left_data: pair.left_data.clone(),
+            right_data: pair.right_data.clone(),
+            dest,
+        }))
+    }
+
     pub(super) async fn execute_async<E: AsyncMpcEngine + ?Sized>(
         self,
         engine: &E,
@@ -260,6 +309,27 @@ impl PendingMpcOperation {
                     dest,
                 })
             }
+            PendingMpcOperation::BooleanBit {
+                op,
+                share_type,
+                left_data,
+                right_data,
+                dest,
+            } => {
+                let product_data = engine
+                    .multiply_share_async(share_type, left_data.as_bytes(), right_data.as_bytes())
+                    .await
+                    .map_mpc_backend_err("async_boolean_bit_share")?;
+
+                Ok(CompletedMpcOperation::BooleanBit {
+                    op,
+                    share_type,
+                    left_data,
+                    right_data,
+                    product_data,
+                    dest,
+                })
+            }
             PendingMpcOperation::Open {
                 share_type,
                 share_data,
@@ -289,7 +359,7 @@ impl PendingMpcOperation {
 
         match self {
             PendingMpcOperation::Input { .. } => {}
-            PendingMpcOperation::Multiply { .. } => {
+            PendingMpcOperation::Multiply { .. } | PendingMpcOperation::BooleanBit { .. } => {
                 engine
                     .multiplication_ops()
                     .map_mpc_backend_err("multiplication_ops")?;
@@ -599,6 +669,17 @@ impl VMState {
                 let (left, right) = self.resolve_register_pair(*lhs, *rhs)?.into_values();
                 PendingMpcOperation::multiply_share(*dest, left, right)
             }
+            RuntimeInstruction::Binary {
+                op: op @ (RuntimeBinaryOp::BitAnd
+                | RuntimeBinaryOp::BitOr
+                | RuntimeBinaryOp::BitXor),
+                dest,
+                lhs,
+                rhs,
+            } => {
+                let (left, right) = self.resolve_register_pair(*lhs, *rhs)?.into_values();
+                PendingMpcOperation::boolean_bit_share(*op, *dest, left, right)
+            }
             RuntimeInstruction::Call { function } => {
                 self.plan_async_mpc_builtin_call(function, hooks_enabled)
             }
@@ -662,6 +743,45 @@ impl VMState {
                 share_data,
                 dest,
             } => {
+                self.write_current_register(
+                    dest,
+                    Value::Share(share_type, share_data),
+                    hooks_enabled,
+                )?;
+                Ok(())
+            }
+            CompletedMpcOperation::BooleanBit {
+                op,
+                share_type,
+                left_data,
+                right_data,
+                product_data,
+                dest,
+            } => {
+                let share_runtime = || self.share_runtime().map_err(Into::into);
+                let share_data = match op {
+                    RuntimeBinaryOp::BitAnd => product_data,
+                    RuntimeBinaryOp::BitOr => bool_or_data(
+                        &share_runtime,
+                        share_type,
+                        &left_data,
+                        &right_data,
+                        &product_data,
+                    )?,
+                    RuntimeBinaryOp::BitXor => bool_xor_data(
+                        &share_runtime,
+                        share_type,
+                        &left_data,
+                        &right_data,
+                        &product_data,
+                    )?,
+                    _ => {
+                        return Err(VmError::Message(
+                            "completed boolean bit operation used a non-bitwise opcode"
+                                .to_string(),
+                        ))
+                    }
+                };
                 self.write_current_register(
                     dest,
                     Value::Share(share_type, share_data),

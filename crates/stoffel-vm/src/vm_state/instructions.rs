@@ -959,8 +959,10 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, _| {
-            Ok(runtime_value_ops::bit_and(left, right)?)
+        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
+            Ok(runtime_value_ops::bit_and(left, right, &|| {
+                state.share_runtime().map_err(Into::into)
+            })?)
         })?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
@@ -985,8 +987,10 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, _| {
-            Ok(runtime_value_ops::bit_or(left, right)?)
+        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
+            Ok(runtime_value_ops::bit_or(left, right, &|| {
+                state.share_runtime().map_err(Into::into)
+            })?)
         })?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
@@ -1011,8 +1015,10 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, _| {
-            Ok(runtime_value_ops::bit_xor(left, right)?)
+        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
+            Ok(runtime_value_ops::bit_xor(left, right, &|| {
+                state.share_runtime().map_err(Into::into)
+            })?)
         })?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
@@ -1029,8 +1035,11 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value =
-            self.with_resolved_register(src, |value, _| Ok(runtime_value_ops::bit_not(value)?))?;
+        let result_value = self.with_resolved_register(src, |value, state| {
+            Ok(runtime_value_ops::bit_not(value, &|| {
+                state.share_runtime().map_err(Into::into)
+            })?)
+        })?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
         Ok(())

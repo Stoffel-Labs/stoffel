@@ -9,8 +9,8 @@ pub(crate) use arithmetic::{
     try_clear_sub,
 };
 pub(crate) use bitwise::{
-    bit_and, bit_not, bit_or, bit_xor, shl, shr, try_clear_bit_and, try_clear_bit_not,
-    try_clear_bit_or, try_clear_bit_xor, try_clear_shl, try_clear_shr,
+    bit_and, bit_not, bit_or, bit_xor, bool_or_data, bool_xor_data, shl, shr, try_clear_bit_and,
+    try_clear_bit_not, try_clear_bit_or, try_clear_bit_xor, try_clear_shl, try_clear_shr,
 };
 pub(crate) use compare::{compare, try_clear_compare};
 pub(crate) use error::ValueOpError;

@@ -155,19 +155,20 @@ fn unsupported_secret_bit_ops_classify_any_share_type() {
         ShareData::Opaque(vec![1]),
     );
 
-    let err = bit_and(&fixed_share, &Value::Bool(true))
+    let err = bit_and(&fixed_share, &Value::Bool(true), &unavailable_runtime)
         .expect_err("secret shares need explicit bitwise protocols");
     assert!(err
         .to_string()
-        .contains("Bitwise AND is not supported on secret shares"));
+        .contains("Bitwise AND is only supported on secret bool shares"));
 
     let err = shl(&Value::I64(1), &fixed_share).expect_err("secret shift amounts are unsupported");
     assert!(err
         .to_string()
         .contains("Left shift is not supported on secret shares"));
 
-    let err = bit_not(&fixed_share).expect_err("secret bitwise NOT is unsupported");
+    let err = bit_not(&fixed_share, &unavailable_runtime)
+        .expect_err("secret bitwise NOT is unsupported");
     assert!(err
         .to_string()
-        .contains("Bitwise NOT is not supported on secret shares"));
+        .contains("Bitwise NOT is only supported on secret bool shares"));
 }

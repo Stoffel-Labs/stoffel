@@ -1,50 +1,101 @@
-use super::error::{type_error, unsupported, ValueOpError, ValueOpResult};
-use super::share_operands::contains_share_operand;
-use stoffel_vm_types::core_types::Value;
+use super::error::{type_error, unsupported, ShareRuntimeProvider, ValueOpError, ValueOpResult};
+use super::share_operands::{contains_share_operand, matching_share_pair};
+use stoffel_vm_types::core_types::{ShareData, ShareType, Value};
 
-pub(crate) fn bit_and(left: &Value, right: &Value) -> ValueOpResult<Value> {
+pub(crate) fn bit_and(
+    left: &Value,
+    right: &Value,
+    share_runtime: ShareRuntimeProvider<'_>,
+) -> ValueOpResult<Value> {
     if let Some(result) = try_clear_bit_and(left, right) {
         return result;
     }
 
+    if let Some(pair) = matching_share_pair("AND", left, right)? {
+        ensure_secret_bool(pair.share_type, "Bitwise AND")?;
+        let data =
+            share_runtime()?.multiply_share_data(pair.share_type, pair.left_data, pair.right_data)?;
+        return Ok(Value::Share(pair.share_type, data));
+    }
+
     if contains_share_operand(left, right) {
-        unsupported("Bitwise AND is not supported on secret shares")
+        unsupported("Bitwise AND is only supported on secret bool shares")
     } else {
         type_error("AND")
     }
 }
 
-pub(crate) fn bit_or(left: &Value, right: &Value) -> ValueOpResult<Value> {
+pub(crate) fn bit_or(
+    left: &Value,
+    right: &Value,
+    share_runtime: ShareRuntimeProvider<'_>,
+) -> ValueOpResult<Value> {
     if let Some(result) = try_clear_bit_or(left, right) {
         return result;
     }
 
+    if let Some(pair) = matching_share_pair("OR", left, right)? {
+        ensure_secret_bool(pair.share_type, "Bitwise OR")?;
+        let product =
+            share_runtime()?.multiply_share_data(pair.share_type, pair.left_data, pair.right_data)?;
+        let data = bool_or_data(
+            share_runtime,
+            pair.share_type,
+            pair.left_data,
+            pair.right_data,
+            &product,
+        )?;
+        return Ok(Value::Share(pair.share_type, data));
+    }
+
     if contains_share_operand(left, right) {
-        unsupported("Bitwise OR is not supported on secret shares")
+        unsupported("Bitwise OR is only supported on secret bool shares")
     } else {
         type_error("OR")
     }
 }
 
-pub(crate) fn bit_xor(left: &Value, right: &Value) -> ValueOpResult<Value> {
+pub(crate) fn bit_xor(
+    left: &Value,
+    right: &Value,
+    share_runtime: ShareRuntimeProvider<'_>,
+) -> ValueOpResult<Value> {
     if let Some(result) = try_clear_bit_xor(left, right) {
         return result;
     }
 
+    if let Some(pair) = matching_share_pair("XOR", left, right)? {
+        ensure_secret_bool(pair.share_type, "Bitwise XOR")?;
+        let product =
+            share_runtime()?.multiply_share_data(pair.share_type, pair.left_data, pair.right_data)?;
+        let data = bool_xor_data(
+            share_runtime,
+            pair.share_type,
+            pair.left_data,
+            pair.right_data,
+            &product,
+        )?;
+        return Ok(Value::Share(pair.share_type, data));
+    }
+
     if contains_share_operand(left, right) {
-        unsupported("Bitwise XOR is not supported on secret shares")
+        unsupported("Bitwise XOR is only supported on secret bool shares")
     } else {
         type_error("XOR")
     }
 }
 
-pub(crate) fn bit_not(value: &Value) -> ValueOpResult<Value> {
+pub(crate) fn bit_not(value: &Value, share_runtime: ShareRuntimeProvider<'_>) -> ValueOpResult<Value> {
     if let Some(result) = try_clear_bit_not(value) {
         return result;
     }
 
-    if matches!(value, Value::Share(_, _)) {
-        unsupported("Bitwise NOT is not supported on secret shares")
+    if let Value::Share(share_type, share_data) = value {
+        ensure_secret_bool(*share_type, "Bitwise NOT")?;
+        let data = share_runtime()?.scalar_sub_data(*share_type, 1, share_data)?;
+        Ok(Value::Share(*share_type, data))
+    } else if matches!(value, Value::Share(_, _)) {
+        unsupported("Bitwise NOT is only supported on secret bool shares")
     } else {
         type_error("NOT")
     }
@@ -142,4 +193,45 @@ fn checked_i64_shr(value: i64, amount: i64) -> ValueOpResult<i64> {
             operation: "SHR",
             amount,
         })
+}
+
+pub(crate) fn bool_xor_data(
+    share_runtime: ShareRuntimeProvider<'_>,
+    share_type: ShareType,
+    left_data: &ShareData,
+    right_data: &ShareData,
+    product_data: &ShareData,
+) -> ValueOpResult<ShareData> {
+    ensure_secret_bool(share_type, "Bitwise XOR")?;
+    let runtime = share_runtime()?;
+    let sum = runtime.add_data(share_type, left_data, right_data)?;
+    let doubled_product = runtime.mul_scalar_data(share_type, product_data, 2)?;
+    Ok(runtime.sub_data(share_type, &sum, &doubled_product)?)
+}
+
+pub(crate) fn bool_or_data(
+    share_runtime: ShareRuntimeProvider<'_>,
+    share_type: ShareType,
+    left_data: &ShareData,
+    right_data: &ShareData,
+    product_data: &ShareData,
+) -> ValueOpResult<ShareData> {
+    ensure_secret_bool(share_type, "Bitwise OR")?;
+    let runtime = share_runtime()?;
+    let sum = runtime.add_data(share_type, left_data, right_data)?;
+    Ok(runtime.sub_data(share_type, &sum, product_data)?)
+}
+
+fn ensure_secret_bool(share_type: ShareType, operation: &'static str) -> ValueOpResult<()> {
+    if share_type == ShareType::boolean() {
+        Ok(())
+    } else {
+        unsupported(match operation {
+            "Bitwise AND" => "Bitwise AND is only supported on secret bool shares",
+            "Bitwise OR" => "Bitwise OR is only supported on secret bool shares",
+            "Bitwise XOR" => "Bitwise XOR is only supported on secret bool shares",
+            "Bitwise NOT" => "Bitwise NOT is only supported on secret bool shares",
+            _ => "Bitwise share operation is only supported on secret bool shares",
+        })
+    }
 }

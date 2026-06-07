@@ -68,6 +68,7 @@ fn get_keywords() -> HashMap<String, TokenKind> {
     keywords.insert("elif".to_string(), TokenKind::Keyword("elif".to_string())); // Or 'elsif'/'elif'? Nim uses 'elif'
     keywords.insert("and".to_string(), TokenKind::Operator("and".to_string()));
     keywords.insert("or".to_string(), TokenKind::Operator("or".to_string()));
+    keywords.insert("xor".to_string(), TokenKind::Operator("xor".to_string()));
     keywords.insert("not".to_string(), TokenKind::Operator("not".to_string()));
     keywords.insert("while".to_string(), TokenKind::Keyword("while".to_string()));
     keywords.insert("for".to_string(), TokenKind::Keyword("for".to_string()));

@@ -2189,7 +2189,12 @@ where
     //   - Clone 1 (`processing_node`): handles incoming messages via process()
     //   - Clone 2 (inside `engine`): initiates preprocessing via run_preprocessing()
     // Both share the same Arc<Mutex> stores, but only ONE processes each message.
-    let n_triples = (2 * t + 1).max(1);
+    let default_n_triples = (2 * t + 1).max(1);
+    let n_triples = std::env::var("STOFFEL_PREPROCESSING_TRIPLES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default_n_triples);
     let client_random_count = input_ids.len().max(coordinator_client_count_hint);
     let n_client_random = client_random_count.saturating_mul(client_input_count);
     let n_random = 2 + 2 * n_triples + n_client_random;
