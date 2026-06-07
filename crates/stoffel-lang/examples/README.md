@@ -17,6 +17,7 @@ example folder has a `main.stfl` source file and a short README.
 - `mpc_client_private_score`: client input shares, private share computation, and client output shares.
 - `mpc_share_arithmetic`: basic secret-share creation, arithmetic, and opening.
 - `mpc_runtime_info`: MPC runtime metadata and capability builtins.
+- `mpc_boolean_circuit`: `secret bool` random bits and boolean gates built from share arithmetic.
 - `mpc_client_federated_average`: client-provided secret inputs via `ClientStore`.
 - `mpc_protocol_coordination`: RBC/ABA coordination for distributed protocol phases.
 - `mpc_share_toolkit`: broad Share builtin coverage for MPC service programs.

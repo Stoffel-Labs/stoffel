@@ -70,7 +70,9 @@ fn init_creates_default_project() {
     assert!(temp.path().join("hello/src/main.rs").exists());
     assert!(temp.path().join("hello/src/stoffel_bindings.rs").exists());
     let program = fs::read_to_string(temp.path().join("hello/src/main.stfl")).unwrap();
-    assert!(program.contains("def main(a: secret int64, b: secret int64) -> secret int64"));
+    assert!(program.contains("def gate_and(a: secret bool, b: secret bool) -> secret bool"));
+    assert!(program.contains("var x: secret bool = Share.random()"));
+    assert!(program.contains("return result.reveal()"));
     let cargo_toml = fs::read_to_string(temp.path().join("hello/Cargo.toml")).unwrap();
     assert!(cargo_toml.contains("stoffel-rust-sdk"));
     assert!(cargo_toml.contains("stoffel = { package = \"stoffel-rust-sdk\""));
@@ -78,13 +80,15 @@ fn init_creates_default_project() {
     let main_rs = fs::read_to_string(temp.path().join("hello/src/main.rs")).unwrap();
     assert!(main_rs.contains("mod stoffel_bindings"));
     assert!(main_rs.contains("stoffel_bindings::ProgramManifest"));
+    assert!(!main_rs.contains("with_inputs"));
     let bindings = fs::read_to_string(temp.path().join("hello/src/stoffel_bindings.rs")).unwrap();
     assert!(bindings.contains("impl stoffel::GeneratedProgramManifest for ProgramManifest"));
     assert!(bindings.contains("MpcBackend::HoneyBadger"));
     let readme = fs::read_to_string(temp.path().join("hello/README.md")).unwrap();
     assert!(readme.contains("stoffel check"));
-    assert!(readme.contains("stoffel run --input a=40 --input b=2"));
-    assert!(readme.contains("stoffel dev --once --input a=40 --input b=2"));
+    assert!(readme.contains("stoffel run"));
+    assert!(readme.contains("stoffel dev --once"));
+    assert!(!readme.contains("--input a=40 --input b=2"));
     assert!(readme.contains("stoffel build"));
     assert!(readme.contains("cargo build"));
     assert!(readme.contains("cargo run"));
@@ -185,7 +189,7 @@ fn init_help_names_supported_templates_and_aliases() {
 }
 
 #[test]
-fn run_executes_local_mpc_project_with_inputs() {
+fn run_executes_default_secret_bool_circuit_project() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
@@ -199,18 +203,10 @@ fn run_executes_local_mpc_project_with_inputs() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .current_dir(temp.path())
-        .args([
-            "run",
-            "--timeout-secs",
-            LOCAL_MPC_TEST_TIMEOUT_SECS,
-            "--input",
-            "a=40",
-            "--input",
-            "b=2",
-        ])
+        .args(["run", "--timeout-secs", LOCAL_MPC_TEST_TIMEOUT_SECS])
         .assert()
         .success()
-        .stdout(predicate::str::contains("42"));
+        .stdout(predicate::str::contains("true").or(predicate::str::contains("false")));
 }
 
 #[test]
@@ -557,7 +553,7 @@ fn run_rejects_non_project_directories_inside_a_project() {
 }
 
 #[test]
-fn dev_once_executes_default_project_with_named_inputs() {
+fn dev_once_executes_default_secret_bool_circuit_project() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app");
@@ -572,18 +568,10 @@ fn dev_once_executes_default_project_with_named_inputs() {
         .unwrap()
         .arg("dev")
         .arg(&project)
-        .args([
-            "--once",
-            "--timeout-secs",
-            LOCAL_MPC_TEST_TIMEOUT_SECS,
-            "--input",
-            "a=40",
-            "--input",
-            "b=2",
-        ])
+        .args(["--once", "--timeout-secs", LOCAL_MPC_TEST_TIMEOUT_SECS])
         .assert()
         .success()
-        .stdout(predicate::str::contains("42"));
+        .stdout(predicate::str::contains("true").or(predicate::str::contains("false")));
 }
 
 #[test]
@@ -596,6 +584,11 @@ fn dev_once_explains_input_mistakes() {
         .arg(&project)
         .assert()
         .success();
+    fs::write(
+        project.join("src/main.stfl"),
+        "def main(a: secret int64, b: secret int64) -> secret int64:\n  return a + b\n",
+    )
+    .unwrap();
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -3431,10 +3424,7 @@ fn init_supports_declared_templates_and_library_mode() {
         (
             "python",
             "requirements.txt",
-            &[
-                "stoffel run --input a=40 --input b=2",
-                "python3 -m pip install -r requirements.txt",
-            ][..],
+            &["stoffel run", "python3 -m pip install -r requirements.txt"][..],
         ),
         (
             "rust",
@@ -3448,16 +3438,12 @@ fn init_supports_declared_templates_and_library_mode() {
         (
             "solidity-foundry",
             "foundry.toml",
-            &["stoffel run --input a=40 --input b=2", "forge build"][..],
+            &["stoffel run", "forge build"][..],
         ),
         (
             "solidity-hardhat",
             "hardhat.config.js",
-            &[
-                "stoffel run --input a=40 --input b=2",
-                "npm install",
-                "npx hardhat compile",
-            ][..],
+            &["stoffel run", "npm install", "npx hardhat compile"][..],
         ),
     ] {
         let path = temp.path().join(name);
@@ -3483,6 +3469,10 @@ fn init_supports_declared_templates_and_library_mode() {
             assert!(!main_rs.contains("execute_clear"));
             let program = fs::read_to_string(path.join("stoffel/src/program.stfl")).unwrap();
             assert!(program.contains("secret int64"));
+        }
+        if name != "rust" {
+            let program = fs::read_to_string(path.join("src/main.stfl")).unwrap();
+            assert!(program.contains("secret bool"));
         }
     }
 

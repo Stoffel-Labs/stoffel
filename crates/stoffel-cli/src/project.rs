@@ -428,10 +428,7 @@ fn levenshtein(left: &str, right: &str) -> usize {
 fn init_stoffel_project(path: &Path) -> Result<()> {
     let name = project_name(path);
     write_new(path.join(CONFIG_FILE), &default_config_text(name.clone()))?;
-    write_new(
-        path.join("src/main.stfl"),
-        "def main(a: secret int64, b: secret int64) -> secret int64:\n  return a + b\n",
-    )?;
+    write_new(path.join("src/main.stfl"), default_stoffel_program_text())?;
     write_new(path.join("Cargo.toml"), &default_cargo_toml_text(&name))?;
     write_new(path.join("src/main.rs"), default_main_rs_text())?;
     write_new(
@@ -877,7 +874,41 @@ fn default_config_text(name: String) -> String {
 
 fn default_readme_text(title: &str) -> String {
     format!(
-        "# {title}\n\nValidate the Stoffel source:\n\n```sh\nstoffel check\n```\n\nRun the default local MPC example:\n\n```sh\nstoffel run --input a=40 --input b=2\n```\n\nRun the default example once with the development command:\n\n```sh\nstoffel dev --once --input a=40 --input b=2\n```\n\nBuild bytecode:\n\n```sh\nstoffel build\n```\n"
+        "# {title}\n\nValidate the Stoffel source:\n\n```sh\nstoffel check\n```\n\nRun the default local MPC example:\n\n```sh\nstoffel run\n```\n\nRun the default example once with the development command:\n\n```sh\nstoffel dev --once\n```\n\nBuild bytecode:\n\n```sh\nstoffel build\n```\n"
+    )
+}
+
+fn default_stoffel_program_text() -> &'static str {
+    concat!(
+        "def gate_and(a: secret bool, b: secret bool) -> secret bool:\n",
+        "  return Share.mul(a, b)\n",
+        "\n",
+        "def gate_not(a: secret bool) -> secret bool:\n",
+        "  var one = Share.from_clear_int(1, 1)\n",
+        "  return Share.sub(one, a)\n",
+        "\n",
+        "def gate_or(a: secret bool, b: secret bool) -> secret bool:\n",
+        "  var ab: secret bool = gate_and(a, b)\n",
+        "  var sum = Share.add(a, b)\n",
+        "  return Share.sub(sum, ab)\n",
+        "\n",
+        "def gate_xor(a: secret bool, b: secret bool) -> secret bool:\n",
+        "  var ab: secret bool = gate_and(a, b)\n",
+        "  var sum = Share.add(a, b)\n",
+        "  var two_ab = Share.mul_scalar(ab, 2)\n",
+        "  return Share.sub(sum, two_ab)\n",
+        "\n",
+        "def circuit(x: secret bool, y: secret bool, z: secret bool) -> secret bool:\n",
+        "  var left: secret bool = gate_or(gate_and(x, y), gate_not(z))\n",
+        "  var right: secret bool = gate_and(x, gate_not(y))\n",
+        "  return gate_xor(left, right)\n",
+        "\n",
+        "def main() -> bool:\n",
+        "  var x: secret bool = Share.random()\n",
+        "  var y: secret bool = Share.random()\n",
+        "  var z: secret bool = Share.random()\n",
+        "  var result: secret bool = circuit(x, y, z)\n",
+        "  return result.reveal()\n",
     )
 }
 
@@ -888,7 +919,7 @@ fn default_cargo_toml_text(name: &str) -> String {
 }
 
 fn default_main_rs_text() -> &'static str {
-    "use stoffel::prelude::*;\n\nmod stoffel_bindings;\n\n#[tokio::main]\nasync fn main() -> stoffel::Result<()> {\n    let _manifest = stoffel_bindings::ProgramManifest;\n    let result = Stoffel::compile_file(\"src/main.stfl\")?\n        .parties(5)\n        .threshold(1)\n        .with_inputs(&[(\"a\", 40_i64), (\"b\", 2_i64)])\n        .execute_local()\n        .await?;\n\n    println!(\"{}\", result[0]);\n    Ok(())\n}\n"
+    "use stoffel::prelude::*;\n\nmod stoffel_bindings;\n\n#[tokio::main]\nasync fn main() -> stoffel::Result<()> {\n    let _manifest = stoffel_bindings::ProgramManifest;\n    let result = Stoffel::compile_file(\"src/main.stfl\")?\n        .parties(5)\n        .threshold(1)\n        .execute_local()\n        .await?;\n\n    println!(\"{}\", result[0]);\n    Ok(())\n}\n"
 }
 
 fn default_bindings_rs_text() -> &'static str {
