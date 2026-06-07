@@ -31,6 +31,7 @@ builtin object Share:
   def batch_open_fixed[T](shares: list[Share]) -> list[T] {.builtin: "Share.batch_open".}:
   def open_exp(share: Share, curve_name: string) -> bytes {.builtin.}:
   def random() -> Share {.builtin.}:
+  def random_int(bit_length: int64) -> Share {.builtin.}:
   def get_commitment(share: Share, index: int64) -> bytes {.builtin.}:
   def commitment_count(share: Share) -> int64 {.builtin.}:
   def has_commitments(share: Share) -> bool {.builtin.}:

@@ -157,6 +157,13 @@ impl<'a> SemanticAnalyzer<'a> {
         matches!(name, "print")
     }
 
+    fn is_typed_assignment_target(node: &AstNode) -> bool {
+        matches!(
+            node,
+            AstNode::Identifier(_, _) | AstNode::FieldAccess { .. } | AstNode::IndexAccess { .. }
+        )
+    }
+
     fn share_expr_can_initialize_secret(expr: Option<&AstNode>, dst: &SymbolType) -> bool {
         let Some(AstNode::FunctionCall { function, .. }) = expr else {
             return false;
@@ -855,10 +862,8 @@ impl<'a> SemanticAnalyzer<'a> {
                 // Analyze target and value to get types
                 let (checked_target, target_type) = self.analyze_node(*target)?;
                 let (checked_value, value_type) = self.analyze_node(*value)?;
-                let (checked_value, value_type) = if matches!(
-                    checked_target,
-                    AstNode::Identifier(_, _) | AstNode::FieldAccess { .. }
-                ) && target_type != SymbolType::Unknown
+                let (checked_value, value_type) = if Self::is_typed_assignment_target(&checked_target)
+                    && target_type != SymbolType::Unknown
                 {
                     Self::refine_expression_type_with_expected(
                         checked_value,
@@ -884,10 +889,8 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 // Type check assignments when the target has a known static type.
                 let loc = location.clone();
-                if matches!(
-                    checked_target,
-                    AstNode::Identifier(_, _) | AstNode::FieldAccess { .. }
-                ) && target_type != SymbolType::Unknown
+                if Self::is_typed_assignment_target(&checked_target)
+                    && target_type != SymbolType::Unknown
                 {
                     // Enforce integer compatibility (includes literal range check)
                     if self

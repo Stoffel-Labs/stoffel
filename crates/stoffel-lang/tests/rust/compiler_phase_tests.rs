@@ -787,6 +787,22 @@ var opened_floats: list[float] = Share.batch_open_fixed(shares)
 }
 
 #[test]
+fn test_semantic_return_only_generic_is_refined_from_index_assignment_type() {
+    let source = r#"
+var s1 = Share.from_clear(10)
+var s2 = Share.from_clear(20)
+var shares: list[Share] = [s1, s2]
+var opened: list[list[float]]
+opened[0] = Share.batch_open_fixed(shares)
+"#;
+    let analyzed = analyze_source_ast(source).expect("semantic analysis succeeds");
+    let mut return_types = Vec::new();
+    collect_call_return_types(&analyzed, "Share.batch_open_fixed", &mut return_types);
+
+    assert_eq!(return_types, vec![list_of(SymbolType::Float)]);
+}
+
+#[test]
 fn test_semantic_return_only_generic_is_refined_from_function_return_type() {
     let source = r#"
 def open_as_floats(shares: list[Share]) -> list[float]:
@@ -885,6 +901,37 @@ def main() -> secret uint8:
     assert!(
         call_names.iter().any(|name| name == "Share.random_int"),
         "typed Share.random should lower to VM Share.random_int, got {call_names:?}"
+    );
+}
+
+#[test]
+fn test_compile_explicit_share_random_int_can_initialize_secret_int64() {
+    let source = r#"
+def main() -> secret int64:
+  var s: secret int64 = Share.random_int(31)
+  return s
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.random_int"),
+        "explicit Share.random_int should lower to VM Share.random_int, got {call_names:?}"
+    );
+}
+
+#[test]
+fn test_compile_share_random_in_secret_int_list_index_assignment() {
+    let source = r#"
+def main() -> secret int64:
+  var values: list[secret int64]
+  values[0] = Share.random()
+  return values[0]
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.random_int"),
+        "indexed assignment context should lower Share.random to VM Share.random_int, got {call_names:?}"
     );
 }
 

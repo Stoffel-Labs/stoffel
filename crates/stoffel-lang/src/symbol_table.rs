@@ -1194,6 +1194,7 @@ mod tests {
             "batch_open_fixed",
             "open_exp",
             "random",
+            "random_int",
             "get_commitment",
             "commitment_count",
             "has_commitments",
