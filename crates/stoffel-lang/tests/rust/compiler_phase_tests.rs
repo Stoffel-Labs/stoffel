@@ -890,6 +890,32 @@ def main() -> secret int64:
 }
 
 #[test]
+fn test_compile_share_random_contextual_secret_bool_lowers_to_one_bit_random() {
+    let source = r#"
+def main() -> secret bool:
+  var test: secret bool = Share.random()
+  return test
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let instructions = &program.main_chunk.instructions;
+    let call_names = collect_call_names(instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.random_int"),
+        "secret bool Share.random should lower to VM Share.random_int, got {call_names:?}"
+    );
+    assert!(
+        call_names.iter().all(|name| name != "Share.random"),
+        "typed secret bool context must not leave raw Share.random calls, got {call_names:?}"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::LDI(_, Value::I64(1)))),
+        "secret bool Share.random should request a 1-bit random int, got {instructions:?}"
+    );
+}
+
+#[test]
 fn test_compile_share_random_contextual_secret_uint8_lowers_to_typed_random() {
     let source = r#"
 def main() -> secret uint8:

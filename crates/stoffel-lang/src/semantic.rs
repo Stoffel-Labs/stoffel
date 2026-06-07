@@ -173,7 +173,7 @@ impl<'a> SemanticAnalyzer<'a> {
         };
 
         match name.as_str() {
-            "Share.random" => dst.is_secret() && dst.is_integer(),
+            "Share.random" => Self::share_random_expected_type(dst),
             "ClientStore.take_share" | "Share.from_clear" | "Share.from_clear_int" => {
                 dst.is_secret() && dst.is_integer()
             }
@@ -182,6 +182,10 @@ impl<'a> SemanticAnalyzer<'a> {
             }
             _ => false,
         }
+    }
+
+    fn share_random_expected_type(ty: &SymbolType) -> bool {
+        ty.is_secret() && (ty.is_integer() || ty.underlying_type() == &SymbolType::Bool)
     }
 
     fn is_unrefined_share_random_call(node: &AstNode) -> bool {
@@ -194,7 +198,7 @@ impl<'a> SemanticAnalyzer<'a> {
             } if matches!(function.as_ref(), AstNode::Identifier(name, _) if name == "Share.random")
                 && !resolved_return_type
                     .as_ref()
-                    .is_some_and(|ty| ty.is_secret() && ty.is_integer())
+                    .is_some_and(Self::share_random_expected_type)
         )
     }
 
@@ -594,7 +598,7 @@ impl<'a> SemanticAnalyzer<'a> {
             src_node,
             Some(AstNode::FunctionCall { function, .. })
                 if matches!(function.as_ref(), AstNode::Identifier(name, _) if name == "Share.random")
-                    && !(dst_type.is_secret() && dst_type.is_integer())
+                    && !Self::share_random_expected_type(dst_type)
         );
         if Self::is_share_alias_type(src_type) && share_random_in_bad_context {
             self.error_reporter.add_error(CompilerError::type_error(
@@ -862,17 +866,18 @@ impl<'a> SemanticAnalyzer<'a> {
                 // Analyze target and value to get types
                 let (checked_target, target_type) = self.analyze_node(*target)?;
                 let (checked_value, value_type) = self.analyze_node(*value)?;
-                let (checked_value, value_type) = if Self::is_typed_assignment_target(&checked_target)
-                    && target_type != SymbolType::Unknown
-                {
-                    Self::refine_expression_type_with_expected(
-                        checked_value,
-                        &value_type,
-                        &target_type,
-                    )
-                } else {
-                    (checked_value, value_type)
-                };
+                let (checked_value, value_type) =
+                    if Self::is_typed_assignment_target(&checked_target)
+                        && target_type != SymbolType::Unknown
+                    {
+                        Self::refine_expression_type_with_expected(
+                            checked_value,
+                            &value_type,
+                            &target_type,
+                        )
+                    } else {
+                        (checked_value, value_type)
+                    };
 
                 if Self::contains_unrefined_share_random_call(&checked_value) {
                     self.error_reporter.add_error(

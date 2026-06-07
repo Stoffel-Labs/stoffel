@@ -66,13 +66,66 @@ fn init_creates_default_project() {
 
     assert!(temp.path().join("hello/Stoffel.toml").exists());
     assert!(temp.path().join("hello/src/main.stfl").exists());
+    assert!(temp.path().join("hello/Cargo.toml").exists());
+    assert!(temp.path().join("hello/src/main.rs").exists());
+    assert!(temp.path().join("hello/src/stoffel_bindings.rs").exists());
     let program = fs::read_to_string(temp.path().join("hello/src/main.stfl")).unwrap();
     assert!(program.contains("def main(a: secret int64, b: secret int64) -> secret int64"));
+    let cargo_toml = fs::read_to_string(temp.path().join("hello/Cargo.toml")).unwrap();
+    assert!(cargo_toml.contains("stoffel-rust-sdk"));
+    assert!(cargo_toml.contains("stoffel = { package = \"stoffel-rust-sdk\""));
+    assert!(!cargo_toml.contains("[build-dependencies]"));
+    let main_rs = fs::read_to_string(temp.path().join("hello/src/main.rs")).unwrap();
+    assert!(main_rs.contains("mod stoffel_bindings"));
+    assert!(main_rs.contains("stoffel_bindings::ProgramManifest"));
+    let bindings = fs::read_to_string(temp.path().join("hello/src/stoffel_bindings.rs")).unwrap();
+    assert!(bindings.contains("impl stoffel::GeneratedProgramManifest for ProgramManifest"));
+    assert!(bindings.contains("MpcBackend::HoneyBadger"));
     let readme = fs::read_to_string(temp.path().join("hello/README.md")).unwrap();
     assert!(readme.contains("stoffel check"));
     assert!(readme.contains("stoffel run --input a=40 --input b=2"));
     assert!(readme.contains("stoffel dev --once --input a=40 --input b=2"));
     assert!(readme.contains("stoffel build"));
+    assert!(readme.contains("cargo build"));
+    assert!(readme.contains("cargo run"));
+}
+
+#[test]
+fn init_default_project_builds_with_cargo_and_sdk_bindings() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("hello");
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(&project)
+        .assert()
+        .success();
+
+    let cli_manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk_path = cli_manifest_dir
+        .parent()
+        .expect("CLI crate lives under crates/")
+        .join("stoffel-rust-sdk");
+    let cargo_toml_path = project.join("Cargo.toml");
+    let cargo_toml = fs::read_to_string(&cargo_toml_path)
+        .unwrap()
+        .replace(
+            "stoffel = { package = \"stoffel-rust-sdk\", git = \"https://github.com/Stoffel-Labs/StoffelVM\" }",
+            &format!(
+                "stoffel = {{ package = \"stoffel-rust-sdk\", path = \"{}\" }}",
+                sdk_path.display()
+            ),
+        );
+    fs::write(&cargo_toml_path, cargo_toml).unwrap();
+
+    StdCommand::new("cargo")
+        .arg("build")
+        .current_dir(&project)
+        .status()
+        .expect("cargo build should run")
+        .success()
+        .then_some(())
+        .expect("initialized default project should build with cargo");
 }
 
 #[test]

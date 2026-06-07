@@ -46,9 +46,12 @@ fn infer_single_share_type(node: &AstNode) -> Option<ShareType> {
     }
 }
 
-fn share_type_for_secret_integer_symbol_type(ty: &SymbolType) -> Option<ShareType> {
-    if !ty.is_secret() || !ty.is_integer() {
+fn share_type_for_secret_scalar_symbol_type(ty: &SymbolType) -> Option<ShareType> {
+    if !ty.is_secret() {
         return None;
+    }
+    if ty.underlying_type() == &SymbolType::Bool {
+        return Some(ShareType::boolean());
     }
     ty.bit_width()
         .map(|bit_width| ShareType::secret_int(usize::from(bit_width)))
@@ -367,7 +370,7 @@ impl CodeGenerator {
                 ..
             } => resolved_return_type
                 .as_ref()
-                .and_then(share_type_for_secret_integer_symbol_type)
+                .and_then(share_type_for_secret_scalar_symbol_type)
                 .or_else(|| infer_single_share_type(node)),
             AstNode::BinaryOperation { left, right, .. } => {
                 let left = self.share_type_for_node(left);
@@ -930,7 +933,7 @@ impl CodeGenerator {
                 if arguments.is_empty() && is_share_random_call(function) {
                     if let Some(return_type) = resolved_return_type.as_ref() {
                         if let Some(share_type) =
-                            share_type_for_secret_integer_symbol_type(return_type)
+                            share_type_for_secret_scalar_symbol_type(return_type)
                         {
                             let bit_length = match share_type {
                                 ShareType::SecretInt { bit_length } => bit_length,
