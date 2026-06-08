@@ -1,0 +1,488 @@
+# AES-128 over secret boolean circuits.
+# Bytes are represented as list[secret bool] in little-endian bit order.
+
+def bit(value: int64) -> secret bool:
+  return Share.from_clear_int(value, 1)
+
+def gate_and(a: secret bool, b: secret bool) -> secret bool:
+  return a and b
+
+def gate_xor(a: secret bool, b: secret bool) -> secret bool:
+  return a xor b
+
+def gate_not(a: secret bool) -> secret bool:
+  return not a
+
+def byte_zero() -> list[secret bool]:
+  return [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]
+
+def byte_xor(a: list[secret bool], b: list[secret bool]) -> list[secret bool]:
+  return [gate_xor(a[0], b[0]), gate_xor(a[1], b[1]), gate_xor(a[2], b[2]), gate_xor(a[3], b[3]), gate_xor(a[4], b[4]), gate_xor(a[5], b[5]), gate_xor(a[6], b[6]), gate_xor(a[7], b[7])]
+
+def byte_xor3(a: list[secret bool], b: list[secret bool], c: list[secret bool]) -> list[secret bool]:
+  return byte_xor(byte_xor(a, b), c)
+
+def byte_xor4(a: list[secret bool], b: list[secret bool], c: list[secret bool], d: list[secret bool]) -> list[secret bool]:
+  return byte_xor(byte_xor(a, b), byte_xor(c, d))
+
+def xtime(a: list[secret bool]) -> list[secret bool]:
+  var high: secret bool = a[7]
+  var r0: secret bool = high
+  var r1: secret bool = gate_xor(a[0], high)
+  var r2: secret bool = a[1]
+  var r3: secret bool = gate_xor(a[2], high)
+  var r4: secret bool = gate_xor(a[3], high)
+  var r5: secret bool = a[4]
+  var r6: secret bool = a[5]
+  var r7: secret bool = a[6]
+  return [r0, r1, r2, r3, r4, r5, r6, r7]
+
+def mul2(a: list[secret bool]) -> list[secret bool]:
+  return xtime(a)
+
+def mul3(a: list[secret bool]) -> list[secret bool]:
+  return byte_xor(xtime(a), a)
+
+object BPTerms:
+  U7: secret bool
+  T1: secret bool
+  T2: secret bool
+  T3: secret bool
+  T4: secret bool
+  T5: secret bool
+  T6: secret bool
+  T7: secret bool
+  T8: secret bool
+  T9: secret bool
+  T10: secret bool
+  T11: secret bool
+  T12: secret bool
+  T13: secret bool
+  T14: secret bool
+  T15: secret bool
+  T16: secret bool
+  T17: secret bool
+  T18: secret bool
+  T19: secret bool
+  T20: secret bool
+  T21: secret bool
+  T22: secret bool
+  T23: secret bool
+  T24: secret bool
+  T25: secret bool
+  T26: secret bool
+  T27: secret bool
+
+object BPMid:
+  M1: secret bool
+  M2: secret bool
+  M3: secret bool
+  M4: secret bool
+  M5: secret bool
+  M6: secret bool
+  M7: secret bool
+  M8: secret bool
+  M9: secret bool
+  M10: secret bool
+  M11: secret bool
+  M12: secret bool
+  M13: secret bool
+  M14: secret bool
+  M15: secret bool
+  M16: secret bool
+  M17: secret bool
+  M18: secret bool
+  M19: secret bool
+  M20: secret bool
+  M21: secret bool
+  M22: secret bool
+  M23: secret bool
+  M24: secret bool
+  M25: secret bool
+  M26: secret bool
+  M27: secret bool
+  M28: secret bool
+  M29: secret bool
+  M30: secret bool
+  M31: secret bool
+  M32: secret bool
+  M33: secret bool
+  M34: secret bool
+  M35: secret bool
+  M36: secret bool
+  M37: secret bool
+  M38: secret bool
+  M39: secret bool
+  M40: secret bool
+  M41: secret bool
+  M42: secret bool
+  M43: secret bool
+  M44: secret bool
+  M45: secret bool
+  M46: secret bool
+  M47: secret bool
+  M48: secret bool
+  M49: secret bool
+  M50: secret bool
+  M51: secret bool
+  M52: secret bool
+  M53: secret bool
+  M54: secret bool
+  M55: secret bool
+  M56: secret bool
+  M57: secret bool
+  M58: secret bool
+  M59: secret bool
+  M60: secret bool
+  M61: secret bool
+  M62: secret bool
+  M63: secret bool
+  L0: secret bool
+  L1: secret bool
+  L2: secret bool
+  L3: secret bool
+  L4: secret bool
+  L5: secret bool
+  L6: secret bool
+  L7: secret bool
+  L8: secret bool
+  L9: secret bool
+  L10: secret bool
+  L11: secret bool
+  L12: secret bool
+  L13: secret bool
+  L14: secret bool
+  L15: secret bool
+  L16: secret bool
+  L17: secret bool
+  L18: secret bool
+  L19: secret bool
+  L20: secret bool
+  L21: secret bool
+  L22: secret bool
+  L23: secret bool
+  L24: secret bool
+  L25: secret bool
+  L26: secret bool
+  L27: secret bool
+  L28: secret bool
+  L29: secret bool
+  S0: secret bool
+  S1: secret bool
+  S2: secret bool
+  S3: secret bool
+  S4: secret bool
+  S5: secret bool
+  S6: secret bool
+  S7: secret bool
+
+def bp_terms(a: list[secret bool]) -> BPTerms:
+  var t: BPTerms
+  var U0: secret bool = a[7]
+  var U1: secret bool = a[6]
+  var U2: secret bool = a[5]
+  var U3: secret bool = a[4]
+  var U4: secret bool = a[3]
+  var U5: secret bool = a[2]
+  var U6: secret bool = a[1]
+  t.U7 = a[0]
+  t.T1 = gate_xor(U0, U3)
+  t.T2 = gate_xor(U0, U5)
+  t.T3 = gate_xor(U0, U6)
+  t.T4 = gate_xor(U3, U5)
+  t.T5 = gate_xor(U4, U6)
+  t.T6 = gate_xor(t.T1, t.T5)
+  t.T7 = gate_xor(U1, U2)
+  t.T8 = gate_xor(t.U7, t.T6)
+  t.T9 = gate_xor(t.U7, t.T7)
+  t.T10 = gate_xor(t.T6, t.T7)
+  t.T11 = gate_xor(U1, U5)
+  t.T12 = gate_xor(U2, U5)
+  t.T13 = gate_xor(t.T3, t.T4)
+  t.T14 = gate_xor(t.T6, t.T11)
+  t.T15 = gate_xor(t.T5, t.T11)
+  t.T16 = gate_xor(t.T5, t.T12)
+  t.T17 = gate_xor(t.T9, t.T16)
+  t.T18 = gate_xor(U3, t.U7)
+  t.T19 = gate_xor(t.T7, t.T18)
+  t.T20 = gate_xor(t.T1, t.T19)
+  t.T21 = gate_xor(U6, t.U7)
+  t.T22 = gate_xor(t.T7, t.T21)
+  t.T23 = gate_xor(t.T2, t.T22)
+  t.T24 = gate_xor(t.T2, t.T10)
+  t.T25 = gate_xor(t.T20, t.T17)
+  t.T26 = gate_xor(t.T3, t.T16)
+  t.T27 = gate_xor(t.T1, t.T12)
+  return t
+
+def bp_middle(t: BPTerms) -> BPMid:
+  var m: BPMid
+  m.M1 = gate_and(t.T13, t.T6)
+  m.M2 = gate_and(t.T23, t.T8)
+  m.M3 = gate_xor(t.T14, m.M1)
+  m.M4 = gate_and(t.T19, t.U7)
+  m.M5 = gate_xor(m.M4, m.M1)
+  m.M6 = gate_and(t.T3, t.T16)
+  m.M7 = gate_and(t.T22, t.T9)
+  m.M8 = gate_xor(t.T26, m.M6)
+  m.M9 = gate_and(t.T20, t.T17)
+  m.M10 = gate_xor(m.M9, m.M6)
+  m.M11 = gate_and(t.T1, t.T15)
+  m.M12 = gate_and(t.T4, t.T27)
+  m.M13 = gate_xor(m.M12, m.M11)
+  m.M14 = gate_and(t.T2, t.T10)
+  m.M15 = gate_xor(m.M14, m.M11)
+  m.M16 = gate_xor(m.M3, m.M2)
+  m.M17 = gate_xor(m.M5, t.T24)
+  m.M18 = gate_xor(m.M8, m.M7)
+  m.M19 = gate_xor(m.M10, m.M15)
+  m.M20 = gate_xor(m.M16, m.M13)
+  m.M21 = gate_xor(m.M17, m.M15)
+  m.M22 = gate_xor(m.M18, m.M13)
+  m.M23 = gate_xor(m.M19, t.T25)
+  m.M24 = gate_xor(m.M22, m.M23)
+  m.M25 = gate_and(m.M22, m.M20)
+  m.M26 = gate_xor(m.M21, m.M25)
+  m.M27 = gate_xor(m.M20, m.M21)
+  m.M28 = gate_xor(m.M23, m.M25)
+  m.M29 = gate_and(m.M28, m.M27)
+  m.M30 = gate_and(m.M26, m.M24)
+  m.M31 = gate_and(m.M20, m.M23)
+  m.M32 = gate_and(m.M27, m.M31)
+  m.M33 = gate_xor(m.M27, m.M25)
+  m.M34 = gate_and(m.M21, m.M22)
+  m.M35 = gate_and(m.M24, m.M34)
+  m.M36 = gate_xor(m.M24, m.M25)
+  m.M37 = gate_xor(m.M21, m.M29)
+  m.M38 = gate_xor(m.M32, m.M33)
+  m.M39 = gate_xor(m.M23, m.M30)
+  m.M40 = gate_xor(m.M35, m.M36)
+  m.M41 = gate_xor(m.M38, m.M40)
+  m.M42 = gate_xor(m.M37, m.M39)
+  m.M43 = gate_xor(m.M37, m.M38)
+  m.M44 = gate_xor(m.M39, m.M40)
+  m.M45 = gate_xor(m.M42, m.M41)
+  return m
+
+def bp_output(t: BPTerms, m: BPMid) -> list[secret bool]:
+  m.M46 = gate_and(m.M44, t.T6)
+  m.M47 = gate_and(m.M40, t.T8)
+  m.M48 = gate_and(m.M39, t.U7)
+  m.M49 = gate_and(m.M43, t.T16)
+  m.M50 = gate_and(m.M38, t.T9)
+  m.M51 = gate_and(m.M37, t.T17)
+  m.M52 = gate_and(m.M42, t.T15)
+  m.M53 = gate_and(m.M45, t.T27)
+  m.M54 = gate_and(m.M41, t.T10)
+  m.M55 = gate_and(m.M44, t.T13)
+  m.M56 = gate_and(m.M40, t.T23)
+  m.M57 = gate_and(m.M39, t.T19)
+  m.M58 = gate_and(m.M43, t.T3)
+  m.M59 = gate_and(m.M38, t.T22)
+  m.M60 = gate_and(m.M37, t.T20)
+  m.M61 = gate_and(m.M42, t.T1)
+  m.M62 = gate_and(m.M45, t.T4)
+  m.M63 = gate_and(m.M41, t.T2)
+  m.L0 = gate_xor(m.M61, m.M62)
+  m.L1 = gate_xor(m.M50, m.M56)
+  m.L2 = gate_xor(m.M46, m.M48)
+  m.L3 = gate_xor(m.M47, m.M55)
+  m.L4 = gate_xor(m.M54, m.M58)
+  m.L5 = gate_xor(m.M49, m.M61)
+  m.L6 = gate_xor(m.M62, m.L5)
+  m.L7 = gate_xor(m.M46, m.L3)
+  m.L8 = gate_xor(m.M51, m.M59)
+  m.L9 = gate_xor(m.M52, m.M53)
+  m.L10 = gate_xor(m.M53, m.L4)
+  m.L11 = gate_xor(m.M60, m.L2)
+  m.L12 = gate_xor(m.M48, m.M51)
+  m.L13 = gate_xor(m.M50, m.L0)
+  m.L14 = gate_xor(m.M52, m.M61)
+  m.L15 = gate_xor(m.M55, m.L1)
+  m.L16 = gate_xor(m.M56, m.L0)
+  m.L17 = gate_xor(m.M57, m.L1)
+  m.L18 = gate_xor(m.M58, m.L8)
+  m.L19 = gate_xor(m.M63, m.L4)
+  m.L20 = gate_xor(m.L0, m.L1)
+  m.L21 = gate_xor(m.L1, m.L7)
+  m.L22 = gate_xor(m.L3, m.L12)
+  m.L23 = gate_xor(m.L18, m.L2)
+  m.L24 = gate_xor(m.L15, m.L9)
+  m.L25 = gate_xor(m.L6, m.L10)
+  m.L26 = gate_xor(m.L7, m.L9)
+  m.L27 = gate_xor(m.L8, m.L10)
+  m.L28 = gate_xor(m.L11, m.L14)
+  m.L29 = gate_xor(m.L11, m.L17)
+  m.S0 = gate_xor(m.L6, m.L24)
+  m.S1 = gate_xor(m.L16, m.L26)
+  m.S2 = gate_xor(m.L19, m.L28)
+  m.S3 = gate_xor(m.L6, m.L21)
+  m.S4 = gate_xor(m.L20, m.L22)
+  m.S5 = gate_xor(m.L25, m.L29)
+  m.S6 = gate_xor(m.L13, m.L27)
+  m.S7 = gate_xor(m.L6, m.L23)
+  return [gate_not(m.S7), gate_not(m.S6), m.S5, m.S4, m.S3, gate_not(m.S2), gate_not(m.S1), m.S0]
+
+def aes_sbox(a: list[secret bool]) -> list[secret bool]:
+  var t = bp_terms(a)
+  var m = bp_middle(t)
+  return bp_output(t, m)
+
+def sub_word(word: list[list[secret bool]]) -> list[list[secret bool]]:
+  return [aes_sbox(word[0]), aes_sbox(word[1]), aes_sbox(word[2]), aes_sbox(word[3])]
+
+def rot_word(word: list[list[secret bool]]) -> list[list[secret bool]]:
+  return [word[1], word[2], word[3], word[0]]
+
+def word_xor(a: list[list[secret bool]], b: list[list[secret bool]]) -> list[list[secret bool]]:
+  return [byte_xor(a[0], b[0]), byte_xor(a[1], b[1]), byte_xor(a[2], b[2]), byte_xor(a[3], b[3])]
+
+def rcon_1() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]]
+
+def rcon_2() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]]
+
+def rcon_3() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]]
+
+def rcon_4() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]]
+
+def rcon_5() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]]
+
+def rcon_6() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]]
+
+def rcon_7() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]]
+
+def rcon_8() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]]
+
+def rcon_9() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]]
+
+def rcon_10() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]]
+
+def rcon(round: int64) -> list[list[secret bool]]:
+  if round == 1:
+    return rcon_1()
+  elif round == 2:
+    return rcon_2()
+  elif round == 3:
+    return rcon_3()
+  elif round == 4:
+    return rcon_4()
+  elif round == 5:
+    return rcon_5()
+  elif round == 6:
+    return rcon_6()
+  elif round == 7:
+    return rcon_7()
+  elif round == 8:
+    return rcon_8()
+  elif round == 9:
+    return rcon_9()
+  elif round == 10:
+    return rcon_10()
+  return rcon_10()
+
+def key_expansion(key: list[list[secret bool]]) -> list[list[secret bool]]:
+  var words: list[list[list[secret bool]]] = []
+  words.append([key[0], key[1], key[2], key[3]])
+  words.append([key[4], key[5], key[6], key[7]])
+  words.append([key[8], key[9], key[10], key[11]])
+  words.append([key[12], key[13], key[14], key[15]])
+  for i in 4..44:
+    var temp: list[list[secret bool]] = words[i - 1]
+    if i % 4 == 0:
+      temp = word_xor(sub_word(rot_word(temp)), rcon(i / 4))
+    words.append(word_xor(words[i - 4], temp))
+
+  var expanded: list[list[secret bool]] = []
+  for i in 0..44:
+    expanded.append(words[i][0])
+    expanded.append(words[i][1])
+    expanded.append(words[i][2])
+    expanded.append(words[i][3])
+  return expanded
+
+def add_round_key(state: list[list[secret bool]], round_key: list[list[secret bool]], offset: int64) -> list[list[secret bool]]:
+  return [byte_xor(state[0], round_key[offset + 0]), byte_xor(state[1], round_key[offset + 1]), byte_xor(state[2], round_key[offset + 2]), byte_xor(state[3], round_key[offset + 3]), byte_xor(state[4], round_key[offset + 4]), byte_xor(state[5], round_key[offset + 5]), byte_xor(state[6], round_key[offset + 6]), byte_xor(state[7], round_key[offset + 7]), byte_xor(state[8], round_key[offset + 8]), byte_xor(state[9], round_key[offset + 9]), byte_xor(state[10], round_key[offset + 10]), byte_xor(state[11], round_key[offset + 11]), byte_xor(state[12], round_key[offset + 12]), byte_xor(state[13], round_key[offset + 13]), byte_xor(state[14], round_key[offset + 14]), byte_xor(state[15], round_key[offset + 15])]
+
+def sub_bytes(state: list[list[secret bool]]) -> list[list[secret bool]]:
+  return [aes_sbox(state[0]), aes_sbox(state[1]), aes_sbox(state[2]), aes_sbox(state[3]), aes_sbox(state[4]), aes_sbox(state[5]), aes_sbox(state[6]), aes_sbox(state[7]), aes_sbox(state[8]), aes_sbox(state[9]), aes_sbox(state[10]), aes_sbox(state[11]), aes_sbox(state[12]), aes_sbox(state[13]), aes_sbox(state[14]), aes_sbox(state[15])]
+
+def shift_rows(state: list[list[secret bool]]) -> list[list[secret bool]]:
+  return [state[0], state[5], state[10], state[15], state[4], state[9], state[14], state[3], state[8], state[13], state[2], state[7], state[12], state[1], state[6], state[11]]
+
+def mix_single_column(a0: list[secret bool], a1: list[secret bool], a2: list[secret bool], a3: list[secret bool]) -> list[list[secret bool]]:
+  var b0 = byte_xor4(mul2(a0), mul3(a1), a2, a3)
+  var b1 = byte_xor4(a0, mul2(a1), mul3(a2), a3)
+  var b2 = byte_xor4(a0, a1, mul2(a2), mul3(a3))
+  var b3 = byte_xor4(mul3(a0), a1, a2, mul2(a3))
+  return [b0, b1, b2, b3]
+
+def mix_columns(state: list[list[secret bool]]) -> list[list[secret bool]]:
+  var c0 = mix_single_column(state[0], state[1], state[2], state[3])
+  var c1 = mix_single_column(state[4], state[5], state[6], state[7])
+  var c2 = mix_single_column(state[8], state[9], state[10], state[11])
+  var c3 = mix_single_column(state[12], state[13], state[14], state[15])
+  return [c0[0], c0[1], c0[2], c0[3], c1[0], c1[1], c1[2], c1[3], c2[0], c2[1], c2[2], c2[3], c3[0], c3[1], c3[2], c3[3]]
+
+def aes128_encrypt(block: list[list[secret bool]], key: list[list[secret bool]]) -> list[list[secret bool]]:
+  var round_key = key_expansion(key)
+  var state = add_round_key(block, round_key, 0)
+  for round in 1..10:
+    state = sub_bytes(state)
+    state = shift_rows(state)
+    state = mix_columns(state)
+    state = add_round_key(state, round_key, round * 16)
+  state = sub_bytes(state)
+  state = shift_rows(state)
+  state = add_round_key(state, round_key, 160)
+  return state
+
+def reveal_byte(byte: list[secret bool]) -> int64:
+  var value: int64 = 0
+  var b0: bool = byte[0].reveal()
+  if b0:
+    value += 1
+  var b1: bool = byte[1].reveal()
+  if b1:
+    value += 2
+  var b2: bool = byte[2].reveal()
+  if b2:
+    value += 4
+  var b3: bool = byte[3].reveal()
+  if b3:
+    value += 8
+  var b4: bool = byte[4].reveal()
+  if b4:
+    value += 16
+  var b5: bool = byte[5].reveal()
+  if b5:
+    value += 32
+  var b6: bool = byte[6].reveal()
+  if b6:
+    value += 64
+  var b7: bool = byte[7].reveal()
+  if b7:
+    value += 128
+  return value
+
+def reveal_block(block: list[list[secret bool]]) -> list[int64]:
+  return [reveal_byte(block[0]), reveal_byte(block[1]), reveal_byte(block[2]), reveal_byte(block[3]), reveal_byte(block[4]), reveal_byte(block[5]), reveal_byte(block[6]), reveal_byte(block[7]), reveal_byte(block[8]), reveal_byte(block[9]), reveal_byte(block[10]), reveal_byte(block[11]), reveal_byte(block[12]), reveal_byte(block[13]), reveal_byte(block[14]), reveal_byte(block[15])]
+
+def nist_plaintext() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1)]]
+
+def nist_key() -> list[list[secret bool]]:
+  return [[Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)]]
+
+def main() -> list[int64]:
+  var ciphertext = aes128_encrypt(nist_plaintext(), nist_key())
+  return reveal_block(ciphertext)
