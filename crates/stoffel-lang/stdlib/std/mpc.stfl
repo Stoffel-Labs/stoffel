@@ -20,6 +20,7 @@ builtin object Share:
   def add_scalar(share: Share, scalar: int64) -> Share {.builtin.}:
   def mul_scalar(share: Share, scalar: int64) -> Share {.builtin.}:
   def mul(share1: Share, share2: Share) -> Share {.builtin.}:
+  def batch_mul(lefts: list[Share], rights: list[Share]) -> list[Share] {.builtin.}:
   def open(share: Share) -> int64 {.builtin.}:
   def reveal[T](share: Share) -> T {.builtin: "Share.open".}:
   def open_fixed(share: Share) -> float {.builtin: "Share.open".}:

@@ -480,6 +480,43 @@ impl VMState {
                     right_data,
                 })
             }
+            MpcOnlineBuiltin::BatchMul => {
+                args.require_exact(2, "2 arguments: lefts_array, rights_array")?;
+                let lefts_arg = args.cloned(0)?;
+                let rights_arg = args.cloned(1)?;
+                let Some((share_type, left_data)) = self
+                    .extract_homogeneous_share_array(&lefts_arg, "Share.batch_mul lefts_array")?
+                else {
+                    return Ok(PendingMpcBuiltinOperation::BatchMul {
+                        share_type: ShareType::default_secret_int(),
+                        left_data: Vec::new(),
+                        right_data: Vec::new(),
+                    });
+                };
+                let Some((right_share_type, right_data)) = self
+                    .extract_homogeneous_share_array(&rights_arg, "Share.batch_mul rights_array")?
+                else {
+                    return Err(
+                        "Share.batch_mul requires both arrays to be empty or non-empty".into(),
+                    );
+                };
+
+                if share_type != right_share_type {
+                    return Err("Share.batch_mul requires arrays with matching share types".into());
+                }
+                if left_data.len() != right_data.len() {
+                    return Err("Share.batch_mul requires arrays with the same length".into());
+                }
+                for (left, right) in left_data.iter().zip(right_data.iter()) {
+                    ensure_matching_share_data_format("async_batch_multiply_share", left, right)?;
+                }
+
+                Ok(PendingMpcBuiltinOperation::BatchMul {
+                    share_type,
+                    left_data,
+                    right_data,
+                })
+            }
             MpcOnlineBuiltin::Open => {
                 args.require_exact(1, "1 argument: share")?;
                 let share_value = args.cloned(0)?;

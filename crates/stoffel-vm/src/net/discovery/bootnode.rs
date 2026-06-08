@@ -427,6 +427,14 @@ impl BootnodeConnection {
         auth_token: Option<String>,
     ) {
         let party_id = registration.party_id;
+        eprintln!(
+            "[bootnode] Received RegisterWithSession from party {} (program: {}, n={}, t={}, has_bytes={})",
+            party_id,
+            hex::encode(&registration.program_id[..8]),
+            registration.n_parties,
+            registration.threshold,
+            program_bytes.is_some()
+        );
         if !registration_token_is_valid(self.required_auth_token.as_deref(), auth_token.as_deref())
         {
             eprintln!(
@@ -506,6 +514,13 @@ impl BootnodeConnection {
                 "[bootnode] Session ready! instance_id={}, n_parties={}",
                 session_info.instance_id, session_info.n_parties
             );
+            if let Err(err) = send_session_announce(&*self.conn, &session_info).await {
+                eprintln!(
+                    "[bootnode] Failed to send immediate SessionAnnounce to party {}: {}",
+                    party_id, err
+                );
+            }
+            self.waiting_for_session = false;
         }
     }
 

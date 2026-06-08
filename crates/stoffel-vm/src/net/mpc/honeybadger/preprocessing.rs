@@ -3,7 +3,11 @@ use crate::net::curve::SupportedMpcField;
 use crate::storage::preproc::{self, PreprocBlob, PreprocKeyScope};
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_std::rand::SeedableRng;
-use std::sync::atomic::Ordering;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
 use stoffel_vm_types::core_types::{ShareData, ShareType};
 use stoffelmpc_mpc::common::PreprocessingMPCProtocol;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -18,6 +22,14 @@ fn ensure_decoded_count(label: &str, actual: usize, expected: u32) -> Result<(),
         ));
     }
     Ok(())
+}
+
+fn preprocessing_progress_interval() -> Option<Duration> {
+    std::env::var("STOFFEL_HB_PREPROCESSING_PROGRESS_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
 }
 
 impl<F, G> HoneyBadgerMpcEngine<F, G>
@@ -39,9 +51,32 @@ where
         {
             let mut node = self.clone_node().await;
             let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-            node.run_preprocessing(self.net.clone(), &mut rng)
-                .await
-                .map_err(|e| format!("Preprocessing failed: {:?}", e))?;
+            let party_id = self.topology.party_id();
+            let started = Instant::now();
+            let progress_done = Arc::new(AtomicBool::new(false));
+            let progress_handle = preprocessing_progress_interval().map(|interval| {
+                let progress_done = Arc::clone(&progress_done);
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(interval).await;
+                        if progress_done.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        eprintln!(
+                            "[hb preprocessing progress] party={} elapsed_ms={}",
+                            party_id,
+                            started.elapsed().as_millis()
+                        );
+                    }
+                })
+            });
+
+            let result = node.run_preprocessing(self.net.clone(), &mut rng).await;
+            progress_done.store(true, Ordering::SeqCst);
+            if let Some(handle) = progress_handle {
+                handle.abort();
+            }
+            result.map_err(|e| format!("Preprocessing failed: {:?}", e))?;
         }
 
         self.persist_preproc().await?;

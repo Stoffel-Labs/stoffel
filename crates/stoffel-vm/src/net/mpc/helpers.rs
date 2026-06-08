@@ -10,6 +10,7 @@ use stoffelmpc_mpc::honeybadger::HoneyBadgerMPCNodeOpts;
 const DEFAULT_MIN_PARTIES: usize = 5;
 const DEFAULT_THRESHOLD: usize = 1;
 const DEFAULT_SECURITY_PARAMETER_K: usize = 8;
+const DEFAULT_PROTOCOL_TIMEOUT_SECONDS: u64 = 600;
 #[allow(dead_code)]
 fn derive_prandbit_count(n_random_shares: usize) -> usize {
     std::cmp::max(n_random_shares, DEFAULT_FIXED_POINT_FRACTIONAL_BITS)
@@ -20,6 +21,15 @@ fn derive_prandint_count(n_triples: usize, n_random_shares: usize) -> usize {
 }
 pub fn honeybadger_protocol_instance_id(instance_id: u64) -> u32 {
     derive_protocol_instance_id_u32(b"honeybadger", instance_id)
+}
+
+pub fn honeybadger_protocol_timeout() -> std::time::Duration {
+    let seconds = std::env::var("STOFFEL_MPC_PROTOCOL_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_PROTOCOL_TIMEOUT_SECONDS);
+    std::time::Duration::from_secs(seconds)
 }
 
 /// Derive the AVSS protocol instance id from the VM session id.
@@ -67,7 +77,7 @@ pub fn honeybadger_node_opts(
         n_prandint,
         l,
         k,
-        std::time::Duration::from_secs(600),
+        honeybadger_protocol_timeout(),
     )
     .map_err(|e| format!("Failed to create HoneyBadger node options: {:?}", e))
 }

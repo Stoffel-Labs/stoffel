@@ -13,8 +13,11 @@ pub(crate) fn bit_and(
 
     if let Some(pair) = matching_share_pair("AND", left, right)? {
         ensure_secret_bool(pair.share_type, "Bitwise AND")?;
-        let data =
-            share_runtime()?.multiply_share_data(pair.share_type, pair.left_data, pair.right_data)?;
+        let data = share_runtime()?.multiply_share_data(
+            pair.share_type,
+            pair.left_data,
+            pair.right_data,
+        )?;
         return Ok(Value::Share(pair.share_type, data));
     }
 
@@ -36,8 +39,11 @@ pub(crate) fn bit_or(
 
     if let Some(pair) = matching_share_pair("OR", left, right)? {
         ensure_secret_bool(pair.share_type, "Bitwise OR")?;
-        let product =
-            share_runtime()?.multiply_share_data(pair.share_type, pair.left_data, pair.right_data)?;
+        let product = share_runtime()?.multiply_share_data(
+            pair.share_type,
+            pair.left_data,
+            pair.right_data,
+        )?;
         let data = bool_or_data(
             share_runtime,
             pair.share_type,
@@ -66,8 +72,11 @@ pub(crate) fn bit_xor(
 
     if let Some(pair) = matching_share_pair("XOR", left, right)? {
         ensure_secret_bool(pair.share_type, "Bitwise XOR")?;
-        let product =
-            share_runtime()?.multiply_share_data(pair.share_type, pair.left_data, pair.right_data)?;
+        let product = share_runtime()?.multiply_share_data(
+            pair.share_type,
+            pair.left_data,
+            pair.right_data,
+        )?;
         let data = bool_xor_data(
             share_runtime,
             pair.share_type,
@@ -85,7 +94,10 @@ pub(crate) fn bit_xor(
     }
 }
 
-pub(crate) fn bit_not(value: &Value, share_runtime: ShareRuntimeProvider<'_>) -> ValueOpResult<Value> {
+pub(crate) fn bit_not(
+    value: &Value,
+    share_runtime: ShareRuntimeProvider<'_>,
+) -> ValueOpResult<Value> {
     if let Some(result) = try_clear_bit_not(value) {
         return result;
     }

@@ -15,5 +15,5 @@ pub mod session_config;
 pub use helpers::NetEnvelope;
 pub use helpers::{
     avss_protocol_instance_id, default_node_opts, honeybadger_node_opts,
-    honeybadger_protocol_instance_id,
+    honeybadger_protocol_instance_id, honeybadger_protocol_timeout,
 };

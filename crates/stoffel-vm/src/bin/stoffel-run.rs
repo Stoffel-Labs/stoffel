@@ -25,7 +25,7 @@ use stoffel_vm::net::hb_engine::HoneyBadgerMpcEngine;
 use stoffel_vm::net::mpc_engine::{DurableIdentityDigest, MpcEngine, MpcSessionTopology};
 use stoffel_vm::net::{
     avss_protocol_instance_id, honeybadger_node_opts, honeybadger_protocol_instance_id,
-    spawn_receive_loops_split,
+    honeybadger_protocol_timeout, spawn_receive_loops_split,
 };
 use stoffel_vm::net::{
     program_id_from_bytes, register_and_wait_for_session, run_bootnode_with_config,
@@ -61,6 +61,16 @@ type AvssCoordinatorShare<F, G> = FeldmanShamirShare<F, G>;
 type AvssOffChainCoordinator<F, G> = OffChainCoordinatorClient<F, AvssCoordinatorShare<F, G>>;
 type AvssOffChainNodeRpcClient<F, G> = OffChainNodeRPCClient<F, AvssCoordinatorShare<F, G>>;
 type AvssOffChainNodeRpcServer<F, G> = OffChainNodeRPCServer<F, AvssCoordinatorShare<F, G>>;
+
+fn session_registration_timeout() -> Duration {
+    let seconds = env::var("STOFFEL_SESSION_REGISTRATION_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(120);
+    Duration::from_secs(seconds)
+}
+
 fn extract_pubkey_from_cert(cert_der: &[u8]) -> Vec<u8> {
     let (_, parsed) = X509Certificate::from_der(cert_der).expect("parse X.509 cert");
     parsed
@@ -2198,9 +2208,13 @@ where
     let client_random_count = input_ids.len().max(coordinator_client_count_hint);
     let n_client_random = client_random_count.saturating_mul(client_input_count);
     let n_random = 2 + 2 * n_triples + n_client_random;
+    let protocol_timeout = honeybadger_protocol_timeout();
     eprintln!(
-        "[party {}] Creating MPC node opts (n_triples={}, n_random={}, timeout=600s)",
-        my_id, n_triples, n_random
+        "[party {}] Creating MPC node opts (n_triples={}, n_random={}, timeout={}s)",
+        my_id,
+        n_triples,
+        n_random,
+        protocol_timeout.as_secs()
     );
     let mpc_opts =
         honeybadger_node_opts(n, t, n_triples, n_random, instance_id).unwrap_or_else(|e| {
@@ -3874,8 +3888,8 @@ async fn main() {
                 entry: entry.clone(),
                 n_parties: n,
                 threshold: t,
-                timeout: Duration::from_secs(120), // 2 minute timeout for all parties to join
-                program_bytes: Some(bytes),        // Leader uploads program bytes
+                timeout: session_registration_timeout(),
+                program_bytes: Some(bytes), // Leader uploads program bytes
             },
         )
         .await
@@ -3963,8 +3977,8 @@ async fn main() {
                 entry: entry.clone(),
                 n_parties: n,
                 threshold: t,
-                timeout: Duration::from_secs(120), // 2 minute timeout for all parties to join
-                program_bytes: Some(bytes),        // Upload program bytes
+                timeout: session_registration_timeout(),
+                program_bytes: Some(bytes), // Upload program bytes
             },
         )
         .await
@@ -4806,8 +4820,16 @@ async fn main() {
         vm.set_client_roster(client_roster.clone());
     }
 
-    // Execute entry function
-    match vm.execute(&agreed_entry) {
+    // Execute entry function. Prefer the async MPC scheduler when an async-capable
+    // engine was installed so secret-share operations yield instead of blocking
+    // inside the synchronous VM instruction path.
+    let execution_result = if let Some(engine) = hb_bls12381_coord_engine.as_ref() {
+        vm.execute_async(&agreed_entry, engine.as_ref()).await
+    } else {
+        vm.execute(&agreed_entry)
+    };
+
+    match execution_result {
         Ok(result) => {
             {
                 let mut handled_by_coordinator = false;

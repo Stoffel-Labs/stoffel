@@ -184,6 +184,67 @@ def main() -> int64:
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "starts a real localhost coordinator and long-running MPC AES party mesh"]
+async fn local_offchain_coordinator_runs_optimized_aes_circuit_without_docker_compose() {
+    let source = include_str!("../../stoffel-lang/examples/mpc_aes128_circuit/main.stfl");
+    let options = stoffellang::CompilerOptions {
+        optimize: true,
+        mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+        ..Default::default()
+    };
+    let compiled =
+        stoffellang::compile(source, "<local-runner-aes-e2e>", &options).expect("compile AES");
+    let binary = stoffellang::convert_to_binary(&compiled);
+
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+        .parties(5)
+        .threshold(1)
+        .timeout(Duration::from_secs(1800))
+        .build()
+        .expect("local runner config")
+        .run()
+        .await
+        .expect("local AES coordinator run");
+
+    assert_eq!(output.consistent_returned_values().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "starts a real localhost coordinator and MPC party mesh"]
+async fn local_offchain_coordinator_runs_honeybadger_batch_mul_40_without_docker_compose() {
+    let source = r#"
+def main() -> int64:
+  var lefts: list[Share] = []
+  var rights: list[Share] = []
+  for i in 0..40:
+    lefts.append(Share.from_clear_int(i % 2, 1))
+    rights.append(Share.from_clear_int(1, 1))
+  var products = Share.batch_mul(lefts, rights)
+  return products[39].open()
+"#;
+    let options = stoffellang::CompilerOptions {
+        optimize: true,
+        mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+        ..Default::default()
+    };
+    let compiled = stoffellang::compile(source, "<local-runner-batch-mul-40-e2e>", &options)
+        .expect("compile batch mul 40");
+    let binary = stoffellang::convert_to_binary(&compiled);
+
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+        .parties(5)
+        .threshold(1)
+        .timeout(Duration::from_secs(900))
+        .build()
+        .expect("local runner config")
+        .run()
+        .await
+        .expect("local batch mul coordinator run");
+
+    assert_eq!(output.consistent_returned_values().unwrap(), vec!["true"]);
+}
+
 #[test]
 fn local_run_output_reports_consistent_party_return_values() {
     let output = LocalCoordinatorRunOutput {

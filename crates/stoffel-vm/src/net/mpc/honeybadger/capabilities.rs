@@ -164,6 +164,16 @@ where
             .map_mpc_engine_operation("async_multiply_share")
     }
 
+    async fn batch_multiply_share_async(
+        &self,
+        ty: ShareType,
+        pairs: &[(Vec<u8>, Vec<u8>)],
+    ) -> MpcEngineResult<Vec<ShareData>> {
+        HoneyBadgerMpcEngine::batch_multiply_share_async(self, ty, pairs)
+            .await
+            .map_mpc_engine_operation("async_batch_multiply_share")
+    }
+
     async fn open_share_async(
         &self,
         ty: ShareType,

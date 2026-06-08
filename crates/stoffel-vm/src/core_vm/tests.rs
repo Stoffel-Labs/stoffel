@@ -331,6 +331,111 @@ impl AsyncMpcEngine for AsyncBatchOpenEngine {
     }
 }
 
+struct AsyncBatchMulEngine {
+    sync_mul_calls: AtomicUsize,
+    async_batch_calls: AtomicUsize,
+}
+
+impl AsyncBatchMulEngine {
+    fn new() -> Self {
+        Self {
+            sync_mul_calls: AtomicUsize::new(0),
+            async_batch_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl MpcEngine for AsyncBatchMulEngine {
+    fn protocol_name(&self) -> &'static str {
+        "async-batch-mul"
+    }
+
+    fn topology(&self) -> MpcSessionTopology {
+        MpcSessionTopology::try_new(11, 1, 3, 1).expect("test topology should be valid")
+    }
+
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    fn start(&self) -> MpcEngineResult<()> {
+        Ok(())
+    }
+
+    fn input_share(&self, _clear: ClearShareInput) -> MpcEngineResult<ShareData> {
+        Ok(ShareData::Opaque(Vec::new()))
+    }
+
+    fn open_share(&self, _ty: ShareType, _share_bytes: &[u8]) -> MpcEngineResult<ClearShareValue> {
+        Err(MpcEngineError::operation_failed("open_share", "not used"))
+    }
+
+    fn capabilities(&self) -> MpcCapabilities {
+        MpcCapabilities::MULTIPLICATION
+    }
+
+    fn as_multiplication(&self) -> Option<&dyn MpcEngineMultiplication> {
+        Some(self)
+    }
+}
+
+impl MpcEngineMultiplication for AsyncBatchMulEngine {
+    fn multiply_share(
+        &self,
+        _ty: ShareType,
+        _left: &[u8],
+        _right: &[u8],
+    ) -> MpcEngineResult<ShareData> {
+        self.sync_mul_calls.fetch_add(1, Ordering::SeqCst);
+        Err(MpcEngineError::operation_failed(
+            "multiply_share",
+            "sync multiply_share should not be used by async batch builtin calls",
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncMpcEngine for AsyncBatchMulEngine {
+    async fn multiply_share_async(
+        &self,
+        _ty: ShareType,
+        _left: &[u8],
+        _right: &[u8],
+    ) -> MpcEngineResult<ShareData> {
+        Err(MpcEngineError::operation_failed(
+            "async_multiply_share",
+            "scalar async multiply should not be used by async batch builtin calls",
+        ))
+    }
+
+    async fn batch_multiply_share_async(
+        &self,
+        _ty: ShareType,
+        pairs: &[(Vec<u8>, Vec<u8>)],
+    ) -> MpcEngineResult<Vec<ShareData>> {
+        self.async_batch_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(pairs
+            .iter()
+            .map(|(left, right)| {
+                let left_byte = left.first().copied().unwrap_or_default();
+                let right_byte = right.first().copied().unwrap_or_default();
+                ShareData::Opaque(vec![left_byte.wrapping_mul(right_byte)])
+            })
+            .collect())
+    }
+
+    async fn open_share_async(
+        &self,
+        _ty: ShareType,
+        _share_bytes: &[u8],
+    ) -> MpcEngineResult<ClearShareValue> {
+        Err(MpcEngineError::operation_failed(
+            "async_open_share",
+            "not used",
+        ))
+    }
+}
+
 struct BarrierConsensusEngine {
     barrier: Arc<tokio::sync::Barrier>,
     rbc_receive_started: AtomicUsize,
@@ -3895,6 +4000,75 @@ async fn share_batch_open_builtin_uses_async_batch_open() {
         Some(Value::I64(8))
     );
     assert_eq!(engine.sync_batch_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.async_batch_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn share_batch_mul_builtin_uses_async_batch_multiply() {
+    let engine = Arc::new(AsyncBatchMulEngine::new());
+    let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
+    let ty = ShareType::boolean();
+    let mut vm = VirtualMachine::builder()
+        .with_standard_library(false)
+        .with_mpc_engine(runtime_engine)
+        .build();
+    let lefts = vm.create_array_ref(2).expect("create left shares array");
+    vm.push_array_values(
+        lefts,
+        &[
+            Value::Share(ty, ShareData::Opaque(vec![1])),
+            Value::Share(ty, ShareData::Opaque(vec![0])),
+        ],
+    )
+    .expect("seed left shares array");
+    let rights = vm.create_array_ref(2).expect("create right shares array");
+    vm.push_array_values(
+        rights,
+        &[
+            Value::Share(ty, ShareData::Opaque(vec![1])),
+            Value::Share(ty, ShareData::Opaque(vec![1])),
+        ],
+    )
+    .expect("seed right shares array");
+    vm.register_function(VMFunction::new(
+        "builtin_batch_mul".to_string(),
+        vec!["lefts".to_string(), "rights".to_string()],
+        Vec::new(),
+        None,
+        2,
+        vec![
+            Instruction::PUSHARG(0),
+            Instruction::PUSHARG(1),
+            Instruction::CALL("Share.batch_mul".to_string()),
+            Instruction::RET(0),
+        ],
+        HashMap::new(),
+    ));
+
+    let result = vm
+        .execute_async_with_args(
+            "builtin_batch_mul",
+            &[Value::from(lefts), Value::from(rights)],
+            engine.as_ref(),
+        )
+        .await
+        .expect("Share.batch_mul should execute through async engine");
+    let Value::Array(result_ref) = result else {
+        panic!("Share.batch_mul should return an array");
+    };
+
+    assert_eq!(vm.read_array_len(result_ref).expect("result length"), 2);
+    assert_eq!(
+        vm.read_table_field(TableRef::from(result_ref), &Value::I64(0))
+            .expect("read first result"),
+        Some(Value::Share(ty, ShareData::Opaque(vec![1])))
+    );
+    assert_eq!(
+        vm.read_table_field(TableRef::from(result_ref), &Value::I64(1))
+            .expect("read second result"),
+        Some(Value::Share(ty, ShareData::Opaque(vec![0])))
+    );
+    assert_eq!(engine.sync_mul_calls.load(Ordering::SeqCst), 0);
     assert_eq!(engine.async_batch_calls.load(Ordering::SeqCst), 1);
 }
 

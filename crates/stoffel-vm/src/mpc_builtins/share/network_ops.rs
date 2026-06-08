@@ -11,6 +11,7 @@ use stoffel_vm_types::core_types::{ShareType, Value};
 
 pub(super) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     vm.try_register_mpc_online_foreign_method("Share", "mul", MpcOnlineBuiltin::Mul, share_mul)?;
+    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::BatchMul, share_batch_mul)?;
     vm.try_register_mpc_online_foreign_method("Share", "open", MpcOnlineBuiltin::Open, share_open)?;
     vm.try_register_mpc_online_foreign_method(
         "Share",
@@ -61,6 +62,50 @@ fn share_mul(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<V
 
     let result_data = ctx.secret_share_mul_data(share_type, &left_data, &right_data)?;
     create_result_share_object(&mut ctx, share_type, result_data)
+}
+
+fn share_batch_mul(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
+    let (lefts_arg, rights_arg) = {
+        let args = ctx.named_args("Share.batch_mul");
+        args.require_exact(2, "2 arguments: lefts_array, rights_array")?;
+        (args.cloned(0)?, args.cloned(1)?)
+    };
+
+    let Some((share_type, left_data)) =
+        ctx.extract_homogeneous_share_array(&lefts_arg, "Share.batch_mul lefts_array")?
+    else {
+        return ctx.create_array(0);
+    };
+    let Some((right_share_type, right_data)) =
+        ctx.extract_homogeneous_share_array(&rights_arg, "Share.batch_mul rights_array")?
+    else {
+        return ctx.create_array(0);
+    };
+
+    if share_type != right_share_type {
+        return Err(
+            crate::foreign_functions::ForeignFunctionCallbackError::Message(
+                "Share.batch_mul requires arrays with matching share types".to_string(),
+            ),
+        );
+    }
+    if left_data.len() != right_data.len() {
+        return Err(
+            crate::foreign_functions::ForeignFunctionCallbackError::Message(
+                "Share.batch_mul requires arrays with the same length".to_string(),
+            ),
+        );
+    }
+
+    let mut results = Vec::with_capacity(left_data.len());
+    for (left, right) in left_data.iter().zip(right_data.iter()) {
+        let result_data = ctx.secret_share_mul_data(share_type, left, right)?;
+        results.push(Value::Share(share_type, result_data));
+    }
+
+    let result_ref = ctx.create_array_ref(results.len())?;
+    ctx.push_array_ref_values(result_ref, &results)?;
+    Ok(Value::from(result_ref))
 }
 
 fn share_open(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {

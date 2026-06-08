@@ -142,6 +142,23 @@ pub trait AsyncMpcEngine: MpcEngine {
         ))
     }
 
+    /// Perform secure multiplication for a batch of share pairs asynchronously.
+    ///
+    /// Backends with native batched multiplication should override this method.
+    /// The default preserves correctness by executing scalar multiplications in
+    /// order.
+    async fn batch_multiply_share_async(
+        &self,
+        ty: ShareType,
+        pairs: &[(Vec<u8>, Vec<u8>)],
+    ) -> MpcEngineResult<Vec<ShareData>> {
+        let mut out = Vec::with_capacity(pairs.len());
+        for (left, right) in pairs {
+            out.push(self.multiply_share_async(ty, left, right).await?);
+        }
+        Ok(out)
+    }
+
     /// Reconstruct a secret from shares asynchronously.
     async fn open_share_async(
         &self,

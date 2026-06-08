@@ -12,6 +12,14 @@ use stoffelnet::transports::quic::{
     NetworkManager, PeerConnection, QuicNetworkConfig, QuicNetworkManager,
 };
 
+fn registration_progress_interval() -> Option<Duration> {
+    std::env::var("STOFFEL_SESSION_REGISTRATION_PROGRESS_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+}
+
 // NAT traversal types - use real types when feature is enabled, stubs otherwise
 #[cfg(feature = "nat")]
 use stoffelnet::transports::ice::{CandidateType, IceCandidate};
@@ -673,16 +681,38 @@ pub async fn register_and_wait_for_session(
         auth_token: Some(auth_token),
         tls_derived_id: Some(local_tls_id),
     };
-    send_ctrl(&*bn_conn, &reg_msg).await?;
+    let send_start = tokio::time::Instant::now();
+    send_ctrl(&*bn_conn, &reg_msg)
+        .await
+        .map_err(|err| format!("failed to send session registration: {err}"))?;
+    eprintln!(
+        "[party {}] Sent session registration to bootnode in {}ms",
+        my_party_id,
+        send_start.elapsed().as_millis()
+    );
 
     // Wait for SessionAnnounce from bootnode
     let start = tokio::time::Instant::now();
+    let progress_interval = registration_progress_interval();
+    let mut last_progress_log = Duration::ZERO;
     loop {
         if start.elapsed() > timeout {
             return Err(format!(
                 "Timeout waiting for session announcement after {:?}",
                 timeout
             ));
+        }
+
+        if let Some(interval) = progress_interval {
+            let elapsed = start.elapsed();
+            if elapsed >= last_progress_log + interval {
+                last_progress_log = elapsed;
+                eprintln!(
+                    "[party {}] Waiting for SessionAnnounce for {}s",
+                    my_party_id,
+                    elapsed.as_secs()
+                );
+            }
         }
 
         match tokio::time::timeout(Duration::from_millis(100), bn_conn.receive()).await {

@@ -6,15 +6,27 @@ use ark_ec::{CurveGroup, PrimeGroup};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::any::TypeId;
+use std::time::Instant;
 use stoffel_vm_types::core_types::{ClearShareValue, ShareData, ShareType};
 use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+
+const MAX_HONEYBADGER_MUL_BATCH_RECON_CHUNKS: usize = 32;
+
+pub(crate) fn max_honeybadger_mul_pairs_per_session(threshold: usize) -> usize {
+    MAX_HONEYBADGER_MUL_BATCH_RECON_CHUNKS.saturating_mul(threshold.saturating_add(1))
+}
 
 impl<F, G> HoneyBadgerMpcEngine<F, G>
 where
     F: SupportedMpcField,
     G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
 {
+    fn trace_multiply_enabled() -> bool {
+        std::env::var("STOFFEL_HB_MULTIPLY_TRACE")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    }
+
     pub async fn multiply_share_async(
         &self,
         ty: ShareType,
@@ -31,10 +43,26 @@ where
                 let right_share = Self::decode_share(right)?;
 
                 let mut node = self.clone_node().await;
+                let trace = Self::trace_multiply_enabled();
+                let started_at = Instant::now();
+                if trace {
+                    eprintln!(
+                        "[hb multiply start] party={} items=1 ty={:?}",
+                        self.topology.party_id(),
+                        ty
+                    );
+                }
                 let result_shares = node
                     .mul(vec![left_share], vec![right_share], self.net.clone())
                     .await
                     .map_err(|e| format!("MPC multiplication failed: {:?}", e))?;
+                if trace {
+                    eprintln!(
+                        "[hb multiply done] party={} items=1 elapsed_ms={}",
+                        self.topology.party_id(),
+                        started_at.elapsed().as_millis()
+                    );
+                }
 
                 let result_share = result_shares
                     .into_iter()
@@ -42,6 +70,77 @@ where
                     .ok_or_else(|| "Multiplication returned no shares".to_string())?;
 
                 Self::encode_share(&result_share).map(ShareData::Opaque)
+            }
+        }
+    }
+
+    pub async fn batch_multiply_share_async(
+        &self,
+        ty: ShareType,
+        pairs: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<Vec<ShareData>, String> {
+        if !self.is_ready() {
+            return Err("MPC engine not ready".into());
+        }
+
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        match ty {
+            ShareType::SecretInt { .. } | ShareType::SecretFixedPoint { .. } => {
+                let max_pairs_per_session =
+                    max_honeybadger_mul_pairs_per_session(self.topology.threshold()).max(1);
+                let trace = Self::trace_multiply_enabled();
+                let started_at = Instant::now();
+                if trace {
+                    eprintln!(
+                        "[hb batch_multiply start] party={} items={} ty={:?}",
+                        self.topology.party_id(),
+                        pairs.len(),
+                        ty
+                    );
+                }
+
+                let mut encoded_results = Vec::with_capacity(pairs.len());
+                let mut node = self.clone_node().await;
+                for chunk in pairs.chunks(max_pairs_per_session) {
+                    let mut left_shares = Vec::with_capacity(chunk.len());
+                    let mut right_shares = Vec::with_capacity(chunk.len());
+
+                    for (left, right) in chunk {
+                        left_shares.push(Self::decode_share(left)?);
+                        right_shares.push(Self::decode_share(right)?);
+                    }
+
+                    let result_shares = node
+                        .mul(left_shares, right_shares, self.net.clone())
+                        .await
+                        .map_err(|e| format!("MPC batch multiplication failed: {:?}", e))?;
+
+                    if result_shares.len() != chunk.len() {
+                        return Err(format!(
+                            "Batch multiplication returned {} shares for {} inputs",
+                            result_shares.len(),
+                            chunk.len()
+                        ));
+                    }
+
+                    for share in result_shares {
+                        encoded_results.push(Self::encode_share(&share).map(ShareData::Opaque)?);
+                    }
+                }
+                if trace {
+                    eprintln!(
+                        "[hb batch_multiply done] party={} items={} chunks={} elapsed_ms={}",
+                        self.topology.party_id(),
+                        pairs.len(),
+                        pairs.len().div_ceil(max_pairs_per_session),
+                        started_at.elapsed().as_millis()
+                    );
+                }
+
+                Ok(encoded_results)
             }
         }
     }
@@ -446,5 +545,17 @@ where
     pub(super) fn decode_share(bytes: &[u8]) -> Result<RobustShare<F>, String> {
         RobustShare::<F>::deserialize_compressed(bytes)
             .map_err(|e| format!("deserialize share: {}", e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::max_honeybadger_mul_pairs_per_session;
+
+    #[test]
+    fn max_mul_pairs_per_session_tracks_batch_recon_child_session_space() {
+        assert_eq!(max_honeybadger_mul_pairs_per_session(0), 32);
+        assert_eq!(max_honeybadger_mul_pairs_per_session(1), 64);
+        assert_eq!(max_honeybadger_mul_pairs_per_session(3), 128);
     }
 }

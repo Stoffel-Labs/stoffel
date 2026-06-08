@@ -166,8 +166,8 @@ fn unsupported_secret_bit_ops_classify_any_share_type() {
         .to_string()
         .contains("Left shift is not supported on secret shares"));
 
-    let err = bit_not(&fixed_share, &unavailable_runtime)
-        .expect_err("secret bitwise NOT is unsupported");
+    let err =
+        bit_not(&fixed_share, &unavailable_runtime).expect_err("secret bitwise NOT is unsupported");
     assert!(err
         .to_string()
         .contains("Bitwise NOT is only supported on secret bool shares"));

@@ -19,7 +19,7 @@ use stoffel_mpc_coordinator::Coordinator;
 use stoffel_vm_types::compiled_binary::{utils::save_to_file, CompiledBinary};
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
@@ -1162,25 +1162,21 @@ async fn wait_for_child(
     mut child: Child,
     timeout: Duration,
 ) -> LocalCoordinatorRunnerResult<LocalPartyOutput> {
-    let mut stdout_pipe = child.stdout.take().ok_or_else(|| {
+    let stdout_pipe = child.stdout.take().ok_or_else(|| {
         LocalCoordinatorRunnerError::Configuration("child stdout was not piped".to_owned())
     })?;
-    let mut stderr_pipe = child.stderr.take().ok_or_else(|| {
+    let stderr_pipe = child.stderr.take().ok_or_else(|| {
         LocalCoordinatorRunnerError::Configuration("child stderr was not piped".to_owned())
     })?;
+    let tee_output = std::env::var("STOFFEL_LOCAL_RUNNER_TEE")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
+    let stdout_name = name.clone();
     let stdout_task = tokio::spawn(async move {
-        let mut output = String::new();
-        stdout_pipe
-            .read_to_string(&mut output)
-            .await
-            .map(|_| output)
+        read_child_output(stdout_name, "stdout", stdout_pipe, tee_output).await
     });
+    let stderr_name = name.clone();
     let stderr_task = tokio::spawn(async move {
-        let mut output = String::new();
-        stderr_pipe
-            .read_to_string(&mut output)
-            .await
-            .map(|_| output)
+        read_child_output(stderr_name, "stderr", stderr_pipe, tee_output).await
     });
 
     let status = match tokio::time::timeout(timeout, child.wait()).await {
@@ -1223,6 +1219,34 @@ async fn wait_for_child(
         stderr,
         combined,
     })
+}
+
+async fn read_child_output<R>(
+    name: String,
+    stream: &'static str,
+    pipe: R,
+    tee_output: bool,
+) -> std::io::Result<String>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut reader = BufReader::new(pipe);
+    let mut output = String::new();
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).await?;
+        if read == 0 {
+            break;
+        }
+        if tee_output {
+            eprint!("[{name} {stream}] {line}");
+        }
+        output.push_str(&line);
+    }
+
+    Ok(output)
 }
 
 fn reserve_port() -> std::io::Result<u16> {

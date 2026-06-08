@@ -92,10 +92,14 @@ impl PendingMpcBuiltinCall {
             operation,
         }
     }
+
+    pub(crate) const fn operation(&self) -> &PendingMpcBuiltinOperation {
+        &self.operation
+    }
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum PendingMpcBuiltinOperation {
+pub(crate) enum PendingMpcBuiltinOperation {
     InputShare {
         clear: ClearShareInput,
     },
@@ -103,6 +107,11 @@ pub(super) enum PendingMpcBuiltinOperation {
         share_type: ShareType,
         left_data: ShareData,
         right_data: ShareData,
+    },
+    BatchMul {
+        share_type: ShareType,
+        left_data: Vec<ShareData>,
+        right_data: Vec<ShareData>,
     },
     Open {
         share_type: ShareType,
@@ -178,6 +187,10 @@ pub(super) enum CompletedMpcBuiltinResult {
     ShareValue {
         share_type: ShareType,
         share_data: ShareData,
+    },
+    ShareValues {
+        share_type: ShareType,
+        share_data: Vec<ShareData>,
     },
     BatchOpen(Vec<ClearShareValue>),
     ByteArray(Vec<u8>),
@@ -403,6 +416,25 @@ impl PendingMpcBuiltinCall {
                     share_data,
                 }
             }
+            PendingMpcBuiltinOperation::BatchMul {
+                share_type,
+                left_data,
+                right_data,
+            } => {
+                let pairs: Vec<(Vec<u8>, Vec<u8>)> = left_data
+                    .iter()
+                    .zip(right_data.iter())
+                    .map(|(left, right)| (left.as_bytes().to_vec(), right.as_bytes().to_vec()))
+                    .collect();
+                let share_data = engine
+                    .batch_multiply_share_async(share_type, &pairs)
+                    .await
+                    .map_mpc_backend_err("async_batch_multiply_share")?;
+                CompletedMpcBuiltinResult::ShareValues {
+                    share_type,
+                    share_data,
+                }
+            }
             PendingMpcBuiltinOperation::Open {
                 share_type,
                 share_data,
@@ -571,7 +603,8 @@ impl PendingMpcBuiltinCall {
     fn ensure_engine_can_execute<E: AsyncMpcEngine + ?Sized>(&self, engine: &E) -> VmResult<()> {
         match &self.operation {
             PendingMpcBuiltinOperation::InputShare { .. } => {}
-            PendingMpcBuiltinOperation::Mul { .. } => {
+            PendingMpcBuiltinOperation::Mul { .. }
+            | PendingMpcBuiltinOperation::BatchMul { .. } => {
                 engine
                     .multiplication_ops()
                     .map_mpc_backend_err("multiplication_ops")?;
@@ -670,9 +703,8 @@ impl VMState {
                 PendingMpcOperation::multiply_share(*dest, left, right)
             }
             RuntimeInstruction::Binary {
-                op: op @ (RuntimeBinaryOp::BitAnd
-                | RuntimeBinaryOp::BitOr
-                | RuntimeBinaryOp::BitXor),
+                op:
+                    op @ (RuntimeBinaryOp::BitAnd | RuntimeBinaryOp::BitOr | RuntimeBinaryOp::BitXor),
                 dest,
                 lhs,
                 rhs,
@@ -777,8 +809,7 @@ impl VMState {
                     )?,
                     _ => {
                         return Err(VmError::Message(
-                            "completed boolean bit operation used a non-bitwise opcode"
-                                .to_string(),
+                            "completed boolean bit operation used a non-bitwise opcode".to_string(),
                         ))
                     }
                 };
@@ -826,6 +857,18 @@ impl VMState {
                 share_type,
                 share_data,
             } => Ok(Value::Share(share_type, share_data)),
+            CompletedMpcBuiltinResult::ShareValues {
+                share_type,
+                share_data,
+            } => {
+                let shares: Vec<Value> = share_data
+                    .into_iter()
+                    .map(|share_data| Value::Share(share_type, share_data))
+                    .collect();
+                let result_ref = self.create_array_ref(shares.len())?;
+                self.push_array_ref_values(result_ref, &shares)?;
+                Ok(Value::from(result_ref))
+            }
             CompletedMpcBuiltinResult::BatchOpen(values) => {
                 let revealed: Vec<Value> = values
                     .into_iter()

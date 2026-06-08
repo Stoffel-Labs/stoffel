@@ -1184,6 +1184,7 @@ mod tests {
             "add_scalar",
             "mul_scalar",
             "mul",
+            "batch_mul",
             "open",
             "open_fixed",
             "send_to_client",

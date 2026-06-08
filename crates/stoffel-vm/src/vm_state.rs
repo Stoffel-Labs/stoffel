@@ -48,7 +48,9 @@ mod share_objects;
 mod table_memory;
 mod upvalues;
 
-pub(crate) use effect::{CompletedVmEffect, VmEffect, VmExecutionBudget, VmRunSlice};
+pub(crate) use effect::{
+    CompletedVmEffect, VmEffect, VmEffectKind, VmEffectSummary, VmExecutionBudget, VmRunSlice,
+};
 
 pub(crate) struct VMStateConfig {
     table_memory: Box<dyn TableMemory>,

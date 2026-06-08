@@ -15,6 +15,11 @@ fn generate_temp_name() -> String {
     format!("__batch_reveal_{}", count)
 }
 
+fn generate_named_temp_name(prefix: &str) -> String {
+    let count = BATCH_TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+    format!("__{}_{}", prefix, count)
+}
+
 /// Resets the temporary variable counter (useful for testing)
 #[allow(dead_code)]
 pub fn reset_temp_counter() {
@@ -42,6 +47,35 @@ struct RevealCandidate {
     type_annotation: Option<Box<AstNode>>,
     /// Whether the variable is mutable (for declarations)
     is_mutable: bool,
+}
+
+/// Represents a secret multiplication that can potentially be batched.
+#[derive(Debug, Clone)]
+struct MultiplyCandidate {
+    /// The index in the block where this statement appears.
+    statement_index: usize,
+    /// Variable being assigned to.
+    target_key: String,
+    /// Assignment target for non-declaration statements.
+    target_expr: AstNode,
+    /// Left multiplication operand.
+    left_expr: AstNode,
+    /// Right multiplication operand.
+    right_expr: AstNode,
+    /// Original operation using the product term.
+    op: String,
+    /// Variables referenced by both operands.
+    referenced_vars: HashSet<String>,
+    /// Source location for generated nodes.
+    location: SourceLocation,
+    /// Whether this is a variable declaration instead of assignment.
+    is_declaration: bool,
+    /// Type annotation if present.
+    type_annotation: Option<Box<AstNode>>,
+    /// Whether the variable is mutable.
+    is_mutable: bool,
+    /// Whether the variable is secret.
+    is_secret: bool,
 }
 
 /// Collects all variable names referenced in an expression
@@ -91,6 +125,865 @@ fn collect_referenced_vars(node: &AstNode, vars: &mut HashSet<String>) {
             }
         }
         _ => {}
+    }
+}
+
+fn type_annotation_is_secret(type_annotation: Option<&AstNode>) -> bool {
+    matches!(type_annotation, Some(AstNode::SecretType(_)))
+}
+
+#[derive(Debug, Clone)]
+struct MultiplyWrapper {
+    params: [String; 2],
+    op: String,
+    swapped: bool,
+}
+
+fn function_return_expr(body: &AstNode) -> Option<&AstNode> {
+    match body {
+        AstNode::Return {
+            value: Some(value), ..
+        } => Some(value.as_ref()),
+        AstNode::Block(statements) if statements.len() == 1 => match &statements[0] {
+            AstNode::Return {
+                value: Some(value), ..
+            } => Some(value.as_ref()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn multiply_wrapper_for_function(node: &AstNode) -> Option<(String, MultiplyWrapper)> {
+    let AstNode::FunctionDefinition {
+        name: Some(name),
+        parameters,
+        body,
+        ..
+    } = node
+    else {
+        return None;
+    };
+    if parameters.len() != 2 {
+        return None;
+    }
+    let AstNode::BinaryOperation {
+        op, left, right, ..
+    } = function_return_expr(body)?
+    else {
+        return None;
+    };
+    if op != "*" && op != "and" && op != "or" && op != "xor" {
+        return None;
+    }
+    let left_name = match left.as_ref() {
+        AstNode::Identifier(name, _) => name,
+        _ => return None,
+    };
+    let right_name = match right.as_ref() {
+        AstNode::Identifier(name, _) => name,
+        _ => return None,
+    };
+    let first_param = &parameters[0].name;
+    let second_param = &parameters[1].name;
+    let swapped = if left_name == first_param && right_name == second_param {
+        false
+    } else if left_name == second_param && right_name == first_param {
+        true
+    } else {
+        return None;
+    };
+
+    Some((
+        name.clone(),
+        MultiplyWrapper {
+            params: [first_param.clone(), second_param.clone()],
+            op: op.clone(),
+            swapped,
+        },
+    ))
+}
+
+fn inline_multiply_wrappers_with_map(
+    node: AstNode,
+    wrappers: &HashMap<String, MultiplyWrapper>,
+) -> AstNode {
+    match node {
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            resolved_return_type,
+        } => {
+            let function = Box::new(inline_multiply_wrappers_with_map(*function, wrappers));
+            let arguments: Vec<AstNode> = arguments
+                .into_iter()
+                .map(|argument| inline_multiply_wrappers_with_map(argument, wrappers))
+                .collect();
+
+            if let AstNode::Identifier(name, _) = function.as_ref() {
+                if let Some(wrapper) = wrappers.get(name) {
+                    if arguments.len() == 2 {
+                        let (left, right) = if wrapper.swapped {
+                            (arguments[1].clone(), arguments[0].clone())
+                        } else {
+                            (arguments[0].clone(), arguments[1].clone())
+                        };
+                        let _params = &wrapper.params;
+                        return AstNode::BinaryOperation {
+                            op: wrapper.op.clone(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                            location,
+                        };
+                    }
+                }
+            }
+
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                location,
+                resolved_return_type,
+            }
+        }
+        AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value,
+            is_mutable,
+            is_secret,
+            location,
+        } => AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value: value.map(|value| Box::new(inline_multiply_wrappers_with_map(*value, wrappers))),
+            is_mutable,
+            is_secret,
+            location,
+        },
+        AstNode::Assignment {
+            target,
+            value,
+            location,
+        } => AstNode::Assignment {
+            target: Box::new(inline_multiply_wrappers_with_map(*target, wrappers)),
+            value: Box::new(inline_multiply_wrappers_with_map(*value, wrappers)),
+            location,
+        },
+        AstNode::BinaryOperation {
+            op,
+            left,
+            right,
+            location,
+        } => AstNode::BinaryOperation {
+            op,
+            left: Box::new(inline_multiply_wrappers_with_map(*left, wrappers)),
+            right: Box::new(inline_multiply_wrappers_with_map(*right, wrappers)),
+            location,
+        },
+        AstNode::UnaryOperation {
+            op,
+            operand,
+            location,
+        } => AstNode::UnaryOperation {
+            op,
+            operand: Box::new(inline_multiply_wrappers_with_map(*operand, wrappers)),
+            location,
+        },
+        AstNode::FieldAccess {
+            object,
+            field_name,
+            location,
+        } => AstNode::FieldAccess {
+            object: Box::new(inline_multiply_wrappers_with_map(*object, wrappers)),
+            field_name,
+            location,
+        },
+        AstNode::IndexAccess {
+            base,
+            index,
+            location,
+        } => AstNode::IndexAccess {
+            base: Box::new(inline_multiply_wrappers_with_map(*base, wrappers)),
+            index: Box::new(inline_multiply_wrappers_with_map(*index, wrappers)),
+            location,
+        },
+        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| inline_multiply_wrappers_with_map(element, wrappers))
+                .collect(),
+            location,
+        },
+        AstNode::Return { value, location } => AstNode::Return {
+            value: value.map(|value| Box::new(inline_multiply_wrappers_with_map(*value, wrappers))),
+            location,
+        },
+        AstNode::DiscardStatement {
+            expression,
+            location,
+        } => AstNode::DiscardStatement {
+            expression: Box::new(inline_multiply_wrappers_with_map(*expression, wrappers)),
+            location,
+        },
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => AstNode::IfExpression {
+            condition: Box::new(inline_multiply_wrappers_with_map(*condition, wrappers)),
+            then_branch: Box::new(inline_multiply_wrappers_with_map(*then_branch, wrappers)),
+            else_branch: else_branch
+                .map(|branch| Box::new(inline_multiply_wrappers_with_map(*branch, wrappers))),
+        },
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => AstNode::WhileLoop {
+            condition: Box::new(inline_multiply_wrappers_with_map(*condition, wrappers)),
+            body: Box::new(inline_multiply_wrappers_with_map(*body, wrappers)),
+            location,
+        },
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => AstNode::ForLoop {
+            variables,
+            iterable: Box::new(inline_multiply_wrappers_with_map(*iterable, wrappers)),
+            body: Box::new(inline_multiply_wrappers_with_map(*body, wrappers)),
+            location,
+        },
+        AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body,
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        } => AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body: Box::new(inline_multiply_wrappers_with_map(*body, wrappers)),
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        },
+        AstNode::Block(statements) => AstNode::Block(
+            statements
+                .into_iter()
+                .map(|statement| inline_multiply_wrappers_with_map(statement, wrappers))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Inlines tiny pure wrappers whose body is exactly a secret multiply/AND.
+pub fn inline_multiply_wrappers(node: AstNode) -> AstNode {
+    let mut wrappers = HashMap::new();
+    if let AstNode::Block(statements) = &node {
+        for statement in statements {
+            if let Some((name, wrapper)) = multiply_wrapper_for_function(statement) {
+                wrappers.insert(name, wrapper);
+            }
+        }
+    }
+    if wrappers.is_empty() {
+        return node;
+    }
+    inline_multiply_wrappers_with_map(node, &wrappers)
+}
+
+fn secret_multiply_operands(value: &AstNode) -> Option<(&str, &AstNode, &AstNode)> {
+    match value {
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } if op == "*" || op == "and" || op == "or" || op == "xor" => {
+            Some((op.as_str(), left.as_ref(), right.as_ref()))
+        }
+        _ => None,
+    }
+}
+
+fn lvalue_key(node: &AstNode) -> Option<String> {
+    match node {
+        AstNode::Identifier(name, _) => Some(name.clone()),
+        AstNode::FieldAccess {
+            object, field_name, ..
+        } => lvalue_key(object).map(|object| format!("{object}.{field_name}")),
+        _ => None,
+    }
+}
+
+fn collect_multiply_dependency_vars(node: &AstNode, vars: &mut HashSet<String>) {
+    if let Some(key) = lvalue_key(node) {
+        vars.insert(key);
+        return;
+    }
+
+    match node {
+        AstNode::BinaryOperation { left, right, .. } => {
+            collect_multiply_dependency_vars(left, vars);
+            collect_multiply_dependency_vars(right, vars);
+        }
+        AstNode::UnaryOperation { operand, .. } => {
+            collect_multiply_dependency_vars(operand, vars);
+        }
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            ..
+        } => {
+            collect_multiply_dependency_vars(function, vars);
+            for argument in arguments {
+                collect_multiply_dependency_vars(argument, vars);
+            }
+        }
+        AstNode::IndexAccess { base, index, .. } => {
+            collect_multiply_dependency_vars(base, vars);
+            collect_multiply_dependency_vars(index, vars);
+        }
+        AstNode::ListLiteral { elements, .. } => {
+            for element in elements {
+                collect_multiply_dependency_vars(element, vars);
+            }
+        }
+        _ => collect_referenced_vars(node, vars),
+    }
+}
+
+/// Extracts consecutive statement-level secret multiply candidates.
+fn extract_multiply_candidates(statements: &[AstNode]) -> Vec<MultiplyCandidate> {
+    let mut candidates = Vec::new();
+    let mut secret_lvalues = HashSet::new();
+
+    for (idx, stmt) in statements.iter().enumerate() {
+        match stmt {
+            AstNode::VariableDeclaration {
+                name,
+                value: Some(value),
+                type_annotation,
+                is_mutable,
+                is_secret,
+                location,
+                ..
+            } => {
+                let declared_secret =
+                    *is_secret || type_annotation_is_secret(type_annotation.as_deref());
+                if declared_secret {
+                    secret_lvalues.insert(name.clone());
+                }
+
+                if declared_secret {
+                    if let Some((op, left, right)) = secret_multiply_operands(value) {
+                        let mut referenced_vars = HashSet::new();
+                        collect_multiply_dependency_vars(left, &mut referenced_vars);
+                        collect_multiply_dependency_vars(right, &mut referenced_vars);
+                        candidates.push(MultiplyCandidate {
+                            statement_index: idx,
+                            target_key: name.clone(),
+                            target_expr: AstNode::Identifier(name.clone(), location.clone()),
+                            left_expr: left.clone(),
+                            right_expr: right.clone(),
+                            op: op.to_string(),
+                            referenced_vars,
+                            location: location.clone(),
+                            is_declaration: true,
+                            type_annotation: type_annotation.clone(),
+                            is_mutable: *is_mutable,
+                            is_secret: *is_secret,
+                        });
+                    }
+                }
+            }
+            AstNode::Assignment {
+                target,
+                value,
+                location,
+            } => {
+                if let Some(target_key) = lvalue_key(target) {
+                    let target_is_secret = secret_lvalues.contains(&target_key)
+                        || matches!(target.as_ref(), AstNode::FieldAccess { .. });
+                    if target_is_secret {
+                        if let Some((op, left, right)) = secret_multiply_operands(value) {
+                            let mut referenced_vars = HashSet::new();
+                            collect_multiply_dependency_vars(left, &mut referenced_vars);
+                            collect_multiply_dependency_vars(right, &mut referenced_vars);
+                            candidates.push(MultiplyCandidate {
+                                statement_index: idx,
+                                target_key,
+                                target_expr: target.as_ref().clone(),
+                                left_expr: left.clone(),
+                                right_expr: right.clone(),
+                                op: op.to_string(),
+                                referenced_vars,
+                                location: location.clone(),
+                                is_declaration: false,
+                                type_annotation: None,
+                                is_mutable: false,
+                                is_secret: true,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    candidates
+}
+
+fn keys_conflict(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+}
+
+fn key_set_contains_conflict(keys: &HashSet<String>, needle: &str) -> bool {
+    keys.iter().any(|key| keys_conflict(key, needle))
+}
+
+fn statement_reads_and_writes(statement: &AstNode) -> (HashSet<String>, HashSet<String>) {
+    let mut reads = HashSet::new();
+    let mut writes = HashSet::new();
+
+    match statement {
+        AstNode::VariableDeclaration { name, value, .. } => {
+            writes.insert(name.clone());
+            if let Some(value) = value {
+                collect_multiply_dependency_vars(value, &mut reads);
+            }
+        }
+        AstNode::Assignment { target, value, .. } => {
+            if let Some(key) = lvalue_key(target) {
+                writes.insert(key);
+            } else {
+                collect_multiply_dependency_vars(target, &mut reads);
+            }
+            collect_multiply_dependency_vars(value, &mut reads);
+        }
+        AstNode::Return {
+            value: Some(value), ..
+        } => collect_multiply_dependency_vars(value, &mut reads),
+        AstNode::DiscardStatement { expression, .. } => {
+            collect_multiply_dependency_vars(expression, &mut reads);
+        }
+        _ => collect_multiply_dependency_vars(statement, &mut reads),
+    }
+
+    (reads, writes)
+}
+
+fn can_move_multiply_before_statement(candidate: &MultiplyCandidate, statement: &AstNode) -> bool {
+    let (reads, writes) = statement_reads_and_writes(statement);
+
+    if reads
+        .iter()
+        .any(|read| keys_conflict(read, &candidate.target_key))
+    {
+        return false;
+    }
+
+    if writes
+        .iter()
+        .any(|write| keys_conflict(write, &candidate.target_key))
+    {
+        return false;
+    }
+
+    !candidate
+        .referenced_vars
+        .iter()
+        .any(|referenced| key_set_contains_conflict(&writes, referenced))
+}
+
+fn can_move_multiply_to_group_start(
+    candidate: &MultiplyCandidate,
+    group: &[MultiplyCandidate],
+    statements: &[AstNode],
+) -> bool {
+    let Some(first) = group.first() else {
+        return true;
+    };
+
+    for idx in (first.statement_index + 1)..candidate.statement_index {
+        if group.iter().any(|grouped| grouped.statement_index == idx) {
+            continue;
+        }
+        if !can_move_multiply_before_statement(candidate, &statements[idx]) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Groups independent multiply candidates that can be batch-called without
+/// changing the values observed by intervening statements.
+fn group_batchable_multiplies(
+    statements: &[AstNode],
+    candidates: Vec<MultiplyCandidate>,
+) -> Vec<Vec<MultiplyCandidate>> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut groups = Vec::new();
+    let mut current_group = Vec::new();
+    let mut defined_vars: HashSet<String> = HashSet::new();
+    let mut last_index = None;
+
+    for candidate in candidates {
+        let can_batch = match last_index {
+            None => true,
+            Some(last_idx) => {
+                candidate.statement_index > last_idx
+                    && !candidate.referenced_vars.iter().any(|var| {
+                        defined_vars
+                            .iter()
+                            .any(|defined| keys_conflict(var, defined))
+                    })
+                    && !key_set_contains_conflict(&defined_vars, &candidate.target_key)
+                    && can_move_multiply_to_group_start(&candidate, &current_group, statements)
+            }
+        };
+
+        if can_batch {
+            defined_vars.insert(candidate.target_key.clone());
+            current_group.push(candidate);
+            last_index = current_group
+                .last()
+                .map(|candidate| candidate.statement_index);
+        } else {
+            if !current_group.is_empty() {
+                groups.push(current_group);
+            }
+            defined_vars.clear();
+            defined_vars.insert(candidate.target_key.clone());
+            last_index = Some(candidate.statement_index);
+            current_group = vec![candidate];
+        }
+    }
+
+    if !current_group.is_empty() {
+        groups.push(current_group);
+    }
+
+    groups
+}
+
+/// Creates a batch multiply transformation for a group of candidates.
+///
+/// Transforms:
+///   var a: secret bool = x and y
+///   var b: secret bool = p and q
+/// Into:
+///   var __batch_mul_lefts_N = [x, p]
+///   var __batch_mul_rights_M = [y, q]
+///   var __batch_mul_results_K = Share.batch_mul(__batch_mul_lefts_N, __batch_mul_rights_M)
+///   var a: secret bool = __batch_mul_results_K[0]
+///   var b: secret bool = __batch_mul_results_K[1]
+fn create_batch_multiply_statements(group: &[MultiplyCandidate]) -> Vec<AstNode> {
+    let lefts_name = generate_named_temp_name("batch_mul_lefts");
+    let rights_name = generate_named_temp_name("batch_mul_rights");
+    let results_name = generate_named_temp_name("batch_mul_results");
+    let location = group[0].location.clone();
+
+    let lefts_decl = AstNode::VariableDeclaration {
+        name: lefts_name.clone(),
+        type_annotation: None,
+        value: Some(Box::new(AstNode::ListLiteral {
+            elements: group
+                .iter()
+                .map(|candidate| candidate.left_expr.clone())
+                .collect(),
+            location: location.clone(),
+        })),
+        is_mutable: false,
+        is_secret: false,
+        location: location.clone(),
+    };
+
+    let rights_decl = AstNode::VariableDeclaration {
+        name: rights_name.clone(),
+        type_annotation: None,
+        value: Some(Box::new(AstNode::ListLiteral {
+            elements: group
+                .iter()
+                .map(|candidate| candidate.right_expr.clone())
+                .collect(),
+            location: location.clone(),
+        })),
+        is_mutable: false,
+        is_secret: false,
+        location: location.clone(),
+    };
+
+    let batch_call = AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier(
+            "Share.batch_mul".to_string(),
+            location.clone(),
+        )),
+        arguments: vec![
+            AstNode::Identifier(lefts_name.clone(), location.clone()),
+            AstNode::Identifier(rights_name.clone(), location.clone()),
+        ],
+        location: location.clone(),
+        resolved_return_type: None,
+    };
+
+    let results_decl = AstNode::VariableDeclaration {
+        name: results_name.clone(),
+        type_annotation: None,
+        value: Some(Box::new(batch_call)),
+        is_mutable: false,
+        is_secret: false,
+        location: location.clone(),
+    };
+
+    let mut result = vec![lefts_decl, rights_decl, results_decl];
+
+    for (idx, candidate) in group.iter().enumerate() {
+        let value_expr = batched_boolean_value_expr(candidate, &results_name, idx);
+
+        if candidate.is_declaration {
+            result.push(AstNode::VariableDeclaration {
+                name: candidate.target_key.clone(),
+                type_annotation: candidate.type_annotation.clone(),
+                value: Some(Box::new(value_expr)),
+                is_mutable: candidate.is_mutable,
+                is_secret: candidate.is_secret,
+                location: candidate.location.clone(),
+            });
+        } else {
+            result.push(AstNode::Assignment {
+                target: Box::new(candidate.target_expr.clone()),
+                value: Box::new(value_expr),
+                location: candidate.location.clone(),
+            });
+        }
+    }
+
+    result
+}
+
+fn batch_result_access(results_name: &str, idx: usize, location: &SourceLocation) -> AstNode {
+    AstNode::IndexAccess {
+        base: Box::new(AstNode::Identifier(
+            results_name.to_string(),
+            location.clone(),
+        )),
+        index: Box::new(AstNode::Literal {
+            value: crate::ast::Value::Int {
+                value: idx as u128,
+                kind: None,
+            },
+            location: location.clone(),
+        }),
+        location: location.clone(),
+    }
+}
+
+fn make_share_binary_call(
+    function_name: &str,
+    left: AstNode,
+    right: AstNode,
+    location: &SourceLocation,
+) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier(
+            function_name.to_string(),
+            location.clone(),
+        )),
+        arguments: vec![left, right],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+fn make_share_mul_scalar_expr(share: AstNode, scalar: u128, location: &SourceLocation) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier(
+            "Share.mul_scalar".to_string(),
+            location.clone(),
+        )),
+        arguments: vec![
+            share,
+            AstNode::Literal {
+                value: crate::ast::Value::Int {
+                    value: scalar,
+                    kind: None,
+                },
+                location: location.clone(),
+            },
+        ],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+fn batched_boolean_value_expr(
+    candidate: &MultiplyCandidate,
+    results_name: &str,
+    idx: usize,
+) -> AstNode {
+    let location = &candidate.location;
+    let product = batch_result_access(results_name, idx, location);
+
+    match candidate.op.as_str() {
+        "or" => {
+            let sum = make_share_binary_call(
+                "Share.add",
+                candidate.left_expr.clone(),
+                candidate.right_expr.clone(),
+                location,
+            );
+            make_share_binary_call("Share.sub", sum, product, location)
+        }
+        "xor" => {
+            let sum = make_share_binary_call(
+                "Share.add",
+                candidate.left_expr.clone(),
+                candidate.right_expr.clone(),
+                location,
+            );
+            let doubled_product = make_share_mul_scalar_expr(product, 2, location);
+            make_share_binary_call("Share.sub", sum, doubled_product, location)
+        }
+        _ => product,
+    }
+}
+
+fn optimize_block_multiplies(statements: Vec<AstNode>) -> Vec<AstNode> {
+    let statements: Vec<AstNode> = statements.into_iter().map(optimize_multiplies).collect();
+    let candidates = extract_multiply_candidates(&statements);
+
+    if candidates.is_empty() {
+        return statements;
+    }
+
+    let groups = group_batchable_multiplies(&statements, candidates);
+    if groups.is_empty() {
+        return statements;
+    }
+
+    let mut batched_indices = HashSet::new();
+    let mut batch_replacements = Vec::new();
+
+    for group in &groups {
+        let first_idx = group[0].statement_index;
+        for candidate in group {
+            batched_indices.insert(candidate.statement_index);
+        }
+        batch_replacements.push((first_idx, create_batch_multiply_statements(group)));
+    }
+
+    let mut result = Vec::new();
+    let mut replacement_iter = batch_replacements.into_iter().peekable();
+
+    for (idx, stmt) in statements.into_iter().enumerate() {
+        if batched_indices.contains(&idx) {
+            if let Some((first_idx, _)) = replacement_iter.peek() {
+                if *first_idx == idx {
+                    let (_, replacement_stmts) = replacement_iter.next().unwrap();
+                    result.extend(replacement_stmts);
+                }
+            }
+        } else {
+            result.push(stmt);
+        }
+    }
+
+    result
+}
+
+/// Batches consecutive independent secret multiplications into Share.batch_mul().
+pub fn optimize_multiplies(node: AstNode) -> AstNode {
+    match node {
+        AstNode::Block(statements) => AstNode::Block(optimize_block_multiplies(statements)),
+        AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body,
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        } => AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body: Box::new(optimize_multiplies(*body)),
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        },
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => AstNode::IfExpression {
+            condition: Box::new(optimize_multiplies(*condition)),
+            then_branch: Box::new(optimize_multiplies(*then_branch)),
+            else_branch: else_branch.map(|e| Box::new(optimize_multiplies(*e))),
+        },
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => AstNode::WhileLoop {
+            condition: Box::new(optimize_multiplies(*condition)),
+            body: Box::new(optimize_multiplies(*body)),
+            location,
+        },
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => AstNode::ForLoop {
+            variables,
+            iterable: Box::new(optimize_multiplies(*iterable)),
+            body: Box::new(optimize_multiplies(*body)),
+            location,
+        },
+        AstNode::TryCatch {
+            try_block,
+            catch_clauses,
+            finally_block,
+            location,
+        } => AstNode::TryCatch {
+            try_block: Box::new(optimize_multiplies(*try_block)),
+            catch_clauses: catch_clauses
+                .into_iter()
+                .map(|c| crate::ast::CatchClause {
+                    body: Box::new(optimize_multiplies(*c.body)),
+                    ..c
+                })
+                .collect(),
+            finally_block: finally_block.map(|b| Box::new(optimize_multiplies(*b))),
+            location,
+        },
+        _ => node,
     }
 }
 
@@ -867,7 +1760,9 @@ pub fn reorder_for_reveal_batching(node: AstNode) -> AstNode {
 
 /// Combined optimization: applies both Share.open() batching and instruction reordering
 pub fn optimize_all(node: AstNode) -> AstNode {
+    let node = inline_multiply_wrappers(node);
     let node = optimize_reveals(node);
+    let node = optimize_multiplies(node);
     reorder_for_reveal_batching(node)
 }
 
@@ -1120,12 +2015,78 @@ mod tests {
         }
     }
 
+    fn make_secret_bool_type() -> AstNode {
+        AstNode::SecretType(Box::new(make_identifier("bool")))
+    }
+
+    fn make_secret_bool_decl(name: &str, value: AstNode) -> AstNode {
+        AstNode::VariableDeclaration {
+            name: name.to_string(),
+            type_annotation: Some(Box::new(make_secret_bool_type())),
+            value: Some(Box::new(value)),
+            is_mutable: false,
+            is_secret: true,
+            location: make_loc(),
+        }
+    }
+
     fn make_binary_op(left: AstNode, op: &str, right: AstNode) -> AstNode {
         AstNode::BinaryOperation {
             op: op.to_string(),
             left: Box::new(left),
             right: Box::new(right),
             location: make_loc(),
+        }
+    }
+
+    fn make_field_access(object: &str, field: &str) -> AstNode {
+        AstNode::FieldAccess {
+            object: Box::new(make_identifier(object)),
+            field_name: field.to_string(),
+            location: make_loc(),
+        }
+    }
+
+    fn make_multiply_wrapper() -> AstNode {
+        AstNode::FunctionDefinition {
+            name: Some("gate_and".to_string()),
+            type_params: Vec::new(),
+            parameters: vec![
+                crate::ast::Parameter {
+                    name: "a".to_string(),
+                    type_annotation: Some(Box::new(make_secret_bool_type())),
+                    default_value: None,
+                    is_secret: true,
+                },
+                crate::ast::Parameter {
+                    name: "b".to_string(),
+                    type_annotation: Some(Box::new(make_secret_bool_type())),
+                    default_value: None,
+                    is_secret: true,
+                },
+            ],
+            return_type: Some(Box::new(make_secret_bool_type())),
+            body: Box::new(AstNode::Block(vec![AstNode::Return {
+                value: Some(Box::new(make_binary_op(
+                    make_identifier("a"),
+                    "and",
+                    make_identifier("b"),
+                ))),
+                location: make_loc(),
+            }])),
+            is_secret: false,
+            pragmas: Vec::new(),
+            location: make_loc(),
+            node_id: 0,
+        }
+    }
+
+    fn make_call(name: &str, arguments: Vec<AstNode>) -> AstNode {
+        AstNode::FunctionCall {
+            function: Box::new(make_identifier(name)),
+            arguments,
+            location: make_loc(),
+            resolved_return_type: None,
         }
     }
 
@@ -1188,6 +2149,168 @@ mod tests {
             // Last two should be the computations
             assert_eq!(get_var_decl_name(&stmts[4]), Some("x"));
             assert_eq!(get_var_decl_name(&stmts[5]), Some("y"));
+        } else {
+            panic!("Expected Block");
+        }
+    }
+
+    #[test]
+    fn test_batch_two_secret_bool_and_operations() {
+        reset_temp_counter();
+
+        let block = AstNode::Block(vec![
+            make_secret_bool_decl(
+                "a",
+                make_binary_op(make_identifier("x"), "and", make_identifier("y")),
+            ),
+            make_secret_bool_decl(
+                "b",
+                make_binary_op(make_identifier("p"), "and", make_identifier("q")),
+            ),
+        ]);
+
+        let optimized = optimize_multiplies(block);
+
+        if let AstNode::Block(stmts) = optimized {
+            assert_eq!(stmts.len(), 5);
+
+            if let AstNode::VariableDeclaration {
+                value: Some(value), ..
+            } = &stmts[2]
+            {
+                if let AstNode::FunctionCall {
+                    function,
+                    arguments,
+                    ..
+                } = value.as_ref()
+                {
+                    assert_eq!(arguments.len(), 2);
+                    assert_eq!(function.as_ref(), &make_identifier("Share.batch_mul"));
+                } else {
+                    panic!("Expected Share.batch_mul call");
+                }
+            } else {
+                panic!("Expected batch result declaration");
+            }
+
+            assert_eq!(get_var_decl_name(&stmts[3]), Some("a"));
+            assert_eq!(get_var_decl_name(&stmts[4]), Some("b"));
+            for stmt in &stmts[3..=4] {
+                if let AstNode::VariableDeclaration {
+                    value: Some(value), ..
+                } = stmt
+                {
+                    assert!(matches!(value.as_ref(), AstNode::IndexAccess { .. }));
+                } else {
+                    panic!("Expected variable declaration from batch result");
+                }
+            }
+        } else {
+            panic!("Expected Block");
+        }
+    }
+
+    #[test]
+    fn test_no_batch_secret_multiply_with_dependency() {
+        reset_temp_counter();
+
+        let block = AstNode::Block(vec![
+            make_secret_bool_decl(
+                "a",
+                make_binary_op(make_identifier("x"), "and", make_identifier("y")),
+            ),
+            make_secret_bool_decl(
+                "b",
+                make_binary_op(make_identifier("a"), "and", make_identifier("q")),
+            ),
+        ]);
+
+        let optimized = optimize_multiplies(block);
+
+        if let AstNode::Block(stmts) = optimized {
+            assert_eq!(stmts.len(), 8);
+
+            for idx in [2, 6] {
+                if let AstNode::VariableDeclaration {
+                    value: Some(value), ..
+                } = &stmts[idx]
+                {
+                    if let AstNode::FunctionCall { function, .. } = value.as_ref() {
+                        assert_eq!(function.as_ref(), &make_identifier("Share.batch_mul"));
+                    } else {
+                        panic!("Expected Share.batch_mul call");
+                    }
+                } else {
+                    panic!("Expected batch result declaration");
+                }
+            }
+
+            assert_eq!(get_var_decl_name(&stmts[3]), Some("a"));
+            assert_eq!(get_var_decl_name(&stmts[7]), Some("b"));
+            for stmt in [&stmts[3], &stmts[7]] {
+                if let AstNode::VariableDeclaration {
+                    value: Some(value), ..
+                } = stmt
+                {
+                    assert!(matches!(value.as_ref(), AstNode::IndexAccess { .. }));
+                } else {
+                    panic!("Expected variable declaration from batch result");
+                }
+            }
+        } else {
+            panic!("Expected Block");
+        }
+    }
+
+    #[test]
+    fn test_inline_wrapper_and_batch_field_assignments() {
+        reset_temp_counter();
+
+        let block = AstNode::Block(vec![
+            make_multiply_wrapper(),
+            AstNode::Assignment {
+                target: Box::new(make_field_access("m", "M1")),
+                value: Box::new(make_call(
+                    "gate_and",
+                    vec![make_field_access("t", "T13"), make_field_access("t", "T6")],
+                )),
+                location: make_loc(),
+            },
+            AstNode::Assignment {
+                target: Box::new(make_field_access("m", "M2")),
+                value: Box::new(make_call(
+                    "gate_and",
+                    vec![make_field_access("t", "T23"), make_field_access("t", "T8")],
+                )),
+                location: make_loc(),
+            },
+        ]);
+
+        let optimized = optimize_multiplies(inline_multiply_wrappers(block));
+
+        if let AstNode::Block(stmts) = optimized {
+            assert_eq!(stmts.len(), 6);
+            if let AstNode::VariableDeclaration {
+                value: Some(value), ..
+            } = &stmts[3]
+            {
+                if let AstNode::FunctionCall { function, .. } = value.as_ref() {
+                    assert_eq!(function.as_ref(), &make_identifier("Share.batch_mul"));
+                } else {
+                    panic!("Expected Share.batch_mul call");
+                }
+            } else {
+                panic!("Expected batch result declaration");
+            }
+
+            for stmt in &stmts[4..=5] {
+                if let AstNode::Assignment { target, value, .. } = stmt {
+                    assert!(matches!(target.as_ref(), AstNode::FieldAccess { .. }));
+                    assert!(matches!(value.as_ref(), AstNode::IndexAccess { .. }));
+                } else {
+                    panic!("Expected field assignment from batch result");
+                }
+            }
         } else {
             panic!("Expected Block");
         }
