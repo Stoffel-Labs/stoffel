@@ -1703,6 +1703,62 @@ def main():
 // ===========================================
 
 #[test]
+fn test_compile_bool_accepts_zero_and_one_literals() {
+    let source = r#"
+def takes_bool(value: bool) -> bool:
+  return value
+
+def main() -> bool:
+  var false_bit: bool = 0
+  var true_bit: bool = 1
+  var passed_bit: bool = takes_bool(1)
+  return passed_bit
+"#;
+    assert!(compile_source(source).is_ok());
+}
+
+#[test]
+fn test_compile_bool_integer_literal_lowers_to_bool_constant() {
+    let source = r#"
+def main() -> bool:
+  var bit: bool = 1
+  return bit
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+
+    assert!(
+        program
+            .main_chunk
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::LDI(_, Value::Bool(true)))),
+        "expected integer bool initializer to lower to Bool(true), got {:?}",
+        program.main_chunk.instructions
+    );
+}
+
+#[test]
+fn test_compile_bool_rejects_integer_literal_outside_bit_range() {
+    let source = r#"
+def main() -> bool:
+  var bit: bool = 2
+  return bit
+"#;
+    let errors = compile_source_errors(source);
+    let messages = errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(
+        messages.iter().any(|message| message.contains(
+            "Integer literal 2 cannot initialize 'bool' (allowed values are 0 or 1)"
+        )),
+        "expected bool literal range error, got {messages:?}"
+    );
+}
+
+#[test]
 fn test_semantic_secret_assignment_valid() {
     let source = r#"
 var share: Share = ClientStore.take_share(0, 0)

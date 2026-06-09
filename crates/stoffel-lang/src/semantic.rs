@@ -79,6 +79,26 @@ impl<'a> SemanticAnalyzer<'a> {
         }
     }
 
+    fn int_literal_bool_value(node: &AstNode) -> Option<bool> {
+        match Self::int_literal_value(node)? {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+
+    fn bool_literal_from_int(node: AstNode) -> AstNode {
+        if let AstNode::Literal { location, .. } = &node {
+            if let Some(value) = Self::int_literal_bool_value(&node) {
+                return AstNode::Literal {
+                    value: Value::Bool(value),
+                    location: location.clone(),
+                };
+            }
+        }
+        node
+    }
+
     /// Checks if two types are compatible, allowing Unknown to match any type.
     /// This enables type refinement where a concrete type annotation can refine
     /// an Unknown type from inference (e.g., `List[float]` refines `List[<unknown>]`).
@@ -357,6 +377,12 @@ impl<'a> SemanticAnalyzer<'a> {
         expected_type: &SymbolType,
     ) -> (AstNode, SymbolType) {
         let refined_type = match (&expr, inferred_type, expected_type) {
+            (AstNode::Literal { .. }, _, expected)
+                if expected.underlying_type() == &SymbolType::Bool
+                    && Self::int_literal_bool_value(&expr).is_some() =>
+            {
+                expected.clone()
+            }
             (AstNode::FunctionCall { function, .. }, inferred, expected)
                 if (Self::is_share_alias_type(inferred)
                     || matches!(function.as_ref(), AstNode::Identifier(name, _) if name == "Share.random"))
@@ -430,6 +456,9 @@ impl<'a> SemanticAnalyzer<'a> {
                     pairs
                 };
                 AstNode::DictLiteral { pairs, location }
+            }
+            other if expected_type.underlying_type() == &SymbolType::Bool => {
+                Self::bool_literal_from_int(other)
             }
             other => other,
         };
@@ -555,6 +584,23 @@ impl<'a> SemanticAnalyzer<'a> {
                 .with_hint("Call .reveal() to explicitly reveal a secret value"),
             );
             return Err(());
+        }
+
+        // Numeric bool literals are accepted only for the bit values bool can represent.
+        if dst_type.underlying_type() == &SymbolType::Bool {
+            if let Some(val) = src_node.and_then(Self::int_literal_value) {
+                if val == 0 || val == 1 {
+                    return Ok(());
+                }
+                self.error_reporter.add_error(CompilerError::type_error(
+                    format!(
+                        "Integer literal {} cannot initialize 'bool' (allowed values are 0 or 1)",
+                        val
+                    ),
+                    location,
+                ));
+                return Err(());
+            }
         }
 
         // Only enforce special rules if destination is integer
