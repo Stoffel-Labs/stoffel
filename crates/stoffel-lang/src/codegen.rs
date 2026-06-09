@@ -53,8 +53,13 @@ fn share_type_for_secret_scalar_symbol_type(ty: &SymbolType) -> Option<ShareType
     if ty.underlying_type() == &SymbolType::Bool {
         return Some(ShareType::boolean());
     }
-    ty.bit_width()
-        .map(|bit_width| ShareType::secret_int(usize::from(bit_width)))
+    ty.bit_width().map(|bit_width| {
+        if ty.is_signed() {
+            ShareType::secret_int(usize::from(bit_width))
+        } else {
+            ShareType::secret_uint(usize::from(bit_width))
+        }
+    })
 }
 
 fn is_share_random_call(function: &AstNode) -> bool {
@@ -1295,7 +1300,8 @@ impl CodeGenerator {
                             share_type_for_secret_scalar_symbol_type(return_type)
                         {
                             let bit_length = match share_type {
-                                ShareType::SecretInt { bit_length } => bit_length,
+                                ShareType::SecretInt { bit_length }
+                                | ShareType::SecretUInt { bit_length } => bit_length,
                                 ShareType::SecretFixedPoint { .. } => unreachable!(),
                             };
                             let bit_length_vr = self.allocate_virtual_register(false);

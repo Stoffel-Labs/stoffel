@@ -1751,9 +1751,8 @@ def main() -> bool:
         .collect::<Vec<_>>();
 
     assert!(
-        messages.iter().any(|message| message.contains(
-            "Integer literal 2 cannot initialize 'bool' (allowed values are 0 or 1)"
-        )),
+        messages.iter().any(|message| message
+            .contains("Integer literal 2 cannot initialize 'bool' (allowed values are 0 or 1)")),
         "expected bool literal range error, got {messages:?}"
     );
 }

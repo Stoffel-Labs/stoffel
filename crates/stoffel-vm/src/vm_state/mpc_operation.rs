@@ -2,6 +2,7 @@ use super::{CompletedVmEffect, VMState};
 use crate::error::{MpcBackendResultExt, VmError, VmResult};
 use crate::mpc_values::clear_share_input;
 use crate::net::client_store::ClientOutputShareCount;
+use crate::net::curve::clear_share_value_to_vm_value;
 use crate::net::mpc_engine::{
     AbaSessionId, AsyncMpcEngine, MpcEngine, MpcExponentGroup, MpcPartyId,
 };
@@ -66,6 +67,7 @@ pub(super) enum CompletedMpcOperation {
         dest: RuntimeRegister,
     },
     Open {
+        share_type: ShareType,
         value: ClearShareValue,
         src: RuntimeRegister,
         dest: RuntimeRegister,
@@ -192,7 +194,10 @@ pub(super) enum CompletedMpcBuiltinResult {
         share_type: ShareType,
         share_data: Vec<ShareData>,
     },
-    BatchOpen(Vec<ClearShareValue>),
+    BatchOpen {
+        share_type: ShareType,
+        values: Vec<ClearShareValue>,
+    },
     ByteArray(Vec<u8>),
     RbcReceiveAny {
         party_id: MpcPartyId,
@@ -354,7 +359,12 @@ impl PendingMpcOperation {
                     .await
                     .map_mpc_backend_err("async_open_share")?;
 
-                Ok(CompletedMpcOperation::Open { value, src, dest })
+                Ok(CompletedMpcOperation::Open {
+                    share_type,
+                    value,
+                    src,
+                    dest,
+                })
             }
             PendingMpcOperation::BuiltinCall(call) => Ok(CompletedMpcOperation::BuiltinCall(
                 call.execute_async(engine).await?,
@@ -443,7 +453,7 @@ impl PendingMpcBuiltinCall {
                     .open_share_async(share_type, share_data.as_bytes())
                     .await
                     .map_mpc_backend_err("async_open_share")?;
-                CompletedMpcBuiltinResult::Value(value.into_vm_value())
+                CompletedMpcBuiltinResult::Value(clear_share_value_to_vm_value(share_type, value))
             }
             PendingMpcBuiltinOperation::BatchOpen {
                 share_type,
@@ -457,7 +467,7 @@ impl PendingMpcBuiltinCall {
                     .batch_open_shares_async(share_type, &share_bytes)
                     .await
                     .map_mpc_backend_err("async_batch_open_shares")?;
-                CompletedMpcBuiltinResult::BatchOpen(values)
+                CompletedMpcBuiltinResult::BatchOpen { share_type, values }
             }
             PendingMpcBuiltinOperation::SendToClient {
                 client_id,
@@ -820,8 +830,18 @@ impl VMState {
                 )?;
                 Ok(())
             }
-            CompletedMpcOperation::Open { value, src, dest } => {
-                self.write_mov_result(dest, src, value.into_vm_value(), hooks_enabled)?;
+            CompletedMpcOperation::Open {
+                share_type,
+                value,
+                src,
+                dest,
+            } => {
+                self.write_mov_result(
+                    dest,
+                    src,
+                    clear_share_value_to_vm_value(share_type, value),
+                    hooks_enabled,
+                )?;
                 Ok(())
             }
             CompletedMpcOperation::BuiltinCall(call) => {
@@ -869,10 +889,10 @@ impl VMState {
                 self.push_array_ref_values(result_ref, &shares)?;
                 Ok(Value::from(result_ref))
             }
-            CompletedMpcBuiltinResult::BatchOpen(values) => {
+            CompletedMpcBuiltinResult::BatchOpen { share_type, values } => {
                 let revealed: Vec<Value> = values
                     .into_iter()
-                    .map(ClearShareValue::into_vm_value)
+                    .map(|value| clear_share_value_to_vm_value(share_type, value))
                     .collect();
                 let result_ref = self.create_array_ref(revealed.len())?;
                 self.push_array_ref_values(result_ref, &revealed)?;

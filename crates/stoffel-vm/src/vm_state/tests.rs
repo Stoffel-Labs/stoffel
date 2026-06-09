@@ -300,6 +300,9 @@ impl MpcEngine for MockBatchEngine {
                 ShareType::SecretInt { .. } => {
                     ClearShareValue::Integer(bytes.first().copied().unwrap_or(0) as i64)
                 }
+                ShareType::SecretUInt { .. } => {
+                    ClearShareValue::UnsignedInteger(bytes.first().copied().unwrap_or(0) as u64)
+                }
                 ShareType::SecretFixedPoint { .. } => {
                     ClearShareValue::FixedPoint(F64(
                         bytes.first().copied().unwrap_or(0) as f64 + 0.5

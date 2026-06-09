@@ -41,6 +41,7 @@ const TAG_ARRAY: u8 = 14;
 
 const SHARE_TYPE_SECRET_INT: u8 = 0;
 const SHARE_TYPE_SECRET_FIXED_POINT: u8 = 1;
+const SHARE_TYPE_SECRET_UINT: u8 = 2;
 
 const SHARE_DATA_OPAQUE: u8 = 0;
 const SHARE_DATA_FELDMAN: u8 = 1;
@@ -345,6 +346,10 @@ impl Encoder<'_> {
                 self.write_u8(SHARE_TYPE_SECRET_INT);
                 self.write_len(bit_length, "secret integer bit")?;
             }
+            ShareType::SecretUInt { bit_length } => {
+                self.write_u8(SHARE_TYPE_SECRET_UINT);
+                self.write_len(bit_length, "secret unsigned integer bit")?;
+            }
             ShareType::SecretFixedPoint { precision } => {
                 self.write_u8(SHARE_TYPE_SECRET_FIXED_POINT);
                 self.write_len(precision.total_bits(), "fixed-point total bit")?;
@@ -570,6 +575,11 @@ impl Reader<'_> {
             SHARE_TYPE_SECRET_INT => {
                 let bit_length = self.read_len("secret integer bit")?;
                 ShareType::try_secret_int(bit_length)
+                    .map_err(|error| invalid_data(error.to_string()))
+            }
+            SHARE_TYPE_SECRET_UINT => {
+                let bit_length = self.read_len("secret unsigned integer bit")?;
+                ShareType::try_secret_uint(bit_length)
                     .map_err(|error| invalid_data(error.to_string()))
             }
             SHARE_TYPE_SECRET_FIXED_POINT => {

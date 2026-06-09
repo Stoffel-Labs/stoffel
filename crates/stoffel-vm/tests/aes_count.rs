@@ -33,6 +33,7 @@ impl CountingEngine {
     fn share_from_clear(clear: ClearShareInput) -> ShareData {
         let byte = match clear.value() {
             ClearShareValue::Integer(value) => (value & 1) as u8,
+            ClearShareValue::UnsignedInteger(value) => (value & 1) as u8,
             ClearShareValue::FixedPoint(value) => ((value.0 as i64) & 1) as u8,
             ClearShareValue::Boolean(value) => u8::from(value),
         };

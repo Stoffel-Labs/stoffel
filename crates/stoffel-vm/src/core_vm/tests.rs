@@ -220,6 +220,7 @@ impl AsyncMpcEngine for BarrierInputEngine {
     async fn input_share_async(&self, clear: ClearShareInput) -> MpcEngineResult<ShareData> {
         let share_byte = match clear.value() {
             ClearShareValue::Integer(value) => value.to_le_bytes()[0],
+            ClearShareValue::UnsignedInteger(value) => value.to_le_bytes()[0],
             ClearShareValue::FixedPoint(value) => (value.0 as i64).to_le_bytes()[0],
             ClearShareValue::Boolean(value) => u8::from(value),
         };
@@ -1005,6 +1006,7 @@ impl TurmoilAllOpsEngine {
     fn clear_payload(clear: ClearShareInput) -> Vec<u8> {
         let value = match clear.value() {
             ClearShareValue::Integer(value) => value as u8,
+            ClearShareValue::UnsignedInteger(value) => value as u8,
             ClearShareValue::FixedPoint(_) => 0,
             ClearShareValue::Boolean(value) => u8::from(value),
         };

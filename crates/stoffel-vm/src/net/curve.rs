@@ -245,6 +245,11 @@ pub fn field_from_i64<F: ark_ff::PrimeField>(value: i64) -> F {
     }
 }
 
+#[inline]
+pub fn field_from_u64<F: ark_ff::PrimeField>(value: u64) -> F {
+    F::from(value)
+}
+
 fn bigint_to_single_limb_u64<B: AsRef<[u64]>>(value: &B) -> Option<u64> {
     let limbs = value.as_ref();
     if limbs.iter().skip(1).any(|limb| *limb != 0) {
@@ -252,6 +257,10 @@ fn bigint_to_single_limb_u64<B: AsRef<[u64]>>(value: &B) -> Option<u64> {
     }
 
     Some(limbs.first().copied().unwrap_or(0))
+}
+
+fn bigint_low_u64<B: AsRef<[u64]>>(value: &B) -> u64 {
+    value.as_ref().first().copied().unwrap_or(0)
 }
 
 /// Convert a field element back to `i64`.
@@ -289,6 +298,81 @@ pub fn field_to_i64<F: ark_ff::PrimeField>(value: F) -> MpcCurveResult<i64> {
             bigint_to_single_limb_u64(&bigint).ok_or(MpcCurveError::FieldElementExceedsI64Max)?;
         i64::try_from(raw).map_err(|_| MpcCurveError::FieldElementExceedsI64Max)
     }
+}
+
+/// Decode a field element as a signed VM integer with the given bit width.
+///
+/// Integer shares are arithmetic over the MPC field, but VM `secret intN`
+/// reveals are bounded integer values. When an operation such as `int64 * int64`
+/// opens to a field element outside the host `i64` range, decode the low `N`
+/// bits as two's-complement instead of rejecting the reveal.
+#[inline]
+pub fn field_to_wrapping_secret_int<F: ark_ff::PrimeField>(
+    value: F,
+    bit_length: usize,
+) -> MpcCurveResult<i64> {
+    if bit_length == 0 {
+        return Err(MpcCurveError::FieldElementExceedsI64Max);
+    }
+
+    if bit_length > i64::BITS as usize {
+        return field_to_i64(value);
+    }
+
+    let bigint = value.into_bigint();
+    let neg = (-value).into_bigint();
+    let magnitude_mod = if !value.is_zero() && neg < bigint {
+        bigint_low_u64(&neg).wrapping_neg()
+    } else {
+        bigint_low_u64(&bigint)
+    };
+
+    let mask = if bit_length == u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1u64 << bit_length) - 1
+    };
+    let truncated = magnitude_mod & mask;
+
+    if bit_length == i64::BITS as usize {
+        Ok(truncated as i64)
+    } else {
+        let sign_bit = 1u64 << (bit_length - 1);
+        if truncated & sign_bit == 0 {
+            Ok(truncated as i64)
+        } else {
+            Ok((truncated | !mask) as i64)
+        }
+    }
+}
+
+#[inline]
+pub fn field_to_wrapping_secret_uint<F: ark_ff::PrimeField>(
+    value: F,
+    bit_length: usize,
+) -> MpcCurveResult<u64> {
+    if bit_length == 0 {
+        return Err(MpcCurveError::FieldElementExceedsI64Max);
+    }
+
+    if bit_length > u64::BITS as usize {
+        return Err(MpcCurveError::FieldElementExceedsI64Max);
+    }
+
+    let bigint = value.into_bigint();
+    let neg = (-value).into_bigint();
+    let magnitude_mod = if !value.is_zero() && neg < bigint {
+        bigint_low_u64(&neg).wrapping_neg()
+    } else {
+        bigint_low_u64(&bigint)
+    };
+
+    let mask = if bit_length == u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1u64 << bit_length) - 1
+    };
+    Ok(magnitude_mod & mask)
 }
 
 pub fn fixed_point_scale_as_f64(fractional_bits: usize) -> MpcCurveResult<f64> {
@@ -334,7 +418,12 @@ pub fn field_to_clear_share_value<F: ark_ff::PrimeField>(
         ShareType::SecretInt { bit_length } if bit_length == BOOLEAN_SECRET_INT_BITS => {
             Ok(ClearShareValue::Boolean(!secret.is_zero()))
         }
-        ShareType::SecretInt { .. } => Ok(ClearShareValue::Integer(field_to_i64(secret)?)),
+        ShareType::SecretInt { bit_length } => Ok(ClearShareValue::Integer(
+            field_to_wrapping_secret_int(secret, bit_length)?,
+        )),
+        ShareType::SecretUInt { bit_length } => Ok(ClearShareValue::UnsignedInteger(
+            field_to_wrapping_secret_uint(secret, bit_length)?,
+        )),
         ShareType::SecretFixedPoint { precision } => {
             let scaled = field_to_i64(secret)?;
             let scale = fixed_point_scale_as_f64(precision.f())?;
@@ -346,7 +435,44 @@ pub fn field_to_clear_share_value<F: ark_ff::PrimeField>(
 /// Convert a reconstructed field element to the appropriate [`Value`] for a
 /// given [`ShareType`].
 pub fn field_to_value<F: ark_ff::PrimeField>(ty: ShareType, secret: F) -> MpcCurveResult<Value> {
-    field_to_clear_share_value(ty, secret).map(ClearShareValue::into_vm_value)
+    field_to_clear_share_value(ty, secret).map(|clear| clear_share_value_to_vm_value(ty, clear))
+}
+
+pub fn clear_share_value_to_vm_value(ty: ShareType, clear: ClearShareValue) -> Value {
+    match (ty, clear) {
+        (
+            ShareType::SecretInt {
+                bit_length: BOOLEAN_SECRET_INT_BITS,
+            },
+            ClearShareValue::Boolean(value),
+        ) => Value::Bool(value),
+        (ShareType::SecretInt { bit_length: 8 }, ClearShareValue::Integer(value)) => {
+            Value::I8(value as i8)
+        }
+        (ShareType::SecretInt { bit_length: 16 }, ClearShareValue::Integer(value)) => {
+            Value::I16(value as i16)
+        }
+        (ShareType::SecretInt { bit_length: 32 }, ClearShareValue::Integer(value)) => {
+            Value::I32(value as i32)
+        }
+        (ShareType::SecretInt { .. }, ClearShareValue::Integer(value)) => Value::I64(value),
+        (ShareType::SecretUInt { bit_length: 8 }, ClearShareValue::UnsignedInteger(value)) => {
+            Value::U8(value as u8)
+        }
+        (ShareType::SecretUInt { bit_length: 16 }, ClearShareValue::UnsignedInteger(value)) => {
+            Value::U16(value as u16)
+        }
+        (ShareType::SecretUInt { bit_length: 32 }, ClearShareValue::UnsignedInteger(value)) => {
+            Value::U32(value as u32)
+        }
+        (ShareType::SecretUInt { .. }, ClearShareValue::UnsignedInteger(value)) => {
+            Value::U64(value)
+        }
+        (ShareType::SecretFixedPoint { .. }, ClearShareValue::FixedPoint(value)) => {
+            Value::Float(value)
+        }
+        (_, value) => value.into_vm_value(),
+    }
 }
 
 pub fn revealed_value_to_clear_share_value(
@@ -363,6 +489,18 @@ pub fn revealed_value_to_clear_share_value(
             if bit_length != BOOLEAN_SECRET_INT_BITS =>
         {
             Ok(ClearShareValue::Integer(value))
+        }
+        (ShareType::SecretUInt { .. }, Value::U64(value)) => {
+            Ok(ClearShareValue::UnsignedInteger(value))
+        }
+        (ShareType::SecretUInt { .. }, Value::U32(value)) => {
+            Ok(ClearShareValue::UnsignedInteger(u64::from(value)))
+        }
+        (ShareType::SecretUInt { .. }, Value::U16(value)) => {
+            Ok(ClearShareValue::UnsignedInteger(u64::from(value)))
+        }
+        (ShareType::SecretUInt { .. }, Value::U8(value)) => {
+            Ok(ClearShareValue::UnsignedInteger(u64::from(value)))
         }
         (ShareType::SecretFixedPoint { .. }, Value::Float(value)) => {
             Ok(ClearShareValue::FixedPoint(value))
@@ -478,6 +616,94 @@ mod tests {
     }
 
     #[test]
+    fn secret_int64_reveal_truncates_large_positive_product_to_i64() {
+        type Fr = ark_bls12_381::Fr;
+
+        let lhs = i64::MAX;
+        let product = field_from_i64::<Fr>(lhs) * field_from_i64::<Fr>(lhs);
+        let revealed = field_to_clear_share_value(ShareType::secret_int(64), product)
+            .expect("int64 reveal should truncate oversized product");
+
+        assert_eq!(revealed, ClearShareValue::Integer(lhs.wrapping_mul(lhs)));
+        assert_eq!(revealed, ClearShareValue::Integer(1));
+    }
+
+    #[test]
+    fn secret_int64_reveal_truncates_large_negative_product_to_i64() {
+        type Fr = ark_bls12_381::Fr;
+
+        let lhs = i64::MIN / 2;
+        let rhs = 3i64;
+        let product = field_from_i64::<Fr>(lhs) * field_from_i64::<Fr>(rhs);
+        let revealed = field_to_clear_share_value(ShareType::secret_int(64), product)
+            .expect("int64 reveal should truncate oversized negative product");
+
+        assert_eq!(revealed, ClearShareValue::Integer(lhs.wrapping_mul(rhs)));
+    }
+
+    #[test]
+    fn secret_integer_reveal_uses_declared_integer_width() {
+        type Fr = ark_bls12_381::Fr;
+
+        for (bit_length, lhs, rhs, expected) in [
+            (8usize, 20u64, 20u64, 400i16 as i8 as i64),
+            (16usize, 300u64, 300u64, 90_000i32 as i16 as i64),
+            (
+                32usize,
+                70_000u64,
+                70_000u64,
+                4_900_000_000i64 as i32 as i64,
+            ),
+            (64usize, i64::MAX as u64, i64::MAX as u64, 1i64),
+        ] {
+            let product = Fr::from(lhs) * Fr::from(rhs);
+            let revealed = field_to_clear_share_value(ShareType::secret_int(bit_length), product)
+                .expect("integer reveal should truncate to declared width");
+
+            assert_eq!(
+                revealed,
+                ClearShareValue::Integer(expected),
+                "failed for secret int{bit_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_unsigned_integer_reveal_uses_declared_integer_width() {
+        type Fr = ark_bls12_381::Fr;
+
+        for (bit_length, lhs, rhs, expected) in [
+            (8usize, 20u64, 20u64, 144u64),
+            (16usize, 300u64, 300u64, 24_464u64),
+            (32usize, 70_000u64, 70_000u64, 605_032_704u64),
+            (64usize, u64::MAX, u64::MAX, 1u64),
+        ] {
+            let product = Fr::from(lhs) * Fr::from(rhs);
+            let revealed = field_to_clear_share_value(ShareType::secret_uint(bit_length), product)
+                .expect("unsigned integer reveal should truncate to declared width");
+
+            assert_eq!(
+                revealed,
+                ClearShareValue::UnsignedInteger(expected),
+                "failed for secret uint{bit_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_to_value_returns_width_specific_clear_integer_values() {
+        type Fr = ark_bls12_381::Fr;
+
+        let signed = field_to_value(ShareType::secret_int(32), Fr::from(4_900_000_000u64))
+            .expect("signed int32 reveal");
+        let unsigned = field_to_value(ShareType::secret_uint(32), Fr::from(4_900_000_000u64))
+            .expect("unsigned uint32 reveal");
+
+        assert_eq!(signed, Value::I32(4_900_000_000i64 as i32));
+        assert_eq!(unsigned, Value::U32(4_900_000_000u64 as u32));
+    }
+
+    #[test]
     fn fixed_point_float_to_i64_rejects_non_finite_values() {
         let precision = FixedPointPrecision::new(64, 16);
 
@@ -540,6 +766,7 @@ mod tests {
             bit_length: BOOLEAN_SECRET_INT_BITS,
         };
         let integer_ty = ShareType::SecretInt { bit_length: 64 };
+        let unsigned_integer_ty = ShareType::SecretUInt { bit_length: 64 };
         let fixed_ty = ShareType::secret_fixed_point_from_bits(64, 16);
 
         assert_eq!(
@@ -549,6 +776,10 @@ mod tests {
         assert_eq!(
             revealed_value_to_clear_share_value(integer_ty, Value::I64(-17)).unwrap(),
             ClearShareValue::Integer(-17)
+        );
+        assert_eq!(
+            revealed_value_to_clear_share_value(unsigned_integer_ty, Value::U64(u64::MAX)).unwrap(),
+            ClearShareValue::UnsignedInteger(u64::MAX)
         );
         assert_eq!(
             revealed_value_to_clear_share_value(fixed_ty, Value::Float(F64(3.25))).unwrap(),

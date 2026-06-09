@@ -57,6 +57,15 @@ where
                     );
                     Self::encode_share(&share).map(ShareData::Opaque)
                 }
+                (ShareType::SecretUInt { .. }, ClearShareValue::UnsignedInteger(v)) => {
+                    let secret = crate::net::curve::field_from_u64::<F>(v);
+                    let share = RobustShare::new(
+                        secret,
+                        self.topology.party_id(),
+                        self.topology.threshold(),
+                    );
+                    Self::encode_share(&share).map(ShareData::Opaque)
+                }
                 (
                     ShareType::SecretInt {
                         bit_length: BOOLEAN_SECRET_INT_BITS,
@@ -95,6 +104,7 @@ where
         (|| -> Result<ClearShareValue, String> {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("hb-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("hb-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("hb-fixed-{}-{}", precision.k(), precision.f())
                 }
@@ -147,6 +157,7 @@ where
         (|| -> Result<Vec<ClearShareValue>, String> {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("hb-batch-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("hb-batch-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("hb-batch-fixed-{}-{}", precision.k(), precision.f())
                 }

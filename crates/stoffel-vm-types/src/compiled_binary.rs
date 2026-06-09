@@ -664,6 +664,10 @@ impl CompiledBinary {
                 writer.write_all(&[0u8])?;
                 write_usize_as_u32(writer, bit_length, "SecretInt bit length")?;
             }
+            ShareType::SecretUInt { bit_length } => {
+                writer.write_all(&[2u8])?;
+                write_usize_as_u32(writer, bit_length, "SecretUInt bit length")?;
+            }
             ShareType::SecretFixedPoint { precision } => {
                 writer.write_all(&[1u8])?;
                 write_usize_as_u32(writer, precision.total_bits(), "fixed-point total bits")?;
@@ -1097,6 +1101,14 @@ impl CompiledBinary {
                 ShareType::try_secret_int(bit_length).map_err(|error| {
                     invalid_data(format!(
                         "invalid SecretInt metadata in IO manifest: {error}"
+                    ))
+                })
+            }
+            2 => {
+                let bit_length = read_usize_u32(reader, "SecretUInt bit length")?;
+                ShareType::try_secret_uint(bit_length).map_err(|error| {
+                    invalid_data(format!(
+                        "invalid SecretUInt metadata in IO manifest: {error}"
                     ))
                 })
             }

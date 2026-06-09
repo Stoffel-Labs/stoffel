@@ -1,16 +1,20 @@
 use super::format::ensure_homogeneous_share_data_format;
 use super::MpcShareRuntime;
 use crate::error::{MpcBackendResultExt, VmError, VmResult};
+use crate::net::curve::clear_share_value_to_vm_value;
 use crate::net::mpc_engine::MpcExponentGroup;
 use stoffel_vm_types::core_types::{ClearShareValue, ShareData, ShareType, Value};
 
 impl MpcShareRuntime<'_> {
     pub(crate) fn open_share_value(&self, value: &Value) -> VmResult<Value> {
         match value {
-            Value::Share(ty @ ShareType::SecretInt { .. }, share_data)
-            | Value::Share(ty @ ShareType::SecretFixedPoint { .. }, share_data) => {
-                Ok(self.open_share_data(*ty, share_data)?.into_vm_value())
-            }
+            Value::Share(
+                ty @ (ShareType::SecretInt { .. } | ShareType::SecretUInt { .. }),
+                share_data,
+            )
+            | Value::Share(ty @ ShareType::SecretFixedPoint { .. }, share_data) => Ok(
+                clear_share_value_to_vm_value(*ty, self.open_share_data(*ty, share_data)?),
+            ),
             _ => Err(VmError::InvalidShareRevealValue),
         }
     }

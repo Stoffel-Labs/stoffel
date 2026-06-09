@@ -7,7 +7,11 @@ use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::common::SecretSharingScheme;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 
-use crate::net::curve::{field_to_i64, fixed_point_scale_as_f64, MpcCurveConfig};
+use crate::net::curve::{
+    clear_share_value_to_vm_value, field_to_i64, field_to_wrapping_secret_int,
+    field_to_wrapping_secret_uint, fixed_point_scale_as_f64, MpcCurveConfig,
+};
+use stoffel_vm_types::core_types::ClearShareValue;
 
 pub(crate) fn interpolate_local_for_curve(
     curve_config: MpcCurveConfig,
@@ -88,7 +92,14 @@ where
 
     match ty {
         ShareType::SecretInt { bit_length: 1 } => Ok(Value::Bool(!secret.is_zero())),
-        ShareType::SecretInt { .. } => Ok(Value::I64(field_to_i64(secret)?)),
+        ty @ ShareType::SecretInt { bit_length } => Ok(clear_share_value_to_vm_value(
+            ty,
+            ClearShareValue::Integer(field_to_wrapping_secret_int(secret, bit_length)?),
+        )),
+        ty @ ShareType::SecretUInt { bit_length } => Ok(clear_share_value_to_vm_value(
+            ty,
+            ClearShareValue::UnsignedInteger(field_to_wrapping_secret_uint(secret, bit_length)?),
+        )),
         ShareType::SecretFixedPoint { precision } => {
             let scaled_value = field_to_i64(secret)?;
             let scale = fixed_point_scale_as_f64(precision.f())?;

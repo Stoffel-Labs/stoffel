@@ -35,6 +35,9 @@ where
             (ShareType::SecretInt { .. }, ClearShareValue::Integer(v)) => {
                 Ok(Self::field_from_i64(v))
             }
+            (ShareType::SecretUInt { .. }, ClearShareValue::UnsignedInteger(v)) => {
+                Ok(crate::net::curve::field_from_u64::<F>(v))
+            }
             (
                 ShareType::SecretInt {
                     bit_length: BOOLEAN_SECRET_INT_BITS,
@@ -226,6 +229,7 @@ where
         (|| -> Result<ClearShareValue, String> {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-fixed-{}-{}", precision.k(), precision.f())
                 }
@@ -271,6 +275,7 @@ where
         (|| -> Result<Vec<ClearShareValue>, String> {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-batch-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-batch-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-batch-fixed-{}-{}", precision.k(), precision.f())
                 }

@@ -418,7 +418,7 @@ where
             if node.params.n_prandint < target {
                 node.params.n_prandint = target;
             }
-            if let ShareType::SecretInt { bit_length } = ty {
+            if let ShareType::SecretInt { bit_length } | ShareType::SecretUInt { bit_length } = ty {
                 let target_random_bits = bit_length.min(56);
                 node.params.l = target_random_bits.saturating_sub(node.params.k);
             }

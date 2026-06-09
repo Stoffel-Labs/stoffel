@@ -1,5 +1,5 @@
 use super::{MpcValueError, MpcValueResult};
-use crate::value_conversions::value_to_i64;
+use crate::value_conversions::{value_to_i64, value_to_u64};
 use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareType, Value, F64};
 
 pub(crate) fn clear_share_input(
@@ -46,6 +46,9 @@ fn canonical_clear_share_value(
         }
         (ShareType::SecretInt { .. }, value) if is_integer_value(value) => Ok(
             ClearShareValue::Integer(value_to_i64(value, "clear integer")?),
+        ),
+        (ShareType::SecretUInt { .. }, value) if is_integer_value(value) => Ok(
+            ClearShareValue::UnsignedInteger(value_to_u64(value, "clear unsigned integer")?),
         ),
         (ShareType::SecretFixedPoint { .. }, Value::Float(value)) => {
             Ok(ClearShareValue::FixedPoint(*value))

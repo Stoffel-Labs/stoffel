@@ -43,6 +43,7 @@ fn share_get_type(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackRes
     let ty = ctx.get_share_type(&share_value)?;
     let type_str = match ty {
         ShareType::SecretInt { .. } => "SecretInt",
+        ShareType::SecretUInt { .. } => "SecretUInt",
         ShareType::SecretFixedPoint { .. } => "SecretFixedPoint",
     };
 

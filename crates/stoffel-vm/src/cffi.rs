@@ -254,6 +254,11 @@ impl TryFrom<CShareType> for ShareType {
                 ShareType::try_secret_fixed_point_from_bits(total_bits, fractional_bits)
                     .map_err(String::from)
             }
+            // kind 3 = SecretUInt with bit_length
+            3 => {
+                let bit_length = positive_ffi_width(c.width, "secret unsigned integer bit length")?;
+                ShareType::try_secret_uint(bit_length).map_err(String::from)
+            }
             _ => Err(format!("unknown share type kind {}", c.kind)),
         }
     }
@@ -268,6 +273,12 @@ impl TryFrom<ShareType> for CShareType {
                 kind: if bit_length == 1 { 1 } else { 0 },
                 width: i64::try_from(bit_length)
                     .map_err(|_| "secret integer bit length exceeds C ABI range".to_string())?,
+            }),
+            ShareType::SecretUInt { bit_length } => Ok(CShareType {
+                kind: 3,
+                width: i64::try_from(bit_length).map_err(|_| {
+                    "secret unsigned integer bit length exceeds C ABI range".to_string()
+                })?,
             }),
             ShareType::SecretFixedPoint { precision } => Ok(CShareType {
                 kind: 2,
@@ -1132,7 +1143,7 @@ pub unsafe extern "C" fn hb_engine_open_share(
     // open_share is sync in the current implementation (uses global registry)
     match engine.open_share(ty, share_bytes) {
         Ok(value) => {
-            let value = value.into_vm_value();
+            let value = crate::net::curve::clear_share_value_to_vm_value(ty, value);
             let converted = match value_to_stoffel_value(&value) {
                 Ok(converted) => converted,
                 Err(_) => return HBEngineErrorCode::HBEngineOpenShareFailed,

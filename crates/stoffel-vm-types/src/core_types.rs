@@ -628,6 +628,8 @@ impl FixedPointPrecision {
 pub enum ShareType {
     /// Secure integer shares (mirrors `SecretInt` in mpc-protocols)
     SecretInt { bit_length: usize },
+    /// Secure unsigned integer shares.
+    SecretUInt { bit_length: usize },
     /// Secure fixed-point shares (mirrors `SecretFixedPoint` in mpc-protocols)
     SecretFixedPoint { precision: FixedPointPrecision },
 }
@@ -642,6 +644,18 @@ impl ShareType {
 
     pub fn secret_int(bit_length: usize) -> Self {
         Self::try_secret_int(bit_length).expect("secret integers require a positive bit length")
+    }
+
+    pub fn try_secret_uint(bit_length: usize) -> ShareTypeResult<Self> {
+        if bit_length == 0 {
+            return Err(ShareTypeError::SecretIntBitLengthZero);
+        }
+        Ok(ShareType::SecretUInt { bit_length })
+    }
+
+    pub fn secret_uint(bit_length: usize) -> Self {
+        Self::try_secret_uint(bit_length)
+            .expect("secret unsigned integers require a positive bit length")
     }
 
     pub fn boolean() -> Self {
@@ -678,7 +692,9 @@ impl ShareType {
 
     pub fn bit_length(&self) -> Option<usize> {
         match self {
-            ShareType::SecretInt { bit_length } => Some(*bit_length),
+            ShareType::SecretInt { bit_length } | ShareType::SecretUInt { bit_length } => {
+                Some(*bit_length)
+            }
             _ => None,
         }
     }
@@ -709,6 +725,10 @@ impl Hash for ShareType {
                 0u8.hash(state);
                 bit_length.hash(state);
             }
+            ShareType::SecretUInt { bit_length } => {
+                2u8.hash(state);
+                bit_length.hash(state);
+            }
             ShareType::SecretFixedPoint { precision } => {
                 1u8.hash(state);
                 precision.k().hash(state);
@@ -721,6 +741,7 @@ impl Hash for ShareType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClearShareValue {
     Integer(i64),
+    UnsignedInteger(u64),
     FixedPoint(F64),
     Boolean(bool),
 }
@@ -1095,6 +1116,7 @@ impl ClearShareValue {
     pub fn into_vm_value(self) -> Value {
         match self {
             ClearShareValue::Integer(value) => Value::I64(value),
+            ClearShareValue::UnsignedInteger(value) => Value::U64(value),
             ClearShareValue::FixedPoint(value) => Value::Float(value),
             ClearShareValue::Boolean(value) => Value::Bool(value),
         }

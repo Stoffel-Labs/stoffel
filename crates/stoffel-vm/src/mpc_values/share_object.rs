@@ -131,6 +131,17 @@ impl ShareObjectRef {
                 };
                 Ok(ShareType::try_secret_int(bit_length)?)
             }
+            Value::String(s) if s == share_fields::SECRET_UINT => {
+                let bit_length = match store
+                    .read_table_field(self.table_ref(), &field(share_fields::BIT_LENGTH))
+                    .map_err(|e| {
+                        MpcValueError::table_memory_context("failed to read Share bit length", e)
+                    })? {
+                    Some(value) => value_to_usize(&value, "bit_length")?,
+                    _ => 64,
+                };
+                Ok(ShareType::try_secret_uint(bit_length)?)
+            }
             Value::String(s) if s == share_fields::SECRET_FIXED_POINT => {
                 let k = match store
                     .read_table_field(self.table_ref(), &field(share_fields::PRECISION_K))
@@ -205,6 +216,24 @@ pub fn create_share_object_ref<M: TableMemory + ?Sized>(
                     obj,
                     field(share_fields::SHARE_TYPE),
                     Value::String(share_fields::SECRET_INT.to_string()),
+                )
+                .map_err(|e| MpcValueError::table_memory_context("failed to set Share type", e))?;
+            store
+                .set_table_field(
+                    obj,
+                    field(share_fields::BIT_LENGTH),
+                    Value::I64(usize_to_vm_i64(bit_length, "bit_length")?),
+                )
+                .map_err(|e| {
+                    MpcValueError::table_memory_context("failed to set Share bit length", e)
+                })?;
+        }
+        ShareType::SecretUInt { bit_length } => {
+            store
+                .set_table_field(
+                    obj,
+                    field(share_fields::SHARE_TYPE),
+                    Value::String(share_fields::SECRET_UINT.to_string()),
                 )
                 .map_err(|e| MpcValueError::table_memory_context("failed to set Share type", e))?;
             store

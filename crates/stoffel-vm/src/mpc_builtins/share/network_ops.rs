@@ -4,6 +4,7 @@ use crate::foreign_functions::{
     ForeignFunctionCallbackResult, ForeignFunctionContext, MpcOnlineBuiltin,
 };
 use crate::net::client_store::ClientOutputShareCount;
+use crate::net::curve::clear_share_value_to_vm_value;
 use crate::net::mpc_engine::MpcExponentGenerator;
 use crate::value_conversions::value_to_usize;
 use crate::VirtualMachineResult;
@@ -120,7 +121,7 @@ fn share_open(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<
     };
 
     let revealed = ctx.open_share_data(ty, &data)?;
-    Ok(revealed.into_vm_value())
+    Ok(clear_share_value_to_vm_value(ty, revealed))
 }
 
 fn share_batch_open(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
@@ -139,7 +140,7 @@ fn share_batch_open(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackR
     let revealed: Vec<Value> = ctx
         .batch_open_share_data(share_type, &share_data)?
         .into_iter()
-        .map(|value| value.into_vm_value())
+        .map(|value| clear_share_value_to_vm_value(share_type, value))
         .collect();
 
     let result_ref = ctx.create_array_ref(revealed.len())?;

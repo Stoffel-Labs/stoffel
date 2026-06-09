@@ -389,6 +389,7 @@ where
         (|| -> Result<Vec<u8>, String> {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-field-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-field-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-field-fixed-{}-{}", precision.k(), precision.f())
                 }
@@ -661,6 +662,7 @@ where
         async {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-fixed-{}-{}", precision.k(), precision.f())
                 }
@@ -709,6 +711,7 @@ where
         async {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-batch-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-batch-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-batch-fixed-{}-{}", precision.k(), precision.f())
                 }
@@ -777,6 +780,7 @@ where
         async {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-field-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-field-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-field-fixed-{}-{}", precision.k(), precision.f())
                 }

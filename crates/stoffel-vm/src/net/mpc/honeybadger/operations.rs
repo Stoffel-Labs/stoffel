@@ -38,7 +38,9 @@ where
         }
 
         match ty {
-            ShareType::SecretInt { .. } | ShareType::SecretFixedPoint { .. } => {
+            ShareType::SecretInt { .. }
+            | ShareType::SecretUInt { .. }
+            | ShareType::SecretFixedPoint { .. } => {
                 let left_share = Self::decode_share(left)?;
                 let right_share = Self::decode_share(right)?;
 
@@ -100,7 +102,9 @@ where
         }
 
         match ty {
-            ShareType::SecretInt { .. } | ShareType::SecretFixedPoint { .. } => {
+            ShareType::SecretInt { .. }
+            | ShareType::SecretUInt { .. }
+            | ShareType::SecretFixedPoint { .. } => {
                 let max_pairs_per_session =
                     max_honeybadger_mul_pairs_per_session(self.topology.threshold()).max(1);
                 let trace = Self::trace_multiply_enabled();
@@ -195,6 +199,7 @@ where
     ) -> Result<ClearShareValue, String> {
         let type_key = match ty {
             ShareType::SecretInt { bit_length } => format!("hb-int-{bit_length}"),
+            ShareType::SecretUInt { bit_length } => format!("hb-uint-{bit_length}"),
             ShareType::SecretFixedPoint { precision } => {
                 format!("hb-fixed-{}-{}", precision.k(), precision.f())
             }
@@ -243,6 +248,7 @@ where
 
         let type_key = match ty {
             ShareType::SecretInt { bit_length } => format!("hb-batch-int-{bit_length}"),
+            ShareType::SecretUInt { bit_length } => format!("hb-batch-uint-{bit_length}"),
             ShareType::SecretFixedPoint { precision } => {
                 format!("hb-batch-fixed-{}-{}", precision.k(), precision.f())
             }
