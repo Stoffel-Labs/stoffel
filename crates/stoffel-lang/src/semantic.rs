@@ -157,6 +157,10 @@ impl<'a> SemanticAnalyzer<'a> {
         matches!(name, "print")
     }
 
+    fn is_secret_or_share_value(ty: &SymbolType) -> bool {
+        ty.is_secret() || Self::is_share_alias_type(ty)
+    }
+
     fn is_typed_assignment_target(node: &AstNode) -> bool {
         matches!(
             node,
@@ -1696,7 +1700,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
 
                 // 3. Determine the actual function symbol and its type
-                let (function_name, expected_param_types, return_type) =
+                let (function_name, expected_param_types, return_type, is_builtin_call) =
                     match &checked_function_node {
                         AstNode::Identifier(name, loc) => {
                             // Check if this is a qualified builtin object method call (e.g., "ClientStore.take_share")
@@ -1719,6 +1723,7 @@ impl<'a> SemanticAnalyzer<'a> {
                                         call_name,
                                         method_info.parameters.clone(),
                                         method_info.return_type.clone(),
+                                        true,
                                     )
                                 } else {
                                     self.error_reporter.add_error(CompilerError::semantic_error(
@@ -1736,11 +1741,21 @@ impl<'a> SemanticAnalyzer<'a> {
                                     SymbolKind::Function {
                                         parameters,
                                         return_type,
-                                    }
-                                    | SymbolKind::BuiltinFunction {
+                                    } => (
+                                        name.clone(),
+                                        parameters.clone(),
+                                        return_type.clone(),
+                                        false,
+                                    ),
+                                    SymbolKind::BuiltinFunction {
                                         parameters,
                                         return_type,
-                                    } => (name.clone(), parameters.clone(), return_type.clone()),
+                                    } => (
+                                        name.clone(),
+                                        parameters.clone(),
+                                        return_type.clone(),
+                                        true,
+                                    ),
                                     _ => {
                                         self.error_reporter.add_error(CompilerError::type_error(
                                             format!("'{}' is not a function", name),
@@ -1758,6 +1773,7 @@ impl<'a> SemanticAnalyzer<'a> {
                                         name.clone(),
                                         method_info.parameters.clone(),
                                         method_info.return_type.clone(),
+                                        true,
                                     )
                                 } else if let Some(suggestion) =
                                     suggest_method_to_function(name, &self.symbol_table)
@@ -1829,14 +1845,20 @@ impl<'a> SemanticAnalyzer<'a> {
                                         SymbolKind::Function {
                                             parameters,
                                             return_type,
-                                        }
-                                        | SymbolKind::BuiltinFunction {
+                                        } => (
+                                            qualified_name,
+                                            parameters.clone(),
+                                            return_type.clone(),
+                                            false,
+                                        ),
+                                        SymbolKind::BuiltinFunction {
                                             parameters,
                                             return_type,
                                         } => (
                                             qualified_name,
                                             parameters.clone(),
                                             return_type.clone(),
+                                            true,
                                         ),
                                         _ => {
                                             self.error_reporter.add_error(
@@ -1959,6 +1981,21 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
 
                     if !Self::is_variadic_builtin(&function_name) {
+                        if is_builtin_call
+                            && idx == 0
+                            && expected_ty.is_secret()
+                            && !Self::is_secret_or_share_value(&argument_types[idx])
+                        {
+                            self.error_reporter.add_error(CompilerError::type_error(
+                                format!(
+                                    "Expected secret value, found '{}'",
+                                    declared_type_to_string(&argument_types[idx])
+                                ),
+                                arg_loc,
+                            ));
+                            return Err(());
+                        }
+
                         if self
                             .check_generic_compat(
                                 Some(&checked_arguments[idx]),

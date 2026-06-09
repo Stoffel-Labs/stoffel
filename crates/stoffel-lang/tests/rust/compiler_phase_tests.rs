@@ -1171,6 +1171,44 @@ var revealed: uint64 = share
 }
 
 #[test]
+fn test_semantic_reveal_method_rejects_public_int_receiver() {
+    let source = r#"
+def main(b: bool, bi: int64) -> bool:
+  var bit: bool = b
+  var bit_as_int: int64 = bi
+  var tmp: int64
+
+  tmp = bit * bit_as_int
+  print(tmp)
+  print(tmp.reveal())
+  return bit
+"#;
+    let errors = analyze_source(source).expect_err("reveal on public int should fail");
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("secret") || message.contains("reveal")),
+        "expected reveal-on-public-int rejection, got {errors:?}"
+    );
+}
+
+#[test]
+fn test_semantic_reveal_function_rejects_public_int_argument() {
+    let source = r#"
+def main(bi: int64) -> None:
+  var tmp: int64 = bi
+  print(reveal(tmp))
+"#;
+    let errors = analyze_source(source).expect_err("reveal on public int should fail");
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("Expected secret value")),
+        "expected reveal-on-public-int rejection, got {errors:?}"
+    );
+}
+
+#[test]
 fn test_compile_reveal_method_inside_list_literal() {
     let source = r#"
 var share: secret uint64 = ClientStore.take_share(0, 0)
