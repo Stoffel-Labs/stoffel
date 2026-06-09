@@ -46,10 +46,16 @@ where
                 let trace = Self::trace_multiply_enabled();
                 let started_at = Instant::now();
                 if trace {
+                    let (triples, randoms, bits, exp_points) =
+                        node.preprocessing_material.lock().await.len();
                     eprintln!(
-                        "[hb multiply start] party={} items=1 ty={:?}",
+                        "[hb multiply start] party={} items=1 ty={:?} material=triples:{} randoms:{} bits:{} exp_points:{}",
                         self.topology.party_id(),
-                        ty
+                        ty,
+                        triples,
+                        randoms,
+                        bits,
+                        exp_points
                     );
                 }
                 let result_shares = node
@@ -57,10 +63,16 @@ where
                     .await
                     .map_err(|e| format!("MPC multiplication failed: {:?}", e))?;
                 if trace {
+                    let (triples, randoms, bits, exp_points) =
+                        node.preprocessing_material.lock().await.len();
                     eprintln!(
-                        "[hb multiply done] party={} items=1 elapsed_ms={}",
+                        "[hb multiply done] party={} items=1 elapsed_ms={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                         self.topology.party_id(),
-                        started_at.elapsed().as_millis()
+                        started_at.elapsed().as_millis(),
+                        triples,
+                        randoms,
+                        bits,
+                        exp_points
                     );
                 }
 
@@ -104,7 +116,7 @@ where
 
                 let mut encoded_results = Vec::with_capacity(pairs.len());
                 let mut node = self.clone_node().await;
-                for chunk in pairs.chunks(max_pairs_per_session) {
+                for (chunk_index, chunk) in pairs.chunks(max_pairs_per_session).enumerate() {
                     let mut left_shares = Vec::with_capacity(chunk.len());
                     let mut right_shares = Vec::with_capacity(chunk.len());
 
@@ -113,10 +125,41 @@ where
                         right_shares.push(Self::decode_share(right)?);
                     }
 
+                    let chunk_started_at = Instant::now();
+                    if trace {
+                        let (triples, randoms, bits, exp_points) =
+                            node.preprocessing_material.lock().await.len();
+                        eprintln!(
+                            "[hb batch_multiply chunk start] party={} chunk={} items={} material=triples:{} randoms:{} bits:{} exp_points:{}",
+                            self.topology.party_id(),
+                            chunk_index,
+                            chunk.len(),
+                            triples,
+                            randoms,
+                            bits,
+                            exp_points
+                        );
+                    }
+
                     let result_shares = node
                         .mul(left_shares, right_shares, self.net.clone())
                         .await
                         .map_err(|e| format!("MPC batch multiplication failed: {:?}", e))?;
+                    if trace {
+                        let (triples, randoms, bits, exp_points) =
+                            node.preprocessing_material.lock().await.len();
+                        eprintln!(
+                            "[hb batch_multiply chunk done] party={} chunk={} items={} elapsed_ms={} material=triples:{} randoms:{} bits:{} exp_points:{}",
+                            self.topology.party_id(),
+                            chunk_index,
+                            chunk.len(),
+                            chunk_started_at.elapsed().as_millis(),
+                            triples,
+                            randoms,
+                            bits,
+                            exp_points
+                        );
+                    }
 
                     if result_shares.len() != chunk.len() {
                         return Err(format!(

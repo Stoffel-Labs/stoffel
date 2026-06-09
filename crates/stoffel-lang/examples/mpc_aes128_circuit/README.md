@@ -4,8 +4,9 @@ This example implements AES-128 block encryption over `secret bool` circuits.
 Bytes are `list[secret bool]` values in little-endian bit order.
 
 The S-box uses a Boyar-Peralta-style bitsliced circuit rather than repeated
-GF(2^8) exponentiation. Its intermediates are stored in Stoffel objects so the
-current compiler does not need real register spilling for the large S-box state.
+GF(2^8) exponentiation. Its intermediates are ordinary local temporaries; when
+the S-box exceeds the scalar register budget, the compiler is expected to spill
+those registers into VM objects automatically.
 
 The included `main` encrypts the NIST AES-128 known-answer vector:
 

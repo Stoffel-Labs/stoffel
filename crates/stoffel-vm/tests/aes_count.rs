@@ -1,12 +1,14 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use stoffel_vm::core_vm::VirtualMachine;
 use stoffel_vm::net::mpc_engine::{
     MpcCapabilities, MpcEngine, MpcEngineMultiplication, MpcEngineResult, MpcSessionTopology,
     ShareAlgebraResult,
 };
-use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType};
+use stoffel_vm_types::core_types::{
+    ClearShareInput, ClearShareValue, ShareData, ShareType, TableRef, Value,
+};
 
 #[derive(Default)]
 struct CountingEngine {
@@ -22,6 +24,23 @@ impl CountingEngine {
             self.batch_mul_calls.load(Ordering::SeqCst),
             self.batch_mul_items.load(Ordering::SeqCst),
         )
+    }
+
+    fn bool_byte(bytes: &[u8]) -> u8 {
+        bytes.first().copied().unwrap_or_default() & 1
+    }
+
+    fn share_from_clear(clear: ClearShareInput) -> ShareData {
+        let byte = match clear.value() {
+            ClearShareValue::Integer(value) => (value & 1) as u8,
+            ClearShareValue::FixedPoint(value) => ((value.0 as i64) & 1) as u8,
+            ClearShareValue::Boolean(value) => u8::from(value),
+        };
+        ShareData::Opaque(vec![byte])
+    }
+
+    fn open_bool(share_bytes: &[u8]) -> ClearShareValue {
+        ClearShareValue::Boolean(Self::bool_byte(share_bytes) != 0)
     }
 }
 
@@ -42,12 +61,12 @@ impl MpcEngine for CountingEngine {
         Ok(())
     }
 
-    fn input_share(&self, _clear: ClearShareInput) -> MpcEngineResult<ShareData> {
-        Ok(ShareData::Opaque(vec![0]))
+    fn input_share(&self, clear: ClearShareInput) -> MpcEngineResult<ShareData> {
+        Ok(Self::share_from_clear(clear))
     }
 
-    fn open_share(&self, _ty: ShareType, _share_bytes: &[u8]) -> MpcEngineResult<ClearShareValue> {
-        Ok(ClearShareValue::Boolean(false))
+    fn open_share(&self, _ty: ShareType, share_bytes: &[u8]) -> MpcEngineResult<ClearShareValue> {
+        Ok(Self::open_bool(share_bytes))
     }
 
     fn capabilities(&self) -> MpcCapabilities {
@@ -62,63 +81,68 @@ impl MpcEngine for CountingEngine {
         &self,
         _ty: ShareType,
         lhs_bytes: &[u8],
-        _rhs_bytes: &[u8],
+        rhs_bytes: &[u8],
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(lhs_bytes.to_vec())
+        Ok(vec![
+            Self::bool_byte(lhs_bytes) ^ Self::bool_byte(rhs_bytes),
+        ])
     }
 
     fn sub_share_local(
         &self,
         _ty: ShareType,
         lhs_bytes: &[u8],
-        _rhs_bytes: &[u8],
+        rhs_bytes: &[u8],
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(lhs_bytes.to_vec())
+        Ok(vec![
+            Self::bool_byte(lhs_bytes) ^ Self::bool_byte(rhs_bytes),
+        ])
     }
 
     fn mul_share_scalar_local(
         &self,
         _ty: ShareType,
         share_bytes: &[u8],
-        _scalar: i64,
+        scalar: i64,
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(share_bytes.to_vec())
+        Ok(vec![Self::bool_byte(share_bytes) & ((scalar & 1) as u8)])
     }
 
     fn add_share_scalar_local(
         &self,
         _ty: ShareType,
         share_bytes: &[u8],
-        _scalar: i64,
+        scalar: i64,
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(share_bytes.to_vec())
+        Ok(vec![Self::bool_byte(share_bytes) ^ ((scalar & 1) as u8)])
     }
 
     fn sub_share_scalar_local(
         &self,
         _ty: ShareType,
         share_bytes: &[u8],
-        _scalar: i64,
+        scalar: i64,
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(share_bytes.to_vec())
+        Ok(vec![Self::bool_byte(share_bytes) ^ ((scalar & 1) as u8)])
     }
 
     fn scalar_sub_share_local(
         &self,
         _ty: ShareType,
-        _scalar: i64,
+        scalar: i64,
         share_bytes: &[u8],
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(share_bytes.to_vec())
+        Ok(vec![((scalar & 1) as u8) ^ Self::bool_byte(share_bytes)])
     }
 
     fn div_share_scalar_local(
         &self,
         _ty: ShareType,
         share_bytes: &[u8],
-        _scalar: i64,
+        scalar: i64,
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(share_bytes.to_vec())
+        assert_ne!(scalar & 1, 0, "division by zero in GF(2)");
+        Ok(vec![Self::bool_byte(share_bytes)])
     }
 }
 
@@ -127,27 +151,31 @@ impl MpcEngineMultiplication for CountingEngine {
         &self,
         _ty: ShareType,
         left: &[u8],
-        _right: &[u8],
+        right: &[u8],
     ) -> MpcEngineResult<ShareData> {
         self.scalar_mul_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ShareData::Opaque(left.to_vec()))
+        Ok(ShareData::Opaque(vec![
+            CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right),
+        ]))
     }
 }
 
 #[async_trait::async_trait]
 impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
-    async fn input_share_async(&self, _clear: ClearShareInput) -> MpcEngineResult<ShareData> {
-        Ok(ShareData::Opaque(vec![0]))
+    async fn input_share_async(&self, clear: ClearShareInput) -> MpcEngineResult<ShareData> {
+        Ok(Self::share_from_clear(clear))
     }
 
     async fn multiply_share_async(
         &self,
         _ty: ShareType,
         left: &[u8],
-        _right: &[u8],
+        right: &[u8],
     ) -> MpcEngineResult<ShareData> {
         self.scalar_mul_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ShareData::Opaque(left.to_vec()))
+        Ok(ShareData::Opaque(vec![
+            CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right),
+        ]))
     }
 
     async fn batch_multiply_share_async(
@@ -160,16 +188,20 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
             .fetch_add(pairs.len(), Ordering::SeqCst);
         Ok(pairs
             .iter()
-            .map(|(left, _)| ShareData::Opaque(left.clone()))
+            .map(|(left, right)| {
+                ShareData::Opaque(vec![
+                    CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right),
+                ])
+            })
             .collect())
     }
 
     async fn open_share_async(
         &self,
         _ty: ShareType,
-        _share_bytes: &[u8],
+        share_bytes: &[u8],
     ) -> MpcEngineResult<ClearShareValue> {
-        Ok(ClearShareValue::Boolean(false))
+        Ok(Self::open_bool(share_bytes))
     }
 
     async fn batch_open_shares_async(
@@ -177,10 +209,7 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
         _ty: ShareType,
         shares: &[Vec<u8>],
     ) -> MpcEngineResult<Vec<ClearShareValue>> {
-        Ok(shares
-            .iter()
-            .map(|_| ClearShareValue::Boolean(false))
-            .collect())
+        Ok(shares.iter().map(|share| Self::open_bool(share)).collect())
     }
 
     async fn random_share_async(&self, _ty: ShareType) -> MpcEngineResult<ShareData> {
@@ -224,5 +253,52 @@ async fn count_optimized_aes_batch_mul_items() {
     assert!(
         batch_calls <= 600,
         "optimized AES should stay batched; got {batch_calls} batch calls"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn optimized_aes_matches_nist_vector_with_compiler_spills() {
+    let source = include_str!("../../stoffel-lang/examples/mpc_aes128_circuit/main.stfl");
+    let options = stoffellang::CompilerOptions {
+        optimize: true,
+        mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+        ..Default::default()
+    };
+    let compiled = stoffellang::compile(source, "<aes-exec>", &options).expect("compile AES");
+    let binary = stoffellang::convert_to_binary(&compiled);
+    let functions = binary.try_to_vm_functions().expect("vm functions");
+
+    let engine = Arc::new(CountingEngine::default());
+    let mut vm = VirtualMachine::builder()
+        .with_mpc_engine(engine.clone())
+        .build();
+    for function in functions {
+        vm.try_register_function(function)
+            .expect("register function");
+    }
+
+    let result = vm
+        .execute_async("main", engine.as_ref())
+        .await
+        .expect("execute AES with boolean engine");
+    let Value::Array(result_ref) = result else {
+        panic!("AES main should return an array");
+    };
+
+    let mut ciphertext = Vec::new();
+    for index in 0..vm.read_array_len(result_ref).expect("ciphertext length") {
+        let value = vm
+            .read_table_field(TableRef::from(result_ref), &Value::I64(index as i64))
+            .expect("read ciphertext byte")
+            .expect("ciphertext byte");
+        let Value::I64(byte) = value else {
+            panic!("ciphertext byte should be an int64, got {value:?}");
+        };
+        ciphertext.push(byte);
+    }
+
+    assert_eq!(
+        ciphertext,
+        vec![105, 196, 224, 216, 106, 123, 4, 48, 216, 205, 183, 128, 112, 180, 197, 90]
     );
 }

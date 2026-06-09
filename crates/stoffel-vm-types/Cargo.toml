@@ -8,3 +8,6 @@ rustc-hash = "2.1.1"
 smallvec = "1.11"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
+num-bigint = "0.4"
+num-integer = "0.1"
+num-traits = "0.2"

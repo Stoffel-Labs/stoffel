@@ -479,6 +479,48 @@ else:
 }
 
 #[test]
+fn test_parser_rejects_symbolic_and_in_if_condition() {
+    let source = r#"
+def main(a: bool, b: bool):
+  if a == b && b == a:
+    print("does not compile")
+"#;
+    let error = parse_source(source).expect_err("symbolic boolean operator should be rejected");
+    assert!(
+        error.contains("Unsupported boolean operator '&&'. Use 'and' instead."),
+        "expected pythonic boolean operator guidance, got: {error}"
+    );
+}
+
+#[test]
+fn test_parser_rejects_parenthesized_symbolic_and_in_if_condition() {
+    let source = r#"
+def main(a: bool, b: bool):
+  if (a == b) && (b == a):
+    print("does not compile")
+"#;
+    let error = parse_source(source).expect_err("symbolic boolean operator should be rejected");
+    assert!(
+        error.contains("Unsupported boolean operator '&&'. Use 'and' instead."),
+        "expected pythonic boolean operator guidance, got: {error}"
+    );
+}
+
+#[test]
+fn test_parser_rejects_symbolic_or_in_if_condition() {
+    let source = r#"
+def main(a: bool, b: bool):
+  if a == b || b == a:
+    print("does not compile")
+"#;
+    let error = parse_source(source).expect_err("symbolic boolean operator should be rejected");
+    assert!(
+        error.contains("Unsupported boolean operator '||'. Use 'or' instead."),
+        "expected pythonic boolean operator guidance, got: {error}"
+    );
+}
+
+#[test]
 fn test_parser_while_loop() {
     let source = r#"
 while x > 0:

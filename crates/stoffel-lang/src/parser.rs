@@ -1422,6 +1422,32 @@ impl<'a> Parser<'a> {
             left = self.parse_infix(left)?;
         }
 
+        if min_precedence == 0 {
+            if let Some(TokenInfo {
+                kind: TokenKind::Operator(op),
+                location,
+            }) = self.current_token_info
+            {
+                let replacement = match op.as_str() {
+                    "&&" => Some("and"),
+                    "||" => Some("or"),
+                    _ => None,
+                };
+
+                if let Some(replacement) = replacement {
+                    return Err(CompilerError::syntax_error(
+                        format!(
+                            "Unsupported boolean operator '{op}'. Use '{replacement}' instead."
+                        ),
+                        location.clone(),
+                    )
+                    .with_hint(format!(
+                        "Stoffel uses Pythonic boolean syntax: replace '{op}' with '{replacement}'"
+                    )));
+                }
+            }
+        }
+
         Ok(left)
     }
 

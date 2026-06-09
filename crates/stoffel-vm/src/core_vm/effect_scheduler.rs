@@ -48,8 +48,25 @@ impl AsyncEffectScheduler {
                         state.ensure_async_engine_matches(engine)?;
                         engine_identity_checked = true;
                     }
-                    progress.record_effect(effect.summary());
-                    let completed = effect.execute(engine).await?;
+                    let summary = effect.summary();
+                    progress.record_effect(summary);
+                    let effect_started_at = Instant::now();
+                    let completed = if let Some(interval) = progress.effect_wait_interval() {
+                        let mut effect_future = Box::pin(effect.execute(engine));
+                        let mut next_report = Box::pin(tokio::time::sleep(interval));
+                        loop {
+                            tokio::select! {
+                                completed = &mut effect_future => break completed?,
+                                _ = &mut next_report => {
+                                    progress.report_waiting_effect(summary, effect_started_at.elapsed());
+                                    next_report = Box::pin(tokio::time::sleep(interval));
+                                }
+                            }
+                        }
+                    } else {
+                        effect.execute(engine).await?
+                    };
+                    progress.record_effect_completion(summary, effect_started_at.elapsed());
                     state.apply_completed_vm_effect(completed)?;
                 }
             }
@@ -60,22 +77,37 @@ impl AsyncEffectScheduler {
 #[derive(Debug)]
 struct AsyncMpcProgress {
     interval: Option<Duration>,
+    effect_wait_interval: Option<Duration>,
+    profile_enabled: bool,
     started_at: Instant,
     last_report_at: Instant,
     budget_yields: u64,
     effects: u64,
+    effect_time: Duration,
+    slowest_effect: Option<(VmEffectKind, usize, Duration)>,
     inputs: u64,
+    input_time: Duration,
     multiplies: u64,
+    multiply_time: Duration,
     boolean_bits: u64,
+    boolean_bit_time: Duration,
     opens: u64,
+    open_time: Duration,
     builtin_inputs: u64,
+    builtin_input_time: Duration,
     builtin_muls: u64,
+    builtin_mul_time: Duration,
     builtin_batch_muls: u64,
     builtin_batch_mul_items: u64,
+    builtin_batch_mul_item_buckets: [u64; 10],
+    builtin_batch_mul_time: Duration,
     builtin_opens: u64,
+    builtin_open_time: Duration,
     builtin_batch_opens: u64,
     builtin_batch_open_items: u64,
+    builtin_batch_open_time: Duration,
     builtin_other: u64,
+    builtin_other_time: Duration,
 }
 
 impl AsyncMpcProgress {
@@ -86,24 +118,47 @@ impl AsyncMpcProgress {
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0)
             .map(Duration::from_secs);
+        let effect_wait_interval = std::env::var("STOFFEL_VM_MPC_EFFECT_TRACE_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .map(Duration::from_secs);
+        let profile_enabled = std::env::var("STOFFEL_VM_MPC_PROFILE")
+            .ok()
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"));
         Self {
             interval,
+            effect_wait_interval,
+            profile_enabled,
             started_at: now,
             last_report_at: now,
             budget_yields: 0,
             effects: 0,
+            effect_time: Duration::ZERO,
+            slowest_effect: None,
             inputs: 0,
+            input_time: Duration::ZERO,
             multiplies: 0,
+            multiply_time: Duration::ZERO,
             boolean_bits: 0,
+            boolean_bit_time: Duration::ZERO,
             opens: 0,
+            open_time: Duration::ZERO,
             builtin_inputs: 0,
+            builtin_input_time: Duration::ZERO,
             builtin_muls: 0,
+            builtin_mul_time: Duration::ZERO,
             builtin_batch_muls: 0,
             builtin_batch_mul_items: 0,
+            builtin_batch_mul_item_buckets: [0; 10],
+            builtin_batch_mul_time: Duration::ZERO,
             builtin_opens: 0,
+            builtin_open_time: Duration::ZERO,
             builtin_batch_opens: 0,
             builtin_batch_open_items: 0,
+            builtin_batch_open_time: Duration::ZERO,
             builtin_other: 0,
+            builtin_other_time: Duration::ZERO,
         }
     }
 
@@ -127,6 +182,20 @@ impl AsyncMpcProgress {
             VmEffectKind::BuiltinBatchMul => {
                 self.builtin_batch_muls = self.builtin_batch_muls.saturating_add(1);
                 self.builtin_batch_mul_items = self.builtin_batch_mul_items.saturating_add(items);
+                let bucket = match summary.items {
+                    0 | 1 => 0,
+                    2 => 1,
+                    3 | 4 => 2,
+                    5..=8 => 3,
+                    9..=16 => 4,
+                    17..=32 => 5,
+                    33..=64 => 6,
+                    65..=128 => 7,
+                    129..=256 => 8,
+                    _ => 9,
+                };
+                self.builtin_batch_mul_item_buckets[bucket] =
+                    self.builtin_batch_mul_item_buckets[bucket].saturating_add(1);
             }
             VmEffectKind::BuiltinOpen => self.builtin_opens = self.builtin_opens.saturating_add(1),
             VmEffectKind::BuiltinBatchOpen => {
@@ -136,6 +205,34 @@ impl AsyncMpcProgress {
             VmEffectKind::BuiltinOther => self.builtin_other = self.builtin_other.saturating_add(1),
         }
         self.report_if_due();
+    }
+
+    fn record_effect_completion(
+        &mut self,
+        summary: crate::vm_state::VmEffectSummary,
+        elapsed: Duration,
+    ) {
+        self.effect_time += elapsed;
+        match summary.kind {
+            VmEffectKind::Input => self.input_time += elapsed,
+            VmEffectKind::Multiply => self.multiply_time += elapsed,
+            VmEffectKind::BooleanBit => self.boolean_bit_time += elapsed,
+            VmEffectKind::Open => self.open_time += elapsed,
+            VmEffectKind::BuiltinInput => self.builtin_input_time += elapsed,
+            VmEffectKind::BuiltinMul => self.builtin_mul_time += elapsed,
+            VmEffectKind::BuiltinBatchMul => self.builtin_batch_mul_time += elapsed,
+            VmEffectKind::BuiltinOpen => self.builtin_open_time += elapsed,
+            VmEffectKind::BuiltinBatchOpen => self.builtin_batch_open_time += elapsed,
+            VmEffectKind::BuiltinOther => self.builtin_other_time += elapsed,
+        }
+
+        let should_replace = self
+            .slowest_effect
+            .as_ref()
+            .is_none_or(|(_, _, slowest)| elapsed > *slowest);
+        if should_replace {
+            self.slowest_effect = Some((summary.kind, summary.items, elapsed));
+        }
     }
 
     fn report_if_due(&mut self) {
@@ -148,9 +245,27 @@ impl AsyncMpcProgress {
         }
     }
 
+    fn effect_wait_interval(&self) -> Option<Duration> {
+        self.effect_wait_interval
+    }
+
+    fn report_waiting_effect(&self, summary: crate::vm_state::VmEffectSummary, elapsed: Duration) {
+        eprintln!(
+            "[vm async mpc waiting] kind={:?} items={} elapsed={:.1}s effects_completed={} batch_mul_items_completed={}",
+            summary.kind,
+            summary.items,
+            elapsed.as_secs_f64(),
+            self.effects.saturating_sub(1),
+            self.builtin_batch_mul_items,
+        );
+    }
+
     fn report_final(&self) {
-        if self.interval.is_some() {
+        if self.interval.is_some() || self.profile_enabled {
             self.report("complete");
+            if self.profile_enabled {
+                self.report_profile();
+            }
         }
     }
 
@@ -179,6 +294,47 @@ impl AsyncMpcProgress {
             self.builtin_batch_opens,
             self.builtin_batch_open_items,
             self.builtin_other,
+        );
+    }
+
+    fn report_profile(&self) {
+        let slowest = self
+            .slowest_effect
+            .map(|(kind, items, elapsed)| {
+                format!(
+                    "{kind:?}/items={items}/elapsed={:.3}s",
+                    elapsed.as_secs_f64()
+                )
+            })
+            .unwrap_or_else(|| "none".to_owned());
+
+        eprintln!(
+            "[vm async mpc profile] effect_time={:.3}s input_time={:.3}s mul_time={:.3}s bool_time={:.3}s open_time={:.3}s builtin_input_time={:.3}s builtin_mul_time={:.3}s batch_mul_time={:.3}s builtin_open_time={:.3}s batch_open_time={:.3}s builtin_other_time={:.3}s slowest={}",
+            self.effect_time.as_secs_f64(),
+            self.input_time.as_secs_f64(),
+            self.multiply_time.as_secs_f64(),
+            self.boolean_bit_time.as_secs_f64(),
+            self.open_time.as_secs_f64(),
+            self.builtin_input_time.as_secs_f64(),
+            self.builtin_mul_time.as_secs_f64(),
+            self.builtin_batch_mul_time.as_secs_f64(),
+            self.builtin_open_time.as_secs_f64(),
+            self.builtin_batch_open_time.as_secs_f64(),
+            self.builtin_other_time.as_secs_f64(),
+            slowest,
+        );
+        eprintln!(
+            "[vm async mpc profile batch_mul_items] calls_by_items=1:{} 2:{} 3-4:{} 5-8:{} 9-16:{} 17-32:{} 33-64:{} 65-128:{} 129-256:{} >256:{}",
+            self.builtin_batch_mul_item_buckets[0],
+            self.builtin_batch_mul_item_buckets[1],
+            self.builtin_batch_mul_item_buckets[2],
+            self.builtin_batch_mul_item_buckets[3],
+            self.builtin_batch_mul_item_buckets[4],
+            self.builtin_batch_mul_item_buckets[5],
+            self.builtin_batch_mul_item_buckets[6],
+            self.builtin_batch_mul_item_buckets[7],
+            self.builtin_batch_mul_item_buckets[8],
+            self.builtin_batch_mul_item_buckets[9],
         );
     }
 }

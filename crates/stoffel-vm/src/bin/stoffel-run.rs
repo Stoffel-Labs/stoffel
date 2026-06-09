@@ -62,6 +62,8 @@ type AvssOffChainCoordinator<F, G> = OffChainCoordinatorClient<F, AvssCoordinato
 type AvssOffChainNodeRpcClient<F, G> = OffChainNodeRPCClient<F, AvssCoordinatorShare<F, G>>;
 type AvssOffChainNodeRpcServer<F, G> = OffChainNodeRPCServer<F, AvssCoordinatorShare<F, G>>;
 
+const HB_PREPROCESSING_READY_PREFIX: &[u8] = b"STOFFEL_HB_PREPROCESSING_READY_V1";
+
 fn session_registration_timeout() -> Duration {
     let seconds = env::var("STOFFEL_SESSION_REGISTRATION_TIMEOUT_SECONDS")
         .ok()
@@ -2280,11 +2282,22 @@ where
     // Only this task calls process() — no other task touches the processing_node.
     let processing_net = net.clone();
     let process_party_id = my_id;
+    let (preprocessing_ready_tx, mut preprocessing_ready_rx) = mpsc::channel::<usize>(n);
     tokio::spawn(async move {
         let mut msg_count = 0u64;
         loop {
             tokio::select! {
                 Some((sender_id, raw_msg)) = server_rx.recv() => {
+                    if raw_msg.starts_with(HB_PREPROCESSING_READY_PREFIX) {
+                        if let Err(error) = preprocessing_ready_tx.send(sender_id).await {
+                            eprintln!(
+                                "[party {}] Failed to record preprocessing-ready marker from {}: {}",
+                                process_party_id, sender_id, error
+                            );
+                        }
+                        continue;
+                    }
+
                     msg_count += 1;
                     if msg_count <= 5 || msg_count.is_multiple_of(1000) {
                         eprintln!(
@@ -2327,11 +2340,66 @@ where
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     eprintln!("[party {}] Starting MPC preprocessing...", my_id);
+    let preprocessing_started_at = std::time::Instant::now();
     engine
         .preprocess()
         .await
         .map_err(|e| format!("MPC preprocessing failed: {}", e))?;
-    eprintln!("[party {}] MPC preprocessing complete!", my_id);
+    eprintln!(
+        "[party {}] MPC preprocessing complete! elapsed_ms={}",
+        my_id,
+        preprocessing_started_at.elapsed().as_millis()
+    );
+
+    if n > 1 {
+        eprintln!(
+            "[party {}] Waiting for all parties to finish MPC preprocessing...",
+            my_id
+        );
+        let mut ready_message =
+            Vec::with_capacity(HB_PREPROCESSING_READY_PREFIX.len() + std::mem::size_of::<u64>());
+        ready_message.extend_from_slice(HB_PREPROCESSING_READY_PREFIX);
+        ready_message.extend_from_slice(&instance_id.to_le_bytes());
+        for peer_id in 0..n {
+            if peer_id == my_id {
+                continue;
+            }
+            net.send(peer_id, &ready_message).await.map_err(|error| {
+                format!(
+                    "Failed to send preprocessing-ready marker to party {}: {}",
+                    peer_id, error
+                )
+            })?;
+        }
+
+        let mut ready_parties = std::collections::HashSet::with_capacity(n.saturating_sub(1));
+        let barrier_timeout = honeybadger_protocol_timeout();
+        let barrier_result = tokio::time::timeout(barrier_timeout, async {
+            while ready_parties.len() < n.saturating_sub(1) {
+                let sender_id = preprocessing_ready_rx.recv().await.ok_or_else(|| {
+                    "Preprocessing-ready marker channel closed before all parties were ready"
+                        .to_string()
+                })?;
+                if sender_id != my_id {
+                    ready_parties.insert(sender_id);
+                }
+            }
+            Ok::<(), String>(())
+        })
+        .await
+        .map_err(|_| {
+            format!(
+                "Timed out waiting for preprocessing-ready markers ({}/{})",
+                ready_parties.len(),
+                n.saturating_sub(1)
+            )
+        })?;
+        barrier_result?;
+        eprintln!(
+            "[party {}] All parties completed MPC preprocessing; continuing",
+            my_id
+        );
+    }
 
     if !input_ids.is_empty() {
         let client_index_map: Vec<(usize, ClientId)> = input_ids

@@ -248,6 +248,365 @@ impl CodeGenerator {
         self.current_instructions.push(instruction);
     }
 
+    fn fresh_virtual_register(
+        next_virtual_reg: &mut usize,
+        secrecy_map: &mut HashMap<VirtualRegister, bool>,
+        is_secret: bool,
+    ) -> VirtualRegister {
+        let vr = VirtualRegister(*next_virtual_reg);
+        *next_virtual_reg += 1;
+        secrecy_map.insert(vr, is_secret);
+        vr
+    }
+
+    fn emit_spill_key_load(
+        out: &mut Vec<Instruction>,
+        constants: &mut Vec<Constant>,
+        next_virtual_reg: &mut usize,
+        secrecy_map: &mut HashMap<VirtualRegister, bool>,
+        spilled_vr: VirtualRegister,
+    ) -> VirtualRegister {
+        let key = Constant::String(format!("__stoffel_spill_{}", spilled_vr.0));
+        constants.push(key.clone());
+        let key_vr = Self::fresh_virtual_register(next_virtual_reg, secrecy_map, false);
+        out.push(Instruction::LDI(
+            key_vr.0,
+            crate::core_types::Value::from(key),
+        ));
+        key_vr
+    }
+
+    fn emit_spill_load(
+        out: &mut Vec<Instruction>,
+        constants: &mut Vec<Constant>,
+        next_virtual_reg: &mut usize,
+        secrecy_map: &mut HashMap<VirtualRegister, bool>,
+        spill_object_vr: VirtualRegister,
+        spilled_vr: VirtualRegister,
+    ) -> VirtualRegister {
+        let key_vr =
+            Self::emit_spill_key_load(out, constants, next_virtual_reg, secrecy_map, spilled_vr);
+        out.push(Instruction::PUSHARG(spill_object_vr.0));
+        out.push(Instruction::PUSHARG(key_vr.0));
+        out.push(Instruction::CALL("get_field".to_string()));
+
+        let value_is_secret = *secrecy_map.get(&spilled_vr).unwrap_or(&false);
+        let value_vr = Self::fresh_virtual_register(next_virtual_reg, secrecy_map, value_is_secret);
+        out.push(Instruction::MOV(value_vr.0, 0));
+        value_vr
+    }
+
+    fn emit_spill_store(
+        out: &mut Vec<Instruction>,
+        constants: &mut Vec<Constant>,
+        next_virtual_reg: &mut usize,
+        secrecy_map: &mut HashMap<VirtualRegister, bool>,
+        spill_object_vr: VirtualRegister,
+        spilled_vr: VirtualRegister,
+        value_vr: VirtualRegister,
+    ) {
+        let key_vr =
+            Self::emit_spill_key_load(out, constants, next_virtual_reg, secrecy_map, spilled_vr);
+        out.push(Instruction::PUSHARG(spill_object_vr.0));
+        out.push(Instruction::PUSHARG(key_vr.0));
+        out.push(Instruction::PUSHARG(value_vr.0));
+        out.push(Instruction::CALL("set_field".to_string()));
+    }
+
+    fn remap_instruction_registers(
+        instruction: &Instruction,
+        mapped_uses: &HashMap<VirtualRegister, VirtualRegister>,
+        mapped_defs: &HashMap<VirtualRegister, VirtualRegister>,
+    ) -> Instruction {
+        let map_use = |r: usize| {
+            mapped_uses
+                .get(&VirtualRegister(r))
+                .copied()
+                .unwrap_or(VirtualRegister(r))
+                .0
+        };
+        let map_def = |r: usize| {
+            mapped_defs
+                .get(&VirtualRegister(r))
+                .copied()
+                .unwrap_or(VirtualRegister(r))
+                .0
+        };
+
+        match instruction {
+            Instruction::LD(r, offset) => Instruction::LD(map_def(*r), *offset),
+            Instruction::LDI(r, value) => Instruction::LDI(map_def(*r), value.clone()),
+            Instruction::MOV(dest, src) => Instruction::MOV(map_def(*dest), map_use(*src)),
+            Instruction::ADD(dest, a, b) => {
+                Instruction::ADD(map_def(*dest), map_use(*a), map_use(*b))
+            }
+            Instruction::SUB(dest, a, b) => {
+                Instruction::SUB(map_def(*dest), map_use(*a), map_use(*b))
+            }
+            Instruction::MUL(dest, a, b) => {
+                Instruction::MUL(map_def(*dest), map_use(*a), map_use(*b))
+            }
+            Instruction::DIV(dest, a, b) => {
+                Instruction::DIV(map_def(*dest), map_use(*a), map_use(*b))
+            }
+            Instruction::MOD(dest, a, b) => {
+                Instruction::MOD(map_def(*dest), map_use(*a), map_use(*b))
+            }
+            Instruction::AND(dest, a, b) => {
+                Instruction::AND(map_def(*dest), map_use(*a), map_use(*b))
+            }
+            Instruction::OR(dest, a, b) => {
+                Instruction::OR(map_def(*dest), map_use(*a), map_use(*b))
+            }
+            Instruction::XOR(dest, a, b) => {
+                Instruction::XOR(map_def(*dest), map_use(*a), map_use(*b))
+            }
+            Instruction::NOT(dest, src) => Instruction::NOT(map_def(*dest), map_use(*src)),
+            Instruction::SHL(dest, a, b) => {
+                Instruction::SHL(map_def(*dest), map_use(*a), map_use(*b))
+            }
+            Instruction::SHR(dest, a, b) => {
+                Instruction::SHR(map_def(*dest), map_use(*a), map_use(*b))
+            }
+            Instruction::RET(src) => Instruction::RET(map_use(*src)),
+            Instruction::PUSHARG(src) => Instruction::PUSHARG(map_use(*src)),
+            Instruction::CMP(a, b) => Instruction::CMP(map_use(*a), map_use(*b)),
+            Instruction::JMP(label) => Instruction::JMP(label.clone()),
+            Instruction::JMPEQ(label) => Instruction::JMPEQ(label.clone()),
+            Instruction::JMPNEQ(label) => Instruction::JMPNEQ(label.clone()),
+            Instruction::JMPLT(label) => Instruction::JMPLT(label.clone()),
+            Instruction::JMPGT(label) => Instruction::JMPGT(label.clone()),
+            Instruction::CALL(name) => Instruction::CALL(name.clone()),
+            Instruction::NOP => Instruction::NOP,
+        }
+    }
+
+    fn lower_spills_into_object(
+        instructions: Vec<Instruction>,
+        labels: HashMap<String, usize>,
+        constants: &mut Vec<Constant>,
+        next_virtual_reg: &mut usize,
+        secrecy_map: &mut HashMap<VirtualRegister, bool>,
+        spilled_vrs: &[VirtualRegister],
+        protected_prologue_len: usize,
+    ) -> (Vec<Instruction>, HashMap<String, usize>) {
+        use crate::register_allocator::InstructionRegisterAnalysis;
+
+        let spilled: HashSet<VirtualRegister> = spilled_vrs.iter().copied().collect();
+        let mut out = Vec::with_capacity(instructions.len() + spilled.len() * 8);
+        let spill_object_vr = Self::fresh_virtual_register(next_virtual_reg, secrecy_map, false);
+        let prologue_len = protected_prologue_len.min(instructions.len());
+        let mut pending_prologue_stores = Vec::new();
+        let mut old_to_new = vec![0usize; instructions.len() + 1];
+
+        for i in 0..prologue_len {
+            old_to_new[i] = out.len();
+            let instruction = &instructions[i];
+            let mut mapped_defs = HashMap::new();
+
+            for def_vr in instruction.defs() {
+                if spilled.contains(&def_vr) {
+                    let value_is_secret = *secrecy_map.get(&def_vr).unwrap_or(&false);
+                    let scratch = Self::fresh_virtual_register(
+                        next_virtual_reg,
+                        secrecy_map,
+                        value_is_secret,
+                    );
+                    mapped_defs.insert(def_vr, scratch);
+                    pending_prologue_stores.push((def_vr, scratch));
+                }
+            }
+
+            out.push(Self::remap_instruction_registers(
+                instruction,
+                &HashMap::new(),
+                &mapped_defs,
+            ));
+        }
+        old_to_new[prologue_len] = out.len();
+
+        out.push(Instruction::CALL("create_object".to_string()));
+        out.push(Instruction::MOV(spill_object_vr.0, 0));
+
+        for (spilled_vr, scratch_vr) in pending_prologue_stores {
+            Self::emit_spill_store(
+                &mut out,
+                constants,
+                next_virtual_reg,
+                secrecy_map,
+                spill_object_vr,
+                spilled_vr,
+                scratch_vr,
+            );
+        }
+
+        let mut i = prologue_len;
+        while i < instructions.len() {
+            old_to_new[i] = out.len();
+
+            if matches!(instructions[i], Instruction::PUSHARG(_)) {
+                let start = i;
+                let mut end = i;
+                while end < instructions.len()
+                    && matches!(instructions[end], Instruction::PUSHARG(_))
+                {
+                    end += 1;
+                }
+
+                if end < instructions.len() && matches!(instructions[end], Instruction::CALL(_)) {
+                    let mut mapped_uses = HashMap::new();
+                    for instruction in &instructions[start..end] {
+                        for used_vr in instruction.uses() {
+                            if spilled.contains(&used_vr) && !mapped_uses.contains_key(&used_vr) {
+                                let loaded = Self::emit_spill_load(
+                                    &mut out,
+                                    constants,
+                                    next_virtual_reg,
+                                    secrecy_map,
+                                    spill_object_vr,
+                                    used_vr,
+                                );
+                                mapped_uses.insert(used_vr, loaded);
+                            }
+                        }
+                    }
+                    for (old_index, instruction) in
+                        instructions.iter().enumerate().take(end).skip(start)
+                    {
+                        old_to_new[old_index] = out.len();
+                        out.push(Self::remap_instruction_registers(
+                            instruction,
+                            &mapped_uses,
+                            &HashMap::new(),
+                        ));
+                    }
+                    old_to_new[end] = out.len();
+                    out.push(instructions[end].clone());
+                    i = end + 1;
+                    continue;
+                }
+            }
+
+            let instruction = &instructions[i];
+            let mut mapped_uses = HashMap::new();
+            for used_vr in instruction.uses() {
+                if spilled.contains(&used_vr) && !mapped_uses.contains_key(&used_vr) {
+                    let loaded = Self::emit_spill_load(
+                        &mut out,
+                        constants,
+                        next_virtual_reg,
+                        secrecy_map,
+                        spill_object_vr,
+                        used_vr,
+                    );
+                    mapped_uses.insert(used_vr, loaded);
+                }
+            }
+
+            let mut mapped_defs = HashMap::new();
+            for def_vr in instruction.defs() {
+                if spilled.contains(&def_vr) {
+                    let value_is_secret = *secrecy_map.get(&def_vr).unwrap_or(&false);
+                    let scratch = Self::fresh_virtual_register(
+                        next_virtual_reg,
+                        secrecy_map,
+                        value_is_secret,
+                    );
+                    mapped_defs.insert(def_vr, scratch);
+                }
+            }
+
+            let rewritten =
+                Self::remap_instruction_registers(instruction, &mapped_uses, &mapped_defs);
+            out.push(rewritten);
+
+            for (spilled_vr, scratch_vr) in mapped_defs {
+                Self::emit_spill_store(
+                    &mut out,
+                    constants,
+                    next_virtual_reg,
+                    secrecy_map,
+                    spill_object_vr,
+                    spilled_vr,
+                    scratch_vr,
+                );
+            }
+
+            i += 1;
+        }
+        old_to_new[instructions.len()] = out.len();
+
+        let lowered_labels = labels
+            .into_iter()
+            .map(|(label, index)| {
+                let mapped = old_to_new
+                    .get(index)
+                    .copied()
+                    .unwrap_or_else(|| *old_to_new.last().unwrap_or(&out.len()));
+                (label, mapped)
+            })
+            .collect();
+
+        (out, lowered_labels)
+    }
+
+    fn allocate_registers_with_object_spills(
+        instructions: &mut Vec<Instruction>,
+        labels: &mut HashMap<String, usize>,
+        constants: &mut Vec<Constant>,
+        next_virtual_reg: &mut usize,
+        secrecy_map: &mut HashMap<VirtualRegister, bool>,
+        precolored: &HashMap<VirtualRegister, PhysicalRegister>,
+        protected_prologue_len: usize,
+        diagnostic_name: &str,
+    ) -> CompilerResult<register_allocator::Allocation> {
+        let k_clear = SECRET_REGISTER_START;
+        let k_secret = MAX_REGISTERS - k_clear;
+
+        for _ in 0..64 {
+            let intervals = register_allocator::analyze_liveness_cfg_with_liveins(
+                instructions,
+                labels,
+                &precolored.keys().copied().collect::<Vec<_>>(),
+            );
+            let graph = register_allocator::build_interference_graph(&intervals);
+            match register_allocator::color_graph(
+                &graph,
+                k_clear,
+                k_secret,
+                secrecy_map,
+                precolored,
+            ) {
+                Ok(allocation) => return Ok(allocation),
+                Err(AllocationError::NeedsSpilling(spilled_vrs)) => {
+                    let old_instructions = std::mem::take(instructions);
+                    let old_labels = std::mem::take(labels);
+                    let (lowered_instructions, lowered_labels) = Self::lower_spills_into_object(
+                        old_instructions,
+                        old_labels,
+                        constants,
+                        next_virtual_reg,
+                        secrecy_map,
+                        &spilled_vrs,
+                        protected_prologue_len,
+                    );
+                    *instructions = lowered_instructions;
+                    *labels = lowered_labels;
+                }
+                Err(AllocationError::PoolExhausted(_, _)) => {
+                    return Err(CompilerError::internal_error(format!(
+                        "Register allocation failed for {diagnostic_name}: Pool exhausted"
+                    )));
+                }
+            }
+        }
+
+        Err(CompilerError::internal_error(format!(
+            "Register allocation failed for {diagnostic_name}: object spill lowering did not converge"
+        ))
+        .with_hint("Try splitting the function into smaller helper functions."))
+    }
+
     fn record_client_io_call(&mut self, function_name: &str, arguments: &[AstNode]) {
         match function_name {
             "ClientStore.take_share" | "ClientStore.take_share_fixed" => {
@@ -1474,17 +1833,11 @@ impl CodeGenerator {
                 self.merge_client_io_from(&function_generator);
 
                 // --- Perform Register Allocation ---
-                let virtual_instructions = function_generator.current_instructions;
-                let intervals = register_allocator::analyze_liveness_cfg_with_liveins(
-                    &virtual_instructions,
-                    &function_generator.current_labels,
-                    &param_vrs,
-                );
-                let graph = register_allocator::build_interference_graph(&intervals);
-
-                let k_clear = SECRET_REGISTER_START;
-                let k_secret = MAX_REGISTERS - k_clear;
-                let secrecy_map = function_generator.vr_secrecy;
+                let mut virtual_instructions = function_generator.current_instructions;
+                let mut function_labels = function_generator.current_labels;
+                let mut secrecy_map = function_generator.vr_secrecy;
+                let mut function_constants = function_generator.identified_constants;
+                let mut next_virtual_reg = function_generator.next_virtual_reg;
 
                 // Precolor parameter VRs to ABI registers R0..Rn-1
                 let mut precolored: HashMap<VirtualRegister, PhysicalRegister> = HashMap::new();
@@ -1492,28 +1845,16 @@ impl CodeGenerator {
                     precolored.insert(*vr, PhysicalRegister(i));
                 }
 
-                let allocation_result = register_allocator::color_graph(
-                    &graph,
-                    k_clear,
-                    k_secret,
-                    &secrecy_map,
+                let allocation = Self::allocate_registers_with_object_spills(
+                    &mut virtual_instructions,
+                    &mut function_labels,
+                    &mut function_constants,
+                    &mut next_virtual_reg,
+                    &mut secrecy_map,
                     &precolored,
-                );
-                let allocation = match allocation_result {
-                    Ok(alloc) => alloc,
-                    Err(AllocationError::NeedsSpilling(spilled_vrs)) => {
-                        // Basic error handling for now. Real implementation needs spilling logic.
-                        return Err(CompilerError::internal_error(format!(
-                            "Register allocation failed for function '{}': Need to spill registers {:?}",
-                            name.as_deref().unwrap_or("<anon>"), spilled_vrs
-                        )).with_hint("Spilling not yet implemented. Try simplifying the function."));
-                    }
-                    Err(AllocationError::PoolExhausted(_, _)) => {
-                        return Err(CompilerError::internal_error(
-                            "Register allocation failed: Pool exhausted".to_string(),
-                        ));
-                    }
-                };
+                    param_vrs.len(),
+                    &format!("function '{}'", name.as_deref().unwrap_or("<anon>")),
+                )?;
 
                 // Rewrite instructions with physical registers
                 let final_instructions =
@@ -1522,9 +1863,8 @@ impl CodeGenerator {
                 // Finalize the function's bytecode chunk.
                 let mut function_chunk = BytecodeChunk::new();
                 function_chunk.instructions = final_instructions;
-                function_chunk.labels = function_generator.current_labels; // TODO: Adjust label indices after rewrite/spilling?
-                function_chunk.constants =
-                    dedupe_constants(function_generator.identified_constants);
+                function_chunk.labels = function_labels;
+                function_chunk.constants = dedupe_constants(function_constants);
                 function_chunk.parameters =
                     parameters.iter().map(|param| param.name.clone()).collect();
                 function_chunk.upvalues = collect_upvalue_names(body);
@@ -1743,43 +2083,30 @@ impl CodeGenerator {
                 .push(Instruction::CALL("main".to_string()));
         }
         // Perform register allocation for the main chunk's instructions
-        let main_instructions = self.current_instructions; // Instructions generated for the main body
-        let intervals = register_allocator::analyze_liveness_cfg_with_liveins(
-            &main_instructions,
-            &self.current_labels,
-            &[],
-        );
-        let graph = register_allocator::build_interference_graph(&intervals);
-
-        let k_clear = SECRET_REGISTER_START;
-        let k_secret = MAX_REGISTERS - k_clear;
-        let secrecy_map = self.vr_secrecy;
+        let mut main_instructions = self.current_instructions; // Instructions generated for the main body
+        let mut main_labels = self.current_labels;
+        let mut main_constants = self.identified_constants;
+        let mut secrecy_map = self.vr_secrecy;
+        let mut next_virtual_reg = self.next_virtual_reg;
         // No precolored mapping for top-level/main chunk
         let empty_pre: HashMap<VirtualRegister, PhysicalRegister> = HashMap::new();
-        let allocation_result =
-            register_allocator::color_graph(&graph, k_clear, k_secret, &secrecy_map, &empty_pre);
-        let allocation = match allocation_result {
-            Ok(alloc) => alloc,
-            Err(AllocationError::NeedsSpilling(spilled_vrs)) => {
-                // Basic error handling for now. Real implementation needs spilling logic.
-                return Err(CompilerError::internal_error(format!(
-                    "Register allocation failed for main program body: Need to spill registers {:?}",
-                    spilled_vrs
-                )).with_hint("Spilling not yet implemented."));
-            }
-            Err(AllocationError::PoolExhausted(_, _)) => {
-                return Err(CompilerError::internal_error(
-                    "Register allocation failed: Pool exhausted".to_string(),
-                ));
-            }
-        };
+        let allocation = Self::allocate_registers_with_object_spills(
+            &mut main_instructions,
+            &mut main_labels,
+            &mut main_constants,
+            &mut next_virtual_reg,
+            &mut secrecy_map,
+            &empty_pre,
+            0,
+            "main program body",
+        )?;
 
         let final_main_instructions =
             register_allocator::rewrite_instructions(&main_instructions, &allocation);
         let mut main_chunk = BytecodeChunk::new();
         main_chunk.instructions = final_main_instructions;
-        main_chunk.labels = self.current_labels; // TODO: Adjust label indices?
-        main_chunk.constants = dedupe_constants(self.identified_constants);
+        main_chunk.labels = main_labels;
+        main_chunk.constants = dedupe_constants(main_constants);
 
         Ok(CompiledProgram {
             main_chunk,

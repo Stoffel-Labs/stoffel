@@ -171,274 +171,7 @@ def mul2_bytes(values: list[list[secret bool]]) -> list[list[secret bool]]:
 def mul3_bytes(values: list[list[secret bool]]) -> list[list[secret bool]]:
   return bytes_xor(xtime_bytes(values), values)
 
-object BPTerms:
-  U7: secret bool
-  T1: secret bool
-  T2: secret bool
-  T3: secret bool
-  T4: secret bool
-  T5: secret bool
-  T6: secret bool
-  T7: secret bool
-  T8: secret bool
-  T9: secret bool
-  T10: secret bool
-  T11: secret bool
-  T12: secret bool
-  T13: secret bool
-  T14: secret bool
-  T15: secret bool
-  T16: secret bool
-  T17: secret bool
-  T18: secret bool
-  T19: secret bool
-  T20: secret bool
-  T21: secret bool
-  T22: secret bool
-  T23: secret bool
-  T24: secret bool
-  T25: secret bool
-  T26: secret bool
-  T27: secret bool
-
-object BPMid:
-  M1: secret bool
-  M2: secret bool
-  M3: secret bool
-  M4: secret bool
-  M5: secret bool
-  M6: secret bool
-  M7: secret bool
-  M8: secret bool
-  M9: secret bool
-  M10: secret bool
-  M11: secret bool
-  M12: secret bool
-  M13: secret bool
-  M14: secret bool
-  M15: secret bool
-  M16: secret bool
-  M17: secret bool
-  M18: secret bool
-  M19: secret bool
-  M20: secret bool
-  M21: secret bool
-  M22: secret bool
-  M23: secret bool
-  M24: secret bool
-  M25: secret bool
-  M26: secret bool
-  M27: secret bool
-  M28: secret bool
-  M29: secret bool
-  M30: secret bool
-  M31: secret bool
-  M32: secret bool
-  M33: secret bool
-  M34: secret bool
-  M35: secret bool
-  M36: secret bool
-  M37: secret bool
-  M38: secret bool
-  M39: secret bool
-  M40: secret bool
-  M41: secret bool
-  M42: secret bool
-  M43: secret bool
-  M44: secret bool
-  M45: secret bool
-  M46: secret bool
-  M47: secret bool
-  M48: secret bool
-  M49: secret bool
-  M50: secret bool
-  M51: secret bool
-  M52: secret bool
-  M53: secret bool
-  M54: secret bool
-  M55: secret bool
-  M56: secret bool
-  M57: secret bool
-  M58: secret bool
-  M59: secret bool
-  M60: secret bool
-  M61: secret bool
-  M62: secret bool
-  M63: secret bool
-  L0: secret bool
-  L1: secret bool
-  L2: secret bool
-  L3: secret bool
-  L4: secret bool
-  L5: secret bool
-  L6: secret bool
-  L7: secret bool
-  L8: secret bool
-  L9: secret bool
-  L10: secret bool
-  L11: secret bool
-  L12: secret bool
-  L13: secret bool
-  L14: secret bool
-  L15: secret bool
-  L16: secret bool
-  L17: secret bool
-  L18: secret bool
-  L19: secret bool
-  L20: secret bool
-  L21: secret bool
-  L22: secret bool
-  L23: secret bool
-  L24: secret bool
-  L25: secret bool
-  L26: secret bool
-  L27: secret bool
-  L28: secret bool
-  L29: secret bool
-  S0: secret bool
-  S1: secret bool
-  S2: secret bool
-  S3: secret bool
-  S4: secret bool
-  S5: secret bool
-  S6: secret bool
-  S7: secret bool
-
-object BPTermsVec:
-  U7: list[secret bool]
-  T1: list[secret bool]
-  T2: list[secret bool]
-  T3: list[secret bool]
-  T4: list[secret bool]
-  T5: list[secret bool]
-  T6: list[secret bool]
-  T7: list[secret bool]
-  T8: list[secret bool]
-  T9: list[secret bool]
-  T10: list[secret bool]
-  T11: list[secret bool]
-  T12: list[secret bool]
-  T13: list[secret bool]
-  T14: list[secret bool]
-  T15: list[secret bool]
-  T16: list[secret bool]
-  T17: list[secret bool]
-  T18: list[secret bool]
-  T19: list[secret bool]
-  T20: list[secret bool]
-  T21: list[secret bool]
-  T22: list[secret bool]
-  T23: list[secret bool]
-  T24: list[secret bool]
-  T25: list[secret bool]
-  T26: list[secret bool]
-  T27: list[secret bool]
-
-object BPMidVec:
-  M1: list[secret bool]
-  M2: list[secret bool]
-  M3: list[secret bool]
-  M4: list[secret bool]
-  M5: list[secret bool]
-  M6: list[secret bool]
-  M7: list[secret bool]
-  M8: list[secret bool]
-  M9: list[secret bool]
-  M10: list[secret bool]
-  M11: list[secret bool]
-  M12: list[secret bool]
-  M13: list[secret bool]
-  M14: list[secret bool]
-  M15: list[secret bool]
-  M16: list[secret bool]
-  M17: list[secret bool]
-  M18: list[secret bool]
-  M19: list[secret bool]
-  M20: list[secret bool]
-  M21: list[secret bool]
-  M22: list[secret bool]
-  M23: list[secret bool]
-  M24: list[secret bool]
-  M25: list[secret bool]
-  M26: list[secret bool]
-  M27: list[secret bool]
-  M28: list[secret bool]
-  M29: list[secret bool]
-  M30: list[secret bool]
-  M31: list[secret bool]
-  M32: list[secret bool]
-  M33: list[secret bool]
-  M34: list[secret bool]
-  M35: list[secret bool]
-  M36: list[secret bool]
-  M37: list[secret bool]
-  M38: list[secret bool]
-  M39: list[secret bool]
-  M40: list[secret bool]
-  M41: list[secret bool]
-  M42: list[secret bool]
-  M43: list[secret bool]
-  M44: list[secret bool]
-  M45: list[secret bool]
-  M46: list[secret bool]
-  M47: list[secret bool]
-  M48: list[secret bool]
-  M49: list[secret bool]
-  M50: list[secret bool]
-  M51: list[secret bool]
-  M52: list[secret bool]
-  M53: list[secret bool]
-  M54: list[secret bool]
-  M55: list[secret bool]
-  M56: list[secret bool]
-  M57: list[secret bool]
-  M58: list[secret bool]
-  M59: list[secret bool]
-  M60: list[secret bool]
-  M61: list[secret bool]
-  M62: list[secret bool]
-  M63: list[secret bool]
-  L0: list[secret bool]
-  L1: list[secret bool]
-  L2: list[secret bool]
-  L3: list[secret bool]
-  L4: list[secret bool]
-  L5: list[secret bool]
-  L6: list[secret bool]
-  L7: list[secret bool]
-  L8: list[secret bool]
-  L9: list[secret bool]
-  L10: list[secret bool]
-  L11: list[secret bool]
-  L12: list[secret bool]
-  L13: list[secret bool]
-  L14: list[secret bool]
-  L15: list[secret bool]
-  L16: list[secret bool]
-  L17: list[secret bool]
-  L18: list[secret bool]
-  L19: list[secret bool]
-  L20: list[secret bool]
-  L21: list[secret bool]
-  L22: list[secret bool]
-  L23: list[secret bool]
-  L24: list[secret bool]
-  L25: list[secret bool]
-  L26: list[secret bool]
-  L27: list[secret bool]
-  L28: list[secret bool]
-  L29: list[secret bool]
-  S0: list[secret bool]
-  S1: list[secret bool]
-  S2: list[secret bool]
-  S3: list[secret bool]
-  S4: list[secret bool]
-  S5: list[secret bool]
-  S6: list[secret bool]
-  S7: list[secret bool]
-
-def bp_terms(a: list[secret bool]) -> BPTerms:
-  var t: BPTerms
+def aes_sbox(a: list[secret bool]) -> list[secret bool]:
   var U0: secret bool = a[7]
   var U1: secret bool = a[6]
   var U2: secret bool = a[5]
@@ -446,332 +179,142 @@ def bp_terms(a: list[secret bool]) -> BPTerms:
   var U4: secret bool = a[3]
   var U5: secret bool = a[2]
   var U6: secret bool = a[1]
-  t.U7 = a[0]
-  t.T1 = gate_xor(U0, U3)
-  t.T2 = gate_xor(U0, U5)
-  t.T3 = gate_xor(U0, U6)
-  t.T4 = gate_xor(U3, U5)
-  t.T5 = gate_xor(U4, U6)
-  t.T6 = gate_xor(t.T1, t.T5)
-  t.T7 = gate_xor(U1, U2)
-  t.T8 = gate_xor(t.U7, t.T6)
-  t.T9 = gate_xor(t.U7, t.T7)
-  t.T10 = gate_xor(t.T6, t.T7)
-  t.T11 = gate_xor(U1, U5)
-  t.T12 = gate_xor(U2, U5)
-  t.T13 = gate_xor(t.T3, t.T4)
-  t.T14 = gate_xor(t.T6, t.T11)
-  t.T15 = gate_xor(t.T5, t.T11)
-  t.T16 = gate_xor(t.T5, t.T12)
-  t.T17 = gate_xor(t.T9, t.T16)
-  t.T18 = gate_xor(U3, t.U7)
-  t.T19 = gate_xor(t.T7, t.T18)
-  t.T20 = gate_xor(t.T1, t.T19)
-  t.T21 = gate_xor(U6, t.U7)
-  t.T22 = gate_xor(t.T7, t.T21)
-  t.T23 = gate_xor(t.T2, t.T22)
-  t.T24 = gate_xor(t.T2, t.T10)
-  t.T25 = gate_xor(t.T20, t.T17)
-  t.T26 = gate_xor(t.T3, t.T16)
-  t.T27 = gate_xor(t.T1, t.T12)
-  return t
-
-def bp_middle(t: BPTerms) -> BPMid:
-  var m: BPMid
-  m.M1 = gate_and(t.T13, t.T6)
-  m.M2 = gate_and(t.T23, t.T8)
-  m.M3 = gate_xor(t.T14, m.M1)
-  m.M4 = gate_and(t.T19, t.U7)
-  m.M5 = gate_xor(m.M4, m.M1)
-  m.M6 = gate_and(t.T3, t.T16)
-  m.M7 = gate_and(t.T22, t.T9)
-  m.M8 = gate_xor(t.T26, m.M6)
-  m.M9 = gate_and(t.T20, t.T17)
-  m.M10 = gate_xor(m.M9, m.M6)
-  m.M11 = gate_and(t.T1, t.T15)
-  m.M12 = gate_and(t.T4, t.T27)
-  m.M13 = gate_xor(m.M12, m.M11)
-  m.M14 = gate_and(t.T2, t.T10)
-  m.M15 = gate_xor(m.M14, m.M11)
-  m.M16 = gate_xor(m.M3, m.M2)
-  m.M17 = gate_xor(m.M5, t.T24)
-  m.M18 = gate_xor(m.M8, m.M7)
-  m.M19 = gate_xor(m.M10, m.M15)
-  m.M20 = gate_xor(m.M16, m.M13)
-  m.M21 = gate_xor(m.M17, m.M15)
-  m.M22 = gate_xor(m.M18, m.M13)
-  m.M23 = gate_xor(m.M19, t.T25)
-  m.M24 = gate_xor(m.M22, m.M23)
-  m.M25 = gate_and(m.M22, m.M20)
-  m.M26 = gate_xor(m.M21, m.M25)
-  m.M27 = gate_xor(m.M20, m.M21)
-  m.M28 = gate_xor(m.M23, m.M25)
-  m.M29 = gate_and(m.M28, m.M27)
-  m.M30 = gate_and(m.M26, m.M24)
-  m.M31 = gate_and(m.M20, m.M23)
-  m.M32 = gate_and(m.M27, m.M31)
-  m.M33 = gate_xor(m.M27, m.M25)
-  m.M34 = gate_and(m.M21, m.M22)
-  m.M35 = gate_and(m.M24, m.M34)
-  m.M36 = gate_xor(m.M24, m.M25)
-  m.M37 = gate_xor(m.M21, m.M29)
-  m.M38 = gate_xor(m.M32, m.M33)
-  m.M39 = gate_xor(m.M23, m.M30)
-  m.M40 = gate_xor(m.M35, m.M36)
-  m.M41 = gate_xor(m.M38, m.M40)
-  m.M42 = gate_xor(m.M37, m.M39)
-  m.M43 = gate_xor(m.M37, m.M38)
-  m.M44 = gate_xor(m.M39, m.M40)
-  m.M45 = gate_xor(m.M42, m.M41)
-  return m
-
-def bp_output(t: BPTerms, m: BPMid) -> list[secret bool]:
-  m.M46 = gate_and(m.M44, t.T6)
-  m.M47 = gate_and(m.M40, t.T8)
-  m.M48 = gate_and(m.M39, t.U7)
-  m.M49 = gate_and(m.M43, t.T16)
-  m.M50 = gate_and(m.M38, t.T9)
-  m.M51 = gate_and(m.M37, t.T17)
-  m.M52 = gate_and(m.M42, t.T15)
-  m.M53 = gate_and(m.M45, t.T27)
-  m.M54 = gate_and(m.M41, t.T10)
-  m.M55 = gate_and(m.M44, t.T13)
-  m.M56 = gate_and(m.M40, t.T23)
-  m.M57 = gate_and(m.M39, t.T19)
-  m.M58 = gate_and(m.M43, t.T3)
-  m.M59 = gate_and(m.M38, t.T22)
-  m.M60 = gate_and(m.M37, t.T20)
-  m.M61 = gate_and(m.M42, t.T1)
-  m.M62 = gate_and(m.M45, t.T4)
-  m.M63 = gate_and(m.M41, t.T2)
-  m.L0 = gate_xor(m.M61, m.M62)
-  m.L1 = gate_xor(m.M50, m.M56)
-  m.L2 = gate_xor(m.M46, m.M48)
-  m.L3 = gate_xor(m.M47, m.M55)
-  m.L4 = gate_xor(m.M54, m.M58)
-  m.L5 = gate_xor(m.M49, m.M61)
-  m.L6 = gate_xor(m.M62, m.L5)
-  m.L7 = gate_xor(m.M46, m.L3)
-  m.L8 = gate_xor(m.M51, m.M59)
-  m.L9 = gate_xor(m.M52, m.M53)
-  m.L10 = gate_xor(m.M53, m.L4)
-  m.L11 = gate_xor(m.M60, m.L2)
-  m.L12 = gate_xor(m.M48, m.M51)
-  m.L13 = gate_xor(m.M50, m.L0)
-  m.L14 = gate_xor(m.M52, m.M61)
-  m.L15 = gate_xor(m.M55, m.L1)
-  m.L16 = gate_xor(m.M56, m.L0)
-  m.L17 = gate_xor(m.M57, m.L1)
-  m.L18 = gate_xor(m.M58, m.L8)
-  m.L19 = gate_xor(m.M63, m.L4)
-  m.L20 = gate_xor(m.L0, m.L1)
-  m.L21 = gate_xor(m.L1, m.L7)
-  m.L22 = gate_xor(m.L3, m.L12)
-  m.L23 = gate_xor(m.L18, m.L2)
-  m.L24 = gate_xor(m.L15, m.L9)
-  m.L25 = gate_xor(m.L6, m.L10)
-  m.L26 = gate_xor(m.L7, m.L9)
-  m.L27 = gate_xor(m.L8, m.L10)
-  m.L28 = gate_xor(m.L11, m.L14)
-  m.L29 = gate_xor(m.L11, m.L17)
-  m.S0 = gate_xor(m.L6, m.L24)
-  m.S1 = gate_xor(m.L16, m.L26)
-  m.S2 = gate_xor(m.L19, m.L28)
-  m.S3 = gate_xor(m.L6, m.L21)
-  m.S4 = gate_xor(m.L20, m.L22)
-  m.S5 = gate_xor(m.L25, m.L29)
-  m.S6 = gate_xor(m.L13, m.L27)
-  m.S7 = gate_xor(m.L6, m.L23)
-  return [gate_not(m.S7), gate_not(m.S6), m.S5, m.S4, m.S3, gate_not(m.S2), gate_not(m.S1), m.S0]
-
-def aes_sbox(a: list[secret bool]) -> list[secret bool]:
-  var t = bp_terms(a)
-  var m = bp_middle(t)
-  return bp_output(t, m)
-
-def bp_terms_vec(a: list[list[secret bool]]) -> BPTermsVec:
-  var t: BPTermsVec
-  var U0: list[secret bool] = []
-  var U1: list[secret bool] = []
-  var U2: list[secret bool] = []
-  var U3: list[secret bool] = []
-  var U4: list[secret bool] = []
-  var U5: list[secret bool] = []
-  var U6: list[secret bool] = []
-  var U7: list[secret bool] = []
-  for i in 0..a.len():
-    U0.append(a[i][7])
-    U1.append(a[i][6])
-    U2.append(a[i][5])
-    U3.append(a[i][4])
-    U4.append(a[i][3])
-    U5.append(a[i][2])
-    U6.append(a[i][1])
-    U7.append(a[i][0])
-  t.U7 = U7
-  var x0 = bits_xor_many([U0, U0, U0, U3, U4, U1, U1, U2, U3, U6], [U3, U5, U6, U5, U6, U2, U5, U5, t.U7, t.U7])
-  t.T1 = x0[0]
-  t.T2 = x0[1]
-  t.T3 = x0[2]
-  t.T4 = x0[3]
-  t.T5 = x0[4]
-  t.T7 = x0[5]
-  t.T11 = x0[6]
-  t.T12 = x0[7]
-  t.T18 = x0[8]
-  t.T21 = x0[9]
-  var x1 = bits_xor_many([t.T1, t.U7, t.T3, t.T5, t.T5, t.T7, t.T7, t.T1], [t.T5, t.T7, t.T4, t.T11, t.T12, t.T18, t.T21, t.T12])
-  t.T6 = x1[0]
-  t.T9 = x1[1]
-  t.T13 = x1[2]
-  t.T15 = x1[3]
-  t.T16 = x1[4]
-  t.T19 = x1[5]
-  t.T22 = x1[6]
-  t.T27 = x1[7]
-  var x2 = bits_xor_many([t.T6, t.U7, t.T6, t.T9, t.T1, t.T2, t.T3], [t.T7, t.T6, t.T11, t.T16, t.T19, t.T22, t.T16])
-  t.T10 = x2[0]
-  t.T8 = x2[1]
-  t.T14 = x2[2]
-  t.T17 = x2[3]
-  t.T20 = x2[4]
-  t.T23 = x2[5]
-  t.T26 = x2[6]
-  var x3 = bits_xor_many([t.T2, t.T20], [t.T10, t.T17])
-  t.T24 = x3[0]
-  t.T25 = x3[1]
-  return t
-
-def bp_middle_vec(t: BPTermsVec) -> BPMidVec:
-  var m: BPMidVec
-  var p0 = bits_mul_many([t.T13, t.T23, t.T19, t.T3, t.T22, t.T20, t.T1, t.T4, t.T2], [t.T6, t.T8, t.U7, t.T16, t.T9, t.T17, t.T15, t.T27, t.T10])
-  m.M1 = p0[0]
-  m.M2 = p0[1]
-  m.M4 = p0[2]
-  m.M6 = p0[3]
-  m.M7 = p0[4]
-  m.M9 = p0[5]
-  m.M11 = p0[6]
-  m.M12 = p0[7]
-  m.M14 = p0[8]
-  var x0 = bits_xor_many([t.T14, m.M4, t.T26, m.M9, m.M12, m.M14], [m.M1, m.M1, m.M6, m.M6, m.M11, m.M11])
-  m.M3 = x0[0]
-  m.M5 = x0[1]
-  m.M8 = x0[2]
-  m.M10 = x0[3]
-  m.M13 = x0[4]
-  m.M15 = x0[5]
-  var x1 = bits_xor_many([m.M3, m.M5, m.M8, m.M10], [m.M2, t.T24, m.M7, m.M15])
-  m.M16 = x1[0]
-  m.M17 = x1[1]
-  m.M18 = x1[2]
-  m.M19 = x1[3]
-  var x2 = bits_xor_many([m.M16, m.M17, m.M18, m.M19], [m.M13, m.M15, m.M13, t.T25])
-  m.M20 = x2[0]
-  m.M21 = x2[1]
-  m.M22 = x2[2]
-  m.M23 = x2[3]
-  var x3 = bits_xor_many([m.M22, m.M20], [m.M23, m.M21])
-  m.M24 = x3[0]
-  m.M27 = x3[1]
-  m.M25 = Share.batch_mul(m.M22, m.M20)
-  var x4 = bits_xor_many([m.M21, m.M23, m.M27], [m.M25, m.M25, m.M25])
-  m.M26 = x4[0]
-  m.M28 = x4[1]
-  m.M33 = x4[2]
-  var p1 = bits_mul_many([m.M28, m.M26, m.M20, m.M21], [m.M27, m.M24, m.M23, m.M22])
-  m.M29 = p1[0]
-  m.M30 = p1[1]
-  m.M31 = p1[2]
-  m.M34 = p1[3]
-  var p2 = bits_mul_many([m.M27, m.M24], [m.M31, m.M34])
-  m.M32 = p2[0]
-  m.M35 = p2[1]
-  var x5 = bits_xor_many([m.M24, m.M21, m.M32, m.M23], [m.M25, m.M29, m.M33, m.M30])
-  m.M36 = x5[0]
-  m.M37 = x5[1]
-  m.M38 = x5[2]
-  m.M39 = x5[3]
-  m.M40 = bits_xor(m.M35, m.M36)
-  var x6 = bits_xor_many([m.M38, m.M37, m.M37, m.M39], [m.M40, m.M39, m.M38, m.M40])
-  m.M41 = x6[0]
-  m.M42 = x6[1]
-  m.M43 = x6[2]
-  m.M44 = x6[3]
-  m.M45 = bits_xor(m.M42, m.M41)
-  return m
-
-def bp_output_vec(t: BPTermsVec, m: BPMidVec) -> list[list[secret bool]]:
-  var p0 = bits_mul_many([m.M44, m.M40, m.M39, m.M43, m.M38, m.M37, m.M42, m.M45, m.M41, m.M44, m.M40, m.M39, m.M43, m.M38, m.M37, m.M42, m.M45, m.M41], [t.T6, t.T8, t.U7, t.T16, t.T9, t.T17, t.T15, t.T27, t.T10, t.T13, t.T23, t.T19, t.T3, t.T22, t.T20, t.T1, t.T4, t.T2])
-  m.M46 = p0[0]
-  m.M47 = p0[1]
-  m.M48 = p0[2]
-  m.M49 = p0[3]
-  m.M50 = p0[4]
-  m.M51 = p0[5]
-  m.M52 = p0[6]
-  m.M53 = p0[7]
-  m.M54 = p0[8]
-  m.M55 = p0[9]
-  m.M56 = p0[10]
-  m.M57 = p0[11]
-  m.M58 = p0[12]
-  m.M59 = p0[13]
-  m.M60 = p0[14]
-  m.M61 = p0[15]
-  m.M62 = p0[16]
-  m.M63 = p0[17]
-  var x0 = bits_xor_many([m.M61, m.M50, m.M46, m.M47, m.M54, m.M49, m.M51, m.M52, m.M48, m.M52], [m.M62, m.M56, m.M48, m.M55, m.M58, m.M61, m.M59, m.M53, m.M51, m.M61])
-  m.L0 = x0[0]
-  m.L1 = x0[1]
-  m.L2 = x0[2]
-  m.L3 = x0[3]
-  m.L4 = x0[4]
-  m.L5 = x0[5]
-  m.L8 = x0[6]
-  m.L9 = x0[7]
-  m.L12 = x0[8]
-  m.L14 = x0[9]
-  var x1 = bits_xor_many([m.M62, m.M46, m.M53, m.M60, m.M50, m.M55, m.M56, m.M57, m.M58, m.M63, m.L0, m.L3], [m.L5, m.L3, m.L4, m.L2, m.L0, m.L1, m.L0, m.L1, m.L8, m.L4, m.L1, m.L12])
-  m.L6 = x1[0]
-  m.L7 = x1[1]
-  m.L10 = x1[2]
-  m.L11 = x1[3]
-  m.L13 = x1[4]
-  m.L15 = x1[5]
-  m.L16 = x1[6]
-  m.L17 = x1[7]
-  m.L18 = x1[8]
-  m.L19 = x1[9]
-  m.L20 = x1[10]
-  m.L22 = x1[11]
-  var x2 = bits_xor_many([m.L1, m.L18, m.L15, m.L6, m.L7, m.L8, m.L11, m.L11], [m.L7, m.L2, m.L9, m.L10, m.L9, m.L10, m.L14, m.L17])
-  m.L21 = x2[0]
-  m.L23 = x2[1]
-  m.L24 = x2[2]
-  m.L25 = x2[3]
-  m.L26 = x2[4]
-  m.L27 = x2[5]
-  m.L28 = x2[6]
-  m.L29 = x2[7]
-  var x3 = bits_xor_many([m.L6, m.L16, m.L19, m.L6, m.L20, m.L25, m.L13, m.L6], [m.L24, m.L26, m.L28, m.L21, m.L22, m.L29, m.L27, m.L23])
-  m.S0 = x3[0]
-  m.S1 = x3[1]
-  m.S2 = x3[2]
-  m.S3 = x3[3]
-  m.S4 = x3[4]
-  m.S5 = x3[5]
-  m.S6 = x3[6]
-  m.S7 = x3[7]
-  var out: list[list[secret bool]] = []
-  for i in 0..m.S0.len():
-    out.append([gate_not(m.S7[i]), gate_not(m.S6[i]), m.S5[i], m.S4[i], m.S3[i], gate_not(m.S2[i]), gate_not(m.S1[i]), m.S0[i]])
-  return out
+  var U7: secret bool = a[0]
+  var T1: secret bool = gate_xor(U0, U3)
+  var T2: secret bool = gate_xor(U0, U5)
+  var T3: secret bool = gate_xor(U0, U6)
+  var T4: secret bool = gate_xor(U3, U5)
+  var T5: secret bool = gate_xor(U4, U6)
+  var T6: secret bool = gate_xor(T1, T5)
+  var T7: secret bool = gate_xor(U1, U2)
+  var T8: secret bool = gate_xor(U7, T6)
+  var T9: secret bool = gate_xor(U7, T7)
+  var T10: secret bool = gate_xor(T6, T7)
+  var T11: secret bool = gate_xor(U1, U5)
+  var T12: secret bool = gate_xor(U2, U5)
+  var T13: secret bool = gate_xor(T3, T4)
+  var T14: secret bool = gate_xor(T6, T11)
+  var T15: secret bool = gate_xor(T5, T11)
+  var T16: secret bool = gate_xor(T5, T12)
+  var T17: secret bool = gate_xor(T9, T16)
+  var T18: secret bool = gate_xor(U3, U7)
+  var T19: secret bool = gate_xor(T7, T18)
+  var T20: secret bool = gate_xor(T1, T19)
+  var T21: secret bool = gate_xor(U6, U7)
+  var T22: secret bool = gate_xor(T7, T21)
+  var T23: secret bool = gate_xor(T2, T22)
+  var T24: secret bool = gate_xor(T2, T10)
+  var T25: secret bool = gate_xor(T20, T17)
+  var T26: secret bool = gate_xor(T3, T16)
+  var T27: secret bool = gate_xor(T1, T12)
+  var M1: secret bool = gate_and(T13, T6)
+  var M2: secret bool = gate_and(T23, T8)
+  var M3: secret bool = gate_xor(T14, M1)
+  var M4: secret bool = gate_and(T19, U7)
+  var M5: secret bool = gate_xor(M4, M1)
+  var M6: secret bool = gate_and(T3, T16)
+  var M7: secret bool = gate_and(T22, T9)
+  var M8: secret bool = gate_xor(T26, M6)
+  var M9: secret bool = gate_and(T20, T17)
+  var M10: secret bool = gate_xor(M9, M6)
+  var M11: secret bool = gate_and(T1, T15)
+  var M12: secret bool = gate_and(T4, T27)
+  var M13: secret bool = gate_xor(M12, M11)
+  var M14: secret bool = gate_and(T2, T10)
+  var M15: secret bool = gate_xor(M14, M11)
+  var M16: secret bool = gate_xor(M3, M2)
+  var M17: secret bool = gate_xor(M5, T24)
+  var M18: secret bool = gate_xor(M8, M7)
+  var M19: secret bool = gate_xor(M10, M15)
+  var M20: secret bool = gate_xor(M16, M13)
+  var M21: secret bool = gate_xor(M17, M15)
+  var M22: secret bool = gate_xor(M18, M13)
+  var M23: secret bool = gate_xor(M19, T25)
+  var M24: secret bool = gate_xor(M22, M23)
+  var M25: secret bool = gate_and(M22, M20)
+  var M26: secret bool = gate_xor(M21, M25)
+  var M27: secret bool = gate_xor(M20, M21)
+  var M28: secret bool = gate_xor(M23, M25)
+  var M29: secret bool = gate_and(M28, M27)
+  var M30: secret bool = gate_and(M26, M24)
+  var M31: secret bool = gate_and(M20, M23)
+  var M32: secret bool = gate_and(M27, M31)
+  var M33: secret bool = gate_xor(M27, M25)
+  var M34: secret bool = gate_and(M21, M22)
+  var M35: secret bool = gate_and(M24, M34)
+  var M36: secret bool = gate_xor(M24, M25)
+  var M37: secret bool = gate_xor(M21, M29)
+  var M38: secret bool = gate_xor(M32, M33)
+  var M39: secret bool = gate_xor(M23, M30)
+  var M40: secret bool = gate_xor(M35, M36)
+  var M41: secret bool = gate_xor(M38, M40)
+  var M42: secret bool = gate_xor(M37, M39)
+  var M43: secret bool = gate_xor(M37, M38)
+  var M44: secret bool = gate_xor(M39, M40)
+  var M45: secret bool = gate_xor(M42, M41)
+  var M46: secret bool = gate_and(M44, T6)
+  var M47: secret bool = gate_and(M40, T8)
+  var M48: secret bool = gate_and(M39, U7)
+  var M49: secret bool = gate_and(M43, T16)
+  var M50: secret bool = gate_and(M38, T9)
+  var M51: secret bool = gate_and(M37, T17)
+  var M52: secret bool = gate_and(M42, T15)
+  var M53: secret bool = gate_and(M45, T27)
+  var M54: secret bool = gate_and(M41, T10)
+  var M55: secret bool = gate_and(M44, T13)
+  var M56: secret bool = gate_and(M40, T23)
+  var M57: secret bool = gate_and(M39, T19)
+  var M58: secret bool = gate_and(M43, T3)
+  var M59: secret bool = gate_and(M38, T22)
+  var M60: secret bool = gate_and(M37, T20)
+  var M61: secret bool = gate_and(M42, T1)
+  var M62: secret bool = gate_and(M45, T4)
+  var M63: secret bool = gate_and(M41, T2)
+  var L0: secret bool = gate_xor(M61, M62)
+  var L1: secret bool = gate_xor(M50, M56)
+  var L2: secret bool = gate_xor(M46, M48)
+  var L3: secret bool = gate_xor(M47, M55)
+  var L4: secret bool = gate_xor(M54, M58)
+  var L5: secret bool = gate_xor(M49, M61)
+  var L6: secret bool = gate_xor(M62, L5)
+  var L7: secret bool = gate_xor(M46, L3)
+  var L8: secret bool = gate_xor(M51, M59)
+  var L9: secret bool = gate_xor(M52, M53)
+  var L10: secret bool = gate_xor(M53, L4)
+  var L11: secret bool = gate_xor(M60, L2)
+  var L12: secret bool = gate_xor(M48, M51)
+  var L13: secret bool = gate_xor(M50, L0)
+  var L14: secret bool = gate_xor(M52, M61)
+  var L15: secret bool = gate_xor(M55, L1)
+  var L16: secret bool = gate_xor(M56, L0)
+  var L17: secret bool = gate_xor(M57, L1)
+  var L18: secret bool = gate_xor(M58, L8)
+  var L19: secret bool = gate_xor(M63, L4)
+  var L20: secret bool = gate_xor(L0, L1)
+  var L21: secret bool = gate_xor(L1, L7)
+  var L22: secret bool = gate_xor(L3, L12)
+  var L23: secret bool = gate_xor(L18, L2)
+  var L24: secret bool = gate_xor(L15, L9)
+  var L25: secret bool = gate_xor(L6, L10)
+  var L26: secret bool = gate_xor(L7, L9)
+  var L27: secret bool = gate_xor(L8, L10)
+  var L28: secret bool = gate_xor(L11, L14)
+  var L29: secret bool = gate_xor(L11, L17)
+  var S0: secret bool = gate_xor(L6, L24)
+  var S1: secret bool = gate_xor(L16, L26)
+  var S2: secret bool = gate_xor(L19, L28)
+  var S3: secret bool = gate_xor(L6, L21)
+  var S4: secret bool = gate_xor(L20, L22)
+  var S5: secret bool = gate_xor(L25, L29)
+  var S6: secret bool = gate_xor(L13, L27)
+  var S7: secret bool = gate_xor(L6, L23)
+  return [gate_not(S7), gate_not(S6), S5, S4, S3, gate_not(S2), gate_not(S1), S0]
 
 def aes_sbox_vec(a: list[list[secret bool]]) -> list[list[secret bool]]:
-  var t = bp_terms_vec(a)
-  var m = bp_middle_vec(t)
-  return bp_output_vec(t, m)
+  var out: list[list[secret bool]] = []
+  for i in 0..a.len():
+    out.append(aes_sbox(a[i]))
+  return out
 
 def sub_word(word: list[list[secret bool]]) -> list[list[secret bool]]:
   return aes_sbox_vec(word)
