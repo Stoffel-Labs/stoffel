@@ -10,7 +10,3 @@ resolver = "2"
 exclude = [
     "vendor/mpc-protocols-limit-test",
 ]
-
-[patch."https://github.com/Stoffel-Labs/mpc-protocols.git"]
-stoffelmpc-mpc = { path = "vendor/mpc-protocols-limit-test/mpc" }
-stoffelmpc-network = { path = "vendor/mpc-protocols-limit-test/network" }
