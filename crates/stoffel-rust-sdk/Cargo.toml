@@ -37,7 +37,7 @@ stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
 stoffel-mpc-coordinator = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "feature/no-feature-gates-and-multi-type-awareness", default-features = false }
 stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
-stoffelmpc-mpc = { version = "0.1.0", path = "../../vendor/mpc-protocols-limit-test/mpc" }
+stoffelmpc-mpc = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "temp/monorepo-network-dep" }
 
 [dev-dependencies]
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
