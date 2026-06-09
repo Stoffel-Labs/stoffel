@@ -156,6 +156,8 @@ pub struct BytecodeChunk {
     pub constants: Vec<Constant>,
     pub labels: std::collections::HashMap<String, usize>,
     pub parameters: Vec<String>,
+    pub parameter_types: Vec<stoffel_vm_types::compiled_binary::FunctionType>,
+    pub return_type: stoffel_vm_types::compiled_binary::FunctionType,
     pub upvalues: Vec<String>,
 }
 

@@ -6,8 +6,9 @@ use crate::net::client_store::{ClientInputIndex, ClientOutputShareCount, ClientS
 use crate::runtime_hooks::HookEvent;
 use crate::value_conversions::{usize_to_vm_i64, value_to_i64, value_to_usize};
 use crate::VirtualMachineResult;
+use std::cmp::Ordering;
 use std::collections::HashSet;
-use stoffel_vm_types::core_types::{ShareData, ShareType, TableRef, Value};
+use stoffel_vm_types::core_types::{ArrayRef, ShareData, ShareType, TableRef, Value};
 
 const OUTPUT_SHARE_LIST_MAGIC: &[u8; 5] = b"VMOS1";
 
@@ -18,7 +19,19 @@ pub(crate) const FUNCTION_NAMES: &[&str] = &[
     "set_field",
     "array_length",
     "array_push",
+    "array_concat",
+    "array_repeat",
     "append",
+    "extend",
+    "copy",
+    "count",
+    "index",
+    "pop",
+    "remove",
+    "insert",
+    "clear",
+    "reverse",
+    "sort",
     "len",
     "range",
     "ClientStore.get_number_clients",
@@ -169,6 +182,61 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         Ok(Value::I64(usize_to_vm_i64(len, "array length")?))
     });
 
+    register_standard_builtin!("array_concat", |mut ctx| {
+        let (left_ref, right_ref) = {
+            let args = ctx.named_args("array_concat");
+            args.require_exact(2, "2 arguments: left array and right array")?;
+            (
+                args.array_ref(0, "First argument")?,
+                args.array_ref(1, "Second argument")?,
+            )
+        };
+
+        let left_len = ctx.read_array_ref_len(left_ref)?;
+        let right_len = ctx.read_array_ref_len(right_ref)?;
+        let capacity = left_len
+            .checked_add(right_len)
+            .ok_or_else(|| "array_concat result length is too large".to_owned())?;
+        let result_ref = ctx.create_array_ref(capacity)?;
+
+        for source_ref in [left_ref, right_ref] {
+            let len = ctx.read_array_ref_len(source_ref)?;
+            for index in 0..len {
+                let value = ctx
+                    .read_table_field(TableRef::from(source_ref), &Value::I64(index as i64))?
+                    .unwrap_or(Value::Unit);
+                ctx.push_array_ref_values(result_ref, &[value])?;
+            }
+        }
+
+        Ok(Value::from(result_ref))
+    });
+
+    register_standard_builtin!("array_repeat", |mut ctx| {
+        let (array_ref, count) = {
+            let args = ctx.named_args("array_repeat");
+            args.require_exact(2, "2 arguments: array and count")?;
+            let count = value_to_i64(args.get(1)?, "repeat count")?;
+            (
+                args.array_ref(0, "First argument")?,
+                usize::try_from(count.max(0))
+                    .map_err(|_| "repeat count is too large".to_owned())?,
+            )
+        };
+
+        let values = collect_array_values(&mut ctx, array_ref)?;
+        let capacity = values
+            .len()
+            .checked_mul(count)
+            .ok_or_else(|| "array_repeat result length is too large".to_owned())?;
+        let result_ref = ctx.create_array_ref(capacity)?;
+        for _ in 0..count {
+            ctx.push_array_ref_values(result_ref, &values)?;
+        }
+
+        Ok(Value::from(result_ref))
+    });
+
     register_standard_builtin!("append", |mut ctx| {
         let array_ref = {
             let args = ctx.named_args("append");
@@ -178,6 +246,173 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
 
         let len = ctx.push_array_args_from(array_ref, 1, "append")?;
         Ok(Value::I64(usize_to_vm_i64(len, "array length")?))
+    });
+
+    register_standard_builtin!("extend", |mut ctx| {
+        let (array_ref, values_ref) = {
+            let args = ctx.named_args("extend");
+            args.require_exact(2, "2 arguments: array and values")?;
+            (
+                args.array_ref(0, "First argument")?,
+                args.array_ref(1, "Second argument")?,
+            )
+        };
+
+        let values = collect_array_values(&mut ctx, values_ref)?;
+        let len = ctx.push_array_ref_values(array_ref, &values)?;
+        Ok(Value::I64(usize_to_vm_i64(len, "array length")?))
+    });
+
+    register_standard_builtin!("copy", |mut ctx| {
+        let array_ref = {
+            let args = ctx.named_args("copy");
+            args.require_exact(1, "1 argument: array")?;
+            args.array_ref(0, "First argument")?
+        };
+
+        let values = collect_array_values(&mut ctx, array_ref)?;
+        let result_ref = ctx.create_array_ref(values.len())?;
+        ctx.push_array_ref_values(result_ref, &values)?;
+        Ok(Value::from(result_ref))
+    });
+
+    register_standard_builtin!("count", |mut ctx| {
+        let (array_ref, needle) = {
+            let args = ctx.named_args("count");
+            args.require_exact(2, "2 arguments: array and value")?;
+            (args.array_ref(0, "First argument")?, args.cloned(1)?)
+        };
+
+        let mut count = 0usize;
+        for value in collect_array_values(&mut ctx, array_ref)? {
+            if values_equal(&mut ctx, &value, &needle, 64)? {
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| "count result is too large".to_owned())?;
+            }
+        }
+
+        Ok(Value::I64(usize_to_vm_i64(count, "count")?))
+    });
+
+    register_standard_builtin!("index", |mut ctx| {
+        let (array_ref, needle) = {
+            let args = ctx.named_args("index");
+            args.require_exact(2, "2 arguments: array and value")?;
+            (args.array_ref(0, "First argument")?, args.cloned(1)?)
+        };
+
+        for (index, value) in collect_array_values(&mut ctx, array_ref)?
+            .into_iter()
+            .enumerate()
+        {
+            if values_equal(&mut ctx, &value, &needle, 64)? {
+                return Ok(Value::I64(usize_to_vm_i64(index, "index")?));
+            }
+        }
+
+        Err("value is not in list".into())
+    });
+
+    register_standard_builtin!("pop", |mut ctx| {
+        let (array_ref, index_arg) = {
+            let args = ctx.named_args("pop");
+            args.require_min(1, "at least 1 argument: array")?;
+            if args.len() > 2 {
+                return Err("pop expects at most 2 arguments: array and optional index".into());
+            }
+            (
+                args.array_ref(0, "First argument")?,
+                if args.len() == 2 {
+                    Some(args.cloned(1)?)
+                } else {
+                    None
+                },
+            )
+        };
+
+        let len = ctx.read_array_ref_len(array_ref)?;
+        if len == 0 {
+            return Err("pop from empty list".into());
+        }
+        let index = match index_arg {
+            Some(value) => normalize_existing_index(value_to_i64(&value, "index")?, len)?,
+            None => len - 1,
+        };
+        ctx.pop_array_ref_value(array_ref, index)?
+            .ok_or_else(|| "pop index out of range".into())
+    });
+
+    register_standard_builtin!("remove", |mut ctx| {
+        let (array_ref, needle) = {
+            let args = ctx.named_args("remove");
+            args.require_exact(2, "2 arguments: array and value")?;
+            (args.array_ref(0, "First argument")?, args.cloned(1)?)
+        };
+
+        for (index, value) in collect_array_values(&mut ctx, array_ref)?
+            .into_iter()
+            .enumerate()
+        {
+            if values_equal(&mut ctx, &value, &needle, 64)? {
+                ctx.pop_array_ref_value(array_ref, index)?;
+                return Ok(Value::Unit);
+            }
+        }
+
+        Err("value is not in list".into())
+    });
+
+    register_standard_builtin!("insert", |mut ctx| {
+        let (array_ref, raw_index, value) = {
+            let args = ctx.named_args("insert");
+            args.require_exact(3, "3 arguments: array, index, and value")?;
+            (
+                args.array_ref(0, "First argument")?,
+                value_to_i64(args.get(1)?, "index")?,
+                args.cloned(2)?,
+            )
+        };
+
+        let len = ctx.read_array_ref_len(array_ref)?;
+        let index = normalize_insert_index(raw_index, len);
+        ctx.insert_array_ref_value(array_ref, index, value)?;
+        Ok(Value::Unit)
+    });
+
+    register_standard_builtin!("clear", |mut ctx| {
+        let array_ref = {
+            let args = ctx.named_args("clear");
+            args.require_exact(1, "1 argument: array")?;
+            args.array_ref(0, "First argument")?
+        };
+
+        ctx.clear_array_ref(array_ref)?;
+        Ok(Value::Unit)
+    });
+
+    register_standard_builtin!("reverse", |mut ctx| {
+        let array_ref = {
+            let args = ctx.named_args("reverse");
+            args.require_exact(1, "1 argument: array")?;
+            args.array_ref(0, "First argument")?
+        };
+
+        ctx.reverse_array_ref(array_ref)?;
+        Ok(Value::Unit)
+    });
+
+    register_standard_builtin!("sort", |mut ctx| {
+        let array_ref = {
+            let args = ctx.named_args("sort");
+            args.require_exact(1, "1 argument: array")?;
+            args.array_ref(0, "First argument")?
+        };
+
+        let mut values = collect_array_values(&mut ctx, array_ref)?;
+        sort_values(&mut values)?;
+        ctx.replace_array_ref_values(array_ref, values)?;
+        Ok(Value::Unit)
     });
 
     register_standard_builtin!("len", |mut ctx| {
@@ -465,6 +700,182 @@ fn format_print_value(
             formatted
         }
         _ => Ok(format!("{:?}", value)),
+    }
+}
+
+fn collect_array_values(
+    ctx: &mut ForeignFunctionContext<'_>,
+    array_ref: ArrayRef,
+) -> ForeignFunctionCallbackResult<Vec<Value>> {
+    let len = ctx.read_array_ref_len(array_ref)?;
+    let mut values = Vec::with_capacity(len);
+    for index in 0..len {
+        let index = usize_to_vm_i64(index, "array index")?;
+        values.push(
+            ctx.read_table_field(TableRef::from(array_ref), &Value::I64(index))?
+                .unwrap_or(Value::Unit),
+        );
+    }
+    Ok(values)
+}
+
+fn values_equal(
+    ctx: &mut ForeignFunctionContext<'_>,
+    left: &Value,
+    right: &Value,
+    max_depth: usize,
+) -> ForeignFunctionCallbackResult<bool> {
+    match (left, right) {
+        (Value::Array(left_ref), Value::Array(right_ref)) => {
+            arrays_equal(ctx, *left_ref, *right_ref, max_depth)
+        }
+        _ => Ok(left == right),
+    }
+}
+
+fn arrays_equal(
+    ctx: &mut ForeignFunctionContext<'_>,
+    left_ref: ArrayRef,
+    right_ref: ArrayRef,
+    max_depth: usize,
+) -> ForeignFunctionCallbackResult<bool> {
+    if left_ref == right_ref {
+        return Ok(true);
+    }
+    if max_depth == 0 {
+        return Ok(false);
+    }
+
+    let left_len = ctx.read_array_ref_len(left_ref)?;
+    let right_len = ctx.read_array_ref_len(right_ref)?;
+    if left_len != right_len {
+        return Ok(false);
+    }
+
+    for index in 0..left_len {
+        let key = Value::I64(usize_to_vm_i64(index, "array index")?);
+        let left_value = ctx
+            .read_table_field(TableRef::from(left_ref), &key)?
+            .unwrap_or(Value::Unit);
+        let right_value = ctx
+            .read_table_field(TableRef::from(right_ref), &key)?
+            .unwrap_or(Value::Unit);
+        if !values_equal(ctx, &left_value, &right_value, max_depth - 1)? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn normalize_existing_index(index: i64, len: usize) -> Result<usize, String> {
+    let len_i64 = i64::try_from(len).map_err(|_| "list length exceeds i64 range".to_owned())?;
+    let normalized = if index < 0 { len_i64 + index } else { index };
+    if normalized < 0 || normalized >= len_i64 {
+        return Err("list index out of range".to_owned());
+    }
+    usize::try_from(normalized).map_err(|_| "list index is too large".to_owned())
+}
+
+fn normalize_insert_index(index: i64, len: usize) -> usize {
+    let Ok(len_i64) = i64::try_from(len) else {
+        return len;
+    };
+    let normalized = if index < 0 { len_i64 + index } else { index };
+    if normalized <= 0 {
+        0
+    } else if normalized >= len_i64 {
+        len
+    } else {
+        usize::try_from(normalized).unwrap_or(len)
+    }
+}
+
+fn sort_values(values: &mut [Value]) -> Result<(), String> {
+    for index in 1..values.len() {
+        let mut current = index;
+        while current > 0
+            && compare_sort_values(&values[current], &values[current - 1])? == Ordering::Less
+        {
+            values.swap(current, current - 1);
+            current -= 1;
+        }
+    }
+    Ok(())
+}
+
+fn compare_sort_values(left: &Value, right: &Value) -> Result<Ordering, String> {
+    if let (Some(left), Some(right)) = (numeric_sort_value(left), numeric_sort_value(right)) {
+        return compare_numeric_sort_values(left, right);
+    }
+
+    match (left, right) {
+        (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
+        (Value::Bool(left), Value::Bool(right)) => Ok(left.cmp(right)),
+        _ => Err(format!(
+            "list sort does not support comparing {} and {}",
+            left.type_name(),
+            right.type_name()
+        )),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NumericSortValue {
+    Signed(i128),
+    Unsigned(u128),
+    Float(f64),
+}
+
+fn numeric_sort_value(value: &Value) -> Option<NumericSortValue> {
+    match value {
+        Value::I64(value) => Some(NumericSortValue::Signed((*value).into())),
+        Value::I32(value) => Some(NumericSortValue::Signed((*value).into())),
+        Value::I16(value) => Some(NumericSortValue::Signed((*value).into())),
+        Value::I8(value) => Some(NumericSortValue::Signed((*value).into())),
+        Value::U64(value) => Some(NumericSortValue::Unsigned((*value).into())),
+        Value::U32(value) => Some(NumericSortValue::Unsigned((*value).into())),
+        Value::U16(value) => Some(NumericSortValue::Unsigned((*value).into())),
+        Value::U8(value) => Some(NumericSortValue::Unsigned((*value).into())),
+        Value::Float(value) => Some(NumericSortValue::Float(value.0)),
+        _ => None,
+    }
+}
+
+fn compare_numeric_sort_values(
+    left: NumericSortValue,
+    right: NumericSortValue,
+) -> Result<Ordering, String> {
+    match (left, right) {
+        (NumericSortValue::Signed(left), NumericSortValue::Signed(right)) => Ok(left.cmp(&right)),
+        (NumericSortValue::Unsigned(left), NumericSortValue::Unsigned(right)) => {
+            Ok(left.cmp(&right))
+        }
+        (NumericSortValue::Signed(left), NumericSortValue::Unsigned(right)) => {
+            if left < 0 {
+                Ok(Ordering::Less)
+            } else {
+                Ok((left as u128).cmp(&right))
+            }
+        }
+        (NumericSortValue::Unsigned(left), NumericSortValue::Signed(right)) => {
+            if right < 0 {
+                Ok(Ordering::Greater)
+            } else {
+                Ok(left.cmp(&(right as u128)))
+            }
+        }
+        (left, right) => numeric_sort_value_as_f64(left)
+            .partial_cmp(&numeric_sort_value_as_f64(right))
+            .ok_or_else(|| "list sort does not support NaN values".to_owned()),
+    }
+}
+
+fn numeric_sort_value_as_f64(value: NumericSortValue) -> f64 {
+    match value {
+        NumericSortValue::Signed(value) => value as f64,
+        NumericSortValue::Unsigned(value) => value as f64,
+        NumericSortValue::Float(value) => value,
     }
 }
 

@@ -338,6 +338,64 @@ impl Array {
         Ok(self.length_hint)
     }
 
+    pub fn try_replace_values(&mut self, values: Vec<Value>) -> TableMemoryResult<usize> {
+        let new_len = values.len();
+        i64::try_from(new_len).map_err(|_| TableMemoryError::VmIntegerRangeExceeded {
+            label: "Array length",
+            value: new_len,
+        })?;
+
+        self.elements.clear();
+        self.extra_fields.retain(|key, _| {
+            !Self::is_length_index_key(key, self.length_hint)
+                && !matches!(key, Value::I64(idx) if *idx >= 0)
+        });
+        self.length_hint = 0;
+        self.try_push_values(&values)
+    }
+
+    pub fn try_pop_at(&mut self, index: usize) -> TableMemoryResult<Option<Value>> {
+        if index >= self.length_hint {
+            return Ok(None);
+        }
+
+        let mut values = self.values()?;
+        let value = values.remove(index);
+        self.try_replace_values(values)?;
+        Ok(Some(value))
+    }
+
+    pub fn try_insert_at(&mut self, index: usize, value: Value) -> TableMemoryResult<usize> {
+        let mut values = self.values()?;
+        let index = index.min(values.len());
+        values.insert(index, value);
+        self.try_replace_values(values)
+    }
+
+    pub fn try_clear(&mut self) -> TableMemoryResult<()> {
+        self.try_replace_values(Vec::new()).map(|_| ())
+    }
+
+    pub fn try_reverse(&mut self) -> TableMemoryResult<()> {
+        let mut values = self.values()?;
+        values.reverse();
+        self.try_replace_values(values).map(|_| ())
+    }
+
+    pub fn values(&self) -> TableMemoryResult<Vec<Value>> {
+        let mut values = Vec::with_capacity(self.length_hint);
+        for index in 0..self.length_hint {
+            let index_i64 =
+                i64::try_from(index).map_err(|_| TableMemoryError::VmIntegerRangeExceeded {
+                    label: "Array index",
+                    value: index,
+                })?;
+            let key = Value::I64(index_i64);
+            values.push(self.get(&key).cloned().unwrap_or(Value::Unit));
+        }
+        Ok(values)
+    }
+
     pub fn length(&self) -> usize {
         self.length_hint
     }
@@ -1607,6 +1665,44 @@ pub trait TableMemory: Send + Sync {
         array_ref: ArrayRef,
         values: &[Value],
     ) -> TableMemoryResult<usize>;
+    fn pop_array_ref_value(
+        &mut self,
+        _array_ref: ArrayRef,
+        _index: usize,
+    ) -> TableMemoryResult<Option<Value>> {
+        Err(TableMemoryError::backend(
+            "array pop is not supported by this table memory backend",
+        ))
+    }
+    fn insert_array_ref_value(
+        &mut self,
+        _array_ref: ArrayRef,
+        _index: usize,
+        _value: Value,
+    ) -> TableMemoryResult<usize> {
+        Err(TableMemoryError::backend(
+            "array insert is not supported by this table memory backend",
+        ))
+    }
+    fn replace_array_ref_values(
+        &mut self,
+        _array_ref: ArrayRef,
+        _values: Vec<Value>,
+    ) -> TableMemoryResult<usize> {
+        Err(TableMemoryError::backend(
+            "array replacement is not supported by this table memory backend",
+        ))
+    }
+    fn clear_array_ref(&mut self, _array_ref: ArrayRef) -> TableMemoryResult<()> {
+        Err(TableMemoryError::backend(
+            "array clear is not supported by this table memory backend",
+        ))
+    }
+    fn reverse_array_ref(&mut self, _array_ref: ArrayRef) -> TableMemoryResult<()> {
+        Err(TableMemoryError::backend(
+            "array reverse is not supported by this table memory backend",
+        ))
+    }
     /// Semantically read an object length through the VM-visible memory path.
     fn read_object_ref_len(&mut self, object_ref: ObjectRef) -> TableMemoryResult<usize>;
     /// Semantically read object entries through the VM-visible memory path.
@@ -1914,6 +2010,54 @@ impl TableMemory for ObjectStore {
             .get_array_ref_mut(array_ref)
             .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
         array.try_push_values(values)
+    }
+
+    fn pop_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+    ) -> TableMemoryResult<Option<Value>> {
+        let array = self
+            .get_array_ref_mut(array_ref)
+            .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
+        array.try_pop_at(index)
+    }
+
+    fn insert_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+        value: Value,
+    ) -> TableMemoryResult<usize> {
+        let array = self
+            .get_array_ref_mut(array_ref)
+            .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
+        array.try_insert_at(index, value)
+    }
+
+    fn replace_array_ref_values(
+        &mut self,
+        array_ref: ArrayRef,
+        values: Vec<Value>,
+    ) -> TableMemoryResult<usize> {
+        let array = self
+            .get_array_ref_mut(array_ref)
+            .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
+        array.try_replace_values(values)
+    }
+
+    fn clear_array_ref(&mut self, array_ref: ArrayRef) -> TableMemoryResult<()> {
+        let array = self
+            .get_array_ref_mut(array_ref)
+            .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
+        array.try_clear()
+    }
+
+    fn reverse_array_ref(&mut self, array_ref: ArrayRef) -> TableMemoryResult<()> {
+        let array = self
+            .get_array_ref_mut(array_ref)
+            .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
+        array.try_reverse()
     }
 
     fn read_object_ref_len(&mut self, object_ref: ObjectRef) -> TableMemoryResult<usize> {

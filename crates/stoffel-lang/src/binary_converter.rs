@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use stoffel_vm_types::compiled_binary::{
     BinaryResult, ClientIoManifest, CompiledBinary, CompiledFunction, CompiledInstruction,
+    FunctionType,
 };
 use stoffel_vm_types::core_types::Value;
 use stoffel_vm_types::registers::DEFAULT_SECRET_REGISTER_START;
@@ -206,15 +207,28 @@ fn convert_chunk_to_function(
 
     // Create the compiled function
     let reg_count = estimate_register_count(chunk);
+    let parameter_types = normalized_chunk_parameter_types(chunk, parameters.len());
     CompiledFunction {
         name: name.to_string(),
         register_count: reg_count,
         parameters,
+        parameter_types,
+        return_type: chunk.return_type.clone(),
         upvalues: chunk.upvalues.clone(),
         parent,
         labels: chunk.labels.clone(),
         instructions,
     }
+}
+
+fn normalized_chunk_parameter_types(
+    chunk: &BytecodeChunk,
+    parameter_count: usize,
+) -> Vec<FunctionType> {
+    let mut parameter_types = chunk.parameter_types.clone();
+    parameter_types.resize(parameter_count, FunctionType::Unknown);
+    parameter_types.truncate(parameter_count);
+    parameter_types
 }
 
 /// Adds a constant to the binary and returns its index

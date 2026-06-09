@@ -49,6 +49,10 @@ impl<'a> ForeignArguments<'a> {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.args.len()
+    }
+
     /// Get an argument by index or return a callback error that names the function.
     pub fn get(&self, index: usize) -> ForeignFunctionCallbackResult<&'a Value> {
         self.args

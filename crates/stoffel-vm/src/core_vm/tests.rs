@@ -17,6 +17,7 @@ use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use stoffel_vm_types::compiled_binary::{MpcBackend, MpcCurve};
 use stoffel_vm_types::core_types::{
     ArrayRef, ClearShareInput, ClearShareValue, ForeignObjectRef, ObjectRef, ObjectStore,
     ShareData, ShareType, TableMemory, TableMemoryResult, TableRef, Value,
@@ -43,6 +44,146 @@ fn callback_error(error: &VirtualMachineError) -> &ForeignFunctionCallbackError 
     }
 
     panic!("expected foreign function callback error source");
+}
+
+fn compile_vm_source(source: &str) -> VirtualMachine {
+    let options = stoffellang::CompilerOptions {
+        optimize: false,
+        optimization_level: 0,
+        print_ir: false,
+        mpc_backend: MpcBackend::HoneyBadger,
+        mpc_curve: MpcCurve::default(),
+    };
+    let program =
+        stoffellang::compile(source, "vm-test.stfl", &options).expect("test source should compile");
+    let binary = stoffellang::convert_to_binary(&program);
+    let mut vm = VirtualMachine::try_new().expect("vm should initialize");
+    for function in binary
+        .try_to_vm_functions()
+        .expect("compiled bytecode should convert to VM functions")
+    {
+        vm.try_register_function(function)
+            .expect("function should register");
+    }
+    vm
+}
+
+fn vm_array(vm: &mut VirtualMachine, values: &[Value]) -> Value {
+    let array_ref = vm
+        .create_array_ref(values.len())
+        .expect("array should be created");
+    vm.push_array_ref_values(array_ref, values)
+        .expect("array values should push");
+    Value::from(array_ref)
+}
+
+fn read_vm_array(vm: &mut VirtualMachine, value: Value) -> Vec<Value> {
+    let array_ref = ArrayRef::try_from(&value).expect("value should be an array");
+    let len = vm
+        .read_array_ref_len(array_ref)
+        .expect("array length should read");
+    (0..len)
+        .map(|index| {
+            vm.read_table_field(TableRef::from(array_ref), &Value::I64(index as i64))
+                .expect("array element should read")
+                .unwrap_or(Value::Unit)
+        })
+        .collect()
+}
+
+#[test]
+fn compiled_nested_list_index_concat_executes_as_list_concat() {
+    let mut vm = compile_vm_source(
+        r#"
+def main(a: list[list[int64]], a_rows: int64, a_cols: int64) -> list[int64]:
+  var nested_list: list[list[int64]] = a
+  var result: list[int64] = []
+  for i in 0..a_rows:
+    result = nested_list[i] + nested_list[i]
+  return result
+"#,
+    );
+    let row0 = vm_array(&mut vm, &[Value::I64(1), Value::I64(2)]);
+    let row1 = vm_array(&mut vm, &[Value::I64(3), Value::I64(4)]);
+    let input = vm_array(&mut vm, &[row0, row1]);
+
+    let result = vm
+        .execute_with_args("main", &[input, Value::I64(2), Value::I64(2)])
+        .expect("nested list concat program should execute");
+
+    assert_eq!(
+        read_vm_array(&mut vm, result),
+        vec![Value::I64(3), Value::I64(4), Value::I64(3), Value::I64(4)]
+    );
+}
+
+#[test]
+fn compiled_list_methods_follow_python_style_mutation_semantics() {
+    let mut vm = compile_vm_source(
+        r#"
+def main() -> list[int64]:
+  var items: list[int64] = [3, 1, 2]
+  items.insert(1, 9)
+  var popped: int64 = items.pop(-2)
+  items.remove(9)
+  items.extend([5, 5])
+  var five_count: int64 = items.count(5)
+  var two_index: int64 = items.index(2)
+  items.reverse()
+  items.sort()
+  items.append(popped)
+  items.append(five_count)
+  items.append(two_index)
+  return items
+"#,
+    );
+
+    let result = vm
+        .execute_with_args("main", &[])
+        .expect("list method program should execute");
+
+    assert_eq!(
+        read_vm_array(&mut vm, result),
+        vec![
+            Value::I64(2),
+            Value::I64(3),
+            Value::I64(5),
+            Value::I64(5),
+            Value::I64(1),
+            Value::I64(2),
+            Value::I64(1),
+        ]
+    );
+}
+
+#[test]
+fn compiled_list_copy_clear_and_repeat_follow_python_style_semantics() {
+    let mut vm = compile_vm_source(
+        r#"
+def main() -> list[int64]:
+  var items: list[int64] = [4, 6]
+  var copied: list[int64] = items.copy()
+  items.clear()
+  return copied + ([7] * 2) + (2 * [8]) + [len(items)]
+"#,
+    );
+
+    let result = vm
+        .execute_with_args("main", &[])
+        .expect("copy clear repeat program should execute");
+
+    assert_eq!(
+        read_vm_array(&mut vm, result),
+        vec![
+            Value::I64(4),
+            Value::I64(6),
+            Value::I64(7),
+            Value::I64(7),
+            Value::I64(8),
+            Value::I64(8),
+            Value::I64(0),
+        ]
+    );
 }
 
 struct ClonePreservedEngine;

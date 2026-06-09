@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{AstNode, Pragma, Value};
+use crate::builtin_registry::BuiltinParameterInfo;
 use crate::errors::{CompilerError, ErrorReporter, SourceLocation};
 use crate::suggestions::{
     suggest_from_symbols, suggest_function_from_symbols, suggest_method_to_function,
@@ -16,6 +17,13 @@ pub struct SemanticAnalyzer<'a> {
     current_function_return_type: Option<SymbolType>, // Track expected return type
     /// Imported symbols from other modules, keyed by their qualified name
     imported_symbols: HashMap<String, SymbolInfo>,
+}
+
+#[derive(Debug, Clone)]
+struct CallParameterInfo {
+    ty: SymbolType,
+    has_default: bool,
+    is_variadic: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,12 +181,85 @@ impl<'a> SemanticAnalyzer<'a> {
         matches!(src, SymbolType::Secret(_)) && Self::is_share_alias_type(dst)
     }
 
-    fn is_variadic_builtin(name: &str) -> bool {
-        matches!(name, "print")
-    }
-
     fn is_secret_or_share_value(ty: &SymbolType) -> bool {
         ty.is_secret() || Self::is_share_alias_type(ty)
+    }
+
+    fn builtin_parameter_info_to_call_parameter(info: &BuiltinParameterInfo) -> CallParameterInfo {
+        CallParameterInfo {
+            ty: info.ty.clone(),
+            has_default: info.has_default,
+            is_variadic: info.is_variadic,
+        }
+    }
+
+    fn fixed_parameter_info(parameters: &[SymbolType]) -> Vec<CallParameterInfo> {
+        parameters
+            .iter()
+            .cloned()
+            .map(|ty| CallParameterInfo {
+                ty,
+                has_default: false,
+                is_variadic: false,
+            })
+            .collect()
+    }
+
+    fn builtin_call_parameters(
+        &self,
+        function_name: &str,
+        fallback: &[SymbolType],
+    ) -> Vec<CallParameterInfo> {
+        let registry = crate::builtin_registry::builtin_registry();
+        if let Some(function) = registry.functions.get(function_name) {
+            return function
+                .parameter_details
+                .iter()
+                .map(Self::builtin_parameter_info_to_call_parameter)
+                .collect();
+        }
+
+        if let Some((object_name, method_name)) = function_name.split_once('.') {
+            if let Some(method) = registry
+                .objects
+                .get(object_name)
+                .and_then(|object| object.methods.get(method_name))
+            {
+                return method
+                    .parameter_details
+                    .iter()
+                    .map(Self::builtin_parameter_info_to_call_parameter)
+                    .collect();
+            }
+        }
+
+        Self::fixed_parameter_info(fallback)
+    }
+
+    fn minimum_argument_count(parameters: &[CallParameterInfo]) -> usize {
+        parameters
+            .iter()
+            .filter(|parameter| !parameter.has_default && !parameter.is_variadic)
+            .count()
+    }
+
+    fn has_variadic_parameter(parameters: &[CallParameterInfo]) -> bool {
+        parameters.iter().any(|parameter| parameter.is_variadic)
+    }
+
+    fn expected_argument_type_for_index(
+        parameters: &[CallParameterInfo],
+        index: usize,
+    ) -> Option<&SymbolType> {
+        parameters
+            .get(index)
+            .map(|parameter| &parameter.ty)
+            .or_else(|| {
+                parameters
+                    .iter()
+                    .find(|parameter| parameter.is_variadic)
+                    .map(|parameter| &parameter.ty)
+            })
     }
 
     fn is_typed_assignment_target(node: &AstNode) -> bool {
@@ -1144,11 +1225,34 @@ impl<'a> SemanticAnalyzer<'a> {
                 // Check for pragmas like 'builtin'
                 let mut is_builtin = false;
                 for pragma in &pragmas {
-                    if let Pragma::Simple(pragma_name, _) = pragma {
-                        if pragma_name == "builtin" {
-                            is_builtin = true;
-                            break;
-                        }
+                    if matches!(
+                        pragma,
+                        Pragma::Simple(pragma_name, _) | Pragma::KeyValue(pragma_name, _, _)
+                            if pragma_name == "builtin"
+                    ) {
+                        is_builtin = true;
+                        break;
+                    }
+                }
+
+                if !is_builtin {
+                    if let Some(param) = parameters
+                        .iter()
+                        .find(|param| param.default_value.is_some() || param.is_variadic)
+                    {
+                        self.error_reporter.add_error(
+                            CompilerError::semantic_error(
+                                "Default and variadic parameters are currently supported only for builtin declarations",
+                                param
+                                    .type_annotation
+                                    .as_ref()
+                                    .map_or_else(|| location.clone(), |node| node.location()),
+                            )
+                            .with_hint(
+                                "Builtin declarations may use Python-style `name = default` and `*args`; user-defined function lowering needs default argument support before this is enabled generally.",
+                            ),
+                        );
+                        return Err(());
                     }
                 }
 
@@ -1969,14 +2073,28 @@ impl<'a> SemanticAnalyzer<'a> {
                     };
 
                 // 4. Validate argument count
-                if !Self::is_variadic_builtin(&function_name)
-                    && expected_param_types.len() != argument_types.len()
+                let call_parameters =
+                    self.builtin_call_parameters(&function_name, &expected_param_types);
+                let min_args = Self::minimum_argument_count(&call_parameters);
+                let has_variadic = Self::has_variadic_parameter(&call_parameters);
+                let max_args = if has_variadic {
+                    None
+                } else {
+                    Some(call_parameters.len())
+                };
+                if argument_types.len() < min_args
+                    || max_args.is_some_and(|max_args| argument_types.len() > max_args)
                 {
+                    let expected = match max_args {
+                        Some(max_args) if min_args == max_args => min_args.to_string(),
+                        Some(max_args) => format!("{min_args} to {max_args}"),
+                        None => format!("at least {min_args}"),
+                    };
                     self.error_reporter.add_error(CompilerError::semantic_error(
                         format!(
-                            "Function '{}' expects {} arguments, but {} were provided",
+                            "Function '{}' expects {} argument(s), but {} were provided",
                             function_name,
-                            expected_param_types.len(),
+                            expected,
                             argument_types.len()
                         ),
                         location.clone(),
@@ -1986,19 +2104,9 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 // 5. Validate arguments, binding any function-level type parameters per call
                 let mut generic_bindings = HashMap::new();
-                let arg_check_len = if Self::is_variadic_builtin(&function_name) {
-                    argument_types.len()
-                } else {
-                    expected_param_types.len()
-                };
-                for idx in 0..arg_check_len {
-                    let expected_fallback;
-                    let expected_ty = if Self::is_variadic_builtin(&function_name) {
-                        expected_fallback = SymbolType::Unknown;
-                        &expected_fallback
-                    } else {
-                        &expected_param_types[idx]
-                    };
+                for idx in 0..argument_types.len() {
+                    let expected_ty = Self::expected_argument_type_for_index(&call_parameters, idx)
+                        .unwrap_or(&SymbolType::Unknown);
                     let mut arg_loc = checked_arguments[idx].location();
                     if arg_loc.line == 0 {
                         arg_loc = location.clone();
@@ -2026,34 +2134,32 @@ impl<'a> SemanticAnalyzer<'a> {
                         return Err(());
                     }
 
-                    if !Self::is_variadic_builtin(&function_name) {
-                        if is_builtin_call
-                            && idx == 0
-                            && expected_ty.is_secret()
-                            && !Self::is_secret_or_share_value(&argument_types[idx])
-                        {
-                            self.error_reporter.add_error(CompilerError::type_error(
-                                format!(
-                                    "Expected secret value, found '{}'",
-                                    declared_type_to_string(&argument_types[idx])
-                                ),
-                                arg_loc,
-                            ));
-                            return Err(());
-                        }
+                    if is_builtin_call
+                        && idx == 0
+                        && expected_ty.is_secret()
+                        && !Self::is_secret_or_share_value(&argument_types[idx])
+                    {
+                        self.error_reporter.add_error(CompilerError::type_error(
+                            format!(
+                                "Expected secret value, found '{}'",
+                                declared_type_to_string(&argument_types[idx])
+                            ),
+                            arg_loc,
+                        ));
+                        return Err(());
+                    }
 
-                        if self
-                            .check_generic_compat(
-                                Some(&checked_arguments[idx]),
-                                &argument_types[idx],
-                                expected_ty,
-                                &mut generic_bindings,
-                                arg_loc,
-                            )
-                            .is_err()
-                        {
-                            return Err(());
-                        }
+                    if self
+                        .check_generic_compat(
+                            Some(&checked_arguments[idx]),
+                            &argument_types[idx],
+                            expected_ty,
+                            &mut generic_bindings,
+                            arg_loc,
+                        )
+                        .is_err()
+                    {
+                        return Err(());
                     }
                 }
 
@@ -2150,14 +2256,28 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 };
 
-                if !Self::is_variadic_builtin(&function_name)
-                    && expected_param_types.len() != argument_types.len()
+                let call_parameters =
+                    self.builtin_call_parameters(&function_name, &expected_param_types);
+                let min_args = Self::minimum_argument_count(&call_parameters);
+                let has_variadic = Self::has_variadic_parameter(&call_parameters);
+                let max_args = if has_variadic {
+                    None
+                } else {
+                    Some(call_parameters.len())
+                };
+                if argument_types.len() < min_args
+                    || max_args.is_some_and(|max_args| argument_types.len() > max_args)
                 {
+                    let expected = match max_args {
+                        Some(max_args) if min_args == max_args => min_args.to_string(),
+                        Some(max_args) => format!("{min_args} to {max_args}"),
+                        None => format!("at least {min_args}"),
+                    };
                     self.error_reporter.add_error(CompilerError::semantic_error(
                         format!(
-                            "Function '{}' expects {} arguments, but {} were provided",
+                            "Function '{}' expects {} argument(s), but {} were provided",
                             function_name,
-                            expected_param_types.len(),
+                            expected,
                             argument_types.len()
                         ),
                         location.clone(),
@@ -2167,19 +2287,9 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 // 5. Validate arguments, binding any function-level type parameters per call
                 let mut generic_bindings = HashMap::new();
-                let arg_check_len = if Self::is_variadic_builtin(&function_name) {
-                    argument_types.len()
-                } else {
-                    expected_param_types.len()
-                };
-                for idx in 0..arg_check_len {
-                    let expected_fallback;
-                    let expected_ty = if Self::is_variadic_builtin(&function_name) {
-                        expected_fallback = SymbolType::Unknown;
-                        &expected_fallback
-                    } else {
-                        &expected_param_types[idx]
-                    };
+                for idx in 0..argument_types.len() {
+                    let expected_ty = Self::expected_argument_type_for_index(&call_parameters, idx)
+                        .unwrap_or(&SymbolType::Unknown);
                     let arg_loc = checked_arguments[idx].location();
                     let expected_after_bindings =
                         Self::substitute_type_vars(expected_ty, &generic_bindings);
@@ -2203,19 +2313,17 @@ impl<'a> SemanticAnalyzer<'a> {
                         return Err(());
                     }
 
-                    if !Self::is_variadic_builtin(&function_name) {
-                        if self
-                            .check_generic_compat(
-                                Some(&checked_arguments[idx]),
-                                &argument_types[idx],
-                                expected_ty,
-                                &mut generic_bindings,
-                                arg_loc,
-                            )
-                            .is_err()
-                        {
-                            return Err(());
-                        }
+                    if self
+                        .check_generic_compat(
+                            Some(&checked_arguments[idx]),
+                            &argument_types[idx],
+                            expected_ty,
+                            &mut generic_bindings,
+                            arg_loc,
+                        )
+                        .is_err()
+                    {
+                        return Err(());
                     }
                 }
 
@@ -2332,6 +2440,65 @@ impl<'a> SemanticAnalyzer<'a> {
                         },
                         result_ty,
                     ));
+                }
+
+                if op == "+" {
+                    if let (SymbolType::List(left_elem), SymbolType::List(right_elem)) =
+                        (left_ty.underlying_type(), right_ty.underlying_type())
+                    {
+                        if !Self::types_compatible(left_elem, right_elem) {
+                            self.error_reporter.add_error(CompilerError::type_error(
+                                format!(
+                                    "Cannot concatenate lists with incompatible element types '{}' and '{}'",
+                                    declared_type_to_string(left_elem),
+                                    declared_type_to_string(right_elem)
+                                ),
+                                location.clone(),
+                            ));
+                            return Err(());
+                        }
+
+                        return Ok((
+                            AstNode::BinaryOperation {
+                                op,
+                                left: Box::new(checked_left),
+                                right: Box::new(checked_right),
+                                location,
+                            },
+                            left_ty.clone(),
+                        ));
+                    }
+                }
+
+                if op == "*" {
+                    let left_is_list = matches!(left_ty.underlying_type(), SymbolType::List(_));
+                    let right_is_list = matches!(right_ty.underlying_type(), SymbolType::List(_));
+                    let left_is_int = left_ty.underlying_type().is_integer();
+                    let right_is_int = right_ty.underlying_type().is_integer();
+
+                    if left_is_list && right_is_int {
+                        return Ok((
+                            AstNode::BinaryOperation {
+                                op,
+                                left: Box::new(checked_left),
+                                right: Box::new(checked_right),
+                                location,
+                            },
+                            left_ty.clone(),
+                        ));
+                    }
+
+                    if left_is_int && right_is_list {
+                        return Ok((
+                            AstNode::BinaryOperation {
+                                op,
+                                left: Box::new(checked_left),
+                                right: Box::new(checked_right),
+                                location,
+                            },
+                            right_ty.clone(),
+                        ));
+                    }
                 }
 
                 // For other binary ops we don't handle here; pass through as Unknown type.

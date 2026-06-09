@@ -32,6 +32,7 @@ impl ClientValueType {
         match (self, share_type) {
             (ClientValueType::Boolean, ShareType::SecretInt { bit_length: 1 }) => true,
             (ClientValueType::Integer, ShareType::SecretInt { bit_length }) => bit_length > 1,
+            (ClientValueType::Integer, ShareType::SecretUInt { .. }) => true,
             (ClientValueType::FixedPoint, ShareType::SecretFixedPoint { .. }) => true,
             _ => false,
         }
@@ -471,6 +472,14 @@ impl ClientOutputValue for i64 {
 
     fn try_from_sdk_value(value: Value) -> Result<Self> {
         i64::try_from(value)
+    }
+}
+
+impl ClientOutputValue for u64 {
+    const VALUE_TYPE: ClientValueType = ClientValueType::Integer;
+
+    fn try_from_sdk_value(value: Value) -> Result<Self> {
+        u64::try_from(value)
     }
 }
 

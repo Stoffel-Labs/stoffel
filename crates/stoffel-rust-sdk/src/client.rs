@@ -1241,6 +1241,19 @@ fn value_to_field(value: &Value, share_type: ShareType) -> Result<Fr> {
             })?;
             Ok(i64_to_field(value))
         }
+        (ShareType::SecretUInt { bit_length }, Value::U64(value)) => {
+            validate_secret_uint_range(*value, bit_length)?;
+            Ok(Fr::from(*value))
+        }
+        (ShareType::SecretUInt { bit_length }, Value::I64(value)) => {
+            let value = u64::try_from(*value).map_err(|_| {
+                Error::InvalidInput(
+                    "signed input for secret unsigned integer must be non-negative".to_owned(),
+                )
+            })?;
+            validate_secret_uint_range(value, bit_length)?;
+            Ok(Fr::from(value))
+        }
         (ShareType::SecretFixedPoint { .. }, Value::Float(value)) => {
             encode_fixed_point(*value, share_type)
         }
@@ -1257,6 +1270,20 @@ fn value_to_field(value: &Value, share_type: ShareType) -> Result<Fr> {
             "value kind '{}' is not compatible with share type {share_type:?}",
             value.kind()
         ))),
+    }
+}
+
+fn validate_secret_uint_range(value: u64, bit_length: usize) -> Result<()> {
+    if bit_length >= 64 {
+        return Ok(());
+    }
+    let max = (1u64 << bit_length) - 1;
+    if value <= max {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput(format!(
+            "secret unsigned integer input {value} does not fit in {bit_length} bit(s)"
+        )))
     }
 }
 
@@ -1303,10 +1330,24 @@ fn field_to_i64(value: Fr) -> Result<i64> {
     ))
 }
 
+fn field_to_u64(value: Fr, bit_length: usize) -> Result<u64> {
+    let positive = value.into_bigint();
+    if positive.as_ref()[1..].iter().all(|limb| *limb == 0) {
+        let value = positive.as_ref()[0];
+        validate_secret_uint_range(value, bit_length)?;
+        return Ok(value);
+    }
+
+    Err(Error::InvalidInput(
+        "field output cannot be represented as u64".to_owned(),
+    ))
+}
+
 fn field_to_value(value: Fr, share_type: ShareType) -> Result<Value> {
     match share_type {
         ShareType::SecretInt { bit_length: 1 } => Ok(Value::Bool(!value.is_zero())),
         ShareType::SecretInt { .. } => Ok(Value::I64(field_to_i64(value)?)),
+        ShareType::SecretUInt { bit_length } => Ok(Value::U64(field_to_u64(value, bit_length)?)),
         ShareType::SecretFixedPoint { precision } => {
             let scaled = field_to_i64(value)?;
             let scale = 2f64.powi(precision.fractional_bits() as i32);
@@ -1546,5 +1587,26 @@ fn clone_error_for_handle(error: &Error) -> Error {
         Error::Bytecode(message) => Error::Bytecode(message.clone()),
         Error::ConfigParse(error) => Error::Configuration(error.to_string()),
         Error::ConfigSerialize(error) => Error::Configuration(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_uint_values_encode_and_decode_as_unsigned() -> Result<()> {
+        let share_type = ShareType::secret_uint(8);
+        let field = value_to_field(&Value::U64(255), share_type)?;
+        assert_eq!(field_to_value(field, share_type)?, Value::U64(255));
+        Ok(())
+    }
+
+    #[test]
+    fn secret_uint_encoding_rejects_negative_or_out_of_range_values() {
+        let share_type = ShareType::secret_uint(8);
+
+        assert!(value_to_field(&Value::I64(-1), share_type).is_err());
+        assert!(value_to_field(&Value::U64(256), share_type).is_err());
     }
 }

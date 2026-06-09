@@ -23,10 +23,11 @@ use std::io::{self, Read, Write};
 // Magic bytes that identify a StoffelVM bytecode file
 pub const MAGIC_BYTES: &[u8; 4] = b"STFL";
 // Current bytecode format version
-pub const FORMAT_VERSION: u16 = 4;
+pub const FORMAT_VERSION: u16 = 5;
 pub const CLIENT_IO_MANIFEST_FORMAT_VERSION: u16 = 2;
 pub const MPC_BACKEND_MANIFEST_FORMAT_VERSION: u16 = 3;
 pub const MPC_CURVE_MANIFEST_FORMAT_VERSION: u16 = 4;
+pub const FUNCTION_TYPE_METADATA_FORMAT_VERSION: u16 = 5;
 
 const MAX_BINARY_COLLECTION_LEN: usize = 1_000_000;
 const MAX_BINARY_STRING_BYTES: usize = 16 * 1024 * 1024;
@@ -61,6 +62,13 @@ pub type BinaryResult<T> = Result<T, BinaryError>;
 
 fn invalid_data(message: impl Into<String>) -> BinaryError {
     BinaryError::InvalidData(message.into())
+}
+
+fn normalized_parameter_types(function: &CompiledFunction) -> Vec<FunctionType> {
+    let mut parameter_types = function.parameter_types.clone();
+    parameter_types.resize(function.parameters.len(), FunctionType::Unknown);
+    parameter_types.truncate(function.parameters.len());
+    parameter_types
 }
 
 fn usize_to_u16(value: usize, field: &str) -> BinaryResult<u16> {
@@ -209,6 +217,93 @@ pub struct ClientIoSchema {
     pub outputs: Vec<ShareType>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FunctionType {
+    Int { signed: bool, bits: u8 },
+    Float,
+    String,
+    Bool,
+    Nil,
+    Void,
+    Secret(Box<FunctionType>),
+    List(Box<FunctionType>),
+    Dict(Box<FunctionType>, Box<FunctionType>),
+    Object(String),
+    Generic(String, Vec<FunctionType>),
+    TypeVar(String),
+    Unknown,
+}
+
+impl FunctionType {
+    pub fn int64() -> Self {
+        Self::Int {
+            signed: true,
+            bits: 64,
+        }
+    }
+
+    pub fn uint64() -> Self {
+        Self::Int {
+            signed: false,
+            bits: 64,
+        }
+    }
+
+    pub fn underlying_type(&self) -> &FunctionType {
+        match self {
+            FunctionType::Secret(inner) => inner.underlying_type(),
+            _ => self,
+        }
+    }
+
+    pub fn is_unknown_like(&self) -> bool {
+        matches!(
+            self.underlying_type(),
+            FunctionType::Unknown | FunctionType::TypeVar(_) | FunctionType::Generic(_, _)
+        )
+    }
+}
+
+impl Default for FunctionType {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl std::fmt::Display for FunctionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FunctionType::Int { signed, bits } => {
+                if *signed {
+                    write!(f, "int{bits}")
+                } else {
+                    write!(f, "uint{bits}")
+                }
+            }
+            FunctionType::Float => f.write_str("float"),
+            FunctionType::String => f.write_str("string"),
+            FunctionType::Bool => f.write_str("bool"),
+            FunctionType::Nil => f.write_str("None"),
+            FunctionType::Void => f.write_str("void"),
+            FunctionType::Secret(inner) => write!(f, "secret {inner}"),
+            FunctionType::List(inner) => write!(f, "list[{inner}]"),
+            FunctionType::Dict(key, value) => write!(f, "dict[{key}, {value}]"),
+            FunctionType::Object(name) | FunctionType::TypeVar(name) => f.write_str(name),
+            FunctionType::Generic(name, params) => {
+                write!(f, "{name}[")?;
+                for (index, param) in params.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{param}")?;
+                }
+                f.write_str("]")
+            }
+            FunctionType::Unknown => f.write_str("<unknown>"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MpcBackend {
     #[default]
@@ -238,6 +333,10 @@ pub struct CompiledFunction {
     pub register_count: usize,
     /// Parameter names
     pub parameters: Vec<String>,
+    /// Source-level parameter types, if present in bytecode metadata.
+    pub parameter_types: Vec<FunctionType>,
+    /// Source-level return type, if present in bytecode metadata.
+    pub return_type: FunctionType,
     /// Upvalue names (for closures)
     pub upvalues: Vec<String>,
     /// Parent function name (for nested functions)
@@ -429,6 +528,8 @@ impl CompiledBinary {
             name: vm_function.name().to_string(),
             register_count: vm_function.register_count(),
             parameters: vm_function.parameters().to_vec(),
+            parameter_types: vec![FunctionType::Unknown; vm_function.parameters().len()],
+            return_type: FunctionType::Unknown,
             upvalues: vm_function.upvalues().to_vec(),
             parent: vm_function.parent().map(str::to_owned),
             labels: vm_function.labels().clone(),
@@ -780,6 +881,14 @@ impl CompiledBinary {
         for param in &function.parameters {
             write_len_prefixed_str_u16(writer, param, "parameter name length")?;
         }
+        if self.version >= FUNCTION_TYPE_METADATA_FORMAT_VERSION {
+            let parameter_types = normalized_parameter_types(function);
+            write_usize_as_u16(writer, parameter_types.len(), "parameter type count")?;
+            for ty in &parameter_types {
+                Self::serialize_function_type(ty, writer)?;
+            }
+            Self::serialize_function_type(&function.return_type, writer)?;
+        }
 
         // Write upvalues
         write_usize_as_u16(writer, function.upvalues.len(), "upvalue count")?;
@@ -808,6 +917,51 @@ impl CompiledBinary {
             self.serialize_instruction(instruction, writer)?;
         }
 
+        Ok(())
+    }
+
+    fn serialize_function_type<W: Write>(ty: &FunctionType, writer: &mut W) -> BinaryResult<()> {
+        match ty {
+            FunctionType::Int { signed, bits } => {
+                writer.write_all(&[0u8])?;
+                writer.write_all(&[*signed as u8, *bits])?;
+            }
+            FunctionType::Float => writer.write_all(&[1u8])?,
+            FunctionType::String => writer.write_all(&[2u8])?,
+            FunctionType::Bool => writer.write_all(&[3u8])?,
+            FunctionType::Nil => writer.write_all(&[4u8])?,
+            FunctionType::Void => writer.write_all(&[5u8])?,
+            FunctionType::Secret(inner) => {
+                writer.write_all(&[6u8])?;
+                Self::serialize_function_type(inner, writer)?;
+            }
+            FunctionType::List(inner) => {
+                writer.write_all(&[7u8])?;
+                Self::serialize_function_type(inner, writer)?;
+            }
+            FunctionType::Dict(key, value) => {
+                writer.write_all(&[8u8])?;
+                Self::serialize_function_type(key, writer)?;
+                Self::serialize_function_type(value, writer)?;
+            }
+            FunctionType::Object(name) => {
+                writer.write_all(&[9u8])?;
+                write_len_prefixed_str_u16(writer, name, "function type object name length")?;
+            }
+            FunctionType::Generic(name, params) => {
+                writer.write_all(&[10u8])?;
+                write_len_prefixed_str_u16(writer, name, "function generic type name length")?;
+                write_usize_as_u16(writer, params.len(), "function generic parameter count")?;
+                for param in params {
+                    Self::serialize_function_type(param, writer)?;
+                }
+            }
+            FunctionType::TypeVar(name) => {
+                writer.write_all(&[11u8])?;
+                write_len_prefixed_str_u16(writer, name, "function type variable name length")?;
+            }
+            FunctionType::Unknown => writer.write_all(&[12u8])?,
+        }
         Ok(())
     }
 
@@ -992,7 +1146,7 @@ impl CompiledBinary {
         let mut functions = Vec::new();
         reserve_vec(&mut functions, function_count, "function count")?;
         for _ in 0..function_count {
-            let function = Self::deserialize_function(reader)?;
+            let function = Self::deserialize_function(reader, version)?;
             functions.push(function);
         }
 
@@ -1218,7 +1372,10 @@ impl CompiledBinary {
     /// # Returns
     ///
     /// A result containing the deserialized function or an error
-    fn deserialize_function<R: Read>(reader: &mut R) -> BinaryResult<CompiledFunction> {
+    fn deserialize_function<R: Read>(
+        reader: &mut R,
+        version: u16,
+    ) -> BinaryResult<CompiledFunction> {
         // Read function name
         let name = read_len_prefixed_string_u16(
             reader,
@@ -1242,6 +1399,29 @@ impl CompiledBinary {
             )?;
             parameters.push(param);
         }
+        let (parameter_types, return_type) = if version >= FUNCTION_TYPE_METADATA_FORMAT_VERSION {
+            let type_count = usize::from(read_u16(reader)?);
+            if type_count != parameters.len() {
+                return Err(invalid_data(format!(
+                    "function '{}' declares {} parameter name(s) but {} parameter type(s)",
+                    name,
+                    parameters.len(),
+                    type_count
+                )));
+            }
+            let mut parameter_types = Vec::new();
+            reserve_vec(&mut parameter_types, type_count, "parameter type count")?;
+            for _ in 0..type_count {
+                parameter_types.push(Self::deserialize_function_type(reader)?);
+            }
+            let return_type = Self::deserialize_function_type(reader)?;
+            (parameter_types, return_type)
+        } else {
+            (
+                vec![FunctionType::Unknown; parameters.len()],
+                FunctionType::Unknown,
+            )
+        };
 
         // Read upvalues
         let upvalue_count = usize::from(read_u16(reader)?);
@@ -1309,10 +1489,70 @@ impl CompiledBinary {
             name,
             register_count,
             parameters,
+            parameter_types,
+            return_type,
             upvalues,
             parent,
             labels,
             instructions,
+        })
+    }
+
+    fn deserialize_function_type<R: Read>(reader: &mut R) -> BinaryResult<FunctionType> {
+        let mut tag = [0u8; 1];
+        reader.read_exact(&mut tag)?;
+        Ok(match tag[0] {
+            0 => {
+                let mut data = [0u8; 2];
+                reader.read_exact(&mut data)?;
+                let bits = data[1];
+                if bits == 0 {
+                    return Err(invalid_data(
+                        "integer function type bit width must be non-zero",
+                    ));
+                }
+                FunctionType::Int {
+                    signed: data[0] != 0,
+                    bits,
+                }
+            }
+            1 => FunctionType::Float,
+            2 => FunctionType::String,
+            3 => FunctionType::Bool,
+            4 => FunctionType::Nil,
+            5 => FunctionType::Void,
+            6 => FunctionType::Secret(Box::new(Self::deserialize_function_type(reader)?)),
+            7 => FunctionType::List(Box::new(Self::deserialize_function_type(reader)?)),
+            8 => FunctionType::Dict(
+                Box::new(Self::deserialize_function_type(reader)?),
+                Box::new(Self::deserialize_function_type(reader)?),
+            ),
+            9 => FunctionType::Object(read_len_prefixed_string_u16(
+                reader,
+                "function type object name length",
+                "Invalid UTF-8 in function type object name",
+            )?),
+            10 => {
+                let name = read_len_prefixed_string_u16(
+                    reader,
+                    "function generic type name length",
+                    "Invalid UTF-8 in function generic type name",
+                )?;
+                let param_count = usize::from(read_u16(reader)?);
+                let mut params = Vec::new();
+                reserve_vec(&mut params, param_count, "function generic parameter count")?;
+                for _ in 0..param_count {
+                    params.push(Self::deserialize_function_type(reader)?);
+                }
+                FunctionType::Generic(name, params)
+            }
+            11 => FunctionType::TypeVar(read_len_prefixed_string_u16(
+                reader,
+                "function type variable name length",
+                "Invalid UTF-8 in function type variable name",
+            )?),
+            12 => FunctionType::Unknown,
+            tag => return Err(invalid_data(format!("unknown function type tag {tag}"))),
         })
     }
 
@@ -1614,6 +1854,8 @@ mod tests {
         bytes.extend_from_slice(b"main");
         bytes.extend_from_slice(&0u16.to_le_bytes()); // register count
         bytes.extend_from_slice(&0u16.to_le_bytes()); // parameters
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // parameter types
+        bytes.push(12); // return type: Unknown
         bytes.extend_from_slice(&0u16.to_le_bytes()); // upvalues
         bytes.push(0); // no parent
         bytes.extend_from_slice(&0u16.to_le_bytes()); // labels
@@ -1888,6 +2130,8 @@ mod tests {
                 name: "main".to_string(),
                 register_count: 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
@@ -1911,6 +2155,8 @@ mod tests {
                 name: "main".to_string(),
                 register_count: 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
@@ -1939,6 +2185,8 @@ mod tests {
                 name: "main".to_string(),
                 register_count: 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
@@ -1960,6 +2208,8 @@ mod tests {
                 name: "main".to_string(),
                 register_count: 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
@@ -2021,6 +2271,42 @@ mod tests {
     }
 
     #[test]
+    fn bytecode_v5_function_type_metadata_round_trips() {
+        let mut binary = CompiledBinary::new();
+        binary.functions.push(CompiledFunction {
+            name: "main".to_string(),
+            register_count: 3,
+            parameters: vec!["a".to_string(), "n".to_string()],
+            parameter_types: vec![
+                FunctionType::List(Box::new(FunctionType::List(
+                    Box::new(FunctionType::int64()),
+                ))),
+                FunctionType::Int {
+                    signed: false,
+                    bits: 64,
+                },
+            ],
+            return_type: FunctionType::List(Box::new(FunctionType::int64())),
+            upvalues: vec![],
+            parent: None,
+            labels: HashMap::new(),
+            instructions: vec![CompiledInstruction::RET(0)],
+        });
+
+        let mut buffer = Vec::new();
+        binary.serialize(&mut buffer).unwrap();
+
+        let deserialized = CompiledBinary::deserialize(&mut Cursor::new(&buffer)).unwrap();
+        let function = &deserialized.functions[0];
+        assert_eq!(deserialized.version, FORMAT_VERSION);
+        assert_eq!(
+            function.parameter_types,
+            binary.functions[0].parameter_types
+        );
+        assert_eq!(function.return_type, binary.functions[0].return_type);
+    }
+
+    #[test]
     fn serialize_deserialize_preserves_negative_i8_constants() {
         let function = VMFunction::new(
             "signed_byte".to_string(),
@@ -2057,6 +2343,8 @@ mod tests {
                 name: "oversized_register_frame".to_string(),
                 register_count: usize::from(u16::MAX) + 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
@@ -2078,6 +2366,8 @@ mod tests {
                 name: "x".repeat(usize::from(u16::MAX) + 1),
                 register_count: 0,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
@@ -2103,6 +2393,8 @@ mod tests {
                 name: "oversized_operand".to_string(),
                 register_count: 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
@@ -2131,6 +2423,8 @@ mod tests {
                 name: "oversized_label_offset".to_string(),
                 register_count: 0,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels,
@@ -2210,6 +2504,8 @@ mod tests {
         bytes.extend_from_slice(b"main");
         bytes.extend_from_slice(&0u16.to_le_bytes()); // register count
         bytes.extend_from_slice(&0u16.to_le_bytes()); // parameters
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // parameter types
+        bytes.push(12); // return type: Unknown
         bytes.extend_from_slice(&0u16.to_le_bytes()); // upvalues
         bytes.push(2); // invalid parent flag
 
@@ -2291,6 +2587,8 @@ mod tests {
                 name: "uses_secret_bank".to_string(),
                 register_count: 2,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),

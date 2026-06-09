@@ -3,7 +3,9 @@ use crate::bytecode::{BytecodeChunk, CompiledProgram, Constant, Instruction};
 use crate::errors::{CompilerError, CompilerResult};
 use crate::register_allocator::{self, AllocationError, PhysicalRegister, VirtualRegister};
 use crate::symbol_table::SymbolType;
-use stoffel_vm_types::compiled_binary::{ClientIoManifest, ClientIoSchema, MpcBackend};
+use stoffel_vm_types::compiled_binary::{
+    ClientIoManifest, ClientIoSchema, FunctionType, MpcBackend,
+};
 use stoffel_vm_types::core_types::ShareType;
 use stoffel_vm_types::registers::DEFAULT_SECRET_REGISTER_START;
 
@@ -60,6 +62,69 @@ fn share_type_for_secret_scalar_symbol_type(ty: &SymbolType) -> Option<ShareType
             ShareType::secret_uint(usize::from(bit_width))
         }
     })
+}
+
+fn symbol_type_to_function_type(ty: SymbolType) -> FunctionType {
+    match ty {
+        SymbolType::Int64 => FunctionType::Int {
+            signed: true,
+            bits: 64,
+        },
+        SymbolType::Int32 => FunctionType::Int {
+            signed: true,
+            bits: 32,
+        },
+        SymbolType::Int16 => FunctionType::Int {
+            signed: true,
+            bits: 16,
+        },
+        SymbolType::Int8 => FunctionType::Int {
+            signed: true,
+            bits: 8,
+        },
+        SymbolType::UInt64 => FunctionType::Int {
+            signed: false,
+            bits: 64,
+        },
+        SymbolType::UInt32 => FunctionType::Int {
+            signed: false,
+            bits: 32,
+        },
+        SymbolType::UInt16 => FunctionType::Int {
+            signed: false,
+            bits: 16,
+        },
+        SymbolType::UInt8 => FunctionType::Int {
+            signed: false,
+            bits: 8,
+        },
+        SymbolType::Float => FunctionType::Float,
+        SymbolType::String => FunctionType::String,
+        SymbolType::Bool => FunctionType::Bool,
+        SymbolType::Nil => FunctionType::Nil,
+        SymbolType::Void => FunctionType::Void,
+        SymbolType::Secret(inner) => {
+            FunctionType::Secret(Box::new(symbol_type_to_function_type(*inner)))
+        }
+        SymbolType::TypeName(name) => FunctionType::Object(name),
+        SymbolType::TypeVar(name) => FunctionType::TypeVar(name),
+        SymbolType::Unknown => FunctionType::Unknown,
+        SymbolType::List(inner) => {
+            FunctionType::List(Box::new(symbol_type_to_function_type(*inner)))
+        }
+        SymbolType::Dict(key, value) => FunctionType::Dict(
+            Box::new(symbol_type_to_function_type(*key)),
+            Box::new(symbol_type_to_function_type(*value)),
+        ),
+        SymbolType::Object(name) => FunctionType::Object(name),
+        SymbolType::Generic(name, params) => FunctionType::Generic(
+            name,
+            params
+                .into_iter()
+                .map(symbol_type_to_function_type)
+                .collect(),
+        ),
+    }
 }
 
 fn is_share_random_call(function: &AstNode) -> bool {
@@ -911,6 +976,39 @@ impl CodeGenerator {
                 crate::ast::Value::Bool(_) => Some(SymbolType::Bool),
                 crate::ast::Value::Nil => Some(SymbolType::Nil),
             },
+            AstNode::ListLiteral { elements, .. } => Some(SymbolType::List(Box::new(
+                elements
+                    .first()
+                    .and_then(|element| self.type_hint_for_node(element))
+                    .unwrap_or(SymbolType::Unknown),
+            ))),
+            AstNode::BinaryOperation {
+                op, left, right, ..
+            } => {
+                let left_type = self.type_hint_for_node(left);
+                let right_type = self.type_hint_for_node(right);
+                match (op.as_str(), left_type.as_ref(), right_type.as_ref()) {
+                    ("+", Some(left_type), Some(right_type))
+                        if matches!(left_type.underlying_type(), SymbolType::List(_))
+                            && matches!(right_type.underlying_type(), SymbolType::List(_)) =>
+                    {
+                        Some(left_type.clone())
+                    }
+                    ("*", Some(left_type), Some(right_type))
+                        if matches!(left_type.underlying_type(), SymbolType::List(_))
+                            && right_type.underlying_type().is_integer() =>
+                    {
+                        Some(left_type.clone())
+                    }
+                    ("*", Some(left_type), Some(right_type))
+                        if left_type.underlying_type().is_integer()
+                            && matches!(right_type.underlying_type(), SymbolType::List(_)) =>
+                    {
+                        Some(right_type.clone())
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -1109,10 +1207,58 @@ impl CodeGenerator {
                 right,
                 location,
             } => {
+                let is_list_concat = op == "+"
+                    && matches!(
+                        (
+                            self.type_hint_for_node(left)
+                                .as_ref()
+                                .map(SymbolType::underlying_type),
+                            self.type_hint_for_node(right)
+                                .as_ref()
+                                .map(SymbolType::underlying_type),
+                        ),
+                        (Some(SymbolType::List(_)), Some(SymbolType::List(_)))
+                    );
+                let left_type_hint = self.type_hint_for_node(left);
+                let right_type_hint = self.type_hint_for_node(right);
+                let is_left_list = matches!(
+                    left_type_hint.as_ref().map(SymbolType::underlying_type),
+                    Some(SymbolType::List(_))
+                );
+                let is_right_list = matches!(
+                    right_type_hint.as_ref().map(SymbolType::underlying_type),
+                    Some(SymbolType::List(_))
+                );
+                let is_list_repeat = op == "*" && (is_left_list || is_right_list);
                 let (left_vr, left_is_secret) = self.compile_node(left)?;
                 let (right_vr, right_is_secret) = self.compile_node(right)?;
 
                 let mut result_is_secret = left_is_secret || right_is_secret;
+
+                if is_list_concat {
+                    self.emit(Instruction::PUSHARG(left_vr.0));
+                    self.emit(Instruction::PUSHARG(right_vr.0));
+                    self.emit(Instruction::CALL("array_concat".to_string()));
+
+                    let result_vr = self.allocate_virtual_register(false);
+                    self.emit(Instruction::MOV(result_vr.0, 0));
+                    return Ok((result_vr, false));
+                }
+
+                if is_list_repeat {
+                    let (array_vr, count_vr) = if is_left_list {
+                        (left_vr, right_vr)
+                    } else {
+                        (right_vr, left_vr)
+                    };
+                    self.emit(Instruction::PUSHARG(array_vr.0));
+                    self.emit(Instruction::PUSHARG(count_vr.0));
+                    self.emit(Instruction::CALL("array_repeat".to_string()));
+
+                    let result_vr = self.allocate_virtual_register(false);
+                    self.emit(Instruction::MOV(result_vr.0, 0));
+                    return Ok((result_vr, false));
+                }
 
                 match op.as_str() {
                     "+" | "-" | "*" | "/" | "%" | // Arithmetic
@@ -1777,7 +1923,7 @@ impl CodeGenerator {
                 name,
                 type_params,
                 parameters,
-                return_type: _,
+                return_type,
                 body,
                 is_secret: _,
                 pragmas,
@@ -1873,6 +2019,22 @@ impl CodeGenerator {
                 function_chunk.constants = dedupe_constants(function_constants);
                 function_chunk.parameters =
                     parameters.iter().map(|param| param.name.clone()).collect();
+                function_chunk.parameter_types = parameters
+                    .iter()
+                    .map(|param| {
+                        param
+                            .type_annotation
+                            .as_ref()
+                            .map(|n| SymbolType::from_ast_with_type_params(n, type_params))
+                            .unwrap_or(SymbolType::Unknown)
+                    })
+                    .map(symbol_type_to_function_type)
+                    .collect();
+                function_chunk.return_type = return_type
+                    .as_ref()
+                    .map(|n| SymbolType::from_ast_with_type_params(n, type_params))
+                    .map(symbol_type_to_function_type)
+                    .unwrap_or(stoffel_vm_types::compiled_binary::FunctionType::Void);
                 function_chunk.upvalues = collect_upvalue_names(body);
 
                 // Store the compiled chunk appropriately.

@@ -30,6 +30,7 @@ pub struct Parameter {
     pub type_annotation: Option<Box<AstNode>>,
     pub default_value: Option<Box<AstNode>>,
     pub is_secret: bool,
+    pub is_variadic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

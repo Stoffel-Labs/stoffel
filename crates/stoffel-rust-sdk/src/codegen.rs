@@ -341,10 +341,14 @@ fn emit_value_types(
 fn rust_type(share_type: ShareType) -> Result<&'static str> {
     match share_type {
         ShareType::SecretInt { bit_length: 1 } => Ok("bool"),
-        ShareType::SecretInt { bit_length } if bit_length > 1 => Ok("i64"),
+        ShareType::SecretInt { bit_length: 2..=64 } => Ok("i64"),
+        ShareType::SecretUInt { bit_length: 1..=64 } => Ok("u64"),
         ShareType::SecretFixedPoint { .. } => Ok("f64"),
         ShareType::SecretInt { bit_length } => Err(Error::Unsupported(format!(
             "cannot generate Rust binding for secret integer bit length {bit_length}"
+        ))),
+        ShareType::SecretUInt { bit_length } => Err(Error::Unsupported(format!(
+            "cannot generate Rust binding for secret unsigned integer bit length {bit_length}"
         ))),
     }
 }
@@ -353,6 +357,7 @@ fn client_value_type_variant(share_type: ShareType) -> Result<&'static str> {
     match share_type {
         ShareType::SecretInt { bit_length: 1 } => Ok("Boolean"),
         ShareType::SecretInt { bit_length } if bit_length > 1 => Ok("Integer"),
+        ShareType::SecretUInt { .. } => Ok("Integer"),
         ShareType::SecretFixedPoint { .. } => Ok("FixedPoint"),
         ShareType::SecretInt { bit_length } => Err(Error::Unsupported(format!(
             "cannot generate Rust binding for secret integer bit length {bit_length}"

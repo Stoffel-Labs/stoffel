@@ -883,10 +883,14 @@ async fn run_network(args: RunArgs) -> Result<()> {
     let config_path = resolve_network_config_path(config_path, &args.build.to_build_args());
     validate_network_config_path(&config_path)?;
     if !args.client_inputs.is_empty() {
-        anyhow::bail!("network execution accepts --input values for the configured client slot; --client-input is only used for local ClientStore runs");
+        anyhow::bail!(
+            "network execution accepts --input values for the configured client slot; --client-input is only used for local ClientStore runs"
+        );
     }
     if args.expected_output_clients.is_some() {
-        anyhow::bail!("network execution uses network/off-chain client configuration; --expected-output-clients is only used for local ClientStore runs");
+        anyhow::bail!(
+            "network execution uses network/off-chain client configuration; --expected-output-clients is only used for local ClientStore runs"
+        );
     }
     let build = args.build.to_build_args();
     let run_source = run_builder(&build)?;
@@ -2265,35 +2269,13 @@ fn validate_entry_and_named_inputs(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let input_help = named_input_help(command, entry, &parameters);
-    let mut seen = BTreeMap::<&str, usize>::new();
-    for input in inputs {
-        if !parameters.iter().any(|parameter| parameter == &input.name) {
-            let expected = if parameters.is_empty() {
-                "no named inputs".to_owned()
-            } else {
-                parameters.join(", ")
-            };
-            anyhow::bail!(
-                "unexpected input '{}' for function '{}'; expected {}. {}",
-                input.name,
-                entry,
-                expected,
-                input_help
-            );
-        }
-        *seen.entry(input.name.as_str()).or_default() += 1;
-    }
-    for (name, count) in seen {
-        if count > 1 {
-            anyhow::bail!("duplicate input '{name}' for function '{entry}'. {input_help}");
-        }
-    }
-    for parameter in &parameters {
-        if !inputs.iter().any(|input| &input.name == parameter) {
-            anyhow::bail!("missing input '{parameter}' for function '{entry}'. {input_help}");
-        }
-    }
-    Ok(())
+    let sdk_inputs = inputs
+        .iter()
+        .map(|input| (input.name.clone(), input.value.clone()))
+        .collect::<Vec<_>>();
+    program
+        .validate_function_inputs(entry, &sdk_inputs)
+        .map_err(|error| anyhow::anyhow!("{error}. {input_help}"))
 }
 
 fn validate_entry_declared_in_source(

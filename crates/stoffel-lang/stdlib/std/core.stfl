@@ -19,7 +19,7 @@ builtin type ByteArray = list[uint8]
 builtin opaque Object
 builtin opaque Closure
 
-def print[T](value: T) -> void {.builtin.}:
+def print(*values) -> void {.builtin.}:
 def type[T](value: T) -> string {.builtin.}:
 def create_closure(function_name: string) -> Closure {.builtin.}:
 def create_closure_with_upvalue(function_name: string, upvalue_name: string) -> Closure {.builtin: "create_closure".}:
@@ -28,6 +28,16 @@ def call_closure_with_arg[T, U](closure: Closure, value: T) -> U {.builtin: "cal
 def get_upvalue[T](name: string) -> T {.builtin.}:
 def set_upvalue[T](name: string, value: T) -> void {.builtin.}:
 def append[T](array: list[T], value: T) -> int64 {.builtin: "append".}:
+def extend[T](array: list[T], values: list[T]) -> int64 {.builtin: "extend".}:
+def copy[T](array: list[T]) -> list[T] {.builtin: "copy".}:
+def count[T](array: list[T], value: T) -> int64 {.builtin: "count".}:
+def index[T](array: list[T], value: T) -> int64 {.builtin: "index".}:
+def pop[T](array: list[T], index: int64 = -1) -> T {.builtin: "pop".}:
+def remove[T](array: list[T], value: T) -> void {.builtin: "remove".}:
+def insert[T](array: list[T], index: int64, value: T) -> void {.builtin: "insert".}:
+def clear[T](array: list[T]) -> void {.builtin: "clear".}:
+def reverse[T](array: list[T]) -> void {.builtin: "reverse".}:
+def sort[T](array: list[T]) -> void {.builtin: "sort".}:
 def len[T](array: list[T]) -> int64 {.builtin: "len".}:
 def range(start: int64, stop: int64) -> list[int64] {.builtin.}:
 

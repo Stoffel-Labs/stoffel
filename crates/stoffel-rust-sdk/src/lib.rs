@@ -103,6 +103,7 @@ pub use server::{
     OffChainServerConfig, OffChainServerConfigBuilder, ServerBuilder, ServerState, ServerSummary,
     StoffelServer,
 };
+pub use stoffel_vm_types::compiled_binary::FunctionType;
 pub use types::{
     ClientId, ClientInputValue, ClientOutputValue, ClientValueType, FieldElement,
     GeneratedProgramManifest, GroupElement, MaskIndex, PartyId, PublicKey, Round, Share,

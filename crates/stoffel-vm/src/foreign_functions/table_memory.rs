@@ -153,6 +153,46 @@ impl<'a> ForeignFunctionContext<'a> {
         Ok(self.services.push_array_ref_values(array_ref, values)?)
     }
 
+    /// Remove and return an array value by index, shifting following values left.
+    pub fn pop_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+    ) -> ForeignFunctionCallbackResult<Option<Value>> {
+        Ok(self.services.pop_array_ref_value(array_ref, index)?)
+    }
+
+    /// Insert an array value by index, shifting current and following values right.
+    pub fn insert_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+        value: Value,
+    ) -> ForeignFunctionCallbackResult<usize> {
+        Ok(self
+            .services
+            .insert_array_ref_value(array_ref, index, value)?)
+    }
+
+    /// Replace all VM-visible array elements.
+    pub fn replace_array_ref_values(
+        &mut self,
+        array_ref: ArrayRef,
+        values: Vec<Value>,
+    ) -> ForeignFunctionCallbackResult<usize> {
+        Ok(self.services.replace_array_ref_values(array_ref, values)?)
+    }
+
+    /// Remove all VM-visible array elements.
+    pub fn clear_array_ref(&mut self, array_ref: ArrayRef) -> ForeignFunctionCallbackResult<()> {
+        Ok(self.services.clear_array_ref(array_ref)?)
+    }
+
+    /// Reverse VM-visible array elements in place.
+    pub fn reverse_array_ref(&mut self, array_ref: ArrayRef) -> ForeignFunctionCallbackResult<()> {
+        Ok(self.services.reverse_array_ref(array_ref)?)
+    }
+
     /// Create a VM object and populate it with fields.
     pub fn create_object_with_fields<I>(
         &mut self,

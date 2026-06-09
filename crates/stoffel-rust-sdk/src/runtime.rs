@@ -311,32 +311,17 @@ impl StoffelRuntime {
             .program
             .function(function_name)
             .ok_or_else(|| Error::FunctionNotFound(function_name.to_owned()))?;
+        function.validate_inputs(&self.inputs)?;
         let parameters = function.parameters();
-        for (name, _) in &self.inputs {
-            if !parameters.iter().any(|parameter| parameter == name) {
-                return Err(Error::InvalidInput(format!(
-                    "unexpected input '{name}' for function '{function_name}'"
-                )));
-            }
-        }
         let mut values = Vec::with_capacity(parameters.len());
 
         for parameter in parameters {
-            let mut matches = self
+            let value = self
                 .inputs
                 .iter()
-                .filter(|(name, _)| name == parameter)
-                .map(|(_, value)| value);
-            let Some(value) = matches.next() else {
-                return Err(Error::InvalidInput(format!(
-                    "missing input '{parameter}' for function '{function_name}'"
-                )));
-            };
-            if matches.next().is_some() {
-                return Err(Error::InvalidInput(format!(
-                    "duplicate input '{parameter}' for function '{function_name}'"
-                )));
-            }
+                .find(|(name, _)| name == parameter)
+                .map(|(_, value)| value)
+                .expect("function input validation should guarantee one value per parameter");
             values.push(value.clone());
         }
 

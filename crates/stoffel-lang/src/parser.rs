@@ -436,6 +436,12 @@ impl<'a> Parser<'a> {
         let mut parameters = Vec::new();
         if !self.check(&TokenKind::RParen) {
             loop {
+                let is_variadic = if self.check(&TokenKind::Operator("*".to_string())) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 let param_name_token = self.consume(
                     &TokenKind::Identifier("".to_string()),
                     "Expected parameter name",
@@ -455,11 +461,18 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
+                let default_value = if self.check(&TokenKind::Assign) {
+                    self.advance();
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
                 parameters.push(Parameter {
                     name: param_name,
                     type_annotation: param_type_annotation,
-                    default_value: None,
+                    default_value,
                     is_secret: false,
+                    is_variadic,
                 });
 
                 if self.check(&TokenKind::RParen) {

@@ -1284,6 +1284,49 @@ rows.append(["bad"])
 }
 
 #[test]
+fn test_semantic_builtin_default_parameter_supports_optional_pop_index() {
+    let source = r#"
+var items: list[int64] = [1, 2, 3]
+var last: int64 = items.pop()
+var first: int64 = items.pop(0)
+"#;
+    assert!(analyze_source(source).is_ok());
+}
+
+#[test]
+fn test_semantic_builtin_default_parameter_rejects_too_many_pop_args() {
+    let source = r#"
+var items: list[int64] = [1, 2, 3]
+var bad: int64 = items.pop(0, 1)
+"#;
+    assert!(expect_error_containing(
+        source,
+        "Function 'pop' expects 1 to 2 argument(s)"
+    ));
+}
+
+#[test]
+fn test_semantic_builtin_variadic_parameter_supports_print_args() {
+    let source = r#"
+print()
+print(1, "two", 3)
+"#;
+    assert!(analyze_source(source).is_ok());
+}
+
+#[test]
+fn test_semantic_user_function_default_parameters_are_rejected_until_lowered() {
+    let source = r#"
+def f(x: int64 = 1) -> int64:
+  return x
+"#;
+    assert!(expect_error_containing(
+        source,
+        "Default and variadic parameters are currently supported only for builtin declarations"
+    ));
+}
+
+#[test]
 fn test_semantic_variable_index_access_for_lists_and_strings() {
     let source = r#"
 def at[T](items: list[T], index: int64) -> T:

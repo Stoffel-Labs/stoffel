@@ -31,6 +31,7 @@ pub enum SymbolKind {
 pub struct ObjectMethodInfo {
     /// Parameters for the method (excludes the implicit receiver/self)
     pub parameters: Vec<SymbolType>,
+    pub parameter_details: Vec<crate::builtin_registry::BuiltinParameterInfo>,
     /// Return type of the method
     pub return_type: SymbolType,
     /// The qualified name used in bytecode (e.g., "ClientStore.take_share")

@@ -145,6 +145,26 @@ pub(crate) trait ForeignTableMemoryServices {
     fn set_table_field(&mut self, table_ref: TableRef, key: Value, value: Value) -> VmResult<()>;
 
     fn push_array_ref_values(&mut self, array_ref: ArrayRef, values: &[Value]) -> VmResult<usize>;
+
+    fn pop_array_ref_value(&mut self, array_ref: ArrayRef, index: usize)
+        -> VmResult<Option<Value>>;
+
+    fn insert_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+        value: Value,
+    ) -> VmResult<usize>;
+
+    fn replace_array_ref_values(
+        &mut self,
+        array_ref: ArrayRef,
+        values: Vec<Value>,
+    ) -> VmResult<usize>;
+
+    fn clear_array_ref(&mut self, array_ref: ArrayRef) -> VmResult<()>;
+
+    fn reverse_array_ref(&mut self, array_ref: ArrayRef) -> VmResult<()>;
 }
 
 impl ForeignTableMemoryServices for VMState {
@@ -194,6 +214,39 @@ impl ForeignTableMemoryServices for VMState {
 
     fn push_array_ref_values(&mut self, array_ref: ArrayRef, values: &[Value]) -> VmResult<usize> {
         VMState::push_array_ref_values(self, array_ref, values)
+    }
+
+    fn pop_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+    ) -> VmResult<Option<Value>> {
+        VMState::pop_array_ref_value(self, array_ref, index)
+    }
+
+    fn insert_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+        value: Value,
+    ) -> VmResult<usize> {
+        VMState::insert_array_ref_value(self, array_ref, index, value)
+    }
+
+    fn replace_array_ref_values(
+        &mut self,
+        array_ref: ArrayRef,
+        values: Vec<Value>,
+    ) -> VmResult<usize> {
+        VMState::replace_array_ref_values(self, array_ref, values)
+    }
+
+    fn clear_array_ref(&mut self, array_ref: ArrayRef) -> VmResult<()> {
+        VMState::clear_array_ref(self, array_ref)
+    }
+
+    fn reverse_array_ref(&mut self, array_ref: ArrayRef) -> VmResult<()> {
+        VMState::reverse_array_ref(self, array_ref)
     }
 }
 

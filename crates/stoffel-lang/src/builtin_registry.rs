@@ -20,8 +20,16 @@ const BUILTIN_DECLARATIONS: &[(&str, &str)] = &[
 #[derive(Debug, Clone)]
 pub struct BuiltinFunctionInfo {
     pub parameters: Vec<SymbolType>,
+    pub parameter_details: Vec<BuiltinParameterInfo>,
     pub return_type: SymbolType,
     pub vm_symbol: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BuiltinParameterInfo {
+    pub ty: SymbolType,
+    pub has_default: bool,
+    pub is_variadic: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -152,6 +160,7 @@ fn build_builtin_registry() -> BuiltinRegistry {
                 let vm_symbol = builtin_vm_symbol(pragmas).unwrap_or_else(|| name.clone());
                 let info = BuiltinFunctionInfo {
                     parameters: parameter_types(parameters, &registry, type_params),
+                    parameter_details: parameter_details(parameters, &registry, type_params),
                     return_type: return_type
                         .as_deref()
                         .map(|node| type_from_ast(node, &registry, type_params))
@@ -201,6 +210,7 @@ fn build_builtin_registry() -> BuiltinRegistry {
                         .unwrap_or_else(|| format!("{}.{}", name, method_name));
                     let info = ObjectMethodInfo {
                         parameters: parameter_types(parameters, &registry, type_params),
+                        parameter_details: parameter_details(parameters, &registry, type_params),
                         return_type: return_type
                             .as_deref()
                             .map(|node| type_from_ast(node, &registry, type_params))
@@ -300,6 +310,25 @@ fn parameter_types(
                 .as_deref()
                 .map(|node| type_from_ast(node, registry, type_params))
                 .unwrap_or(SymbolType::Unknown)
+        })
+        .collect()
+}
+
+fn parameter_details(
+    parameters: &[Parameter],
+    registry: &BuiltinRegistry,
+    type_params: &[String],
+) -> Vec<BuiltinParameterInfo> {
+    parameters
+        .iter()
+        .map(|parameter| BuiltinParameterInfo {
+            ty: parameter
+                .type_annotation
+                .as_deref()
+                .map(|node| type_from_ast(node, registry, type_params))
+                .unwrap_or(SymbolType::Unknown),
+            has_default: parameter.default_value.is_some(),
+            is_variadic: parameter.is_variadic,
         })
         .collect()
 }

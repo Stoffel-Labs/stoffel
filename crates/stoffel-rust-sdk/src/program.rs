@@ -11,6 +11,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use stoffel_vm_types::compiled_binary::{
     utils, ClientIoManifest, ClientIoSchema, CompiledBinary, CompiledFunction, CompiledInstruction,
+    FunctionType,
 };
 use stoffel_vm_types::core_types::{ShareType, Value as VmValue};
 use stoffel_vm_types::registers::DEFAULT_SECRET_REGISTER_START;
@@ -107,6 +108,8 @@ pub struct FunctionSummary {
     pub name: String,
     pub arg_count: usize,
     pub parameters: Vec<String>,
+    pub parameter_types: Vec<FunctionType>,
+    pub return_type: FunctionType,
     pub register_count: usize,
     pub instruction_count: usize,
     pub upvalue_count: usize,
@@ -435,6 +438,8 @@ impl Program {
             name: entry_name.to_owned(),
             register_count,
             parameters: Vec::new(),
+            parameter_types: Vec::new(),
+            return_type: FunctionType::Unknown,
             upvalues: Vec::new(),
             parent: None,
             labels: Default::default(),
@@ -472,6 +477,17 @@ impl Program {
 
     pub fn binary(&self) -> &CompiledBinary {
         &self.binary
+    }
+
+    pub fn validate_function_inputs(
+        &self,
+        function_name: &str,
+        inputs: &[(String, Value)],
+    ) -> Result<()> {
+        let function = self
+            .function(function_name)
+            .ok_or_else(|| Error::FunctionNotFound(function_name.to_owned()))?;
+        function.validate_inputs(inputs)
     }
 }
 
@@ -542,6 +558,14 @@ impl<'a> FunctionMetadata<'a> {
         self.0.parameters.iter().map(String::as_str)
     }
 
+    pub fn parameter_types(&self) -> &[FunctionType] {
+        &self.0.parameter_types
+    }
+
+    pub fn return_type(&self) -> &FunctionType {
+        &self.0.return_type
+    }
+
     pub fn register_count(&self) -> usize {
         self.0.register_count
     }
@@ -563,11 +587,54 @@ impl<'a> FunctionMetadata<'a> {
             name: self.name().to_owned(),
             arg_count: self.arg_count(),
             parameters: self.parameters().to_vec(),
+            parameter_types: self.parameter_types().to_vec(),
+            return_type: self.return_type().clone(),
             register_count: self.register_count(),
             instruction_count: self.instruction_count(),
             upvalue_count: self.upvalue_count(),
             parent: self.parent().map(ToOwned::to_owned),
         }
+    }
+
+    pub fn validate_inputs(&self, inputs: &[(String, Value)]) -> Result<()> {
+        for (name, _) in inputs {
+            if !self.0.parameters.iter().any(|parameter| parameter == name) {
+                return Err(Error::InvalidInput(format!(
+                    "unexpected input '{name}' for function '{}'",
+                    self.name()
+                )));
+            }
+        }
+
+        for parameter in &self.0.parameters {
+            let mut matches = inputs.iter().filter(|(name, _)| name == parameter);
+            let Some((_, value)) = matches.next() else {
+                return Err(Error::InvalidInput(format!(
+                    "missing input '{parameter}' for function '{}'",
+                    self.name()
+                )));
+            };
+            if matches.next().is_some() {
+                return Err(Error::InvalidInput(format!(
+                    "duplicate input '{parameter}' for function '{}'",
+                    self.name()
+                )));
+            }
+            let ty = self
+                .0
+                .parameter_types
+                .get(
+                    self.0
+                        .parameters
+                        .iter()
+                        .position(|name| name == parameter)
+                        .unwrap_or(usize::MAX),
+                )
+                .unwrap_or(&FunctionType::Unknown);
+            validate_value_against_function_type(parameter, value, ty)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -582,6 +649,100 @@ impl fmt::Display for FunctionMetadata<'_> {
         }
         write!(f, ")")
     }
+}
+
+fn validate_value_against_function_type(
+    path: &str,
+    value: &Value,
+    ty: &FunctionType,
+) -> Result<()> {
+    let expected = ty.underlying_type();
+    if expected.is_unknown_like() {
+        return Ok(());
+    }
+
+    match expected {
+        FunctionType::Int { signed, bits } => validate_integer(path, value, *signed, *bits),
+        FunctionType::Float => match value {
+            Value::Float(_) | Value::I64(_) | Value::U64(_) => Ok(()),
+            _ => invalid_type(path, expected, value),
+        },
+        FunctionType::String => match value {
+            Value::String(_) => Ok(()),
+            _ => invalid_type(path, expected, value),
+        },
+        FunctionType::Bool => match value {
+            Value::Bool(_) => Ok(()),
+            _ => invalid_type(path, expected, value),
+        },
+        FunctionType::Nil | FunctionType::Void => match value {
+            Value::Unit => Ok(()),
+            _ => invalid_type(path, expected, value),
+        },
+        FunctionType::List(element_type) => match value {
+            Value::List(values) => values.iter().enumerate().try_for_each(|(index, item)| {
+                validate_value_against_function_type(&format!("{path}[{index}]"), item, element_type)
+            }),
+            _ => invalid_type(path, expected, value),
+        },
+        FunctionType::Dict(key_type, value_type) => match value {
+            Value::Object(fields) => fields.iter().try_for_each(|(key, item)| {
+                if !key_type.is_unknown_like() && !matches!(key_type.underlying_type(), FunctionType::String) {
+                    return Err(Error::InvalidInput(format!(
+                        "input '{path}' expects {expected}, but SDK object inputs only provide string keys"
+                    )));
+                }
+                validate_value_against_function_type(&format!("{path}.{key}"), item, value_type)
+            }),
+            _ => invalid_type(path, expected, value),
+        },
+        FunctionType::Object(_) => match value {
+            Value::Object(_) => Ok(()),
+            _ => invalid_type(path, expected, value),
+        },
+        FunctionType::Secret(_)
+        | FunctionType::Generic(_, _)
+        | FunctionType::TypeVar(_)
+        | FunctionType::Unknown => Ok(()),
+    }
+}
+
+fn validate_integer(path: &str, value: &Value, signed: bool, bits: u8) -> Result<()> {
+    let max_unsigned = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    if signed {
+        let max = if bits >= 64 {
+            i64::MAX
+        } else {
+            (1i64 << (bits - 1)) - 1
+        };
+        let min = if bits >= 64 {
+            i64::MIN
+        } else {
+            -(1i64 << (bits - 1))
+        };
+        match value {
+            Value::I64(value) if *value >= min && *value <= max => Ok(()),
+            Value::U64(value) if *value <= max as u64 => Ok(()),
+            _ => invalid_type(path, &FunctionType::Int { signed, bits }, value),
+        }
+    } else {
+        match value {
+            Value::U64(value) if *value <= max_unsigned => Ok(()),
+            Value::I64(value) if *value >= 0 && (*value as u64) <= max_unsigned => Ok(()),
+            _ => invalid_type(path, &FunctionType::Int { signed, bits }, value),
+        }
+    }
+}
+
+fn invalid_type(path: &str, expected: &FunctionType, value: &Value) -> Result<()> {
+    Err(Error::InvalidInput(format!(
+        "input '{path}' expects {expected}, got {}",
+        value.kind()
+    )))
 }
 
 fn bytecode_backend_name(backend: stoffel_vm_types::compiled_binary::MpcBackend) -> &'static str {

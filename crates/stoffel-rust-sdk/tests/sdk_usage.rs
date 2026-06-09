@@ -5,7 +5,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use stoffel::prelude::*;
-use stoffel_vm_types::compiled_binary::CompiledBinary;
+use stoffel_vm_types::compiled_binary::{ClientIoManifest, ClientIoSchema, CompiledBinary};
+use stoffel_vm_types::core_types::ShareType;
 use tempfile::tempdir;
 use tracing::Level;
 
@@ -181,6 +182,32 @@ def main() -> int64:
     assert!(generated.contains("pub output_0: i64"));
     assert!(generated.contains("pub output_1: f64"));
     assert!(generated.contains("impl stoffel::TypedClientOutputs for Client0Outputs"));
+    Ok(())
+}
+
+#[test]
+fn generate_bindings_emits_unsigned_secret_io_as_u64() -> stoffel::Result<()> {
+    let mut binary = CompiledBinary::new();
+    binary.client_io_manifest = ClientIoManifest {
+        clients: vec![ClientIoSchema {
+            client_slot: 0,
+            inputs: vec![ShareType::secret_uint(64)],
+            outputs: vec![ShareType::secret_uint(64)],
+        }],
+        ..Default::default()
+    };
+    let program = Program::new(binary);
+    let temp = tempdir()?;
+    let bytecode_path = temp.path().join("unsigned.stflb");
+    let bindings_path = temp.path().join("stoffel_bindings.rs");
+    program.save_bytecode(&bytecode_path)?;
+
+    generate_bindings(&bytecode_path, &bindings_path)?;
+    let generated = std::fs::read_to_string(bindings_path)?;
+
+    assert!(generated.contains("pub input_0: u64"));
+    assert!(generated.contains("pub output_0: u64"));
+    assert!(generated.contains("stoffel::ClientValueType::Integer"));
     Ok(())
 }
 
@@ -1215,6 +1242,163 @@ fn clear_vm_nested_array_outputs_are_preserved_as_lists() -> stoffel::Result<()>
         vec![
             Value::List(vec![Value::I64(1), Value::I64(2)]),
             Value::List(vec![Value::I64(3), Value::I64(4)]),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn nested_list_index_concat_executes_as_python_style_list_concat() -> stoffel::Result<()> {
+    let result = Stoffel::compile(
+        r#"
+def main(a: list[list[int64]], a_rows: int64, a_cols: int64) -> list[int64]:
+  var nested_list: list[list[int64]] = a
+  var result: list[int64] = []
+  for i in 0..a_rows:
+    result = nested_list[i] + nested_list[i]
+  return result
+"#,
+    )?
+    .with_input(
+        "a",
+        Value::List(vec![
+            Value::List(vec![Value::I64(1), Value::I64(2)]),
+            Value::List(vec![Value::I64(3), Value::I64(4)]),
+        ]),
+    )
+    .with_input("a_rows", 2_i64)
+    .with_input("a_cols", 2_i64)
+    .execute_clear()?;
+
+    assert_eq!(
+        result,
+        vec![Value::I64(3), Value::I64(4), Value::I64(3), Value::I64(4)]
+    );
+    Ok(())
+}
+
+#[test]
+fn function_type_metadata_survives_bytecode_round_trip() -> stoffel::Result<()> {
+    let runtime = Stoffel::compile(
+        r#"
+def main(a: list[list[int64]], n: uint64) -> list[int64]:
+  return a[0]
+"#,
+    )?
+    .build()?;
+    let bytecode = runtime.to_bytecode()?;
+    let loaded = Stoffel::load(&bytecode)?.build()?;
+    let main = loaded.program().main().expect("main metadata should exist");
+
+    assert_eq!(
+        main.parameter_types(),
+        &[
+            FunctionType::List(Box::new(FunctionType::List(
+                Box::new(FunctionType::int64())
+            ))),
+            FunctionType::uint64()
+        ]
+    );
+    assert_eq!(
+        main.return_type(),
+        &FunctionType::List(Box::new(FunctionType::int64()))
+    );
+    Ok(())
+}
+
+#[test]
+fn loaded_bytecode_rejects_flat_list_for_nested_list_input() -> stoffel::Result<()> {
+    let runtime = Stoffel::compile(
+        r#"
+def main(a: list[list[int64]], a_rows: int64, a_cols: int64) -> int64:
+  return a[0][0]
+"#,
+    )?
+    .build()?;
+    let bytecode = runtime.to_bytecode()?;
+    let err = Stoffel::load(&bytecode)?
+        .with_input(
+            "a",
+            Value::List(vec![
+                Value::I64(1),
+                Value::I64(2),
+                Value::I64(3),
+                Value::I64(4),
+            ]),
+        )
+        .with_input("a_rows", 1_i64)
+        .with_input("a_cols", 4_i64)
+        .execute_clear()
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("input 'a[0]' expects list[int64], got i64"),
+        "unexpected error: {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn clear_list_methods_follow_python_style_mutation_semantics() -> stoffel::Result<()> {
+    let result = Stoffel::compile(
+        r#"
+def main() -> list[int64]:
+  var items: list[int64] = [3, 1, 2]
+  items.insert(1, 9)
+  var popped: int64 = items.pop(-2)
+  items.remove(9)
+  items.extend([5, 5])
+  var five_count: int64 = items.count(5)
+  var two_index: int64 = items.index(2)
+  items.reverse()
+  items.sort()
+  items.append(popped)
+  items.append(five_count)
+  items.append(two_index)
+  return items
+"#,
+    )?
+    .execute_clear()?;
+
+    assert_eq!(
+        result,
+        vec![
+            Value::I64(2),
+            Value::I64(3),
+            Value::I64(5),
+            Value::I64(5),
+            Value::I64(1),
+            Value::I64(2),
+            Value::I64(1),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn clear_list_copy_clear_and_repeat_follow_python_style_semantics() -> stoffel::Result<()> {
+    let result = Stoffel::compile(
+        r#"
+def main() -> list[int64]:
+  var items: list[int64] = [4, 6]
+  var copied: list[int64] = items.copy()
+  items.clear()
+  return copied + ([7] * 2) + (2 * [8]) + [len(items)]
+"#,
+    )?
+    .execute_clear()?;
+
+    assert_eq!(
+        result,
+        vec![
+            Value::I64(4),
+            Value::I64(6),
+            Value::I64(7),
+            Value::I64(7),
+            Value::I64(8),
+            Value::I64(8),
+            Value::I64(0),
         ]
     );
     Ok(())

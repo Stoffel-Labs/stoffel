@@ -661,10 +661,14 @@ fn parse_project_config(raw: &str, path: &Path) -> Result<ProjectConfig> {
 fn config_parse_hint(error: &str) -> Option<&'static str> {
     if error.contains("expected usize") {
         if error.contains("parties =") {
-            return Some("write [mpc].parties as an unquoted positive whole number, for example `parties = 5`.");
+            return Some(
+                "write [mpc].parties as an unquoted positive whole number, for example `parties = 5`.",
+            );
         }
         if error.contains("threshold =") {
-            return Some("write [mpc].threshold as an unquoted positive whole number, for example `threshold = 1`.");
+            return Some(
+                "write [mpc].threshold as an unquoted positive whole number, for example `threshold = 1`.",
+            );
         }
         return Some("write numeric config values as unquoted positive whole numbers.");
     }
@@ -681,8 +685,12 @@ fn config_parse_hint(error: &str) -> Option<&'static str> {
         "target" => Some("did you mean [build].target_dir or [build].output_dir?"),
         "threshhold" => Some("did you mean [mpc].threshold?"),
         "party_count" => Some("did you mean [mpc].parties?"),
-        "instance_id" => Some("did you mean [mpc].instance_id? Put instance_id under the [mpc] table, not [build]."),
-        "network" => Some("did you mean [mpc]? Network execution config is passed to `stoffel run --config`, not stored as [network] in Stoffel.toml."),
+        "instance_id" => Some(
+            "did you mean [mpc].instance_id? Put instance_id under the [mpc] table, not [build].",
+        ),
+        "network" => Some(
+            "did you mean [mpc]? Network execution config is passed to `stoffel run --config`, not stored as [network] in Stoffel.toml.",
+        ),
         _ => None,
     }
 }

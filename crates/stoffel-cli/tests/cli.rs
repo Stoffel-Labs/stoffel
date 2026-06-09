@@ -1691,6 +1691,43 @@ fn run_validates_entry_and_inputs_before_timeout() {
 }
 
 #[test]
+fn run_rejects_flat_list_for_nested_list_input() {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    fs::write(
+        temp.path().join("src/main.stfl"),
+        "def main(a: list[list[int64]], a_rows: int64, a_cols: int64) -> int64:\n  return a[0][0]\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(temp.path())
+        .arg("run")
+        .arg(temp.path())
+        .args([
+            "--input",
+            "a=1,2,3,4",
+            "--input",
+            "a_rows=1",
+            "--input",
+            "a_cols=4",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "input 'a[0]' expects list[int64], got i64",
+        ))
+        .stderr(predicate::str::contains("--input a=<value>"));
+}
+
+#[test]
 fn run_explains_positional_input_mistakes() {
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app");
