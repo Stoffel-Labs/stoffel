@@ -1,0 +1,4 @@
+# Heterogeneous list literal [1, "two"]: desired compile-time type error.
+def main() -> int64:
+  var xs = [1, "two", 3]
+  return 1

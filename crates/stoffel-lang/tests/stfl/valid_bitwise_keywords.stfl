@@ -1,0 +1,10 @@
+# 'xor' keyword applied to integers: is it bitwise, or rejected?
+# Desired: well-defined behavior (bitwise 12 xor 10 == 6) or clear error.
+def main() -> int64:
+  var ok = 3200
+  var a = 12
+  var b = 10
+  var c = a xor b
+  if c == 6:
+    ok += 1
+  return ok

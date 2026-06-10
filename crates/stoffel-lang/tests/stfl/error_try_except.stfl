@@ -1,0 +1,7 @@
+# try/except is unsupported; desired: targeted "not supported" diagnostic.
+def main() -> int64:
+  try:
+    var x = 1
+  except:
+    var y = 2
+  return 1
