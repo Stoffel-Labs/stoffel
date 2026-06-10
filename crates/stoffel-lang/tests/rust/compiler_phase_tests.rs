@@ -1600,14 +1600,66 @@ print(1, "two", 3)
 }
 
 #[test]
-fn test_semantic_user_function_default_parameters_are_rejected_until_lowered() {
+fn test_semantic_user_function_default_parameters_are_supported() {
     let source = r#"
-def f(x: int64 = 1) -> int64:
-  return x
+def f(x: int64, bonus: int64 = 5) -> int64:
+  return x + bonus
+
+def main() -> int64:
+  return f(10) + f(10, 1)
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("literal default parameters should compile for user functions");
+}
+
+#[test]
+fn test_semantic_user_function_named_arguments_are_supported() {
+    let source = r#"
+def sub(a: int64, b: int64) -> int64:
+  return a - b
+
+def main() -> int64:
+  return sub(b: 3, a: 10)
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("named arguments should compile for user functions");
+}
+
+#[test]
+fn test_semantic_user_function_unknown_named_argument_is_rejected() {
+    let source = r#"
+def sub(a: int64, b: int64) -> int64:
+  return a - b
+
+def main() -> int64:
+  return sub(a: 10, c: 3)
 "#;
     assert!(expect_error_containing(
         source,
-        "Default and variadic parameters are currently supported only for builtin declarations"
+        "has no parameter named 'c'"
+    ));
+}
+
+#[test]
+fn test_semantic_user_function_non_literal_default_is_rejected() {
+    let source = r#"
+var base: int64 = 10
+
+def f(x: int64 = base) -> int64:
+  return x
+"#;
+    assert!(expect_error_containing(source, "must be a literal"));
+}
+
+#[test]
+fn test_semantic_user_function_variadic_still_rejected() {
+    let source = r#"
+def total(*xs) -> int64:
+  return 0
+"#;
+    assert!(expect_error_containing(
+        source,
+        "Variadic parameters (*args) are currently supported only for builtin declarations"
     ));
 }
 
@@ -3514,4 +3566,99 @@ fn test_targeted_errors_for_unsupported_python_syntax() {
             source
         );
     }
+}
+
+#[test]
+fn test_mixed_width_arithmetic_is_rejected() {
+    let source = r#"
+def main() -> int64:
+  var a: int32 = 5i32
+  var b: int64 = 10i64
+  var c = a + b
+  return 0
+"#;
+    assert!(expect_error_containing(
+        source,
+        "requires matching numeric types"
+    ));
+}
+
+#[test]
+fn test_untyped_literal_adopts_sized_operand_width() {
+    let source = r#"
+def main() -> int64:
+  var a: int32 = 5i32
+  var b = a + 1
+  var c: int8 = 100i8
+  var d = c % 7
+  return 0
+"#;
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("untyped literals should adopt the other operand's width");
+    assert!(
+        program
+            .main_chunk
+            .constants
+            .iter()
+            .any(|constant| matches!(constant, Constant::I32(1))),
+        "literal 1 should become an I32 constant next to an int32 operand"
+    );
+}
+
+#[test]
+fn test_heterogeneous_list_literal_is_rejected() {
+    let source = r#"
+def main() -> int64:
+  var xs = [1, "two", 3]
+  return 0
+"#;
+    assert!(expect_error_containing(
+        source,
+        "List elements must share one type"
+    ));
+}
+
+#[test]
+fn test_string_index_into_list_is_rejected() {
+    let source = r#"
+def main() -> int64:
+  var xs: list[int64] = [1, 2, 3]
+  var x = xs["zero"]
+  return x
+"#;
+    assert!(expect_error_containing(source, "Index must be an integer"));
+}
+
+#[test]
+fn test_missing_return_path_is_rejected() {
+    let source = r#"
+def maybe(x: int64) -> int64:
+  if x > 0:
+    return 1
+
+def main() -> int64:
+  return maybe(1)
+"#;
+    assert!(expect_error_containing(
+        source,
+        "not all paths return a value"
+    ));
+}
+
+#[test]
+fn test_all_paths_returning_via_if_else_is_accepted() {
+    let source = r#"
+def sign(x: int64) -> int64:
+  if x < 0:
+    return -1
+  elif x == 0:
+    return 0
+  else:
+    return 1
+
+def main() -> int64:
+  return sign(5)
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("if/elif/else with returns on every branch should compile");
 }

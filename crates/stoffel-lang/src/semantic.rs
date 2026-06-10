@@ -19,6 +19,9 @@ pub struct SemanticAnalyzer<'a> {
     imported_symbols: HashMap<String, SymbolInfo>,
     /// Number of enclosing loops at the current analysis point (for break/continue)
     loop_depth: usize,
+    /// Parameter names and default-value expressions of user-defined functions,
+    /// used to resolve named arguments and inject defaults at call sites.
+    function_signatures: HashMap<String, Vec<(String, Option<AstNode>)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +42,7 @@ impl<'a> SemanticAnalyzer<'a> {
             current_function_return_type: None,
             imported_symbols: HashMap::new(),
             loop_depth: 0,
+            function_signatures: HashMap::new(),
         }
     }
 
@@ -54,6 +58,7 @@ impl<'a> SemanticAnalyzer<'a> {
             current_function_return_type: None,
             imported_symbols,
             loop_depth: 0,
+            function_signatures: HashMap::new(),
         }
     }
 
@@ -109,6 +114,185 @@ impl<'a> SemanticAnalyzer<'a> {
             }
         }
         node
+    }
+
+    /// Maps a call's arguments onto a user function's parameter list:
+    /// positional arguments fill slots left to right, named arguments fill
+    /// their parameter's slot, and remaining slots take declared defaults.
+    fn resolve_call_arguments(
+        &mut self,
+        arguments: Vec<AstNode>,
+        signature: &[(String, Option<AstNode>)],
+        function_name: &str,
+        location: &SourceLocation,
+    ) -> Result<Vec<AstNode>, ()> {
+        let has_named = arguments
+            .iter()
+            .any(|arg| matches!(arg, AstNode::NamedArgument { .. }));
+        let has_defaults = signature.iter().any(|(_, default)| default.is_some());
+        if !has_named && !has_defaults {
+            return Ok(arguments);
+        }
+        if !has_named && arguments.len() > signature.len() {
+            // Let the regular arity check report this.
+            return Ok(arguments);
+        }
+
+        let mut slots: Vec<Option<AstNode>> = vec![None; signature.len()];
+        let mut next_positional = 0usize;
+        let mut seen_named = false;
+        for arg in arguments {
+            match arg {
+                AstNode::NamedArgument {
+                    name,
+                    value,
+                    location: arg_loc,
+                } => {
+                    seen_named = true;
+                    let Some(index) = signature.iter().position(|(param, _)| *param == name)
+                    else {
+                        self.error_reporter.add_error(CompilerError::semantic_error(
+                            format!(
+                                "Function '{}' has no parameter named '{}'",
+                                function_name, name
+                            ),
+                            arg_loc,
+                        ));
+                        return Err(());
+                    };
+                    if slots[index].is_some() {
+                        self.error_reporter.add_error(CompilerError::semantic_error(
+                            format!("Argument '{}' provided more than once", name),
+                            arg_loc,
+                        ));
+                        return Err(());
+                    }
+                    slots[index] = Some(*value);
+                }
+                positional => {
+                    if seen_named {
+                        self.error_reporter.add_error(CompilerError::semantic_error(
+                            "Positional arguments must come before named arguments",
+                            positional.location(),
+                        ));
+                        return Err(());
+                    }
+                    if next_positional >= slots.len() {
+                        self.error_reporter.add_error(CompilerError::semantic_error(
+                            format!(
+                                "Function '{}' expects {} argument(s), but more were provided",
+                                function_name,
+                                signature.len()
+                            ),
+                            positional.location(),
+                        ));
+                        return Err(());
+                    }
+                    slots[next_positional] = Some(positional);
+                    next_positional += 1;
+                }
+            }
+        }
+
+        let mut resolved = Vec::with_capacity(slots.len());
+        for (slot, (param_name, default)) in slots.into_iter().zip(signature.iter()) {
+            match (slot, default) {
+                (Some(arg), _) => resolved.push(arg),
+                (None, Some(default)) => resolved.push(default.clone()),
+                (None, None) => {
+                    self.error_reporter.add_error(CompilerError::semantic_error(
+                        format!(
+                            "Missing argument '{}' in call to '{}'",
+                            param_name, function_name
+                        ),
+                        location.clone(),
+                    ));
+                    return Err(());
+                }
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// Conservative control-flow check: does every path through `node`
+    /// execute a return statement? Loops are assumed to possibly not run.
+    fn node_always_returns(node: &AstNode) -> bool {
+        match node {
+            AstNode::Return { .. } => true,
+            AstNode::Block(statements) => statements.iter().any(Self::node_always_returns),
+            AstNode::IfExpression {
+                then_branch,
+                else_branch,
+                ..
+            } => match else_branch {
+                Some(else_branch) => {
+                    Self::node_always_returns(then_branch)
+                        && Self::node_always_returns(else_branch)
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn int_kind_for_symbol_type(ty: &SymbolType) -> Option<crate::ast::IntKind> {
+        use crate::ast::{IntKind, IntWidth};
+        match ty.underlying_type() {
+            SymbolType::Int8 => Some(IntKind::Signed(IntWidth::W8)),
+            SymbolType::Int16 => Some(IntKind::Signed(IntWidth::W16)),
+            SymbolType::Int32 => Some(IntKind::Signed(IntWidth::W32)),
+            SymbolType::Int64 => Some(IntKind::Signed(IntWidth::W64)),
+            SymbolType::UInt8 => Some(IntKind::Unsigned(IntWidth::W8)),
+            SymbolType::UInt16 => Some(IntKind::Unsigned(IntWidth::W16)),
+            SymbolType::UInt32 => Some(IntKind::Unsigned(IntWidth::W32)),
+            SymbolType::UInt64 => Some(IntKind::Unsigned(IntWidth::W64)),
+            _ => None,
+        }
+    }
+
+    /// Rewrites an untyped integer literal (or unary minus of one) so codegen
+    /// emits a constant of the expected width instead of defaulting to I64.
+    fn sized_int_literal_from_int(node: AstNode, expected_type: &SymbolType) -> AstNode {
+        let Some(kind) = Self::int_kind_for_symbol_type(expected_type) else {
+            return node;
+        };
+        match node {
+            AstNode::Literal {
+                value: Value::Int { value, kind: None },
+                location,
+            } => AstNode::Literal {
+                value: Value::Int {
+                    value,
+                    kind: Some(kind),
+                },
+                location,
+            },
+            AstNode::UnaryOperation {
+                op,
+                operand,
+                location,
+            } if op == "-" => AstNode::UnaryOperation {
+                op,
+                operand: Box::new(Self::sized_int_literal_from_int(*operand, expected_type)),
+                location,
+            },
+            other => other,
+        }
+    }
+
+    /// True when the node is an untyped integer literal (optionally wrapped in
+    /// unary minus) that can adopt any integer width from context.
+    fn is_untyped_int_literal(node: &AstNode) -> bool {
+        match node {
+            AstNode::Literal {
+                value: Value::Int { kind: None, .. },
+                ..
+            } => true,
+            AstNode::UnaryOperation { op, operand, .. } if op == "-" => {
+                Self::is_untyped_int_literal(operand)
+            }
+            _ => false,
+        }
     }
 
     fn float_literal_from_int(node: AstNode) -> AstNode {
@@ -506,6 +690,13 @@ impl<'a> SemanticAnalyzer<'a> {
             {
                 expected.clone()
             }
+            (node, inferred, expected)
+                if inferred.is_integer()
+                    && expected.underlying_type().is_integer()
+                    && Self::is_untyped_int_literal(node) =>
+            {
+                expected.clone()
+            }
             (
                 AstNode::Literal {
                     value: Value::Float(_),
@@ -617,6 +808,9 @@ impl<'a> SemanticAnalyzer<'a> {
                 Self::bool_literal_from_int(other)
             }
             other if Self::is_clear_real_type(expected_type) => Self::float_literal_from_int(other),
+            other if expected_type.underlying_type().is_integer() => {
+                Self::sized_int_literal_from_int(other, expected_type)
+            }
             other => other,
         };
 
@@ -1329,24 +1523,70 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
 
                 if !is_builtin {
-                    if let Some(param) = parameters
-                        .iter()
-                        .find(|param| param.default_value.is_some() || param.is_variadic)
-                    {
+                    if let Some(param) = parameters.iter().find(|param| param.is_variadic) {
                         self.error_reporter.add_error(
                             CompilerError::semantic_error(
-                                "Default and variadic parameters are currently supported only for builtin declarations",
+                                "Variadic parameters (*args) are currently supported only for builtin declarations",
                                 param
                                     .type_annotation
                                     .as_ref()
                                     .map_or_else(|| location.clone(), |node| node.location()),
                             )
-                            .with_hint(
-                                "Builtin declarations may use Python-style `name = default` and `*args`; user-defined function lowering needs default argument support before this is enabled generally.",
+                            .with_hint("Accept a list[T] parameter instead"),
+                        );
+                        return Err(());
+                    }
+                    // Defaults are injected at call sites, so they must not
+                    // depend on caller or callee scope: literals only.
+                    if let Some(param) = parameters.iter().find(|param| {
+                        param
+                            .default_value
+                            .as_deref()
+                            .is_some_and(|value| !matches!(value, AstNode::Literal { .. }))
+                    }) {
+                        self.error_reporter.add_error(
+                            CompilerError::semantic_error(
+                                format!(
+                                    "Default value for parameter '{}' must be a literal",
+                                    param.name
+                                ),
+                                param
+                                    .type_annotation
+                                    .as_ref()
+                                    .map_or_else(|| location.clone(), |node| node.location()),
                             ),
                         );
                         return Err(());
                     }
+                    let mut seen_default = false;
+                    for param in parameters.iter() {
+                        if param.default_value.is_some() {
+                            seen_default = true;
+                        } else if seen_default {
+                            self.error_reporter.add_error(
+                                CompilerError::semantic_error(
+                                    format!(
+                                        "Parameter '{}' without a default follows a parameter with one",
+                                        param.name
+                                    ),
+                                    location.clone(),
+                                ),
+                            );
+                            return Err(());
+                        }
+                    }
+                    self.function_signatures.insert(
+                        func_name.clone(),
+                        parameters
+                            .iter()
+                            .map(|param| {
+                                (
+                                    param.name.clone(),
+                                    param.default_value.as_deref().cloned(),
+                                )
+                            })
+                            .collect(),
+                    );
                 }
 
                 // 2. Declare the function symbol in the *current* (outer) scope
@@ -1389,7 +1629,26 @@ impl<'a> SemanticAnalyzer<'a> {
 
                     // Recursively analyze the body
                     let (checked_body_node, _body_type) = self.analyze_node(*body)?;
-                    // TODO: Check if all code paths return the correct type (more complex analysis)
+
+                    // Every path through a value-returning function must return.
+                    let needs_return = !matches!(
+                        final_return_type.underlying_type(),
+                        SymbolType::Void | SymbolType::Nil | SymbolType::Unknown
+                    );
+                    if needs_return && !Self::node_always_returns(&checked_body_node) {
+                        self.error_reporter.add_error(
+                            CompilerError::semantic_error(
+                                format!(
+                                    "Function '{}' declares return type '{}' but not all paths return a value",
+                                    func_name,
+                                    declared_type_to_string(&final_return_type)
+                                ),
+                                location.clone(),
+                            )
+                            .with_hint("Add a return statement at the end of the function or to every branch"),
+                        );
+                        return Err(());
+                    }
 
                     self.current_function_return_type = previous_return_type;
                     self.symbol_table.exit_scope();
@@ -1958,13 +2217,26 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 }
 
-                // 2. Analyze arguments
+                // 2. For user-defined functions, resolve named arguments and
+                // inject default values so the call becomes plain positional.
+                let arguments = if let AstNode::Identifier(name, _) = &checked_function_node {
+                    match self.function_signatures.get(name).cloned() {
+                        Some(signature) => {
+                            self.resolve_call_arguments(arguments, &signature, name, &location)?
+                        }
+                        None => arguments,
+                    }
+                } else {
+                    arguments
+                };
+
+                // Analyze arguments
                 let mut checked_arguments = Vec::with_capacity(arguments.len());
                 let mut argument_types = Vec::with_capacity(arguments.len());
                 for arg_node in arguments {
                     if let AstNode::NamedArgument { location, .. } = &arg_node {
                         self.error_reporter.add_error(CompilerError::semantic_error(
-                            "Named arguments are only supported for object constructors",
+                            "Named arguments are only supported for object constructors and user-defined functions",
                             location.clone(),
                         ));
                         return Err(());
@@ -2741,6 +3013,146 @@ impl<'a> SemanticAnalyzer<'a> {
                     ));
                 }
 
+                if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%") {
+                    let mut checked_left = checked_left;
+                    let mut checked_right = checked_right;
+                    let mut left_ty = left_ty;
+                    let mut right_ty = right_ty;
+
+                    // Untyped integer literals adopt the width of the other side
+                    // (e.g. `a32 + 1` treats 1 as int32, `f + 1` treats 1 as float).
+                    if Self::is_untyped_int_literal(&checked_left)
+                        && Self::is_clear_numeric_type(right_ty.underlying_type())
+                    {
+                        Self::refine_argument_with_expected(
+                            &mut checked_left,
+                            &mut left_ty,
+                            right_ty.underlying_type(),
+                        );
+                    } else if Self::is_untyped_int_literal(&checked_right)
+                        && Self::is_clear_numeric_type(left_ty.underlying_type())
+                    {
+                        Self::refine_argument_with_expected(
+                            &mut checked_right,
+                            &mut right_ty,
+                            left_ty.underlying_type(),
+                        );
+                    }
+
+                    let l_under = left_ty.underlying_type().clone();
+                    let r_under = right_ty.underlying_type().clone();
+                    let result_secret = left_ty.is_secret() || right_ty.is_secret();
+                    let wrap = |ty: SymbolType| {
+                        if result_secret {
+                            SymbolType::Secret(Box::new(ty))
+                        } else {
+                            ty
+                        }
+                    };
+                    let rebuild = |left: AstNode, right: AstNode| AstNode::BinaryOperation {
+                        op: op.clone(),
+                        left: Box::new(left),
+                        right: Box::new(right),
+                        location: location.clone(),
+                    };
+
+                    let unknown_involved = matches!(l_under, SymbolType::Unknown)
+                        || matches!(r_under, SymbolType::Unknown);
+                    if unknown_involved {
+                        return Ok((
+                            rebuild(checked_left, checked_right),
+                            SymbolType::Unknown,
+                        ));
+                    }
+
+                    // Opaque Share values support arithmetic via the MPC runtime;
+                    // the result is a Share (refined by annotations downstream).
+                    let l_share = Self::is_share_alias_type(&left_ty);
+                    let r_share = Self::is_share_alias_type(&right_ty);
+                    if l_share || r_share {
+                        let result_ty = if l_share {
+                            left_ty.clone()
+                        } else {
+                            right_ty.clone()
+                        };
+                        return Ok((rebuild(checked_left, checked_right), result_ty));
+                    }
+
+                    let both_numeric = Self::is_clear_numeric_type(&l_under)
+                        && Self::is_clear_numeric_type(&r_under);
+                    if both_numeric {
+                        // Same type: fine.
+                        if l_under == r_under {
+                            let result = wrap(l_under);
+                            return Ok((rebuild(checked_left, checked_right), result));
+                        }
+                        // Fixed-point and float share a runtime representation.
+                        let fixed_float_mix = (matches!(l_under, SymbolType::Fixed { .. })
+                            && r_under == SymbolType::Float)
+                            || (l_under == SymbolType::Float
+                                && matches!(r_under, SymbolType::Fixed { .. }));
+                        if fixed_float_mix {
+                            let result_under = if matches!(l_under, SymbolType::Fixed { .. }) {
+                                l_under
+                            } else {
+                                r_under
+                            };
+                            return Ok((
+                                rebuild(checked_left, checked_right),
+                                wrap(result_under),
+                            ));
+                        }
+                        // int64 <-> float/fixed coercion is supported by the VM
+                        // (clear fixed-point values share the float representation).
+                        let i64_real_mix = (l_under == SymbolType::Int64
+                            && Self::is_clear_real_type(&r_under))
+                            || (Self::is_clear_real_type(&l_under)
+                                && r_under == SymbolType::Int64);
+                        if i64_real_mix {
+                            let result_under = if Self::is_clear_real_type(&l_under) {
+                                l_under
+                            } else {
+                                r_under
+                            };
+                            return Ok((
+                                rebuild(checked_left, checked_right),
+                                wrap(result_under),
+                            ));
+                        }
+                        let hint = if l_under.is_integer() && r_under.is_integer() {
+                            "Give both operands the same width, e.g. with literal suffixes like 10i32"
+                        } else {
+                            "Convert the integer operand explicitly or use matching numeric types"
+                        };
+                        self.error_reporter.add_error(
+                            CompilerError::type_error(
+                                format!(
+                                    "Arithmetic '{}' requires matching numeric types, found '{}' and '{}'",
+                                    op,
+                                    declared_type_to_string(&left_ty),
+                                    declared_type_to_string(&right_ty)
+                                ),
+                                location.clone(),
+                            )
+                            .with_hint(hint),
+                        );
+                        return Err(());
+                    }
+
+                    // Non-numeric operands (bools, strings outside of string+string,
+                    // lists outside of concat/repeat, objects, nil).
+                    self.error_reporter.add_error(CompilerError::type_error(
+                        format!(
+                            "Operands to '{}' must be numeric, found '{}' and '{}'",
+                            op,
+                            declared_type_to_string(&left_ty),
+                            declared_type_to_string(&right_ty)
+                        ),
+                        location.clone(),
+                    ));
+                    return Err(());
+                }
+
                 // For other binary ops we don't handle here; pass through as Unknown type.
                 Ok((
                     AstNode::BinaryOperation {
@@ -2755,16 +3167,52 @@ impl<'a> SemanticAnalyzer<'a> {
 
             // --- Collection Literals and Access ---
             AstNode::ListLiteral { elements, location } => {
-                let mut checked_elements = Vec::with_capacity(elements.len());
-                let mut element_type = SymbolType::Unknown;
-
+                let mut analyzed = Vec::with_capacity(elements.len());
                 for elem in elements {
-                    let (checked_elem, elem_ty) = self.analyze_node(elem)?;
-                    // Infer element type from first element, check consistency
-                    if matches!(element_type, SymbolType::Unknown) {
-                        element_type = elem_ty.clone();
+                    analyzed.push(self.analyze_node(elem)?);
+                }
+
+                // The element type is set by the first element that is not an
+                // untyped integer literal (literals adapt to their context,
+                // e.g. [0, local] where local is a float).
+                let element_type = analyzed
+                    .iter()
+                    .find(|(node, ty)| {
+                        !matches!(ty, SymbolType::Unknown) && !Self::is_untyped_int_literal(node)
+                    })
+                    .or_else(|| {
+                        analyzed
+                            .iter()
+                            .find(|(_, ty)| !matches!(ty, SymbolType::Unknown))
+                    })
+                    .map(|(_, ty)| ty.clone())
+                    .unwrap_or(SymbolType::Unknown);
+
+                let mut checked_elements = Vec::with_capacity(analyzed.len());
+                for (mut checked_elem, mut elem_ty) in analyzed {
+                    if !matches!(element_type, SymbolType::Unknown)
+                        && !matches!(elem_ty, SymbolType::Unknown)
+                    {
+                        Self::refine_argument_with_expected(
+                            &mut checked_elem,
+                            &mut elem_ty,
+                            &element_type,
+                        );
+                        if !Self::types_compatible(&elem_ty, &element_type) {
+                            self.error_reporter.add_error(
+                                CompilerError::type_error(
+                                    format!(
+                                        "List elements must share one type: expected '{}', found '{}'",
+                                        declared_type_to_string(&element_type),
+                                        declared_type_to_string(&elem_ty)
+                                    ),
+                                    checked_elem.location(),
+                                )
+                                .with_hint("Use a single element type, or model mixed data with an object"),
+                            );
+                            return Err(());
+                        }
                     }
-                    // TODO: Add type consistency checking between elements
                     checked_elements.push(checked_elem);
                 }
 
@@ -2783,16 +3231,49 @@ impl<'a> SemanticAnalyzer<'a> {
                 let mut value_type = SymbolType::Unknown;
 
                 for (key, value) in pairs {
-                    let (checked_key, key_ty) = self.analyze_node(key)?;
-                    let (checked_value, val_ty) = self.analyze_node(value)?;
-                    // Infer types from first pair
+                    let (mut checked_key, mut key_ty) = self.analyze_node(key)?;
+                    let (mut checked_value, mut val_ty) = self.analyze_node(value)?;
+                    // Infer types from first pair; later pairs must agree.
                     if matches!(key_type, SymbolType::Unknown) {
                         key_type = key_ty.clone();
+                    } else if !matches!(key_ty, SymbolType::Unknown) {
+                        Self::refine_argument_with_expected(
+                            &mut checked_key,
+                            &mut key_ty,
+                            &key_type,
+                        );
+                        if !Self::types_compatible(&key_ty, &key_type) {
+                            self.error_reporter.add_error(CompilerError::type_error(
+                                format!(
+                                    "Dict keys must share one type: expected '{}', found '{}'",
+                                    declared_type_to_string(&key_type),
+                                    declared_type_to_string(&key_ty)
+                                ),
+                                checked_key.location(),
+                            ));
+                            return Err(());
+                        }
                     }
                     if matches!(value_type, SymbolType::Unknown) {
                         value_type = val_ty.clone();
+                    } else if !matches!(val_ty, SymbolType::Unknown) {
+                        Self::refine_argument_with_expected(
+                            &mut checked_value,
+                            &mut val_ty,
+                            &value_type,
+                        );
+                        if !Self::types_compatible(&val_ty, &value_type) {
+                            self.error_reporter.add_error(CompilerError::type_error(
+                                format!(
+                                    "Dict values must share one type: expected '{}', found '{}'",
+                                    declared_type_to_string(&value_type),
+                                    declared_type_to_string(&val_ty)
+                                ),
+                                checked_value.location(),
+                            ));
+                            return Err(());
+                        }
                     }
-                    // TODO: Add type consistency checking between pairs
                     checked_pairs.push((checked_key, checked_value));
                 }
 
@@ -2811,7 +3292,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 location,
             } => {
                 let (checked_base, base_type) = self.analyze_node(*base)?;
-                let (checked_index, _index_type) = self.analyze_node(*index)?;
+                let (checked_index, index_type) = self.analyze_node(*index)?;
 
                 // Determine element type based on base type
                 let element_type = match base_type.underlying_type() {
@@ -2821,7 +3302,44 @@ impl<'a> SemanticAnalyzer<'a> {
                     _ => SymbolType::Unknown, // Allow dynamic access for unknown types
                 };
 
-                // TODO: Verify index type is appropriate (integer for lists, key type for dicts)
+                // Validate the index type: integers for lists/strings, the key
+                // type for dicts. Secret indices are never allowed.
+                if index_type.is_secret() {
+                    self.error_reporter.add_error(CompilerError::semantic_error(
+                        "Cannot index with a secret value",
+                        checked_index.location(),
+                    ));
+                    return Err(());
+                }
+                match base_type.underlying_type() {
+                    SymbolType::List(_) | SymbolType::String => {
+                        let idx_under = index_type.underlying_type();
+                        if !idx_under.is_integer() && !matches!(idx_under, SymbolType::Unknown) {
+                            self.error_reporter.add_error(CompilerError::type_error(
+                                format!(
+                                    "Index must be an integer, found '{}'",
+                                    declared_type_to_string(&index_type)
+                                ),
+                                checked_index.location(),
+                            ));
+                            return Err(());
+                        }
+                    }
+                    SymbolType::Dict(key_ty, _) => {
+                        if !Self::types_compatible(index_type.underlying_type(), key_ty) {
+                            self.error_reporter.add_error(CompilerError::type_error(
+                                format!(
+                                    "Dict key must be '{}', found '{}'",
+                                    declared_type_to_string(key_ty),
+                                    declared_type_to_string(&index_type)
+                                ),
+                                checked_index.location(),
+                            ));
+                            return Err(());
+                        }
+                    }
+                    _ => {}
+                }
 
                 Ok((
                     AstNode::IndexAccess {
