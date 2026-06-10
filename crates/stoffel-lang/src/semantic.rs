@@ -107,6 +107,18 @@ impl<'a> SemanticAnalyzer<'a> {
         node
     }
 
+    fn float_literal_from_int(node: AstNode) -> AstNode {
+        if let AstNode::Literal { location, .. } = &node {
+            if let Some(value) = Self::int_literal_value(&node) {
+                return AstNode::Literal {
+                    value: Value::Float((value as f64).to_bits()),
+                    location: location.clone(),
+                };
+            }
+        }
+        node
+    }
+
     /// Checks if two types are compatible, allowing Unknown to match any type.
     /// This enables type refinement where a concrete type annotation can refine
     /// an Unknown type from inference (e.g., `List[float]` refines `List[<unknown>]`).
@@ -431,6 +443,11 @@ impl<'a> SemanticAnalyzer<'a> {
                     expected_inner,
                 )))
             }
+            (inferred, expected)
+                if inferred.is_integer() && expected.underlying_type() == &SymbolType::Float =>
+            {
+                expected.clone()
+            }
             (
                 SymbolType::Generic(inferred_name, inferred_params),
                 SymbolType::Generic(expected_name, expected_params),
@@ -461,6 +478,13 @@ impl<'a> SemanticAnalyzer<'a> {
             (AstNode::Literal { .. }, _, expected)
                 if expected.underlying_type() == &SymbolType::Bool
                     && Self::int_literal_bool_value(&expr).is_some() =>
+            {
+                expected.clone()
+            }
+            (AstNode::Literal { .. }, inferred, expected)
+                if inferred.is_integer()
+                    && expected.underlying_type() == &SymbolType::Float
+                    && Self::int_literal_value(&expr).is_some() =>
             {
                 expected.clone()
             }
@@ -540,6 +564,9 @@ impl<'a> SemanticAnalyzer<'a> {
             }
             other if expected_type.underlying_type() == &SymbolType::Bool => {
                 Self::bool_literal_from_int(other)
+            }
+            other if expected_type.underlying_type() == &SymbolType::Float => {
+                Self::float_literal_from_int(other)
             }
             other => other,
         };
@@ -682,6 +709,12 @@ impl<'a> SemanticAnalyzer<'a> {
                 ));
                 return Err(());
             }
+        }
+
+        if dst_type.underlying_type() == &SymbolType::Float
+            && src_node.and_then(Self::int_literal_value).is_some()
+        {
+            return Ok(());
         }
 
         // Only enforce special rules if destination is integer

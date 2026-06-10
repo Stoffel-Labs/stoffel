@@ -4,7 +4,9 @@ use crate::net::curve::MpcFieldKind;
 use crate::net::mpc_engine::{MpcEngine, MpcSessionTopology, ShareAlgebraResult};
 use crate::net::share_runtime::MpcShareRuntime;
 use std::sync::{Arc, Mutex};
-use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType, Value};
+use stoffel_vm_types::core_types::{
+    ClearShareInput, ClearShareValue, ShareData, ShareType, Value, F64,
+};
 
 fn unavailable_runtime<'a>() -> ValueOpResult<MpcShareRuntime<'a>> {
     Err(ValueOpError::Unsupported {
@@ -145,7 +147,41 @@ fn clear_compare_helper_handles_ordered_values() {
         try_clear_compare(&Value::Bool(true), &Value::Bool(false)).expect("bool is comparable"),
         std::cmp::Ordering::Greater
     );
-    assert!(try_clear_compare(&Value::I64(1), &Value::U64(1)).is_none());
+    assert_eq!(
+        try_clear_compare(&Value::I64(1), &Value::U64(1)).expect("mixed integers are comparable"),
+        std::cmp::Ordering::Equal
+    );
+}
+
+#[test]
+fn clear_compare_helper_handles_public_float64_values() {
+    assert_eq!(
+        try_clear_compare(&Value::Float(F64(0.0)), &Value::Float(F64(0.0)))
+            .expect("float64 equality should be comparable"),
+        std::cmp::Ordering::Equal
+    );
+    assert_eq!(
+        try_clear_compare(&Value::Float(F64(0.0)), &Value::I64(0))
+            .expect("float64 and integer literals should be comparable"),
+        std::cmp::Ordering::Equal
+    );
+    assert_eq!(
+        try_clear_compare(
+            &Value::U64(9_007_199_254_740_993),
+            &Value::Float(F64(9_007_199_254_740_992.0)),
+        )
+        .expect("large integer and float values should be comparable"),
+        std::cmp::Ordering::Greater
+    );
+    assert_eq!(
+        try_clear_compare(&Value::U64(0), &Value::Float(F64(f64::MIN_POSITIVE)))
+            .expect("zero and a tiny positive float should be comparable"),
+        std::cmp::Ordering::Less
+    );
+    assert!(
+        try_clear_compare(&Value::Float(F64(f64::NAN)), &Value::Float(F64(0.0))).is_none(),
+        "NaN remains unordered because the VM comparison flag has no unordered state"
+    );
 }
 
 #[test]

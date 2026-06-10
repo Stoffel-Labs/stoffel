@@ -3,11 +3,12 @@
 //! These tests exercise the lexer, parser, UFCS transformer, and semantic analyzer
 //! as a unit, testing real code snippets rather than manually constructed ASTs.
 
-use stoffel_vm_types::compiled_binary::{MpcBackend, MpcCurve};
+use stoffel_vm_types::compiled_binary::{FunctionType, MpcBackend, MpcCurve};
 use stoffel_vm_types::core_types::{ShareType, Value};
 use stoffel_vm_types::instructions::Instruction;
 use stoffel_vm_types::registers::DEFAULT_SECRET_REGISTER_START;
 use stoffellang::ast::AstNode;
+use stoffellang::bytecode::Constant;
 use stoffellang::compiler::{compile, CompilerOptions};
 use stoffellang::convert_to_binary;
 use stoffellang::errors::{CompilerError, ErrorReporter};
@@ -825,6 +826,74 @@ var opened_floats: list[float] = Share.batch_open_fixed(shares)
     assert_eq!(
         return_types,
         vec![list_of(SymbolType::Int64), list_of(SymbolType::Float)]
+    );
+}
+
+#[test]
+fn test_fix64_type_alias_resolves_to_fixed_point_float() {
+    let source = r#"
+def identity(x: fix64) -> fix64:
+  return x
+
+def main(x: fix64) -> list[fix64]:
+  var y: fix64 = identity(x)
+  return [y]
+"#;
+    let analyzed = analyze_source_ast(source).expect("fix64 should resolve as a primitive type");
+    let mut return_types = Vec::new();
+    collect_call_return_types(&analyzed, "identity", &mut return_types);
+
+    assert_eq!(return_types, vec![SymbolType::Float]);
+
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("fix64 annotations should compile through bytecode generation");
+    assert_eq!(
+        program.main_chunk.return_type,
+        FunctionType::List(Box::new(FunctionType::Float))
+    );
+}
+
+#[test]
+fn test_int_literal_return_refines_to_fixed_point_return_type() {
+    let source = r#"
+def main(x: float64) -> float64:
+  if x < 0.1:
+    return 0
+  return x
+"#;
+
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("integer literals should be valid float64 return values");
+
+    assert_eq!(program.main_chunk.return_type, FunctionType::Float);
+    assert!(
+        program
+            .main_chunk
+            .constants
+            .iter()
+            .any(|constant| matches!(constant, Constant::Float(value) if value.0 == 0.0)),
+        "return 0 should be refined to a float constant"
+    );
+}
+
+#[test]
+fn test_int_literals_refine_to_fixed_point_annotation_contexts() {
+    let source = r#"
+def take_float(x: float64) -> float64:
+  return x
+
+def main() -> list[float64]:
+  var local: float64 = 1
+  var values: list[float64] = [0, local, take_float(2)]
+  return values
+"#;
+
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("integer literals should refine in float64 annotation contexts");
+
+    assert_eq!(
+        program.main_chunk.return_type,
+        FunctionType::List(Box::new(FunctionType::Float))
     );
 }
 

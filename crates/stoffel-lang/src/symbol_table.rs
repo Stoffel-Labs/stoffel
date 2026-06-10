@@ -255,7 +255,7 @@ impl SymbolType {
                 "u16" | "uint16" => SymbolType::UInt16,
                 "u8" | "uint8" => SymbolType::UInt8,
                 // Other primitives
-                "float" | "float64" | "f64" => SymbolType::Float,
+                "float" | "float64" | "f64" | "fix64" => SymbolType::Float,
                 "string" => SymbolType::String,
                 "bool" => SymbolType::Bool,
                 "bytes" | "ByteArray" => SymbolType::List(Box::new(SymbolType::UInt8)),

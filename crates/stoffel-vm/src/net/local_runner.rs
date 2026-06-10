@@ -1298,7 +1298,7 @@ fn port_is_free(port: u16) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use stoffel_vm_types::compiled_binary::{ClientIoSchema, CompiledFunction};
+    use stoffel_vm_types::compiled_binary::{ClientIoSchema, CompiledFunction, FunctionType};
     use stoffel_vm_types::core_types::ShareType;
 
     fn test_runner(mut binary: CompiledBinary) -> LocalCoordinatorRunnerBuilder {
@@ -1306,6 +1306,8 @@ mod tests {
             name: "main".to_owned(),
             register_count: 0,
             parameters: Vec::new(),
+            parameter_types: Vec::new(),
+            return_type: FunctionType::Unknown,
             upvalues: Vec::new(),
             parent: None,
             labels: HashMap::new(),
