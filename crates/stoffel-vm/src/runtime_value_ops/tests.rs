@@ -239,3 +239,84 @@ fn unsupported_secret_bit_ops_classify_any_share_type() {
         .to_string()
         .contains("Bitwise NOT is only supported on secret bool shares"));
 }
+
+#[test]
+fn clear_bitwise_supports_all_integer_widths() {
+    assert_eq!(
+        bit_and(&Value::I32(12), &Value::I32(10), &unavailable_runtime).unwrap(),
+        Value::I32(8)
+    );
+    assert_eq!(
+        bit_or(&Value::U8(12), &Value::U8(10), &unavailable_runtime).unwrap(),
+        Value::U8(14)
+    );
+    assert_eq!(
+        bit_xor(&Value::I16(12), &Value::I16(10), &unavailable_runtime).unwrap(),
+        Value::I16(6)
+    );
+    assert_eq!(
+        bit_xor(&Value::U64(12), &Value::U64(10), &unavailable_runtime).unwrap(),
+        Value::U64(6)
+    );
+    assert_eq!(
+        bit_not(&Value::U8(0), &unavailable_runtime).unwrap(),
+        Value::U8(255)
+    );
+    assert_eq!(
+        bit_not(&Value::I8(0), &unavailable_runtime).unwrap(),
+        Value::I8(-1)
+    );
+    // Mixed widths still reject.
+    bit_and(&Value::I32(1), &Value::I64(1), &unavailable_runtime)
+        .expect_err("mixed-width bitwise should be a type error");
+}
+
+#[test]
+fn clear_shifts_support_all_integer_widths() {
+    assert_eq!(shl(&Value::I32(1), &Value::I32(4)).unwrap(), Value::I32(16));
+    assert_eq!(shr(&Value::U16(8), &Value::U16(2)).unwrap(), Value::U16(2));
+    assert_eq!(shl(&Value::U8(1), &Value::U8(3)).unwrap(), Value::U8(8));
+    assert_eq!(shr(&Value::I8(-16), &Value::I8(2)).unwrap(), Value::I8(-4));
+
+    // Out-of-range shift amounts error instead of wrapping.
+    shl(&Value::I8(1), &Value::I8(9)).expect_err("shift wider than the type should error");
+    shl(&Value::I64(1), &Value::I64(-1)).expect_err("negative shift amount should error");
+}
+
+#[test]
+fn clear_float_modulo_is_supported() {
+    assert_eq!(
+        modulo(&Value::Float(F64(7.5)), &Value::Float(F64(2.0))).unwrap(),
+        Value::Float(F64(1.5))
+    );
+    assert_eq!(
+        modulo(&Value::Float(F64(7.5)), &Value::I64(2)).unwrap(),
+        Value::Float(F64(1.5))
+    );
+    assert_eq!(
+        modulo(&Value::I64(7), &Value::Float(F64(2.5))).unwrap(),
+        Value::Float(F64(2.0))
+    );
+    modulo(&Value::Float(F64(1.0)), &Value::Float(F64(0.0)))
+        .expect_err("float modulo by zero should error");
+}
+
+#[test]
+fn clear_string_concat_is_supported() {
+    assert_eq!(
+        add(
+            &Value::String("foo".to_string()),
+            &Value::String("bar".to_string()),
+            &unavailable_runtime
+        )
+        .unwrap(),
+        Value::String("foobar".to_string())
+    );
+    // String with non-string still rejects.
+    add(
+        &Value::String("foo".to_string()),
+        &Value::I64(1),
+        &unavailable_runtime,
+    )
+    .expect_err("string + int should be a type error");
+}

@@ -80,11 +80,15 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
             let key = args.cloned(1)?;
             if let Value::String(value) = target {
                 let index = value_to_usize(&key, "string index")?;
-                return Ok(value
-                    .chars()
-                    .nth(index)
-                    .map(|ch| Value::String(ch.to_string()))
-                    .unwrap_or(Value::Unit));
+                return match value.chars().nth(index) {
+                    Some(ch) => Ok(Value::String(ch.to_string())),
+                    None => Err(format!(
+                        "string index {} out of range (length {})",
+                        index,
+                        value.chars().count()
+                    )
+                    .into()),
+                };
             }
             let Some(table_ref) = TableRef::from_value(&target) else {
                 return Ok(Value::Unit);
@@ -92,9 +96,39 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
             (table_ref, key)
         };
 
-        let value = ctx
-            .read_table_field(table_ref, &key)?
-            .unwrap_or(Value::Unit);
+        if let TableRef::Array(_) = table_ref {
+            let negative_index = match &key {
+                Value::I64(v) => Some(*v as i128),
+                Value::I32(v) => Some(*v as i128),
+                Value::I16(v) => Some(*v as i128),
+                Value::I8(v) => Some(*v as i128),
+                _ => None,
+            }
+            .filter(|v| *v < 0);
+            if let Some(index) = negative_index {
+                return Err(format!(
+                    "array index {} is negative; negative indexing is not supported",
+                    index
+                )
+                .into());
+            }
+        }
+
+        let value = match ctx.read_table_field(table_ref, &key)? {
+            Some(value) => value,
+            // Missing object/dict keys read as Unit; array reads are bounds-checked.
+            None => match (table_ref, value_to_usize(&key, "array index")) {
+                (TableRef::Array(array_ref), Ok(index)) => {
+                    let len = ctx.read_array_ref_len(array_ref)?;
+                    return Err(format!(
+                        "array index {} out of range (length {})",
+                        index, len
+                    )
+                    .into());
+                }
+                _ => Value::Unit,
+            },
+        };
 
         if ctx.hooks_enabled() {
             match table_ref {

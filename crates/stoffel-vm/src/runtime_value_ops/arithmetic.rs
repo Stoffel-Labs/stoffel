@@ -136,6 +136,7 @@ pub(crate) fn try_clear_add(left: &Value, right: &Value) -> Option<ValueOpResult
         (Value::Float(a), Value::I64(b)) => Ok(Value::Float(F64(a.0 + *b as f64))),
         (Value::I64(a), Value::Float(b)) => Ok(Value::Float(F64(*a as f64 + b.0))),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(F64(a.0 + b.0))),
+        (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{a}{b}"))),
         _ => return None,
     })
 }
@@ -207,6 +208,15 @@ pub(crate) fn try_clear_modulo(left: &Value, right: &Value) -> Option<ValueOpRes
         (Value::U16(a), Value::U16(b)) => checked_rem_u16(*a, *b).map(Value::U16),
         (Value::U32(a), Value::U32(b)) => checked_rem_u32(*a, *b).map(Value::U32),
         (Value::U64(a), Value::U64(b)) => checked_rem_u64(*a, *b).map(Value::U64),
+        (Value::Float(a), Value::I64(b)) => {
+            ensure_nonzero_i64(*b, "Modulo").map(|()| Value::Float(F64(a.0 % *b as f64)))
+        }
+        (Value::I64(a), Value::Float(b)) => {
+            ensure_nonzero_f64(b.0, "Modulo").map(|()| Value::Float(F64(*a as f64 % b.0)))
+        }
+        (Value::Float(a), Value::Float(b)) => {
+            ensure_nonzero_f64(b.0, "Modulo").map(|()| Value::Float(F64(a.0 % b.0)))
+        }
         _ => return None,
     })
 }
