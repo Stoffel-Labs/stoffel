@@ -61,38 +61,75 @@ The compiler can generate binary files that are compatible with the StoffelVM:
 
 ## Language Examples
 
+StoffelLang is Pythonic: indentation-based blocks, `def` for functions,
+`var` for (mutable) variables, and `#` comments.
+
 ### Hello World
 
-```
-fn main() {
-    println("Hello, world!");
-}
+```python
+def main() -> None:
+  print("Hello, world!")
 ```
 
 ### Variables and Types
 
-```
-fn main() {
-    let x: i32 = 42;
-    let y = 3.14;  // Type inference
-    let name = "Stoffel";
-    let is_active = true;
-    
-    println("x = {}, y = {}", x, y);
-}
+```python
+def main() -> None:
+  var x: int32 = 42i32      # sized integers: int8..int64, uint8..uint64
+  var y = 3.14              # float (exponents work too: 2.5e-2)
+  var f: fix64 = 1.5        # fixed-point (MPC-friendly): fix32 / fix64
+  var name = "Stoffel" + "!"
+  var is_active = True
+  print(name, len(name), x, y, f, is_active)
 ```
 
 ### Functions
 
-```
-fn add(a: i32, b: i32) -> i32 {
-    return a + b;
-}
+```python
+# Literal default values and named arguments are supported.
+def add(a: int64, b: int64 = 7) -> int64:
+  return a + b
 
-fn main() {
-    let result = add(5, 7);
-    println("5 + 7 = {}", result);
-}
+def main() -> int64:
+  return add(5) + add(b: 2, a: 1)
+```
+
+### Control Flow
+
+```python
+def main() -> int64:
+  var sum = 0
+  for i in 0..10:        # ranges are end-EXCLUSIVE
+    if i % 2 == 1:
+      continue
+    if i > 6:
+      break
+    sum += i
+  while sum < 100:
+    sum = sum * 2
+  return sum
+```
+
+### Bitwise Operations
+
+`and`, `or`, `xor` are logical on bools and bitwise on matching integer
+types (Nim-style); `shl`/`shr` are the shift operators.
+
+```python
+def main() -> int64:
+  var mask = 12 and 10   # 8
+  var bits = 12 xor 10   # 6
+  var shifted = 1 shl 4  # 16
+  return mask + bits + shifted
+```
+
+### Secret (MPC) Values
+
+```python
+def main() -> int64:
+  var a: secret int64 = Share.from_clear(10)
+  var b: secret int64 = a + 5
+  return b.reveal()
 ```
 
 ## VM Compatibility
