@@ -133,6 +133,9 @@ pub(crate) fn try_clear_add(left: &Value, right: &Value) -> Option<ValueOpResult
         (Value::U16(a), Value::U16(b)) => checked_value("ADD", a.checked_add(*b), Value::U16),
         (Value::U32(a), Value::U32(b)) => checked_value("ADD", a.checked_add(*b), Value::U32),
         (Value::U64(a), Value::U64(b)) => checked_value("ADD", a.checked_add(*b), Value::U64),
+        (Value::Float(a), Value::I64(b)) => Ok(Value::Float(F64(a.0 + *b as f64))),
+        (Value::I64(a), Value::Float(b)) => Ok(Value::Float(F64(*a as f64 + b.0))),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(F64(a.0 + b.0))),
         _ => return None,
     })
 }
@@ -147,6 +150,9 @@ pub(crate) fn try_clear_sub(left: &Value, right: &Value) -> Option<ValueOpResult
         (Value::U16(a), Value::U16(b)) => checked_value("SUB", a.checked_sub(*b), Value::U16),
         (Value::U32(a), Value::U32(b)) => checked_value("SUB", a.checked_sub(*b), Value::U32),
         (Value::U64(a), Value::U64(b)) => checked_value("SUB", a.checked_sub(*b), Value::U64),
+        (Value::Float(a), Value::I64(b)) => Ok(Value::Float(F64(a.0 - *b as f64))),
+        (Value::I64(a), Value::Float(b)) => Ok(Value::Float(F64(*a as f64 - b.0))),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(F64(a.0 - b.0))),
         _ => return None,
     })
 }
@@ -161,6 +167,9 @@ pub(crate) fn try_clear_mul(left: &Value, right: &Value) -> Option<ValueOpResult
         (Value::U16(a), Value::U16(b)) => checked_value("MUL", a.checked_mul(*b), Value::U16),
         (Value::U32(a), Value::U32(b)) => checked_value("MUL", a.checked_mul(*b), Value::U32),
         (Value::U64(a), Value::U64(b)) => checked_value("MUL", a.checked_mul(*b), Value::U64),
+        (Value::Float(a), Value::I64(b)) => Ok(Value::Float(F64(a.0 * *b as f64))),
+        (Value::I64(a), Value::Float(b)) => Ok(Value::Float(F64(*a as f64 * b.0))),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(F64(a.0 * b.0))),
         _ => return None,
     })
 }

@@ -3,7 +3,7 @@
 # This program computes the element-wise AVERAGE of a 2x3 matrix across
 # multiple clients using fixed-point secret shares. Each client provides six
 # elements in row-major order. The secret reduction is performed over the flat
-# row-major domain, then the clear averages are reshaped to list[list[float]].
+# row-major domain, then the clear averages are reshaped to list[list[fix64]].
 
 def matrix_get[T](matrix: list[list[T]], row_idx: int64, col_idx: int64) -> T:
   return matrix[row_idx][col_idx]
@@ -15,14 +15,14 @@ def append_matrix_row[T](matrix: list[list[T]], row: list[T]) -> list[list[T]]:
   matrix.append(row)
   return matrix
 
-def reshape_2x3(values: list[float]) -> list[list[float]]:
+def reshape_2x3(values: list[fix64]) -> list[list[fix64]]:
   var row_count: int64 = 2
   var col_count: int64 = 3
-  var matrix: list[list[float]] = []
+  var matrix: list[list[fix64]] = []
 
   var row_idx: int64 = 0
   while row_idx < row_count:
-    var row: list[float] = []
+    var row: list[fix64] = []
 
     var col_idx: int64 = 0
     while col_idx < col_count:
@@ -37,14 +37,14 @@ def reshape_2x3(values: list[float]) -> list[list[float]]:
 
 # Computes element-wise federated average across all clients.
 # Returns a 2x3 matrix of per-element averages.
-def federated_average_2x3() -> list[list[float]]:
+def federated_average_2x3() -> list[list[fix64]]:
   var row_count: int64 = 2
   var col_count: int64 = 3
   var matrix_size: int64 = row_count * col_count
   var num_clients: int64 = ClientStore.get_number_clients()
 
   if num_clients == 0:
-    var empty: list[list[float]] = []
+    var empty: list[list[fix64]] = []
     return empty
 
   var flat_sums: list[Share] = []
@@ -61,8 +61,8 @@ def federated_average_2x3() -> list[list[float]]:
     flat_sums.append(element_sum)
     element_idx += 1
 
-  var opened_sums: list[float] = Share.batch_open_fixed(flat_sums)
-  var flat_averages: list[float] = []
+  var opened_sums: list[fix64] = Share.batch_open_fixed(flat_sums)
+  var flat_averages: list[fix64] = []
 
   element_idx = 0
   while element_idx < matrix_size:
@@ -71,11 +71,11 @@ def federated_average_2x3() -> list[list[float]]:
 
   return reshape_2x3(flat_averages)
 
-def main() -> list[list[float]]:
-  var averages: list[list[float]] = federated_average_2x3()
+def main() -> list[list[fix64]]:
+  var averages: list[list[fix64]] = federated_average_2x3()
 
-  # Exercise generic nested-list return substitution with T = float.
-  var first_average: float = matrix_get(averages, 0, 0)
-  var first_row: list[float] = matrix_row(averages, 0)
+  # Exercise generic nested-list return substitution with T = fix64.
+  var first_average: fix64 = matrix_get(averages, 0, 0)
+  var first_row: list[fix64] = matrix_row(averages, 0)
 
   return averages

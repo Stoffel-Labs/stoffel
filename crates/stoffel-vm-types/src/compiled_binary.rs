@@ -23,7 +23,7 @@ use std::io::{self, Read, Write};
 // Magic bytes that identify a StoffelVM bytecode file
 pub const MAGIC_BYTES: &[u8; 4] = b"STFL";
 // Current bytecode format version
-pub const FORMAT_VERSION: u16 = 5;
+pub const FORMAT_VERSION: u16 = 6;
 pub const CLIENT_IO_MANIFEST_FORMAT_VERSION: u16 = 2;
 pub const MPC_BACKEND_MANIFEST_FORMAT_VERSION: u16 = 3;
 pub const MPC_CURVE_MANIFEST_FORMAT_VERSION: u16 = 4;
@@ -221,6 +221,7 @@ pub struct ClientIoSchema {
 pub enum FunctionType {
     Int { signed: bool, bits: u8 },
     Float,
+    Fixed,
     String,
     Bool,
     Nil,
@@ -281,6 +282,7 @@ impl std::fmt::Display for FunctionType {
                 }
             }
             FunctionType::Float => f.write_str("float"),
+            FunctionType::Fixed => f.write_str("fix64"),
             FunctionType::String => f.write_str("string"),
             FunctionType::Bool => f.write_str("bool"),
             FunctionType::Nil => f.write_str("None"),
@@ -927,6 +929,7 @@ impl CompiledBinary {
                 writer.write_all(&[*signed as u8, *bits])?;
             }
             FunctionType::Float => writer.write_all(&[1u8])?,
+            FunctionType::Fixed => writer.write_all(&[13u8])?,
             FunctionType::String => writer.write_all(&[2u8])?,
             FunctionType::Bool => writer.write_all(&[3u8])?,
             FunctionType::Nil => writer.write_all(&[4u8])?,
@@ -1517,6 +1520,7 @@ impl CompiledBinary {
                 }
             }
             1 => FunctionType::Float,
+            13 => FunctionType::Fixed,
             2 => FunctionType::String,
             3 => FunctionType::Bool,
             4 => FunctionType::Nil,

@@ -19,7 +19,7 @@ pub enum TokenKind {
         radix: u32,
         kind: Option<crate::ast::IntKind>,
     }, // includes bases and optional suffix
-    FloatLiteral(u64), // this is a fixed point
+    FloatLiteral(u64), // raw f64 bits
     StringLiteral(String),
     BoolLiteral(bool),
     NilLiteral,
@@ -306,13 +306,10 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
                         }
                     }
                     // Parse the float literal
-                    let decimal_places = 4;
-                    let multiplier = 10_u64.pow(decimal_places);
                     match num_str.parse::<f64>() {
                         Ok(f) => {
-                            let fixed = (f * multiplier as f64).round() as u64;
                             push_token(
-                                TokenKind::FloatLiteral(fixed),
+                                TokenKind::FloatLiteral(f.to_bits()),
                                 make_location(line, column - num_str.len() + 1),
                             ); // Adjust location
                         }
@@ -538,13 +535,10 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
                 column += consumed; // update column by how many chars we consumed including first
 
                 if is_float {
-                    let decimal_places = 4;
-                    let multiplier = 10_u64.pow(decimal_places);
                     match digits.parse::<f64>() {
                         Ok(f) => {
-                            let fixed = (f * multiplier as f64).round() as u64;
                             push_token(
-                                TokenKind::FloatLiteral(fixed),
+                                TokenKind::FloatLiteral(f.to_bits()),
                                 make_location(line, start_col),
                             );
                         }

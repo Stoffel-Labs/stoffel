@@ -9,11 +9,14 @@ builtin type uint8
 builtin type string
 builtin type bool
 builtin type float
+builtin type fixed
 builtin type None
 builtin type void
 builtin type int = int64
 builtin type float64 = float
 builtin type f64 = float
+builtin type fix64 = fixed
+builtin type fixed64 = fixed
 builtin type bytes = list[uint8]
 builtin type ByteArray = list[uint8]
 builtin opaque Object

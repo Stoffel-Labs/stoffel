@@ -81,6 +81,37 @@ fn clear_add_does_not_require_share_runtime() {
 }
 
 #[test]
+fn clear_float_arithmetic_does_not_require_share_runtime() {
+    assert_eq!(
+        add(
+            &Value::Float(F64(1.25)),
+            &Value::Float(F64(2.5)),
+            &unavailable_runtime
+        )
+        .expect("float add should be local"),
+        Value::Float(F64(3.75))
+    );
+    assert_eq!(
+        sub(
+            &Value::Float(F64(0.0)),
+            &Value::Float(F64(0.125)),
+            &unavailable_runtime
+        )
+        .expect("float sub should be local"),
+        Value::Float(F64(-0.125))
+    );
+    assert_eq!(
+        mul(
+            &Value::Float(F64(1.5)),
+            &Value::I64(2),
+            &unavailable_runtime
+        )
+        .expect("float mul should accept integer scalar"),
+        Value::Float(F64(3.0))
+    );
+}
+
+#[test]
 fn share_type_mismatch_rejects_before_backend_dispatch() {
     let err = add(
         &Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1])),

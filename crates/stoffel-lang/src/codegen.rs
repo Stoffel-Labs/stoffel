@@ -99,6 +99,7 @@ fn symbol_type_to_function_type(ty: SymbolType) -> FunctionType {
             bits: 8,
         },
         SymbolType::Float => FunctionType::Float,
+        SymbolType::Fixed => FunctionType::Fixed,
         SymbolType::String => FunctionType::String,
         SymbolType::Bool => FunctionType::Bool,
         SymbolType::Nil => FunctionType::Nil,
@@ -264,7 +265,9 @@ impl CodeGenerator {
                 _ => {
                     if is_secret_register {
                         let clear_constant = match ty.underlying_type() {
-                            SymbolType::Float => Constant::Float(crate::bytecode::F64::new(0.0)),
+                            SymbolType::Float | SymbolType::Fixed => {
+                                Constant::Float(crate::bytecode::F64::new(0.0))
+                            }
                             SymbolType::Bool => Constant::Bool(false),
                             ty if ty.is_integer() => Constant::I64(0),
                             _ => Constant::Unit,
@@ -1175,6 +1178,7 @@ impl CodeGenerator {
                 operand,
                 location,
             } => {
+                let operand_type_hint = self.type_hint_for_node(operand);
                 let (operand_vr, operand_is_secret) = self.compile_node(operand)?;
                 let result_is_secret = operand_is_secret; // Unary ops preserve secrecy
                 let dest_vr = self.allocate_virtual_register(result_is_secret);
@@ -1182,10 +1186,18 @@ impl CodeGenerator {
                 match op.as_str() {
                     "-" => {
                         let zero_vr = self.allocate_virtual_register(false);
-                        self.identified_constants.push(Constant::I64(0));
+                        let zero_constant = if matches!(
+                            operand_type_hint.as_ref().map(SymbolType::underlying_type),
+                            Some(SymbolType::Float | SymbolType::Fixed)
+                        ) {
+                            Constant::Float(crate::bytecode::F64::new(0.0))
+                        } else {
+                            Constant::I64(0)
+                        };
+                        self.identified_constants.push(zero_constant.clone());
                         self.emit(Instruction::LDI(
                             zero_vr.0,
-                            crate::core_types::Value::from(Constant::I64(0)),
+                            crate::core_types::Value::from(zero_constant),
                         ));
                         self.emit(Instruction::SUB(dest_vr.0, zero_vr.0, operand_vr.0));
                     }

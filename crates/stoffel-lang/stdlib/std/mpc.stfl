@@ -13,7 +13,7 @@ builtin object MpcOutput:
 builtin object Share:
   def from_clear(value: int64) -> Share {.builtin.}:
   def from_clear_int(value: int64, bit_length: int64) -> Share {.builtin.}:
-  def from_clear_fixed(value: float, total_bits: int64, frac_bits: int64) -> Share {.builtin.}:
+  def from_clear_fixed(value: fix64, total_bits: int64, frac_bits: int64) -> Share {.builtin.}:
   def add(share1: Share, share2: Share) -> Share {.builtin.}:
   def sub(share1: Share, share2: Share) -> Share {.builtin.}:
   def neg(share: Share) -> Share {.builtin.}:
@@ -23,7 +23,7 @@ builtin object Share:
   def batch_mul(lefts: list[Share], rights: list[Share]) -> list[Share] {.builtin.}:
   def open(share: Share) -> int64 {.builtin.}:
   def reveal[T](share: Share) -> T {.builtin: "Share.open".}:
-  def open_fixed(share: Share) -> float {.builtin: "Share.open".}:
+  def open_fixed(share: Share) -> fix64 {.builtin: "Share.open".}:
   def send_to_client(share: Share, client_id: int64) -> bool {.builtin.}:
   def interpolate_local(shares: list[Share]) -> int64 {.builtin.}:
   def get_type(share: Share) -> string {.builtin.}:

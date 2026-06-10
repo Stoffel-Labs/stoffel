@@ -4,10 +4,10 @@
 # The program returns per-position averages and sends each summed share back to
 # client 0 when client-output is available.
 
-def federated_average_2x3() -> list[float]:
+def federated_average_2x3() -> list[fix64]:
   var matrix_size: int64 = 6
   var num_clients: int64 = ClientStore.get_number_clients()
-  var result: list[float] = []
+  var result: list[fix64] = []
   var output_shares: list[Share] = []
 
   var element_index: int64 = 0
@@ -20,7 +20,7 @@ def federated_average_2x3() -> list[float]:
       element_sum = element_sum.add(share)
       client_index = client_index + 1
 
-    var revealed_sum: float = element_sum.open_fixed()
+    var revealed_sum: fix64 = element_sum.open_fixed()
     result.append(revealed_sum / num_clients)
     output_shares.append(element_sum)
     element_index = element_index + 1
@@ -30,5 +30,5 @@ def federated_average_2x3() -> list[float]:
 
   return result
 
-def main() -> list[float]:
+def main() -> list[fix64]:
   return federated_average_2x3()

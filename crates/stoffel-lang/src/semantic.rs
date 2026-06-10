@@ -119,6 +119,14 @@ impl<'a> SemanticAnalyzer<'a> {
         node
     }
 
+    fn is_clear_real_type(ty: &SymbolType) -> bool {
+        matches!(ty.underlying_type(), SymbolType::Float | SymbolType::Fixed)
+    }
+
+    fn is_clear_numeric_type(ty: &SymbolType) -> bool {
+        ty.is_integer() || Self::is_clear_real_type(ty)
+    }
+
     /// Checks if two types are compatible, allowing Unknown to match any type.
     /// This enables type refinement where a concrete type annotation can refine
     /// an Unknown type from inference (e.g., `List[float]` refines `List[<unknown>]`).
@@ -295,7 +303,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 dst.is_secret() && dst.is_integer()
             }
             "ClientStore.take_share_fixed" | "Share.from_clear_fixed" => {
-                matches!(dst, SymbolType::Secret(inner) if inner.underlying_type() == &SymbolType::Float)
+                matches!(dst, SymbolType::Secret(inner) if inner.underlying_type() == &SymbolType::Fixed)
             }
             _ => false,
         }
@@ -443,9 +451,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     expected_inner,
                 )))
             }
-            (inferred, expected)
-                if inferred.is_integer() && expected.underlying_type() == &SymbolType::Float =>
-            {
+            (inferred, expected) if inferred.is_integer() && Self::is_clear_real_type(expected) => {
                 expected.clone()
             }
             (
@@ -483,8 +489,23 @@ impl<'a> SemanticAnalyzer<'a> {
             }
             (AstNode::Literal { .. }, inferred, expected)
                 if inferred.is_integer()
-                    && expected.underlying_type() == &SymbolType::Float
+                    && Self::is_clear_real_type(expected)
                     && Self::int_literal_value(&expr).is_some() =>
+            {
+                expected.clone()
+            }
+            (
+                AstNode::Literal {
+                    value: Value::Float(_),
+                    ..
+                },
+                _,
+                expected,
+            ) if Self::is_clear_real_type(expected) => expected.clone(),
+            (AstNode::UnaryOperation { op, .. }, inferred, expected)
+                if op == "-"
+                    && Self::is_clear_real_type(inferred)
+                    && Self::is_clear_real_type(expected) =>
             {
                 expected.clone()
             }
@@ -562,12 +583,28 @@ impl<'a> SemanticAnalyzer<'a> {
                 };
                 AstNode::DictLiteral { pairs, location }
             }
+            AstNode::UnaryOperation {
+                op,
+                operand,
+                location,
+            } if op == "-" && Self::is_clear_real_type(expected_type) => {
+                let operand_inferred =
+                    Self::refine_type_with_expected(inferred_type, expected_type);
+                let (refined_operand, _) = Self::refine_expression_type_with_expected(
+                    *operand,
+                    &operand_inferred,
+                    expected_type,
+                );
+                AstNode::UnaryOperation {
+                    op,
+                    operand: Box::new(refined_operand),
+                    location,
+                }
+            }
             other if expected_type.underlying_type() == &SymbolType::Bool => {
                 Self::bool_literal_from_int(other)
             }
-            other if expected_type.underlying_type() == &SymbolType::Float => {
-                Self::float_literal_from_int(other)
-            }
+            other if Self::is_clear_real_type(expected_type) => Self::float_literal_from_int(other),
             other => other,
         };
 
@@ -711,7 +748,7 @@ impl<'a> SemanticAnalyzer<'a> {
             }
         }
 
-        if dst_type.underlying_type() == &SymbolType::Float
+        if Self::is_clear_real_type(dst_type)
             && src_node.and_then(Self::int_literal_value).is_some()
         {
             return Ok(());
@@ -967,8 +1004,19 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 let result_ty = match op.as_str() {
                     "-" => {
-                        if operand_under.is_integer()
-                            || operand_under == SymbolType::Float
+                        if operand_under.is_integer() && !operand_under.is_signed() {
+                            self.error_reporter.add_error(CompilerError::type_error(
+                                format!(
+                                    "Unary '-' requires a signed numeric operand, found '{}'",
+                                    declared_type_to_string(&operand_ty)
+                                ),
+                                location.clone(),
+                            ));
+                            return Err(());
+                        }
+
+                        if (operand_under.is_integer() && operand_under.is_signed())
+                            || Self::is_clear_real_type(&operand_under)
                             || operand_under == SymbolType::Unknown
                         {
                             operand_ty.clone()
@@ -2390,8 +2438,8 @@ impl<'a> SemanticAnalyzer<'a> {
                     // Validate operand types. Equality also supports booleans.
                     let l_under = left_ty.underlying_type().clone();
                     let r_under = right_ty.underlying_type().clone();
-                    let is_left_numeric = l_under.is_integer() || l_under == SymbolType::Float;
-                    let is_right_numeric = r_under.is_integer() || r_under == SymbolType::Float;
+                    let is_left_numeric = Self::is_clear_numeric_type(&l_under);
+                    let is_right_numeric = Self::is_clear_numeric_type(&r_under);
                     let is_same_clear_comparable = l_under == r_under
                         && matches!(l_under, SymbolType::Bool | SymbolType::String);
 
@@ -2643,6 +2691,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         | SymbolType::Int16
                         | SymbolType::Int8
                         | SymbolType::Float
+                        | SymbolType::Fixed
                         | SymbolType::String
                         | SymbolType::Bool
                 );
@@ -2818,6 +2867,7 @@ fn declared_type_to_string(sym_type: &SymbolType) -> String {
         SymbolType::UInt16 => "uint16".to_string(),
         SymbolType::UInt8 => "uint8".to_string(),
         SymbolType::Float => "float".to_string(),
+        SymbolType::Fixed => "fix64".to_string(),
         SymbolType::String => "string".to_string(),
         SymbolType::Bool => "bool".to_string(),
         SymbolType::Nil => "None".to_string(),

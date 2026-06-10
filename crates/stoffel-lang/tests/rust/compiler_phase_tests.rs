@@ -817,7 +817,7 @@ var s1 = Share.from_clear(10)
 var s2 = Share.from_clear(20)
 var shares: list[Share] = [s1, s2]
 var opened_ints: list[int64] = Share.batch_open_fixed(shares)
-var opened_floats: list[float] = Share.batch_open_fixed(shares)
+var opened_fixed: list[fix64] = Share.batch_open_fixed(shares)
 "#;
     let analyzed = analyze_source_ast(source).expect("semantic analysis succeeds");
     let mut return_types = Vec::new();
@@ -825,12 +825,12 @@ var opened_floats: list[float] = Share.batch_open_fixed(shares)
 
     assert_eq!(
         return_types,
-        vec![list_of(SymbolType::Int64), list_of(SymbolType::Float)]
+        vec![list_of(SymbolType::Int64), list_of(SymbolType::Fixed)]
     );
 }
 
 #[test]
-fn test_fix64_type_alias_resolves_to_fixed_point_float() {
+fn test_fix64_type_alias_resolves_to_fixed_point_type() {
     let source = r#"
 def identity(x: fix64) -> fix64:
   return x
@@ -843,14 +843,123 @@ def main(x: fix64) -> list[fix64]:
     let mut return_types = Vec::new();
     collect_call_return_types(&analyzed, "identity", &mut return_types);
 
-    assert_eq!(return_types, vec![SymbolType::Float]);
+    assert_eq!(return_types, vec![SymbolType::Fixed]);
 
     let program = compile(source, "test.stfl", &default_options())
         .expect("fix64 annotations should compile through bytecode generation");
     assert_eq!(
         program.main_chunk.return_type,
-        FunctionType::List(Box::new(FunctionType::Float))
+        FunctionType::List(Box::new(FunctionType::Fixed))
     );
+}
+
+#[test]
+fn test_float64_and_fix64_have_distinct_function_metadata() {
+    let source = r#"
+def floating(x: float64) -> float64:
+  return x
+
+def fixed_point(x: fix64) -> fix64:
+  return x
+"#;
+
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("float64 and fix64 functions should compile");
+
+    let floating = program
+        .function_chunks
+        .get("floating")
+        .expect("floating function should be emitted");
+    assert_eq!(floating.parameter_types, vec![FunctionType::Float]);
+    assert_eq!(floating.return_type, FunctionType::Float);
+
+    let fixed_point = program
+        .function_chunks
+        .get("fixed_point")
+        .expect("fixed_point function should be emitted");
+    assert_eq!(fixed_point.parameter_types, vec![FunctionType::Fixed]);
+    assert_eq!(fixed_point.return_type, FunctionType::Fixed);
+}
+
+#[test]
+fn test_negative_decimal_literals_compile_to_real_values() {
+    let source = r#"
+def main() -> float64:
+  return -0.125
+"#;
+
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("negative decimal literals should compile");
+
+    assert!(
+        program
+            .main_chunk
+            .constants
+            .iter()
+            .any(|constant| matches!(constant, Constant::Float(value) if value.0 == 0.125)),
+        "positive operand of unary minus should be stored as f64 0.125"
+    );
+    assert!(
+        program
+            .main_chunk
+            .constants
+            .iter()
+            .any(|constant| matches!(constant, Constant::Float(value) if value.0 == 0.0)),
+        "unary minus for real values should use a real zero"
+    );
+}
+
+#[test]
+fn test_unary_minus_compiles_for_signed_integer_float_and_fixed_values() {
+    let source = r#"
+def negate_int(x: int64) -> int64:
+  return -x
+
+def negate_float(x: float64) -> float64:
+  return -x
+
+def negate_fixed(x: fix64) -> fix64:
+  return -x
+
+def main() -> fix64:
+  var int_value: int64 = -7
+  var float_value: float64 = negate_float(-0.25)
+  var fixed_value: fix64 = negate_fixed(-1.5)
+  return fixed_value
+"#;
+
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("unary minus should compile for signed integer, float64, and fix64");
+
+    assert_eq!(program.main_chunk.return_type, FunctionType::Fixed);
+    let negate_int = program
+        .function_chunks
+        .get("negate_int")
+        .expect("negate_int should compile");
+    assert_eq!(negate_int.return_type, FunctionType::int64());
+    let negate_float = program
+        .function_chunks
+        .get("negate_float")
+        .expect("negate_float should compile");
+    assert_eq!(negate_float.return_type, FunctionType::Float);
+    let negate_fixed = program
+        .function_chunks
+        .get("negate_fixed")
+        .expect("negate_fixed should compile");
+    assert_eq!(negate_fixed.return_type, FunctionType::Fixed);
+}
+
+#[test]
+fn test_unary_minus_rejects_unsigned_integer_values() {
+    let source = r#"
+def main(x: uint64) -> int64:
+  return -x
+"#;
+
+    assert!(expect_error_containing(
+        source,
+        "Unary '-' requires a signed numeric operand"
+    ));
 }
 
 #[test]
@@ -903,32 +1012,32 @@ fn test_semantic_return_only_generic_is_refined_from_index_assignment_type() {
 var s1 = Share.from_clear(10)
 var s2 = Share.from_clear(20)
 var shares: list[Share] = [s1, s2]
-var opened: list[list[float]]
+var opened: list[list[fix64]]
 opened[0] = Share.batch_open_fixed(shares)
 "#;
     let analyzed = analyze_source_ast(source).expect("semantic analysis succeeds");
     let mut return_types = Vec::new();
     collect_call_return_types(&analyzed, "Share.batch_open_fixed", &mut return_types);
 
-    assert_eq!(return_types, vec![list_of(SymbolType::Float)]);
+    assert_eq!(return_types, vec![list_of(SymbolType::Fixed)]);
 }
 
 #[test]
 fn test_semantic_return_only_generic_is_refined_from_function_return_type() {
     let source = r#"
-def open_as_floats(shares: list[Share]) -> list[float]:
+def open_as_fixed(shares: list[Share]) -> list[fix64]:
   return Share.batch_open_fixed(shares)
 
 var s1 = Share.from_clear(10)
 var s2 = Share.from_clear(20)
 var shares: list[Share] = [s1, s2]
-var opened: list[float] = open_as_floats(shares)
+var opened: list[fix64] = open_as_fixed(shares)
 "#;
     let analyzed = analyze_source_ast(source).expect("semantic analysis succeeds");
     let mut return_types = Vec::new();
     collect_call_return_types(&analyzed, "Share.batch_open_fixed", &mut return_types);
 
-    assert_eq!(return_types, vec![list_of(SymbolType::Float)]);
+    assert_eq!(return_types, vec![list_of(SymbolType::Fixed)]);
 }
 
 #[test]
