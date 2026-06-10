@@ -243,6 +243,19 @@ impl VMState {
             });
         }
 
+        // Program-defined functions and registered builtins take precedence:
+        // a user function named `sub` must stay callable even though `sub`
+        // is also a method name in the registry (UFCS: x.f(y) == f(x, y)).
+        let direct_err = match self.call_target(function_name) {
+            Ok(target) => {
+                return Ok(ResolvedCallTarget {
+                    name: function_name.to_owned(),
+                    target,
+                });
+            }
+            Err(error) => error,
+        };
+
         if self
             .program
             .receiver_types_for_method(function_name)
@@ -272,10 +285,7 @@ impl VMState {
             });
         }
 
-        Ok(ResolvedCallTarget {
-            name: function_name.to_owned(),
-            target: self.call_target(function_name)?,
-        })
+        Err(direct_err)
     }
 
     fn runtime_type_name(&mut self, value: &Value) -> VmResult<String> {

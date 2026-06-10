@@ -1359,13 +1359,15 @@ mod tests {
             .expect("string index"),
             Value::String("c".to_owned())
         );
-        assert_eq!(
-            vm.execute_with_args(
+        let err = vm
+            .execute_with_args(
                 "get_field",
-                &[Value::String("score".to_owned()), Value::I64(99)]
+                &[Value::String("score".to_owned()), Value::I64(99)],
             )
-            .expect("out of bounds string index"),
-            Value::Unit
+            .expect_err("out of bounds string index should error");
+        assert!(
+            err.to_string().contains("out of range"),
+            "unexpected error: {err}"
         );
     }
 
