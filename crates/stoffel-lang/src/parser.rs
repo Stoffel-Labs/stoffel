@@ -217,6 +217,295 @@ impl<'a> Parser<'a> {
     }
 
     // Helper to parse an indented block of statements
+    fn gensym(&mut self, base: &str) -> String {
+        self.node_id_counter += 1;
+        format!("__{}_{}", base, self.node_id_counter)
+    }
+
+    /// Desugars f"a {x} b" into "a " + to_string(x) + " b".
+    /// Interpolations are restricted to identifiers and dotted field chains.
+    fn desugar_fstring(&mut self, text: &str, location: SourceLocation) -> CompilerResult<AstNode> {
+        let string_part = |s: &str, location: &SourceLocation| AstNode::Literal {
+            value: Value::String(s.to_string()),
+            location: location.clone(),
+        };
+
+        let mut parts: Vec<AstNode> = Vec::new();
+        let mut literal = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '{' if chars.peek() == Some(&'{') => {
+                    chars.next();
+                    literal.push('{');
+                }
+                '}' if chars.peek() == Some(&'}') => {
+                    chars.next();
+                    literal.push('}');
+                }
+                '{' => {
+                    let mut expr = String::new();
+                    let mut closed = false;
+                    for c in chars.by_ref() {
+                        if c == '}' {
+                            closed = true;
+                            break;
+                        }
+                        expr.push(c);
+                    }
+                    if !closed {
+                        return Err(CompilerError::syntax_error(
+                            "Unclosed '{' in f-string",
+                            location,
+                        ));
+                    }
+                    let expr = expr.trim();
+                    let valid = !expr.is_empty()
+                        && expr.split('.').all(|segment| {
+                            let mut chars = segment.chars();
+                            chars
+                                .next()
+                                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        });
+                    if !valid {
+                        return Err(CompilerError::syntax_error(
+                            format!(
+                                "f-string interpolation '{{{}}}' must be a variable or dotted field access",
+                                expr
+                            ),
+                            location,
+                        )
+                        .with_hint("Bind complex expressions to a variable first"));
+                    }
+                    if !literal.is_empty() {
+                        parts.push(string_part(&literal, &location));
+                        literal.clear();
+                    }
+                    let mut segments = expr.split('.');
+                    let mut node = AstNode::Identifier(
+                        segments.next().unwrap().to_string(),
+                        location.clone(),
+                    );
+                    for field in segments {
+                        node = AstNode::FieldAccess {
+                            object: Box::new(node),
+                            field_name: field.to_string(),
+                            location: location.clone(),
+                        };
+                    }
+                    parts.push(AstNode::FunctionCall {
+                        function: Box::new(AstNode::Identifier(
+                            "to_string".to_string(),
+                            location.clone(),
+                        )),
+                        arguments: vec![node],
+                        location: location.clone(),
+                        resolved_return_type: None,
+                    });
+                }
+                '}' => {
+                    return Err(CompilerError::syntax_error(
+                        "Single '}' in f-string; use '}}' for a literal brace",
+                        location,
+                    ));
+                }
+                c => literal.push(c),
+            }
+        }
+        if !literal.is_empty() || parts.is_empty() {
+            parts.push(string_part(&literal, &location));
+        }
+
+        let mut iter = parts.into_iter();
+        let mut result = iter.next().expect("at least one part");
+        for part in iter {
+            result = AstNode::BinaryOperation {
+                op: "+".to_string(),
+                left: Box::new(result),
+                right: Box::new(part),
+                location: location.clone(),
+            };
+        }
+        // Anchor the result as a string even when it starts with an
+        // interpolation followed by nothing (to_string already returns one).
+        Ok(result)
+    }
+
+    /// Parses the tail of `[expr for x in iterable if cond]` (the leading
+    /// expression is already parsed) and desugars it to a block that builds
+    /// a list with a for-loop.
+    fn parse_list_comprehension(
+        &mut self,
+        element: AstNode,
+        location: SourceLocation,
+    ) -> CompilerResult<AstNode> {
+        self.consume_keyword("for", "Expected 'for' in comprehension")?;
+        let var_token = self.consume(
+            &TokenKind::Identifier("".to_string()),
+            "Expected loop variable in comprehension",
+        )?;
+        let var_name = match &var_token.kind {
+            TokenKind::Identifier(n) => n.clone(),
+            _ => unreachable!(),
+        };
+        self.consume_keyword("in", "Expected 'in' in comprehension")?;
+        let iterable = self.parse_expression()?;
+        let condition = if self.check_keyword("if") {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+        self.consume(&TokenKind::RBracket, "Expected ']' to close comprehension")?;
+
+        let result_name = self.gensym("comprehension");
+        let append_call = AstNode::FunctionCall {
+            function: Box::new(AstNode::Identifier(
+                "append".to_string(),
+                location.clone(),
+            )),
+            arguments: vec![
+                AstNode::Identifier(result_name.clone(), location.clone()),
+                element,
+            ],
+            location: location.clone(),
+            resolved_return_type: None,
+        };
+        let body = match condition {
+            Some(condition) => AstNode::Block(vec![AstNode::IfExpression {
+                condition: Box::new(condition),
+                then_branch: Box::new(AstNode::Block(vec![append_call])),
+                else_branch: None,
+            }]),
+            None => AstNode::Block(vec![append_call]),
+        };
+
+        Ok(AstNode::Block(vec![
+            AstNode::VariableDeclaration {
+                name: result_name.clone(),
+                value: Some(Box::new(AstNode::ListLiteral {
+                    elements: Vec::new(),
+                    location: location.clone(),
+                })),
+                type_annotation: None,
+                is_mutable: true,
+                is_secret: false,
+                location: location.clone(),
+            },
+            AstNode::ForLoop {
+                variables: vec![var_name],
+                iterable: Box::new(iterable),
+                body: Box::new(body),
+                location: location.clone(),
+            },
+            AstNode::Identifier(result_name, location),
+        ]))
+    }
+
+    /// Parses `match subject:` with literal `case` arms and desugars it to
+    /// an if/elif chain over a bound subject variable.
+    fn parse_match_statement(&mut self) -> CompilerResult<AstNode> {
+        let location = self.get_location();
+        self.advance(); // consume 'match'
+        let subject = self.parse_expression()?;
+        self.consume(&TokenKind::Colon, "Expected ':' after match subject")?;
+        self.consume(
+            &TokenKind::Newline,
+            "Expected newline after ':' before match cases",
+        )?;
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+        self.consume(&TokenKind::Indent, "Expected indented match cases")?;
+
+        let subject_name = self.gensym("match_subject");
+        let mut cases: Vec<(Option<AstNode>, AstNode)> = Vec::new();
+        while !self.check(&TokenKind::Dedent) && !self.check(&TokenKind::Eof) {
+            let case_location = self.get_location();
+            match &self.current_token_info {
+                Some(TokenInfo {
+                    kind: TokenKind::Identifier(id),
+                    ..
+                }) if id == "case" => {
+                    self.advance();
+                }
+                _ => {
+                    return Err(CompilerError::syntax_error(
+                        "Expected 'case' in match block",
+                        case_location,
+                    ));
+                }
+            }
+            let pattern = match &self.current_token_info {
+                Some(TokenInfo {
+                    kind: TokenKind::Identifier(id),
+                    ..
+                }) if id == "_" => {
+                    self.advance();
+                    None
+                }
+                _ => Some(self.parse_expression()?),
+            };
+            self.consume(&TokenKind::Colon, "Expected ':' after case pattern")?;
+            let body = self.parse_indented_block()?;
+            let is_default = pattern.is_none();
+            cases.push((pattern, body));
+            if is_default && !self.check(&TokenKind::Dedent) && !self.check(&TokenKind::Eof) {
+                return Err(CompilerError::syntax_error(
+                    "'case _' must be the last case in a match",
+                    case_location,
+                ));
+            }
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+        }
+        self.consume(&TokenKind::Dedent, "Expected dedent after match block")?;
+
+        if cases.is_empty() {
+            return Err(CompilerError::syntax_error(
+                "match must have at least one case",
+                location,
+            ));
+        }
+
+        let mut else_node: Option<Box<AstNode>> = None;
+        for (pattern, body) in cases.into_iter().rev() {
+            match pattern {
+                None => else_node = Some(Box::new(body)),
+                Some(pattern) => {
+                    let condition = AstNode::BinaryOperation {
+                        op: "==".to_string(),
+                        left: Box::new(AstNode::Identifier(
+                            subject_name.clone(),
+                            location.clone(),
+                        )),
+                        right: Box::new(pattern),
+                        location: location.clone(),
+                    };
+                    else_node = Some(Box::new(AstNode::IfExpression {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(body),
+                        else_branch: else_node,
+                    }));
+                }
+            }
+        }
+
+        Ok(AstNode::Block(vec![
+            AstNode::VariableDeclaration {
+                name: subject_name,
+                value: Some(Box::new(subject)),
+                type_annotation: None,
+                is_mutable: true,
+                is_secret: false,
+                location: location.clone(),
+            },
+            *else_node.expect("at least one case"),
+        ]))
+    }
+
     fn parse_indented_block(&mut self) -> CompilerResult<AstNode> {
         // Allow multiple newlines before the indented block starts
         if let Err(error) = self.consume(
@@ -365,6 +654,41 @@ impl<'a> Parser<'a> {
                 location.clone(),
             )
             .with_hint("Use 'var' for variable declarations (e.g., 'var x = ...')")),
+            // assert <cond>[, <message>] desugars to the builtin assert call.
+            Some(TokenInfo {
+                kind: TokenKind::Identifier(id),
+                location,
+            }) if id == "assert" => {
+                let location = location.clone();
+                self.advance(); // consume 'assert'
+                let condition = self.parse_expression()?;
+                let mut arguments = vec![condition];
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                    arguments.push(self.parse_expression()?);
+                }
+                Ok(AstNode::FunctionCall {
+                    function: Box::new(AstNode::Identifier(
+                        "assert".to_string(),
+                        location.clone(),
+                    )),
+                    arguments,
+                    location,
+                    resolved_return_type: None,
+                })
+            }
+            // match <subject>: case <literal>: ... desugars to an if/elif chain.
+            // (Contextual: `match = ...` still assigns to a variable.)
+            Some(TokenInfo {
+                kind: TokenKind::Identifier(id),
+                ..
+            }) if id == "match" => {
+                if self.check_next(&TokenKind::Assign) {
+                    self.parse_expression_statement()
+                } else {
+                    self.parse_match_statement()
+                }
+            }
             // Recognizable Python constructs that StoffelLang does not support:
             // give a targeted diagnostic instead of a generic parse error.
             Some(TokenInfo {
@@ -372,7 +696,7 @@ impl<'a> Parser<'a> {
                 location,
             }) if matches!(
                 id.as_str(),
-                "try" | "except" | "finally" | "raise" | "match" | "with" | "assert" | "yield"
+                "try" | "except" | "finally" | "raise" | "with" | "yield"
                     | "lambda" | "del" | "global" | "nonlocal"
             ) =>
             {
@@ -381,17 +705,9 @@ impl<'a> Parser<'a> {
                         format!("'{}' is not supported: StoffelLang has no exception handling", id),
                         "Errors abort execution; validate inputs up front and use return values to signal failure",
                     ),
-                    "match" => (
-                        "'match' statements are not supported".to_string(),
-                        "Use an if/elif/else chain instead",
-                    ),
                     "with" => (
                         "'with' statements are not supported".to_string(),
                         "StoffelLang has no context managers; call functions directly",
-                    ),
-                    "assert" => (
-                        "'assert' is not supported".to_string(),
-                        "Use an if statement that returns or reports an error value",
                     ),
                     "yield" => (
                         "'yield' is not supported: StoffelLang has no generators".to_string(),
@@ -615,12 +931,63 @@ impl<'a> Parser<'a> {
             self.parse_object_definition(location)
         } else if self.check_keyword("enum") {
             self.advance(); // Consume 'enum'
-                            // TODO: Parse enum definition
-            Err(CompilerError::syntax_error(
-                "'enum' definitions are not supported yet",
+            let name_token = self.consume(
+                &TokenKind::Identifier("".to_string()),
+                "Expected enum name",
+            )?;
+            let name = match &name_token.kind {
+                TokenKind::Identifier(n) => n.clone(),
+                _ => unreachable!(),
+            };
+            self.consume(&TokenKind::Colon, "Expected ':' after enum name")?;
+            self.consume(
+                &TokenKind::Newline,
+                "Expected newline after ':' before enum members",
+            )?;
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            self.consume(&TokenKind::Indent, "Expected indented enum members")?;
+
+            let mut members = Vec::new();
+            while !self.check(&TokenKind::Dedent) && !self.check(&TokenKind::Eof) {
+                let member_token = self.consume(
+                    &TokenKind::Identifier("".to_string()),
+                    "Expected enum member name",
+                )?;
+                let member_name = match &member_token.kind {
+                    TokenKind::Identifier(n) => n.clone(),
+                    _ => unreachable!(),
+                };
+                let value = if self.check(&TokenKind::Assign) {
+                    self.advance();
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                members.push(crate::ast::EnumMember {
+                    name: member_name,
+                    value,
+                });
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+            }
+            self.consume(&TokenKind::Dedent, "Expected dedent after enum members")?;
+
+            if members.is_empty() {
+                return Err(CompilerError::syntax_error(
+                    "Enum must declare at least one member",
+                    location,
+                ));
+            }
+
+            Ok(AstNode::EnumDefinition {
+                name,
+                members,
+                is_secret: false,
                 location,
-            )
-            .with_hint("Use named int64 constants (e.g. 'var RED = 0') or an object type instead"))
+            })
         } else if self.check_keyword("type") {
             self.advance(); // Consume 'type'
             self.parse_type_alias_definition(location)
@@ -1233,6 +1600,11 @@ impl<'a> Parser<'a> {
                 // Add other operators like power (**), bitwise (&, |, ^), etc.
                 _ => 0, // Not an infix operator or lowest precedence
             },
+            // 'in' is lexed as a keyword but acts as a comparison operator
+            Some(TokenInfo {
+                kind: TokenKind::Keyword(kw),
+                ..
+            }) if kw == "in" => 3,
             // Function call '(' has high precedence
             Some(TokenInfo {
                 kind: TokenKind::LParen,
@@ -1301,11 +1673,16 @@ impl<'a> Parser<'a> {
                         })
                     ) =>
             {
-                Err(CompilerError::syntax_error(
-                    "f-strings are not supported",
-                    token_info.location.clone(),
-                )
-                .with_hint("Build the string with '+' concatenation instead"))
+                let location = token_info.location.clone();
+                let Some(TokenInfo {
+                    kind: TokenKind::StringLiteral(text),
+                    ..
+                }) = self.advance()
+                else {
+                    unreachable!("guard checked the string literal");
+                };
+                let text = text.clone();
+                self.desugar_fstring(&text, location)
             }
             TokenKind::Identifier(name) => Ok(AstNode::Identifier(name.clone(), token_info.location.clone())),
             TokenKind::Keyword(name) if name == "type" => Ok(AstNode::Identifier(name.clone(), token_info.location.clone())),
@@ -1315,11 +1692,19 @@ impl<'a> Parser<'a> {
                 Ok(expr)
             }
             TokenKind::LBracket => {
-                // List literal: [elem1, elem2, ...] or empty list []
+                // List literal: [elem1, elem2, ...], empty list [], or a
+                // comprehension [expr for x in iterable if cond].
                 let mut elements = Vec::new();
                 if !self.check(&TokenKind::RBracket) {
                     loop {
-                        elements.push(self.parse_expression()?);
+                        let element = self.parse_expression()?;
+                        if elements.is_empty() && self.check_keyword("for") {
+                            return self.parse_list_comprehension(
+                                element,
+                                token_info.location.clone(),
+                            );
+                        }
+                        elements.push(element);
                         if self.check(&TokenKind::RBracket) {
                             break;
                         }
@@ -1400,6 +1785,17 @@ impl<'a> Parser<'a> {
                     location: operator_location,
                 })
             }
+            TokenKind::Keyword(kw) if kw == "in" => {
+                let precedence = self.current_precedence();
+                self.advance(); // Consume 'in'
+                let right = self.parse_expression_with_precedence(precedence)?;
+                Ok(AstNode::BinaryOperation {
+                    op: "in".to_string(),
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    location: operator_location,
+                })
+            }
             TokenKind::LParen => {
                 // This is a function call: left(arg1, arg2, ...)
                 self.advance(); // Consume '('
@@ -1451,23 +1847,46 @@ impl<'a> Parser<'a> {
                 })
             }
             TokenKind::LBracket => {
-                // This is index access: left[index]
+                // Index access left[i] or slice left[a:b] (Pythonic, both
+                // bounds optional). Slices lower to the builtin slice().
                 self.advance(); // Consume '['
-                let index = self.parse_expression()?;
+
+                let slice_bound_default = |value: u128, location: &SourceLocation| AstNode::Literal {
+                    value: Value::Int { value, kind: None },
+                    location: location.clone(),
+                };
+
+                let start = if self.check(&TokenKind::Colon) {
+                    slice_bound_default(0, &operator_location)
+                } else {
+                    self.parse_expression()?
+                };
+
                 if self.check(&TokenKind::Colon) {
-                    return Err(CompilerError::syntax_error(
-                        "Slice syntax 'a[start:end]' is not supported",
-                        self.get_location(),
-                    )
-                    .with_hint(
-                        "Copy the elements you need with a loop, e.g. 'for i in start..end: out.append(a[i])'",
-                    ));
+                    self.advance(); // Consume ':'
+                    let stop = if self.check(&TokenKind::RBracket) {
+                        // Omitted end: i64::MAX clamps to the length at runtime.
+                        slice_bound_default(i64::MAX as u128, &operator_location)
+                    } else {
+                        self.parse_expression()?
+                    };
+                    self.consume(&TokenKind::RBracket, "Expected ']' after slice")?;
+                    return Ok(AstNode::FunctionCall {
+                        function: Box::new(AstNode::Identifier(
+                            "slice".to_string(),
+                            operator_location.clone(),
+                        )),
+                        arguments: vec![left, start, stop],
+                        location: operator_location,
+                        resolved_return_type: None,
+                    });
                 }
+
                 self.consume(&TokenKind::RBracket, "Expected ']' after index")?;
 
                 Ok(AstNode::IndexAccess {
                     base: Box::new(left),
-                    index: Box::new(index),
+                    index: Box::new(start),
                     location: operator_location, // Location of '['
                 })
             }

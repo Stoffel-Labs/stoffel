@@ -19,9 +19,12 @@ pub struct SemanticAnalyzer<'a> {
     imported_symbols: HashMap<String, SymbolInfo>,
     /// Number of enclosing loops at the current analysis point (for break/continue)
     loop_depth: usize,
-    /// Parameter names and default-value expressions of user-defined functions,
-    /// used to resolve named arguments and inject defaults at call sites.
-    function_signatures: HashMap<String, Vec<(String, Option<AstNode>)>>,
+    /// Parameter names, default-value expressions, and variadic flags of
+    /// user-defined functions, used to resolve named arguments, inject
+    /// defaults, and pack *args at call sites.
+    function_signatures: HashMap<String, Vec<(String, Option<AstNode>, bool)>>,
+    /// Enum member values by enum name; enums lower to int64 constants.
+    enum_members: HashMap<String, HashMap<String, i64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +46,7 @@ impl<'a> SemanticAnalyzer<'a> {
             imported_symbols: HashMap::new(),
             loop_depth: 0,
             function_signatures: HashMap::new(),
+            enum_members: HashMap::new(),
         }
     }
 
@@ -59,6 +63,7 @@ impl<'a> SemanticAnalyzer<'a> {
             imported_symbols,
             loop_depth: 0,
             function_signatures: HashMap::new(),
+            enum_members: HashMap::new(),
         }
     }
 
@@ -121,15 +126,55 @@ impl<'a> SemanticAnalyzer<'a> {
     /// their parameter's slot, and remaining slots take declared defaults.
     fn resolve_call_arguments(
         &mut self,
-        arguments: Vec<AstNode>,
-        signature: &[(String, Option<AstNode>)],
+        mut arguments: Vec<AstNode>,
+        signature: &[(String, Option<AstNode>, bool)],
         function_name: &str,
         location: &SourceLocation,
     ) -> Result<Vec<AstNode>, ()> {
+        let is_variadic = signature
+            .last()
+            .is_some_and(|(_, _, variadic)| *variadic);
+
+        // Pack extra positional arguments into a list for a trailing *args.
+        if is_variadic {
+            if arguments
+                .iter()
+                .any(|arg| matches!(arg, AstNode::NamedArgument { .. }))
+            {
+                self.error_reporter.add_error(CompilerError::semantic_error(
+                    format!(
+                        "Named arguments cannot be combined with the variadic function '{}'",
+                        function_name
+                    ),
+                    location.clone(),
+                ));
+                return Err(());
+            }
+            let fixed = signature.len() - 1;
+            if arguments.len() < fixed {
+                self.error_reporter.add_error(CompilerError::semantic_error(
+                    format!(
+                        "Function '{}' expects at least {} argument(s), but {} were provided",
+                        function_name,
+                        fixed,
+                        arguments.len()
+                    ),
+                    location.clone(),
+                ));
+                return Err(());
+            }
+            let extras = arguments.split_off(fixed);
+            arguments.push(AstNode::ListLiteral {
+                elements: extras,
+                location: location.clone(),
+            });
+            return Ok(arguments);
+        }
+
         let has_named = arguments
             .iter()
             .any(|arg| matches!(arg, AstNode::NamedArgument { .. }));
-        let has_defaults = signature.iter().any(|(_, default)| default.is_some());
+        let has_defaults = signature.iter().any(|(_, default, _)| default.is_some());
         if !has_named && !has_defaults {
             return Ok(arguments);
         }
@@ -149,7 +194,8 @@ impl<'a> SemanticAnalyzer<'a> {
                     location: arg_loc,
                 } => {
                     seen_named = true;
-                    let Some(index) = signature.iter().position(|(param, _)| *param == name)
+                    let Some(index) =
+                        signature.iter().position(|(param, _, _)| *param == name)
                     else {
                         self.error_reporter.add_error(CompilerError::semantic_error(
                             format!(
@@ -195,7 +241,7 @@ impl<'a> SemanticAnalyzer<'a> {
         }
 
         let mut resolved = Vec::with_capacity(slots.len());
-        for (slot, (param_name, default)) in slots.into_iter().zip(signature.iter()) {
+        for (slot, (param_name, default, _)) in slots.into_iter().zip(signature.iter()) {
             match (slot, default) {
                 (Some(arg), _) => resolved.push(arg),
                 (None, Some(default)) => resolved.push(default.clone()),
@@ -1478,7 +1524,13 @@ impl<'a> SemanticAnalyzer<'a> {
                             .as_ref()
                             .map(|tn| SymbolType::from_ast_with_type_params(tn, &type_params))
                             .unwrap_or(SymbolType::Unknown);
-                        self.resolve_type_aliases(&param_type)
+                        let param_type = self.resolve_type_aliases(&param_type);
+                        if p.is_variadic {
+                            // *args receives the packed extras as a list.
+                            SymbolType::List(Box::new(param_type))
+                        } else {
+                            param_type
+                        }
                     })
                     .collect();
 
@@ -1523,18 +1575,22 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
 
                 if !is_builtin {
-                    if let Some(param) = parameters.iter().find(|param| param.is_variadic) {
-                        self.error_reporter.add_error(
-                            CompilerError::semantic_error(
-                                "Variadic parameters (*args) are currently supported only for builtin declarations",
-                                param
-                                    .type_annotation
-                                    .as_ref()
-                                    .map_or_else(|| location.clone(), |node| node.location()),
-                            )
-                            .with_hint("Accept a list[T] parameter instead"),
-                        );
-                        return Err(());
+                    if let Some(position) = parameters.iter().position(|param| param.is_variadic)
+                    {
+                        if position + 1 != parameters.len() {
+                            self.error_reporter.add_error(CompilerError::semantic_error(
+                                "A variadic parameter (*args) must be the last parameter",
+                                location.clone(),
+                            ));
+                            return Err(());
+                        }
+                        if parameters[position].default_value.is_some() {
+                            self.error_reporter.add_error(CompilerError::semantic_error(
+                                "A variadic parameter cannot have a default value",
+                                location.clone(),
+                            ));
+                            return Err(());
+                        }
                     }
                     // Defaults are injected at call sites, so they must not
                     // depend on caller or callee scope: literals only.
@@ -1583,6 +1639,7 @@ impl<'a> SemanticAnalyzer<'a> {
                                 (
                                     param.name.clone(),
                                     param.default_value.as_deref().cloned(),
+                                    param.is_variadic,
                                 )
                             })
                             .collect(),
@@ -1876,6 +1933,69 @@ impl<'a> SemanticAnalyzer<'a> {
                     AstNode::WhileLoop {
                         condition: Box::new(checked_condition),
                         body: Box::new(checked_body),
+                        location,
+                    },
+                    SymbolType::Void,
+                ))
+            }
+            AstNode::EnumDefinition {
+                name,
+                members,
+                is_secret,
+                location,
+            } => {
+                let mut values = HashMap::new();
+                let mut next_value: i64 = 0;
+                for member in &members {
+                    let value = match member.value.as_deref() {
+                        Some(node) => match Self::int_literal_value(node) {
+                            Some(v) => i64::try_from(v).map_err(|_| {
+                                self.error_reporter.add_error(CompilerError::semantic_error(
+                                    format!(
+                                        "Enum member '{}' value does not fit in int64",
+                                        member.name
+                                    ),
+                                    location.clone(),
+                                ));
+                            })?,
+                            None => {
+                                self.error_reporter.add_error(CompilerError::semantic_error(
+                                    format!(
+                                        "Enum member '{}' must use an integer literal value",
+                                        member.name
+                                    ),
+                                    location.clone(),
+                                ));
+                                return Err(());
+                            }
+                        },
+                        None => next_value,
+                    };
+                    if values.insert(member.name.clone(), value).is_some() {
+                        self.error_reporter.add_error(CompilerError::semantic_error(
+                            format!("Duplicate enum member '{}'", member.name),
+                            location.clone(),
+                        ));
+                        return Err(());
+                    }
+                    next_value = value.saturating_add(1);
+                }
+                self.enum_members.insert(name.clone(), values);
+
+                // The enum name doubles as a type alias for int64.
+                self.symbol_table.declare_symbol(SymbolInfo {
+                    name: name.clone(),
+                    kind: SymbolKind::Type,
+                    symbol_type: SymbolType::Int64,
+                    is_secret: false,
+                    defined_at: location.clone(),
+                });
+
+                Ok((
+                    AstNode::EnumDefinition {
+                        name,
+                        members,
+                        is_secret,
                         location,
                     },
                     SymbolType::Void,
@@ -2964,6 +3084,43 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 }
 
+                if op == "in" {
+                    let container_under = right_ty.underlying_type().clone();
+                    let container_ok = matches!(
+                        container_under,
+                        SymbolType::List(_)
+                            | SymbolType::Dict(_, _)
+                            | SymbolType::String
+                            | SymbolType::Unknown
+                    );
+                    if !container_ok {
+                        self.error_reporter.add_error(CompilerError::type_error(
+                            format!(
+                                "Right side of 'in' must be a list, dict, or string, found '{}'",
+                                declared_type_to_string(&right_ty)
+                            ),
+                            location.clone(),
+                        ));
+                        return Err(());
+                    }
+                    if left_ty.is_secret() || right_ty.is_secret() {
+                        self.error_reporter.add_error(CompilerError::semantic_error(
+                            "'in' is not supported on secret values",
+                            location.clone(),
+                        ));
+                        return Err(());
+                    }
+                    return Ok((
+                        AstNode::BinaryOperation {
+                            op,
+                            left: Box::new(checked_left),
+                            right: Box::new(checked_right),
+                            location,
+                        },
+                        SymbolType::Bool,
+                    ));
+                }
+
                 if matches!(op.as_str(), "shl" | "shr") {
                     let l_under = left_ty.underlying_type().clone();
                     let r_under = right_ty.underlying_type().clone();
@@ -3356,6 +3513,34 @@ impl<'a> SemanticAnalyzer<'a> {
                 field_name,
                 location,
             } => {
+                // Enum member access (Color.Red) lowers to its int64 constant.
+                if let AstNode::Identifier(object_name, _) = object.as_ref() {
+                    if let Some(members) = self.enum_members.get(object_name) {
+                        let Some(value) = members.get(&field_name).copied() else {
+                            self.error_reporter.add_error(CompilerError::semantic_error(
+                                format!(
+                                    "Enum '{}' has no member '{}'",
+                                    object_name, field_name
+                                ),
+                                location.clone(),
+                            ));
+                            return Err(());
+                        };
+                        return Ok((
+                            AstNode::Literal {
+                                value: Value::Int {
+                                    value: value as u128,
+                                    kind: Some(crate::ast::IntKind::Signed(
+                                        crate::ast::IntWidth::W64,
+                                    )),
+                                },
+                                location,
+                            },
+                            SymbolType::Int64,
+                        ));
+                    }
+                }
+
                 let (checked_object, object_type) = self.analyze_node(*object)?;
 
                 // Check if this looks like a method call attempt on a list or primitive type

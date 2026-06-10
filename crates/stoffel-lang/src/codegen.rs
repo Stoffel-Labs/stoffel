@@ -1338,6 +1338,15 @@ impl CodeGenerator {
                 }
 
                 match op.as_str() {
+                    "in" => {
+                        // x in xs lowers to the builtin contains(xs, x).
+                        self.emit(Instruction::PUSHARG(right_vr.0));
+                        self.emit(Instruction::PUSHARG(left_vr.0));
+                        self.emit(Instruction::CALL("contains".to_string()));
+                        let result_vr = self.allocate_virtual_register(false);
+                        self.emit(Instruction::MOV(result_vr.0, 0));
+                        Ok((result_vr, false))
+                    }
                     "+" | "-" | "*" | "/" | "%" | // Arithmetic
                     "and" | "or" | "xor" | // Logical/Bitwise
                     "shl" | "shr" // Shifts
@@ -1764,6 +1773,11 @@ impl CodeGenerator {
                 self.emit(Instruction::MOV(result_vr.0, 0)); // Result is in r0
 
                 Ok((result_vr, result_is_secret))
+            }
+            AstNode::EnumDefinition { .. } => {
+                // Enums are compile-time constants (semantic analysis folds
+                // member accesses to literals); nothing to emit.
+                Ok((VirtualRegister(0), false))
             }
             AstNode::Break => {
                 let Some((_, break_label)) = self.loop_label_stack.last().cloned() else {

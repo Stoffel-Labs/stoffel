@@ -45,6 +45,10 @@ def reverse[T](array: list[T]) -> void {.builtin: "reverse".}:
 def sort[T](array: list[T]) -> void {.builtin: "sort".}:
 def len[T](array: list[T]) -> int64 {.builtin: "len".}:
 def range(start: int64, stop: int64) -> list[int64] {.builtin.}:
+def slice[T](value: T, start: int64, stop: int64) -> T {.builtin: "slice".}:
+def contains[T, U](container: T, value: U) -> bool {.builtin: "contains".}:
+def to_string[T](value: T) -> string {.builtin: "to_string".}:
+def assert(condition: bool, message: string = "assertion failed") -> void {.builtin: "assert".}:
 
 builtin object LocalStorage:
   def store[T](key: string, value: T) -> bool {.builtin.}:
