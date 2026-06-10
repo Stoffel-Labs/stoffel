@@ -51,6 +51,10 @@ pub(crate) const FUNCTION_NAMES: &[&str] = &[
     "set_upvalue",
     "print",
     "type",
+    "slice",
+    "contains",
+    "to_string",
+    "assert",
 ];
 
 pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
@@ -79,13 +83,13 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
             let target = args.cloned(0)?;
             let key = args.cloned(1)?;
             if let Value::String(value) = target {
-                let index = value_to_usize(&key, "string index")?;
+                let len = value.chars().count();
+                let index = resolve_pythonic_index(&key, len, "string index")?;
                 return match value.chars().nth(index) {
                     Some(ch) => Ok(Value::String(ch.to_string())),
                     None => Err(format!(
                         "string index {} out of range (length {})",
-                        index,
-                        value.chars().count()
+                        index, len
                     )
                     .into()),
                 };
@@ -96,23 +100,12 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
             (table_ref, key)
         };
 
-        if let TableRef::Array(_) = table_ref {
-            let negative_index = match &key {
-                Value::I64(v) => Some(*v as i128),
-                Value::I32(v) => Some(*v as i128),
-                Value::I16(v) => Some(*v as i128),
-                Value::I8(v) => Some(*v as i128),
-                _ => None,
-            }
-            .filter(|v| *v < 0);
-            if let Some(index) = negative_index {
-                return Err(format!(
-                    "array index {} is negative; negative indexing is not supported",
-                    index
-                )
-                .into());
-            }
-        }
+        let key = if let TableRef::Array(array_ref) = table_ref {
+            let len = ctx.read_array_ref_len(array_ref)?;
+            resolve_array_key(&key, len, "array index")?
+        } else {
+            key
+        };
 
         let value = match ctx.read_table_field(table_ref, &key)? {
             Some(value) => value,
@@ -155,6 +148,12 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
                 args.cloned(1)?,
                 args.cloned(2)?,
             )
+        };
+        let key = if let TableRef::Array(array_ref) = table_ref {
+            let len = ctx.read_array_ref_len(array_ref)?;
+            resolve_array_key(&key, len, "array index")?
+        } else {
+            key
         };
 
         let hooks_enabled = ctx.hooks_enabled();
@@ -704,7 +703,154 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         Ok(Value::String(args.get(0)?.type_name().to_string()))
     });
 
+    register_standard_builtin!("to_string", |mut ctx| {
+        let value = {
+            let args = ctx.named_args("to_string");
+            args.require_exact(1, "1 argument")?;
+            args.cloned(0)?
+        };
+        let text = format_print_value(&mut ctx, &value, 3, &mut HashSet::new())?;
+        Ok(Value::String(text))
+    });
+
+    register_standard_builtin!("assert", |ctx| {
+        let args = ctx.named_args("assert");
+        args.require_min(1, "1 or 2 arguments: condition and optional message")?;
+        let condition = args.cloned(0)?;
+        let message = match args.cloned(1) {
+            Ok(Value::String(message)) => Some(message),
+            _ => None,
+        };
+        match condition {
+            Value::Bool(true) => Ok(Value::Unit),
+            Value::Bool(false) => Err(message
+                .unwrap_or_else(|| "assertion failed".to_owned())
+                .into()),
+            other => Err(format!(
+                "assert condition must be a bool, found {}",
+                other.type_name()
+            )
+            .into()),
+        }
+    });
+
+    register_standard_builtin!("contains", |mut ctx| {
+        let (container, needle) = {
+            let args = ctx.named_args("contains");
+            args.require_exact(2, "2 arguments: container and value")?;
+            (args.cloned(0)?, args.cloned(1)?)
+        };
+
+        if let Value::String(haystack) = &container {
+            let Value::String(needle) = &needle else {
+                return Err("'in' on a string requires a string operand".into());
+            };
+            return Ok(Value::Bool(haystack.contains(needle.as_str())));
+        }
+
+        match TableRef::from_value(&container) {
+            Some(TableRef::Array(array_ref)) => {
+                for value in collect_array_values(&mut ctx, array_ref)? {
+                    if values_equal(&mut ctx, &value, &needle, 64)? {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            Some(table_ref @ TableRef::Object(_)) => Ok(Value::Bool(
+                ctx.read_table_field(table_ref, &needle)?.is_some(),
+            )),
+            None => Err(format!(
+                "'in' requires a list, dict, or string container, found {}",
+                container.type_name()
+            )
+            .into()),
+        }
+    });
+
+    register_standard_builtin!("slice", |mut ctx| {
+        let (container, start, stop) = {
+            let args = ctx.named_args("slice");
+            args.require_exact(3, "3 arguments: value, start, and stop")?;
+            (args.cloned(0)?, args.cloned(1)?, args.cloned(2)?)
+        };
+
+        if let Value::String(text) = &container {
+            let len = text.chars().count();
+            let (start, stop) = resolve_slice_bounds(&start, &stop, len)?;
+            let sliced: String = text.chars().skip(start).take(stop - start).collect();
+            return Ok(Value::String(sliced));
+        }
+
+        let Some(TableRef::Array(array_ref)) = TableRef::from_value(&container) else {
+            return Err(format!(
+                "slice requires a list or string, found {}",
+                container.type_name()
+            )
+            .into());
+        };
+        let len = ctx.read_array_ref_len(array_ref)?;
+        let (start, stop) = resolve_slice_bounds(&start, &stop, len)?;
+        let result_ref = ctx.create_array_ref(stop - start)?;
+        for index in start..stop {
+            let value = ctx
+                .read_table_field(TableRef::from(array_ref), &Value::I64(index as i64))?
+                .unwrap_or(Value::Unit);
+            ctx.push_array_ref_values(result_ref, &[value])?;
+        }
+        Ok(Value::from(result_ref))
+    });
+
     Ok(())
+}
+
+/// Extracts a signed index from an integer Value.
+fn value_to_signed_index(value: &Value, name: &str) -> Result<i128, String> {
+    match value {
+        Value::I64(v) => Ok(*v as i128),
+        Value::I32(v) => Ok(*v as i128),
+        Value::I16(v) => Ok(*v as i128),
+        Value::I8(v) => Ok(*v as i128),
+        Value::U64(v) => Ok(*v as i128),
+        Value::U32(v) => Ok(*v as i128),
+        Value::U16(v) => Ok(*v as i128),
+        Value::U8(v) => Ok(*v as i128),
+        other => Err(format!("{} must be an integer, found {}", name, other.type_name())),
+    }
+}
+
+/// Resolves a possibly-negative index Pythonically: -1 is the last element.
+fn resolve_pythonic_index(key: &Value, len: usize, name: &str) -> Result<usize, String> {
+    let index = value_to_signed_index(key, name)?;
+    let resolved = if index < 0 { index + len as i128 } else { index };
+    usize::try_from(resolved)
+        .map_err(|_| format!("{} {} out of range (length {})", name, index, len))
+}
+
+/// Resolves negative integer array keys Pythonically, leaving other keys as-is.
+fn resolve_array_key(key: &Value, len: usize, name: &str) -> Result<Value, String> {
+    match value_to_signed_index(key, name) {
+        Ok(index) if index < 0 => {
+            let resolved = resolve_pythonic_index(key, len, name)?;
+            Ok(Value::I64(resolved as i64))
+        }
+        _ => Ok(key.clone()),
+    }
+}
+
+/// Resolves Pythonic slice bounds: negatives are length-relative, both ends
+/// clamp to [0, len], and an inverted range yields an empty slice.
+fn resolve_slice_bounds(start: &Value, stop: &Value, len: usize) -> Result<(usize, usize), String> {
+    let resolve = |value: &Value, default: i128| -> Result<i128, String> {
+        if matches!(value, Value::Unit) {
+            return Ok(default);
+        }
+        let v = value_to_signed_index(value, "slice bound")?;
+        Ok(if v < 0 { v + len as i128 } else { v })
+    };
+    let start = resolve(start, 0)?.clamp(0, len as i128) as usize;
+    let stop = resolve(stop, len as i128)?.clamp(0, len as i128) as usize;
+    Ok((start, stop.max(start)))
 }
 
 fn format_print_value(
