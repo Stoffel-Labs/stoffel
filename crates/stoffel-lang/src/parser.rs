@@ -329,7 +329,22 @@ impl<'a> Parser<'a> {
                 "return" => self.parse_return_statement(),
                 "discard" => self.parse_discard_statement(),
                 "import" => self.parse_import_statement(),
-                // Add other statement keywords (break, continue, yield, etc.)
+                "break" => {
+                    self.advance();
+                    Ok(AstNode::Break)
+                }
+                "continue" => {
+                    self.advance();
+                    Ok(AstNode::Continue)
+                }
+                "pass" => {
+                    self.advance();
+                    // `pass` is a no-op; lower it to a Nil literal statement.
+                    Ok(AstNode::Literal {
+                        value: crate::ast::Value::Nil,
+                        location: self.get_location(),
+                    })
+                }
                 _ => self.parse_expression_statement(), // Assume expression if keyword doesn't start a known statement/decl
             },
             // Friendly hard error for legacy 'proc' at start of a declaration
@@ -350,6 +365,49 @@ impl<'a> Parser<'a> {
                 location.clone(),
             )
             .with_hint("Use 'var' for variable declarations (e.g., 'var x = ...')")),
+            // Recognizable Python constructs that StoffelLang does not support:
+            // give a targeted diagnostic instead of a generic parse error.
+            Some(TokenInfo {
+                kind: TokenKind::Identifier(id),
+                location,
+            }) if matches!(
+                id.as_str(),
+                "try" | "except" | "finally" | "raise" | "match" | "with" | "assert" | "yield"
+                    | "lambda" | "del" | "global" | "nonlocal"
+            ) =>
+            {
+                let (message, hint): (String, &str) = match id.as_str() {
+                    "try" | "except" | "finally" | "raise" => (
+                        format!("'{}' is not supported: StoffelLang has no exception handling", id),
+                        "Errors abort execution; validate inputs up front and use return values to signal failure",
+                    ),
+                    "match" => (
+                        "'match' statements are not supported".to_string(),
+                        "Use an if/elif/else chain instead",
+                    ),
+                    "with" => (
+                        "'with' statements are not supported".to_string(),
+                        "StoffelLang has no context managers; call functions directly",
+                    ),
+                    "assert" => (
+                        "'assert' is not supported".to_string(),
+                        "Use an if statement that returns or reports an error value",
+                    ),
+                    "yield" => (
+                        "'yield' is not supported: StoffelLang has no generators".to_string(),
+                        "Build and return a list instead",
+                    ),
+                    "lambda" => (
+                        "'lambda' is not supported: StoffelLang has no anonymous functions".to_string(),
+                        "Define a named function with 'def' and pass its name to create_closure",
+                    ),
+                    _ => (
+                        format!("'{}' is not supported in StoffelLang", id),
+                        "See the language documentation for the supported statement forms",
+                    ),
+                };
+                Err(CompilerError::syntax_error(message, location.clone()).with_hint(hint))
+            }
             Some(TokenInfo {
                 kind: TokenKind::Identifier(_),
                 ..
@@ -559,9 +617,10 @@ impl<'a> Parser<'a> {
             self.advance(); // Consume 'enum'
                             // TODO: Parse enum definition
             Err(CompilerError::syntax_error(
-                "Enum definition parsing not implemented",
+                "'enum' definitions are not supported yet",
                 location,
-            ))
+            )
+            .with_hint("Use named int64 constants (e.g. 'var RED = 0') or an object type instead"))
         } else if self.check_keyword("type") {
             self.advance(); // Consume 'type'
             self.parse_type_alias_definition(location)
@@ -936,23 +995,23 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // Construct nested IfExpressions from the right
-        let mut final_node = AstNode::IfExpression {
-            condition: Box::new(condition),
-            then_branch: Box::new(then_branch),
-            else_branch, // Initial else branch
-        };
-
-        // Fold elif clauses into nested IfExpressions
+        // Construct nested IfExpressions from the right: each elif becomes the
+        // else-branch of the clause before it, so conditions are evaluated in
+        // source order (if first, then elifs top to bottom, else last).
+        let mut else_node = else_branch;
         for (elif_condition, elif_body) in elif_clauses.into_iter().rev() {
-            final_node = AstNode::IfExpression {
+            else_node = Some(Box::new(AstNode::IfExpression {
                 condition: Box::new(elif_condition),
                 then_branch: Box::new(elif_body),
-                else_branch: Some(Box::new(final_node)),
-            };
+                else_branch: else_node,
+            }));
         }
 
-        Ok(final_node)
+        Ok(AstNode::IfExpression {
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: else_node,
+        })
     }
 
     // TODO: Add location to WhileLoop node
@@ -1170,6 +1229,7 @@ impl<'a> Parser<'a> {
                 ".." => 4,                                                // Range operator
                 "+" | "-" => 5,                                           // Addition/Subtraction
                 "*" | "/" | "%" => 6, // Multiplication/Division/Modulo
+                "shl" | "shr" => 6,   // Bit shifts (Nim-style keywords)
                 // Add other operators like power (**), bitwise (&, |, ^), etc.
                 _ => 0, // Not an infix operator or lowest precedence
             },
@@ -1226,6 +1286,27 @@ impl<'a> Parser<'a> {
                 value: Value::Nil,
                 location: token_info.location.clone(),
             }),
+            TokenKind::Identifier(name) if name == "lambda" => Err(CompilerError::syntax_error(
+                "'lambda' is not supported: StoffelLang has no anonymous functions",
+                token_info.location.clone(),
+            )
+            .with_hint("Define a named function with 'def' and pass its name to create_closure")),
+            TokenKind::Identifier(name)
+                if matches!(name.as_str(), "f" | "F")
+                    && matches!(
+                        self.current_token_info,
+                        Some(TokenInfo {
+                            kind: TokenKind::StringLiteral(_),
+                            ..
+                        })
+                    ) =>
+            {
+                Err(CompilerError::syntax_error(
+                    "f-strings are not supported",
+                    token_info.location.clone(),
+                )
+                .with_hint("Build the string with '+' concatenation instead"))
+            }
             TokenKind::Identifier(name) => Ok(AstNode::Identifier(name.clone(), token_info.location.clone())),
             TokenKind::Keyword(name) if name == "type" => Ok(AstNode::Identifier(name.clone(), token_info.location.clone())),
             TokenKind::LParen => {
@@ -1373,6 +1454,15 @@ impl<'a> Parser<'a> {
                 // This is index access: left[index]
                 self.advance(); // Consume '['
                 let index = self.parse_expression()?;
+                if self.check(&TokenKind::Colon) {
+                    return Err(CompilerError::syntax_error(
+                        "Slice syntax 'a[start:end]' is not supported",
+                        self.get_location(),
+                    )
+                    .with_hint(
+                        "Copy the elements you need with a loop, e.g. 'for i in start..end: out.append(a[i])'",
+                    ));
+                }
                 self.consume(&TokenKind::RBracket, "Expected ']' after index")?;
 
                 Ok(AstNode::IndexAccess {
@@ -1744,6 +1834,14 @@ impl<'a> Parser<'a> {
             } => n.clone(),
             _ => unreachable!(), // consume ensures it's an identifier
         };
+
+        if self.check(&TokenKind::Comma) {
+            return Err(CompilerError::syntax_error(
+                "Tuple unpacking is not supported: a declaration binds exactly one variable",
+                self.get_location(),
+            )
+            .with_hint("Declare each variable on its own line, e.g. 'var a = 1' then 'var b = 2'"));
+        }
 
         // Parse optional type annotation
         let type_annotation = if self.check(&TokenKind::Colon) {
