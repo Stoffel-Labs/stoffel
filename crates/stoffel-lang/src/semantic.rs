@@ -17,6 +17,8 @@ pub struct SemanticAnalyzer<'a> {
     current_function_return_type: Option<SymbolType>, // Track expected return type
     /// Imported symbols from other modules, keyed by their qualified name
     imported_symbols: HashMap<String, SymbolInfo>,
+    /// Number of enclosing loops at the current analysis point (for break/continue)
+    loop_depth: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +38,7 @@ impl<'a> SemanticAnalyzer<'a> {
             error_reporter,
             current_function_return_type: None,
             imported_symbols: HashMap::new(),
+            loop_depth: 0,
         }
     }
 
@@ -50,6 +53,7 @@ impl<'a> SemanticAnalyzer<'a> {
             error_reporter,
             current_function_return_type: None,
             imported_symbols,
+            loop_depth: 0,
         }
     }
 
@@ -1605,7 +1609,10 @@ impl<'a> SemanticAnalyzer<'a> {
                     ));
                     return Err(());
                 }
-                let (checked_body, _body_ty) = self.analyze_node(*body)?;
+                self.loop_depth += 1;
+                let body_result = self.analyze_node(*body);
+                self.loop_depth -= 1;
+                let (checked_body, _body_ty) = body_result?;
                 Ok((
                     AstNode::WhileLoop {
                         condition: Box::new(checked_condition),
@@ -1614,6 +1621,26 @@ impl<'a> SemanticAnalyzer<'a> {
                     },
                     SymbolType::Void,
                 ))
+            }
+            AstNode::Break => {
+                if self.loop_depth == 0 {
+                    self.error_reporter.add_error(CompilerError::semantic_error(
+                        "'break' outside of a loop",
+                        SourceLocation::default(),
+                    ));
+                    return Err(());
+                }
+                Ok((AstNode::Break, SymbolType::Void))
+            }
+            AstNode::Continue => {
+                if self.loop_depth == 0 {
+                    self.error_reporter.add_error(CompilerError::semantic_error(
+                        "'continue' outside of a loop",
+                        SourceLocation::default(),
+                    ));
+                    return Err(());
+                }
+                Ok((AstNode::Continue, SymbolType::Void))
             }
             AstNode::Block(statements) => {
                 // Blocks don't create scopes by default in this design.
@@ -1706,7 +1733,16 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.symbol_table.declare_symbol(var_info);
 
                 // Analyze body within scope
-                let (checked_body, _body_type) = self.analyze_node(*body)?;
+                self.loop_depth += 1;
+                let body_result = self.analyze_node(*body);
+                self.loop_depth -= 1;
+                let (checked_body, _body_type) = match body_result {
+                    Ok(result) => result,
+                    Err(()) => {
+                        self.symbol_table.exit_scope();
+                        return Err(());
+                    }
+                };
 
                 // Exit loop scope
                 self.symbol_table.exit_scope();
@@ -2162,11 +2198,23 @@ impl<'a> SemanticAnalyzer<'a> {
                     };
 
                 // 4. Validate argument count
-                let call_parameters = self.builtin_call_parameters(
+                let mut call_parameters = self.builtin_call_parameters(
                     &function_name,
                     &expected_param_types,
                     is_builtin_call,
                 );
+                // `len` is Pythonic: it accepts a string as well as a list[T].
+                if is_builtin_call
+                    && function_name == "len"
+                    && argument_types.len() == 1
+                    && matches!(argument_types[0].underlying_type(), SymbolType::String)
+                {
+                    call_parameters = vec![CallParameterInfo {
+                        ty: SymbolType::String,
+                        has_default: false,
+                        is_variadic: false,
+                    }];
+                }
                 let min_args = Self::minimum_argument_count(&call_parameters);
                 let has_variadic = Self::has_variadic_parameter(&call_parameters);
                 let max_args = if has_variadic {
@@ -2498,6 +2546,42 @@ impl<'a> SemanticAnalyzer<'a> {
                 if matches!(op.as_str(), "and" | "or" | "xor") {
                     let l_under = left_ty.underlying_type().clone();
                     let r_under = right_ty.underlying_type().clone();
+
+                    // Nim-style: on integers these are bitwise operators.
+                    if l_under.is_integer() && r_under.is_integer() {
+                        if l_under != r_under {
+                            self.error_reporter.add_error(CompilerError::type_error(
+                                format!(
+                                    "Bitwise '{}' requires matching integer types, found '{}' and '{}'",
+                                    op,
+                                    declared_type_to_string(&left_ty),
+                                    declared_type_to_string(&right_ty)
+                                ),
+                                location.clone(),
+                            ));
+                            return Err(());
+                        }
+                        if left_ty.is_secret() || right_ty.is_secret() {
+                            self.error_reporter.add_error(CompilerError::semantic_error(
+                                format!(
+                                    "Bitwise '{}' is not supported on secret integers (only secret bool)",
+                                    op
+                                ),
+                                location.clone(),
+                            ));
+                            return Err(());
+                        }
+                        return Ok((
+                            AstNode::BinaryOperation {
+                                op,
+                                left: Box::new(checked_left),
+                                right: Box::new(checked_right),
+                                location,
+                            },
+                            l_under,
+                        ));
+                    }
+
                     let both_bool = l_under == SymbolType::Bool && r_under == SymbolType::Bool;
                     let both_unknown_or_bool =
                         matches!(l_under, SymbolType::Unknown | SymbolType::Bool)
@@ -2506,7 +2590,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     if !both_unknown_or_bool {
                         self.error_reporter.add_error(CompilerError::type_error(
                             format!(
-                                "Operands to '{}' must both be bool, found '{}' and '{}'",
+                                "Operands to '{}' must both be bool (or matching integers for bitwise use), found '{}' and '{}'",
                                 op,
                                 declared_type_to_string(&left_ty),
                                 declared_type_to_string(&right_ty)
@@ -2536,6 +2620,20 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
 
                 if op == "+" {
+                    if let (SymbolType::String, SymbolType::String) =
+                        (left_ty.underlying_type(), right_ty.underlying_type())
+                    {
+                        return Ok((
+                            AstNode::BinaryOperation {
+                                op,
+                                left: Box::new(checked_left),
+                                right: Box::new(checked_right),
+                                location,
+                            },
+                            SymbolType::String,
+                        ));
+                    }
+
                     if let (SymbolType::List(left_elem), SymbolType::List(right_elem)) =
                         (left_ty.underlying_type(), right_ty.underlying_type())
                     {
@@ -2592,6 +2690,55 @@ impl<'a> SemanticAnalyzer<'a> {
                             right_ty.clone(),
                         ));
                     }
+                }
+
+                if matches!(op.as_str(), "shl" | "shr") {
+                    let l_under = left_ty.underlying_type().clone();
+                    let r_under = right_ty.underlying_type().clone();
+                    let left_ok =
+                        l_under.is_integer() || matches!(l_under, SymbolType::Unknown);
+                    let right_ok =
+                        r_under.is_integer() || matches!(r_under, SymbolType::Unknown);
+                    if !left_ok || !right_ok {
+                        self.error_reporter.add_error(CompilerError::type_error(
+                            format!(
+                                "Operands to '{}' must be integers, found '{}' and '{}'",
+                                op,
+                                declared_type_to_string(&left_ty),
+                                declared_type_to_string(&right_ty)
+                            ),
+                            location.clone(),
+                        ));
+                        return Err(());
+                    }
+                    if left_ty.is_secret() || right_ty.is_secret() {
+                        self.error_reporter.add_error(CompilerError::semantic_error(
+                            format!("'{}' is not supported on secret values", op),
+                            location.clone(),
+                        ));
+                        return Err(());
+                    }
+                    if l_under.is_integer() && r_under.is_integer() && l_under != r_under {
+                        self.error_reporter.add_error(CompilerError::type_error(
+                            format!(
+                                "'{}' requires matching integer types, found '{}' and '{}'",
+                                op,
+                                declared_type_to_string(&left_ty),
+                                declared_type_to_string(&right_ty)
+                            ),
+                            location.clone(),
+                        ));
+                        return Err(());
+                    }
+                    return Ok((
+                        AstNode::BinaryOperation {
+                            op,
+                            left: Box::new(checked_left),
+                            right: Box::new(checked_right),
+                            location,
+                        },
+                        l_under,
+                    ));
                 }
 
                 // For other binary ops we don't handle here; pass through as Unknown type.

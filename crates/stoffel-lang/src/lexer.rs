@@ -73,6 +73,14 @@ fn get_keywords() -> HashMap<String, TokenKind> {
     keywords.insert("while".to_string(), TokenKind::Keyword("while".to_string()));
     keywords.insert("for".to_string(), TokenKind::Keyword("for".to_string()));
     keywords.insert("in".to_string(), TokenKind::Keyword("in".to_string()));
+    keywords.insert("break".to_string(), TokenKind::Keyword("break".to_string()));
+    keywords.insert(
+        "continue".to_string(),
+        TokenKind::Keyword("continue".to_string()),
+    );
+    keywords.insert("pass".to_string(), TokenKind::Keyword("pass".to_string()));
+    keywords.insert("shl".to_string(), TokenKind::Operator("shl".to_string()));
+    keywords.insert("shr".to_string(), TokenKind::Operator("shr".to_string()));
     keywords.insert(
         "return".to_string(),
         TokenKind::Keyword("return".to_string()),
@@ -476,6 +484,45 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
                     }
                 }
 
+                // Optional exponent for decimal literals: 1e3, 2.5e-2, 4E+6
+                if radix == 10 {
+                    if let Some(&exp_c) = iter.peek() {
+                        if exp_c == 'e' || exp_c == 'E' {
+                            let mut probe = iter.clone();
+                            probe.next(); // consume 'e'
+                            let mut exp_str = String::new();
+                            if let Some(&sign_c) = probe.peek() {
+                                if sign_c == '+' || sign_c == '-' {
+                                    exp_str.push(sign_c);
+                                    probe.next();
+                                }
+                            }
+                            let mut has_exp_digits = false;
+                            while let Some(&d) = probe.peek() {
+                                if d.is_ascii_digit() {
+                                    exp_str.push(d);
+                                    probe.next();
+                                    has_exp_digits = true;
+                                } else {
+                                    break;
+                                }
+                            }
+                            // Only treat as exponent when digits follow; otherwise
+                            // leave the 'e' for identifier lexing (e.g. suffixes).
+                            if has_exp_digits {
+                                digits.push('e');
+                                digits.push_str(&exp_str);
+                                let commit_len = 1 + exp_str.len();
+                                for _ in 0..commit_len {
+                                    iter.next();
+                                }
+                                consumed += commit_len;
+                                is_float = true;
+                            }
+                        }
+                    }
+                }
+
                 // Optional integer suffix: i8/i16/i32/i64/u8/u16/u32/u64
                 let mut kind: Option<crate::ast::IntKind> = None;
                 if !is_float {
@@ -648,11 +695,16 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
                     column,
                 };
                 let snippet = extract_source_snippet(source, &location, 2);
-                return Err(CompilerError::syntax_error(
-                    format!("Unexpected character: {}", c),
-                    location,
-                )
-                .with_snippet(snippet));
+                let error = if c == '\'' {
+                    CompilerError::syntax_error(
+                        "Single-quoted strings are not supported",
+                        location,
+                    )
+                    .with_hint("Use double quotes: \"text\"")
+                } else {
+                    CompilerError::syntax_error(format!("Unexpected character: {}", c), location)
+                };
+                return Err(error.with_snippet(snippet));
             }
         }
     }

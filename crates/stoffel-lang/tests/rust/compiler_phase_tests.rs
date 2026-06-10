@@ -3287,3 +3287,231 @@ var n = result.len()
 "#;
     assert!(compile_source(source).is_ok());
 }
+
+// ===========================================
+// Audit regression tests (elif order, break/continue, bitwise, literals)
+// ===========================================
+
+/// elif chains must evaluate conditions in source order. The parser used to
+/// fold elif clauses so the *first elif* became the outermost condition,
+/// silently reordering overlapping conditions (e.g. x < 0 vs x < 10).
+#[test]
+fn test_elif_chain_preserves_source_order() {
+    let source = r#"
+def classify(x: int64) -> int64:
+  if x < 0:
+    return -1
+  elif x < 10:
+    return 1
+  else:
+    return 2
+
+def main() -> int64:
+  return classify(-5)
+"#;
+    let tokens = tokenize(source, "test.stfl").expect("lexes");
+    let ast = parse(&tokens, "test.stfl").expect("parses");
+
+    fn find_if(node: &AstNode) -> Option<&AstNode> {
+        match node {
+            AstNode::IfExpression { .. } => Some(node),
+            AstNode::Block(nodes) => nodes.iter().find_map(find_if),
+            AstNode::FunctionDefinition { body, .. } => find_if(body),
+            _ => None,
+        }
+    }
+
+    let if_node = find_if(&ast).expect("function contains an if");
+    let AstNode::IfExpression { condition, .. } = if_node else {
+        unreachable!()
+    };
+    // The OUTERMOST condition must be the first written one: x < 0.
+    let AstNode::BinaryOperation { op, right, .. } = condition.as_ref() else {
+        panic!("expected comparison condition, got {:?}", condition);
+    };
+    assert_eq!(op, "<");
+    match right.as_ref() {
+        AstNode::Literal {
+            value: stoffellang::ast::Value::Int { value, .. },
+            ..
+        } => assert_eq!(*value, 0, "outer condition must compare against 0, not 10"),
+        other => panic!("expected integer literal in outer condition, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_break_and_continue_compile_inside_loops() {
+    let source = r#"
+def main() -> int64:
+  var n = 0
+  while True:
+    n += 1
+    if n == 5:
+      break
+  var sum = 0
+  for i in 0..10:
+    if i % 2 == 1:
+      continue
+    sum += i
+  return n + sum
+"#;
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("break/continue should compile inside loops");
+    assert!(program.main_chunk.instructions.len() > 0);
+}
+
+#[test]
+fn test_break_outside_loop_is_rejected() {
+    let source = r#"
+def main() -> int64:
+  break
+  return 1
+"#;
+    assert!(expect_error_containing(source, "'break' outside of a loop"));
+}
+
+#[test]
+fn test_continue_outside_loop_is_rejected() {
+    let source = r#"
+def main() -> int64:
+  continue
+  return 1
+"#;
+    assert!(expect_error_containing(
+        source,
+        "'continue' outside of a loop"
+    ));
+}
+
+#[test]
+fn test_pass_statement_compiles_as_noop() {
+    let source = r#"
+def main() -> int64:
+  if True:
+    pass
+  return 1
+"#;
+    compile(source, "test.stfl", &default_options()).expect("pass should compile");
+}
+
+#[test]
+fn test_exponent_float_literals() {
+    let source = r#"
+def main() -> float64:
+  var a = 1e3
+  var b = 2.5e-2
+  var c = 4E+6
+  return a + b + c
+"#;
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("exponent float literals should compile");
+    assert!(
+        program
+            .main_chunk
+            .constants
+            .iter()
+            .any(|constant| matches!(constant, Constant::Float(value) if value.0 == 1000.0)),
+        "1e3 should lex as the float 1000.0"
+    );
+}
+
+#[test]
+fn test_bitwise_keywords_on_matching_integers() {
+    let source = r#"
+def main() -> int64:
+  var a = 12
+  var b = 10
+  var c = a xor b
+  var d = a and b
+  var e = a or b
+  var f = a shl 2
+  var g = a shr 1
+  return c + d + e + f + g
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("bitwise keywords should work on matching integers");
+}
+
+#[test]
+fn test_bitwise_on_mixed_integer_widths_is_rejected() {
+    let source = r#"
+def main() -> int64:
+  var a: int32 = 1i32
+  var b: int64 = 2i64
+  var c = a xor b
+  return 0
+"#;
+    assert!(expect_error_containing(
+        source,
+        "requires matching integer types"
+    ));
+}
+
+#[test]
+fn test_unary_minus_on_sized_integers_uses_matching_width() {
+    let source = r#"
+def main() -> int64:
+  var a32: int32 = 17i32
+  var b32 = -a32
+  var a16: int16 = 5i16
+  var b16 = -a16
+  return 0
+"#;
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("unary minus on sized ints should compile");
+    assert!(
+        program
+            .main_chunk
+            .constants
+            .iter()
+            .any(|constant| matches!(constant, Constant::I32(0))),
+        "negating an int32 must use an I32 zero, not I64"
+    );
+}
+
+#[test]
+fn test_string_concat_types_as_string() {
+    let source = r#"
+def main() -> int64:
+  var a = "Hello, "
+  var b = "Stoffel"
+  var c = a + b
+  return len(c)
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("string concatenation and len(string) should compile");
+}
+
+#[test]
+fn test_targeted_errors_for_unsupported_python_syntax() {
+    let cases: [(&str, &str); 5] = [
+        (
+            "def main() -> int64:\n  try:\n    var x = 1\n  except:\n    var y = 2\n  return 1\n",
+            "no exception handling",
+        ),
+        (
+            "def main() -> int64:\n  var f = lambda x: x + 1\n  return 1\n",
+            "no anonymous functions",
+        ),
+        (
+            "def main() -> int64:\n  var xs: list[int64] = [1, 2, 3]\n  var ys = xs[1:3]\n  return 0\n",
+            "Slice syntax",
+        ),
+        (
+            "def main() -> int64:\n  var a, b = 1, 2\n  return a\n",
+            "Tuple unpacking is not supported",
+        ),
+        (
+            "def main() -> int64:\n  var n = 42\n  var s = f\"value {n}\"\n  return n\n",
+            "f-strings are not supported",
+        ),
+    ];
+    for (source, expected) in cases {
+        assert!(
+            expect_error_containing(source, expected),
+            "expected error containing '{}' for source:\n{}",
+            expected,
+            source
+        );
+    }
+}

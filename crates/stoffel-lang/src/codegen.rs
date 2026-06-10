@@ -1,6 +1,6 @@
 use crate::ast::{AstNode, Pragma};
 use crate::bytecode::{BytecodeChunk, CompiledProgram, Constant, Instruction};
-use crate::errors::{CompilerError, CompilerResult};
+use crate::errors::{CompilerError, CompilerResult, SourceLocation};
 use crate::register_allocator::{self, AllocationError, PhysicalRegister, VirtualRegister};
 use crate::symbol_table::SymbolType;
 use stoffel_vm_types::compiled_binary::{
@@ -177,6 +177,8 @@ struct CodeGenerator {
     variable_share_lists: HashMap<String, Vec<ShareType>>,
     clear_int_constants: HashMap<String, u64>,
     active_loop_bounds: Vec<(String, u64)>,
+    /// (continue_label, break_label) for each enclosing loop, innermost last
+    loop_label_stack: Vec<(String, String)>,
 }
 
 impl CodeGenerator {
@@ -204,6 +206,7 @@ impl CodeGenerator {
             variable_share_lists: HashMap::new(),
             clear_int_constants: HashMap::new(),
             active_loop_bounds: Vec::new(),
+            loop_label_stack: Vec::new(),
         }
     }
 
@@ -1242,13 +1245,19 @@ impl CodeGenerator {
                 match op.as_str() {
                     "-" => {
                         let zero_vr = self.allocate_virtual_register(false);
-                        let zero_constant = if matches!(
-                            operand_type_hint.as_ref().map(SymbolType::underlying_type),
-                            Some(SymbolType::Float | SymbolType::Fixed { .. })
-                        ) {
-                            Constant::Float(crate::bytecode::F64::new(0.0))
-                        } else {
-                            Constant::I64(0)
+                        // The zero must match the operand's width: the VM rejects
+                        // mixed-width SUB, so `-x` on int32 needs an I32 zero.
+                        let zero_constant = match operand_type_hint
+                            .as_ref()
+                            .map(SymbolType::underlying_type)
+                        {
+                            Some(SymbolType::Float | SymbolType::Fixed { .. }) => {
+                                Constant::Float(crate::bytecode::F64::new(0.0))
+                            }
+                            Some(SymbolType::Int32) => Constant::I32(0),
+                            Some(SymbolType::Int16) => Constant::I16(0),
+                            Some(SymbolType::Int8) => Constant::I8(0),
+                            _ => Constant::I64(0),
                         };
                         self.identified_constants.push(zero_constant.clone());
                         self.emit(Instruction::LDI(
@@ -1756,6 +1765,33 @@ impl CodeGenerator {
 
                 Ok((result_vr, result_is_secret))
             }
+            AstNode::Break => {
+                let Some((_, break_label)) = self.loop_label_stack.last().cloned() else {
+                    return Err(CompilerError::semantic_error(
+                        "'break' outside of a loop",
+                        SourceLocation::default(),
+                    ));
+                };
+                self.emit(Instruction::JMP(break_label));
+                // Unreachable placeholder value so the statement has a register.
+                let nil_vr = self.allocate_virtual_register(false);
+                self.identified_constants.push(Constant::Unit);
+                self.emit(Instruction::LDI(nil_vr.0, crate::core_types::Value::Unit));
+                Ok((nil_vr, false))
+            }
+            AstNode::Continue => {
+                let Some((continue_label, _)) = self.loop_label_stack.last().cloned() else {
+                    return Err(CompilerError::semantic_error(
+                        "'continue' outside of a loop",
+                        SourceLocation::default(),
+                    ));
+                };
+                self.emit(Instruction::JMP(continue_label));
+                let nil_vr = self.allocate_virtual_register(false);
+                self.identified_constants.push(Constant::Unit);
+                self.emit(Instruction::LDI(nil_vr.0, crate::core_types::Value::Unit));
+                Ok((nil_vr, false))
+            }
             AstNode::WhileLoop {
                 condition,
                 body,
@@ -1789,14 +1825,19 @@ impl CodeGenerator {
                 self.emit(Instruction::JMPEQ(end_loop_label.clone()));
                 // condition_vr, false_vr used up to here.
 
-                if let Some((loop_var, bound)) = loop_bound {
+                // break exits the loop; continue re-checks the condition.
+                self.loop_label_stack
+                    .push((loop_start_label.clone(), end_loop_label.clone()));
+                let body_result = if let Some((loop_var, bound)) = loop_bound {
                     self.active_loop_bounds.push((loop_var, bound));
-                    let body_result = self.compile_node(body);
+                    let result = self.compile_node(body);
                     self.active_loop_bounds.pop();
-                    let (_body_vr, _body_is_secret) = body_result?;
+                    result
                 } else {
-                    let (_body_vr, _body_is_secret) = self.compile_node(body)?;
-                }
+                    self.compile_node(body)
+                };
+                self.loop_label_stack.pop();
+                let (_body_vr, _body_is_secret) = body_result?;
                 // Result of body is discarded. Its live range ends.
 
                 // Jump back to condition check
@@ -1860,15 +1901,23 @@ impl CodeGenerator {
                         // Start label
                         self.add_label(loop_start_label.clone());
 
+                        let loop_continue_label =
+                            format!("for_continue_{}", self.current_instructions.len());
+
                         // If i >= end: exit
                         self.emit(Instruction::CMP(loop_vr.0, end_vr.0));
                         self.emit(Instruction::JMPGT(loop_end_label.clone()));
                         self.emit(Instruction::JMPEQ(loop_end_label.clone()));
 
-                        // Body
-                        let (_body_vr, _body_is_secret) = self.compile_node(body)?;
+                        // Body. continue jumps to the increment, break to the end.
+                        self.loop_label_stack
+                            .push((loop_continue_label.clone(), loop_end_label.clone()));
+                        let body_result = self.compile_node(body);
+                        self.loop_label_stack.pop();
+                        let (_body_vr, _body_is_secret) = body_result?;
 
                         // i = i + 1
+                        self.add_label(loop_continue_label);
                         let one_vr = self.allocate_virtual_register(false);
                         let one_val = crate::core_types::Value::from(Constant::I64(1));
                         self.identified_constants.push(Constant::I64(1));
@@ -1944,10 +1993,18 @@ impl CodeGenerator {
                         self.emit(Instruction::CALL("get_field".to_string()));
                         self.emit(Instruction::MOV(elem_vr.0, 0)); // Result is in r0
 
-                        // Body
-                        let (_body_vr, _body_is_secret) = self.compile_node(body)?;
+                        let loop_continue_label =
+                            format!("for_continue_{}", self.current_instructions.len());
+
+                        // Body. continue jumps to the increment, break to the end.
+                        self.loop_label_stack
+                            .push((loop_continue_label.clone(), loop_end_label.clone()));
+                        let body_result = self.compile_node(body);
+                        self.loop_label_stack.pop();
+                        let (_body_vr, _body_is_secret) = body_result?;
 
                         // index = index + 1
+                        self.add_label(loop_continue_label);
                         let one_vr = self.allocate_virtual_register(false);
                         self.identified_constants.push(Constant::I64(1));
                         self.emit(Instruction::LDI(
