@@ -3662,3 +3662,18 @@ def main() -> int64:
     compile(source, "test.stfl", &default_options())
         .expect("if/elif/else with returns on every branch should compile");
 }
+
+#[test]
+fn test_oversized_integer_literal_is_a_lexer_error() {
+    let source = r#"
+def main() -> int64:
+  var x = 999999999999999999999999999999999999999999
+  return 0
+"#;
+    let result = tokenize(source, "test.stfl");
+    assert!(
+        result.is_err(),
+        "oversized literal should be a lex error, not silently dropped"
+    );
+    assert!(result.unwrap_err().message.contains("too large"));
+}

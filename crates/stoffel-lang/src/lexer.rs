@@ -589,7 +589,12 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
                                 make_location(line, start_col),
                             );
                         }
-                        Err(_) => { /* Error handling */ }
+                        Err(_) => {
+                            return Err(CompilerError::syntax_error(
+                                format!("Invalid float literal '{}'", digits),
+                                make_location(line, start_col),
+                            ));
+                        }
                     }
                 } else {
                     // convert digits (without underscores) in given radix
@@ -603,7 +608,15 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
                             },
                             make_location(line, start_col),
                         ),
-                        Err(_) => { /* Error handling */ }
+                        Err(_) => {
+                            return Err(CompilerError::syntax_error(
+                                format!(
+                                    "Integer literal '{}' is too large (max 128 bits)",
+                                    digits
+                                ),
+                                make_location(line, start_col),
+                            ));
+                        }
                     }
                 }
             }
