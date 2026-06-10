@@ -1,5 +1,3 @@
-# Variadic parameters (*args) are deferred for user functions; the compiler
-# must reject them with a targeted message suggesting list[T].
 def total(*xs) -> int64:
   var sum = 0
   for x in xs:
@@ -7,7 +5,4 @@ def total(*xs) -> int64:
   return sum
 
 def main() -> int64:
-  var ok = 7300
-  if total(1, 2, 3) == 6:
-    ok += 1
-  return ok
+  return total(1, 2, 3) + total()

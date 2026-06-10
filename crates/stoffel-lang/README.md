@@ -123,6 +123,35 @@ def main() -> int64:
   return mask + bits + shifted
 ```
 
+### Pythonic Conveniences
+
+```python
+enum Color:
+  Red
+  Green
+  Blue          # auto-increment int64 constants; Color.Blue == 2
+
+def total(*xs) -> int64:   # varargs pack into a list
+  var sum = 0
+  for x in xs:
+    sum += x
+  return sum
+
+def main() -> int64:
+  var xs: list[int64] = [1, 2, 3, 4, 5]
+  var mid = xs[1:3]                       # slicing (negative bounds work)
+  var last = xs[-1]                       # negative indexing
+  var evens = [x for x in xs if x % 2 == 0]  # comprehensions
+  assert 2 in xs, "membership with 'in'"  # assert with optional message
+  var s = f"sum is {last}"                # f-strings (variable interpolation)
+  match last:                             # match on literals; _ is default
+    case 5:
+      print(s)
+    case _:
+      pass
+  return total(1, 2) + len(evens) + len(mid)
+```
+
 ### Secret (MPC) Values
 
 ```python

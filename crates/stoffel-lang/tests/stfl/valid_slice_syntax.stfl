@@ -1,5 +1,7 @@
-# Slice syntax xs[1:3] is unsupported; desired: targeted diagnostic.
 def main() -> int64:
   var xs: list[int64] = [1, 2, 3, 4]
   var ys = xs[1:3]
-  return ys[0]
+  var zs = xs[:2]
+  var ws = xs[2:]
+  var tail = xs[-2:]
+  return ys.len() + zs.len() + ws.len() + tail.len()

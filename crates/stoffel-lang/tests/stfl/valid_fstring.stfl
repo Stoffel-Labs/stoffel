@@ -1,5 +1,6 @@
-# f-strings are unsupported; desired: targeted diagnostic.
 def main() -> int64:
   var n = 42
   var s = f"value is {n}"
-  return n
+  if s == "value is 42":
+    return 1
+  return 0

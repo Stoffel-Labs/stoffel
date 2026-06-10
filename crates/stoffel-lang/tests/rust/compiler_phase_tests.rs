@@ -1652,14 +1652,30 @@ def f(x: int64 = base) -> int64:
 }
 
 #[test]
-fn test_semantic_user_function_variadic_still_rejected() {
+fn test_semantic_user_function_variadic_is_supported() {
     let source = r#"
 def total(*xs) -> int64:
-  return 0
+  var sum = 0
+  for x in xs:
+    sum += x
+  return sum
+
+def main() -> int64:
+  return total(1, 2, 3) + total()
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("user-function *args should compile, packing extras into a list");
+}
+
+#[test]
+fn test_semantic_variadic_must_be_last_parameter() {
+    let source = r#"
+def f(*xs, y: int64) -> int64:
+  return y
 "#;
     assert!(expect_error_containing(
         source,
-        "Variadic parameters (*args) are currently supported only for builtin declarations"
+        "must be the last parameter"
     ));
 }
 
@@ -3536,7 +3552,7 @@ def main() -> int64:
 
 #[test]
 fn test_targeted_errors_for_unsupported_python_syntax() {
-    let cases: [(&str, &str); 5] = [
+    let cases: [(&str, &str); 3] = [
         (
             "def main() -> int64:\n  try:\n    var x = 1\n  except:\n    var y = 2\n  return 1\n",
             "no exception handling",
@@ -3546,16 +3562,8 @@ fn test_targeted_errors_for_unsupported_python_syntax() {
             "no anonymous functions",
         ),
         (
-            "def main() -> int64:\n  var xs: list[int64] = [1, 2, 3]\n  var ys = xs[1:3]\n  return 0\n",
-            "Slice syntax",
-        ),
-        (
             "def main() -> int64:\n  var a, b = 1, 2\n  return a\n",
             "Tuple unpacking is not supported",
-        ),
-        (
-            "def main() -> int64:\n  var n = 42\n  var s = f\"value {n}\"\n  return n\n",
-            "f-strings are not supported",
         ),
     ];
     for (source, expected) in cases {
@@ -3676,4 +3684,174 @@ def main() -> int64:
         "oversized literal should be a lex error, not silently dropped"
     );
     assert!(result.unwrap_err().message.contains("too large"));
+}
+
+// ===========================================
+// New language features: slices, f-strings, match, enums, comprehensions, in, assert
+// ===========================================
+
+#[test]
+fn test_slice_syntax_compiles_for_lists_and_strings() {
+    let source = r#"
+def main() -> int64:
+  var xs: list[int64] = [1, 2, 3, 4]
+  var ys = xs[1:3]
+  var zs = xs[:2]
+  var ws = xs[-2:]
+  var s = "stoffel"
+  var sub = s[1:4]
+  return ys.len() + zs.len() + ws.len() + len(sub)
+"#;
+    compile(source, "test.stfl", &default_options()).expect("slice syntax should compile");
+}
+
+#[test]
+fn test_fstring_desugars_to_concatenation() {
+    let source = r#"
+def main() -> string:
+  var n = 42
+  var who = "Stoffel"
+  return f"{who} computes {n}!"
+"#;
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("f-strings should compile");
+    assert!(
+        program
+            .main_chunk
+            .constants
+            .iter()
+            .any(|constant| matches!(constant, Constant::String(s) if s == " computes ")),
+        "literal segments should remain string constants"
+    );
+}
+
+#[test]
+fn test_fstring_complex_interpolation_is_rejected() {
+    let source = r#"
+def main() -> string:
+  var n = 1
+  return f"{n + 1}"
+"#;
+    assert!(expect_error_containing(
+        source,
+        "must be a variable or dotted field access"
+    ));
+}
+
+#[test]
+fn test_match_desugars_to_if_chain() {
+    let source = r#"
+def classify(x: int64) -> int64:
+  match x:
+    case 1:
+      return 10
+    case 2:
+      return 20
+    case _:
+      return 99
+
+def main() -> int64:
+  return classify(2)
+"#;
+    compile(source, "test.stfl", &default_options()).expect("match should compile");
+}
+
+#[test]
+fn test_match_default_case_must_be_last() {
+    let source = r#"
+def main() -> int64:
+  var x = 1
+  match x:
+    case _:
+      return 0
+    case 1:
+      return 1
+"#;
+    assert!(expect_error_containing(source, "must be the last case"));
+}
+
+#[test]
+fn test_enum_members_lower_to_int_constants() {
+    let source = r#"
+enum Color:
+  Red
+  Green
+  Blue
+
+enum Status:
+  Ok = 200
+  NotFound = 404
+
+def main() -> int64:
+  var c: Color = Color.Green
+  return c + Status.NotFound + Color.Blue
+"#;
+    compile(source, "test.stfl", &default_options()).expect("enums should compile");
+}
+
+#[test]
+fn test_enum_unknown_member_is_rejected() {
+    let source = r#"
+enum Color:
+  Red
+
+def main() -> int64:
+  return Color.Purple
+"#;
+    assert!(expect_error_containing(source, "has no member 'Purple'"));
+}
+
+#[test]
+fn test_list_comprehension_compiles() {
+    let source = r#"
+def main() -> int64:
+  var doubled = [x * 2 for x in range(0, 5)]
+  var evens = [x for x in range(0, 10) if x % 2 == 0]
+  return doubled.len() + evens.len()
+"#;
+    compile(source, "test.stfl", &default_options()).expect("comprehensions should compile");
+}
+
+#[test]
+fn test_in_operator_compiles_for_lists_dicts_strings() {
+    let source = r#"
+def main() -> int64:
+  var xs: list[int64] = [1, 2, 3]
+  var d = {"a": 1}
+  var hits = 0
+  if 2 in xs:
+    hits += 1
+  if "a" in d:
+    hits += 1
+  if "off" in "stoffel":
+    hits += 1
+  return hits
+"#;
+    compile(source, "test.stfl", &default_options()).expect("'in' should compile");
+}
+
+#[test]
+fn test_in_operator_rejects_non_container() {
+    let source = r#"
+def main() -> int64:
+  var n = 5
+  if 1 in n:
+    return 1
+  return 0
+"#;
+    assert!(expect_error_containing(
+        source,
+        "Right side of 'in' must be a list, dict, or string"
+    ));
+}
+
+#[test]
+fn test_assert_statement_compiles() {
+    let source = r#"
+def main(x: int64) -> int64:
+  assert x > 0
+  assert x < 100, "x out of range"
+  return x
+"#;
+    compile(source, "test.stfl", &default_options()).expect("assert should compile");
 }
