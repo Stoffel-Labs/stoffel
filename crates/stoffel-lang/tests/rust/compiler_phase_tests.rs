@@ -825,7 +825,10 @@ var opened_fixed: list[fix64] = Share.batch_open_fixed(shares)
 
     assert_eq!(
         return_types,
-        vec![list_of(SymbolType::Int64), list_of(SymbolType::Fixed)]
+        vec![
+            list_of(SymbolType::Int64),
+            list_of(SymbolType::Fixed { bits: 64 }),
+        ]
     );
 }
 
@@ -843,13 +846,13 @@ def main(x: fix64) -> list[fix64]:
     let mut return_types = Vec::new();
     collect_call_return_types(&analyzed, "identity", &mut return_types);
 
-    assert_eq!(return_types, vec![SymbolType::Fixed]);
+    assert_eq!(return_types, vec![SymbolType::Fixed { bits: 64 }]);
 
     let program = compile(source, "test.stfl", &default_options())
         .expect("fix64 annotations should compile through bytecode generation");
     assert_eq!(
         program.main_chunk.return_type,
-        FunctionType::List(Box::new(FunctionType::Fixed))
+        FunctionType::List(Box::new(FunctionType::fix64()))
     );
 }
 
@@ -877,8 +880,112 @@ def fixed_point(x: fix64) -> fix64:
         .function_chunks
         .get("fixed_point")
         .expect("fixed_point function should be emitted");
-    assert_eq!(fixed_point.parameter_types, vec![FunctionType::Fixed]);
-    assert_eq!(fixed_point.return_type, FunctionType::Fixed);
+    assert_eq!(fixed_point.parameter_types, vec![FunctionType::fix64()]);
+    assert_eq!(fixed_point.return_type, FunctionType::fix64());
+}
+
+#[test]
+fn test_secret_fix64_uses_secret_fixed_point_metadata_and_manifest() {
+    let source = r#"
+def main(value: secret fix64) -> None:
+  value.send_to_client(0)
+"#;
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("secret fix64 should compile as SecretFixedPoint");
+
+    assert_eq!(
+        program.main_chunk.parameter_types,
+        vec![FunctionType::Secret(Box::new(FunctionType::fix64()))]
+    );
+    assert_eq!(
+        program.client_io_manifest.clients[0].outputs,
+        vec![ShareType::default_secret_fixed_point()]
+    );
+}
+
+#[test]
+fn test_fix32_and_fix64_have_distinct_function_metadata() {
+    let source = r#"
+def fixed32_value(x: fix32) -> fixed32:
+  return x
+
+def fixed64_value(x: fix64) -> fixed64:
+  return x
+"#;
+
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("fix32 and fix64 functions should compile");
+
+    let fixed32_value = program
+        .function_chunks
+        .get("fixed32_value")
+        .expect("fixed32 function should be emitted");
+    assert_eq!(fixed32_value.parameter_types, vec![FunctionType::fix32()]);
+    assert_eq!(fixed32_value.return_type, FunctionType::fix32());
+
+    let fixed64_value = program
+        .function_chunks
+        .get("fixed64_value")
+        .expect("fixed64 function should be emitted");
+    assert_eq!(fixed64_value.parameter_types, vec![FunctionType::fix64()]);
+    assert_eq!(fixed64_value.return_type, FunctionType::fix64());
+}
+
+#[test]
+fn test_secret_fix32_uses_32_bit_fixed_point_manifest() {
+    let source = r#"
+def main(value: secret fix32) -> None:
+  value.send_to_client(0)
+"#;
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("secret fix32 should compile as a 32-bit SecretFixedPoint");
+
+    assert_eq!(
+        program.main_chunk.parameter_types,
+        vec![FunctionType::Secret(Box::new(FunctionType::fix32()))]
+    );
+    assert_eq!(
+        program.client_io_manifest.clients[0].outputs,
+        vec![ShareType::secret_fixed_point_from_bits(32, 16)]
+    );
+}
+
+#[test]
+fn test_secret_fix32_client_input_annotation_sets_manifest_precision() {
+    let source = r#"
+def main() -> None:
+  var value: secret fix32 = ClientStore.take_share_fixed(0, 0)
+  value.send_to_client(0)
+"#;
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("secret fix32 client input should compile");
+
+    let expected = ShareType::secret_fixed_point_from_bits(32, 16);
+    assert_eq!(program.client_io_manifest.clients[0].inputs, vec![expected]);
+    assert_eq!(
+        program.client_io_manifest.clients[0].outputs,
+        vec![expected]
+    );
+}
+
+#[test]
+fn test_secret_float64_is_rejected_until_protocol_support_exists() {
+    for ty in ["float", "float64", "f64"] {
+        let source = format!(
+            r#"
+def main(value: secret {ty}) -> {ty}:
+  return reveal(value)
+"#
+        );
+        let errors = compile(&source, "test.stfl", &default_options())
+            .expect_err("secret floating point should not compile without protocol support");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("secret float64 is not supported")),
+            "expected secret float64 support error for {ty}, got {errors:?}"
+        );
+    }
 }
 
 #[test]
@@ -931,7 +1038,7 @@ def main() -> fix64:
     let program = compile(source, "test.stfl", &default_options())
         .expect("unary minus should compile for signed integer, float64, and fix64");
 
-    assert_eq!(program.main_chunk.return_type, FunctionType::Fixed);
+    assert_eq!(program.main_chunk.return_type, FunctionType::fix64());
     let negate_int = program
         .function_chunks
         .get("negate_int")
@@ -946,7 +1053,7 @@ def main() -> fix64:
         .function_chunks
         .get("negate_fixed")
         .expect("negate_fixed should compile");
-    assert_eq!(negate_fixed.return_type, FunctionType::Fixed);
+    assert_eq!(negate_fixed.return_type, FunctionType::fix64());
 }
 
 #[test]
@@ -1019,7 +1126,7 @@ opened[0] = Share.batch_open_fixed(shares)
     let mut return_types = Vec::new();
     collect_call_return_types(&analyzed, "Share.batch_open_fixed", &mut return_types);
 
-    assert_eq!(return_types, vec![list_of(SymbolType::Fixed)]);
+    assert_eq!(return_types, vec![list_of(SymbolType::Fixed { bits: 64 })]);
 }
 
 #[test]
@@ -1037,7 +1144,7 @@ var opened: list[fix64] = open_as_fixed(shares)
     let mut return_types = Vec::new();
     collect_call_return_types(&analyzed, "Share.batch_open_fixed", &mut return_types);
 
-    assert_eq!(return_types, vec![list_of(SymbolType::Fixed)]);
+    assert_eq!(return_types, vec![list_of(SymbolType::Fixed { bits: 64 })]);
 }
 
 #[test]
@@ -1282,7 +1389,7 @@ var s: secret float = Share.random()
 "#;
     assert!(expect_error_containing(
         source,
-        "Share.random() requires an expected secret integer type"
+        "secret float64 is not supported"
     ));
 }
 

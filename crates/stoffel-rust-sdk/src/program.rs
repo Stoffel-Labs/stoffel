@@ -663,7 +663,7 @@ fn validate_value_against_function_type(
 
     match expected {
         FunctionType::Int { signed, bits } => validate_integer(path, value, *signed, *bits),
-        FunctionType::Float => match value {
+        FunctionType::Float | FunctionType::Fixed { .. } => match value {
             Value::Float(_) | Value::I64(_) | Value::U64(_) => Ok(()),
             _ => invalid_type(path, expected, value),
         },

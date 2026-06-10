@@ -23,7 +23,7 @@ use std::io::{self, Read, Write};
 // Magic bytes that identify a StoffelVM bytecode file
 pub const MAGIC_BYTES: &[u8; 4] = b"STFL";
 // Current bytecode format version
-pub const FORMAT_VERSION: u16 = 6;
+pub const FORMAT_VERSION: u16 = 7;
 pub const CLIENT_IO_MANIFEST_FORMAT_VERSION: u16 = 2;
 pub const MPC_BACKEND_MANIFEST_FORMAT_VERSION: u16 = 3;
 pub const MPC_CURVE_MANIFEST_FORMAT_VERSION: u16 = 4;
@@ -221,7 +221,7 @@ pub struct ClientIoSchema {
 pub enum FunctionType {
     Int { signed: bool, bits: u8 },
     Float,
-    Fixed,
+    Fixed { bits: u8 },
     String,
     Bool,
     Nil,
@@ -248,6 +248,14 @@ impl FunctionType {
             signed: false,
             bits: 64,
         }
+    }
+
+    pub fn fix64() -> Self {
+        Self::Fixed { bits: 64 }
+    }
+
+    pub fn fix32() -> Self {
+        Self::Fixed { bits: 32 }
     }
 
     pub fn underlying_type(&self) -> &FunctionType {
@@ -282,7 +290,7 @@ impl std::fmt::Display for FunctionType {
                 }
             }
             FunctionType::Float => f.write_str("float"),
-            FunctionType::Fixed => f.write_str("fix64"),
+            FunctionType::Fixed { bits } => write!(f, "fix{bits}"),
             FunctionType::String => f.write_str("string"),
             FunctionType::Bool => f.write_str("bool"),
             FunctionType::Nil => f.write_str("None"),
@@ -929,7 +937,11 @@ impl CompiledBinary {
                 writer.write_all(&[*signed as u8, *bits])?;
             }
             FunctionType::Float => writer.write_all(&[1u8])?,
-            FunctionType::Fixed => writer.write_all(&[13u8])?,
+            FunctionType::Fixed { bits: 64 } => writer.write_all(&[13u8])?,
+            FunctionType::Fixed { bits } => {
+                writer.write_all(&[14u8])?;
+                writer.write_all(&[*bits])?;
+            }
             FunctionType::String => writer.write_all(&[2u8])?,
             FunctionType::Bool => writer.write_all(&[3u8])?,
             FunctionType::Nil => writer.write_all(&[4u8])?,
@@ -1520,7 +1532,7 @@ impl CompiledBinary {
                 }
             }
             1 => FunctionType::Float,
-            13 => FunctionType::Fixed,
+            13 => FunctionType::Fixed { bits: 64 },
             2 => FunctionType::String,
             3 => FunctionType::Bool,
             4 => FunctionType::Nil,
@@ -1556,6 +1568,16 @@ impl CompiledBinary {
                 "Invalid UTF-8 in function type variable name",
             )?),
             12 => FunctionType::Unknown,
+            14 => {
+                let mut bits = [0u8; 1];
+                reader.read_exact(&mut bits)?;
+                if bits[0] == 0 {
+                    return Err(invalid_data(
+                        "fixed-point function type bit width must be non-zero",
+                    ));
+                }
+                FunctionType::Fixed { bits: bits[0] }
+            }
             tag => return Err(invalid_data(format!("unknown function type tag {tag}"))),
         })
     }
@@ -2275,7 +2297,7 @@ mod tests {
     }
 
     #[test]
-    fn bytecode_v5_function_type_metadata_round_trips() {
+    fn bytecode_v7_function_type_metadata_round_trips() {
         let mut binary = CompiledBinary::new();
         binary.functions.push(CompiledFunction {
             name: "main".to_string(),
@@ -2285,12 +2307,9 @@ mod tests {
                 FunctionType::List(Box::new(FunctionType::List(
                     Box::new(FunctionType::int64()),
                 ))),
-                FunctionType::Int {
-                    signed: false,
-                    bits: 64,
-                },
+                FunctionType::Secret(Box::new(FunctionType::fix32())),
             ],
-            return_type: FunctionType::List(Box::new(FunctionType::int64())),
+            return_type: FunctionType::List(Box::new(FunctionType::fix32())),
             upvalues: vec![],
             parent: None,
             labels: HashMap::new(),

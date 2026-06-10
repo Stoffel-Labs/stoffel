@@ -70,7 +70,7 @@ pub enum SymbolType {
     UInt16,
     UInt8,
     Float,
-    Fixed,
+    Fixed { bits: u8 },
     String,
     Bool,
     Nil,
@@ -153,6 +153,14 @@ impl SymbolType {
             SymbolType::Int32 | SymbolType::UInt32 => Some(32),
             SymbolType::Int16 | SymbolType::UInt16 => Some(16),
             SymbolType::Int8 | SymbolType::UInt8 => Some(8),
+            _ => None,
+        }
+    }
+
+    /// Returns bit width for fixed-point types.
+    pub fn fixed_bit_width(&self) -> Option<u8> {
+        match self.underlying_type() {
+            SymbolType::Fixed { bits } => Some(*bits),
             _ => None,
         }
     }
@@ -257,7 +265,8 @@ impl SymbolType {
                 "u8" | "uint8" => SymbolType::UInt8,
                 // Other primitives
                 "float" | "float64" | "f64" => SymbolType::Float,
-                "fixed" | "fixed64" | "fix64" => SymbolType::Fixed,
+                "fixed" | "fixed64" | "fix64" => SymbolType::Fixed { bits: 64 },
+                "fixed32" | "fix32" => SymbolType::Fixed { bits: 32 },
                 "string" => SymbolType::String,
                 "bool" => SymbolType::Bool,
                 "bytes" | "ByteArray" => SymbolType::List(Box::new(SymbolType::UInt8)),
@@ -314,7 +323,7 @@ impl fmt::Display for SymbolType {
             SymbolType::UInt16 => write!(f, "uint16"),
             SymbolType::UInt8 => write!(f, "uint8"),
             SymbolType::Float => write!(f, "float"),
-            SymbolType::Fixed => write!(f, "fix64"),
+            SymbolType::Fixed { bits } => write!(f, "fix{bits}"),
             SymbolType::String => write!(f, "string"),
             SymbolType::Bool => write!(f, "bool"),
             SymbolType::Nil => write!(f, "None"),
@@ -381,6 +390,11 @@ impl Scope {
     /// Declares a symbol in this scope. Returns error if already declared.
     fn declare(&mut self, info: SymbolInfo) -> Result<(), SymbolDeclarationError> {
         if let Some(existing_info) = self.symbols.get(&info.name) {
+            if matches!(existing_info.kind, SymbolKind::BuiltinFunction { .. }) {
+                self.symbols.insert(info.name.clone(), info);
+                return Ok(());
+            }
+
             Err(SymbolDeclarationError::AlreadyDeclared {
                 name: info.name.clone(),
                 original_location: existing_info.defined_at.clone(),

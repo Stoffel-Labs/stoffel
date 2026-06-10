@@ -6,7 +6,7 @@ use crate::symbol_table::SymbolType;
 use stoffel_vm_types::compiled_binary::{
     ClientIoManifest, ClientIoSchema, FunctionType, MpcBackend,
 };
-use stoffel_vm_types::core_types::ShareType;
+use stoffel_vm_types::core_types::{ShareType, DEFAULT_FIXED_POINT_FRACTIONAL_BITS};
 use stoffel_vm_types::registers::DEFAULT_SECRET_REGISTER_START;
 
 use std::collections::HashMap;
@@ -48,12 +48,23 @@ fn infer_single_share_type(node: &AstNode) -> Option<ShareType> {
     }
 }
 
+fn fixed_share_type(bits: u8) -> ShareType {
+    let total_bits = usize::from(bits);
+    ShareType::secret_fixed_point_from_bits(
+        total_bits,
+        DEFAULT_FIXED_POINT_FRACTIONAL_BITS.min(total_bits.saturating_sub(1)),
+    )
+}
+
 fn share_type_for_secret_scalar_symbol_type(ty: &SymbolType) -> Option<ShareType> {
     if !ty.is_secret() {
         return None;
     }
     if ty.underlying_type() == &SymbolType::Bool {
         return Some(ShareType::boolean());
+    }
+    if let SymbolType::Fixed { bits } = ty.underlying_type() {
+        return Some(fixed_share_type(*bits));
     }
     ty.bit_width().map(|bit_width| {
         if ty.is_signed() {
@@ -99,7 +110,7 @@ fn symbol_type_to_function_type(ty: SymbolType) -> FunctionType {
             bits: 8,
         },
         SymbolType::Float => FunctionType::Float,
-        SymbolType::Fixed => FunctionType::Fixed,
+        SymbolType::Fixed { bits } => FunctionType::Fixed { bits },
         SymbolType::String => FunctionType::String,
         SymbolType::Bool => FunctionType::Bool,
         SymbolType::Nil => FunctionType::Nil,
@@ -265,7 +276,7 @@ impl CodeGenerator {
                 _ => {
                     if is_secret_register {
                         let clear_constant = match ty.underlying_type() {
-                            SymbolType::Float | SymbolType::Fixed => {
+                            SymbolType::Float | SymbolType::Fixed { .. } => {
                                 Constant::Float(crate::bytecode::F64::new(0.0))
                             }
                             SymbolType::Bool => Constant::Bool(false),
@@ -732,6 +743,44 @@ impl CodeGenerator {
         }
     }
 
+    fn override_client_input_share_type_for_take_share_fixed(
+        &mut self,
+        value: Option<&AstNode>,
+        share_type: Option<ShareType>,
+    ) {
+        let Some(share_type @ ShareType::SecretFixedPoint { .. }) = share_type else {
+            return;
+        };
+        let Some(AstNode::FunctionCall {
+            function,
+            arguments,
+            ..
+        }) = value
+        else {
+            return;
+        };
+        let AstNode::Identifier(function_name, _) = function.as_ref() else {
+            return;
+        };
+        if function_name != "ClientStore.take_share_fixed" {
+            return;
+        }
+        let Some(client_slot) = int_literal_u64(arguments.first()) else {
+            return;
+        };
+        let Some(input_ordinals) = self.input_ordinals_for_node(arguments.get(1)) else {
+            return;
+        };
+        let inputs = self.client_inputs.entry(client_slot).or_default();
+        for input_ordinal in input_ordinals {
+            let ordinal = input_ordinal as usize;
+            if inputs.len() <= ordinal {
+                inputs.resize(ordinal + 1, None);
+            }
+            inputs[ordinal] = Some(share_type);
+        }
+    }
+
     fn record_share_list_append_call(&mut self, function_name: &str, arguments: &[AstNode]) {
         if function_name != "append" && function_name != "array_push" {
             return;
@@ -1116,9 +1165,12 @@ impl CodeGenerator {
                     declared_type
                 };
                 let explicit_secret = final_type.uses_secret_register();
-                let value_share_type = value
-                    .as_deref()
-                    .and_then(|expr| self.share_type_for_node(expr));
+                let annotation_share_type = share_type_for_secret_scalar_symbol_type(&final_type);
+                let value_share_type = annotation_share_type.or_else(|| {
+                    value
+                        .as_deref()
+                        .and_then(|expr| self.share_type_for_node(expr))
+                });
                 let value_share_list = value.as_deref().and_then(|expr| match expr {
                     AstNode::ListLiteral { elements, .. } => Some(
                         elements
@@ -1154,6 +1206,10 @@ impl CodeGenerator {
                     self.variable_share_types.remove(name);
                 } else if let Some(share_type) = value_share_type {
                     self.variable_share_types.insert(name.clone(), share_type);
+                    self.override_client_input_share_type_for_take_share_fixed(
+                        value.as_deref(),
+                        Some(share_type),
+                    );
                     self.variable_share_lists.remove(name);
                 } else {
                     self.variable_share_types.remove(name);
@@ -1188,7 +1244,7 @@ impl CodeGenerator {
                         let zero_vr = self.allocate_virtual_register(false);
                         let zero_constant = if matches!(
                             operand_type_hint.as_ref().map(SymbolType::underlying_type),
-                            Some(SymbolType::Float | SymbolType::Fixed)
+                            Some(SymbolType::Float | SymbolType::Fixed { .. })
                         ) {
                             Constant::Float(crate::bytecode::F64::new(0.0))
                         } else {
@@ -1989,6 +2045,15 @@ impl CodeGenerator {
                     function_generator
                         .symbol_types
                         .insert(param.name.clone(), param_type);
+                    if let Some(share_type) = function_generator
+                        .symbol_types
+                        .get(&param.name)
+                        .and_then(share_type_for_secret_scalar_symbol_type)
+                    {
+                        function_generator
+                            .variable_share_types
+                            .insert(param.name.clone(), share_type);
+                    }
                     param_vrs.push(param_vr);
                 }
 

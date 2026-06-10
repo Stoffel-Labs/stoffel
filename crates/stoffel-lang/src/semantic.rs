@@ -120,7 +120,10 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     fn is_clear_real_type(ty: &SymbolType) -> bool {
-        matches!(ty.underlying_type(), SymbolType::Float | SymbolType::Fixed)
+        matches!(
+            ty.underlying_type(),
+            SymbolType::Float | SymbolType::Fixed { .. }
+        )
     }
 
     fn is_clear_numeric_type(ty: &SymbolType) -> bool {
@@ -229,27 +232,30 @@ impl<'a> SemanticAnalyzer<'a> {
         &self,
         function_name: &str,
         fallback: &[SymbolType],
+        is_builtin_call: bool,
     ) -> Vec<CallParameterInfo> {
-        let registry = crate::builtin_registry::builtin_registry();
-        if let Some(function) = registry.functions.get(function_name) {
-            return function
-                .parameter_details
-                .iter()
-                .map(Self::builtin_parameter_info_to_call_parameter)
-                .collect();
-        }
-
-        if let Some((object_name, method_name)) = function_name.split_once('.') {
-            if let Some(method) = registry
-                .objects
-                .get(object_name)
-                .and_then(|object| object.methods.get(method_name))
-            {
-                return method
+        if is_builtin_call {
+            let registry = crate::builtin_registry::builtin_registry();
+            if let Some(function) = registry.functions.get(function_name) {
+                return function
                     .parameter_details
                     .iter()
                     .map(Self::builtin_parameter_info_to_call_parameter)
                     .collect();
+            }
+
+            if let Some((object_name, method_name)) = function_name.split_once('.') {
+                if let Some(method) = registry
+                    .objects
+                    .get(object_name)
+                    .and_then(|object| object.methods.get(method_name))
+                {
+                    return method
+                        .parameter_details
+                        .iter()
+                        .map(Self::builtin_parameter_info_to_call_parameter)
+                        .collect();
+                }
             }
         }
 
@@ -302,9 +308,11 @@ impl<'a> SemanticAnalyzer<'a> {
             "ClientStore.take_share" | "Share.from_clear" | "Share.from_clear_int" => {
                 dst.is_secret() && dst.is_integer()
             }
-            "ClientStore.take_share_fixed" | "Share.from_clear_fixed" => {
-                matches!(dst, SymbolType::Secret(inner) if inner.underlying_type() == &SymbolType::Fixed)
-            }
+            "ClientStore.take_share_fixed" | "Share.from_clear_fixed" => matches!(
+                dst,
+                SymbolType::Secret(inner)
+                    if matches!(inner.underlying_type(), SymbolType::Fixed { .. })
+            ),
             _ => false,
         }
     }
@@ -2154,8 +2162,11 @@ impl<'a> SemanticAnalyzer<'a> {
                     };
 
                 // 4. Validate argument count
-                let call_parameters =
-                    self.builtin_call_parameters(&function_name, &expected_param_types);
+                let call_parameters = self.builtin_call_parameters(
+                    &function_name,
+                    &expected_param_types,
+                    is_builtin_call,
+                );
                 let min_args = Self::minimum_argument_count(&call_parameters);
                 let has_variadic = Self::has_variadic_parameter(&call_parameters);
                 let max_args = if has_variadic {
@@ -2313,18 +2324,16 @@ impl<'a> SemanticAnalyzer<'a> {
                 };
 
                 // 4. Check if the symbol is a function and validate arguments (similar to FunctionCall)
-                let (expected_param_types, return_type) = match &function_info.kind {
+                let (expected_param_types, return_type, is_builtin_call) = match &function_info.kind
+                {
                     SymbolKind::Function {
                         parameters,
                         return_type,
-                    }
-                    | SymbolKind::BuiltinFunction {
+                    } => (parameters.clone(), return_type.clone(), false),
+                    SymbolKind::BuiltinFunction {
                         parameters,
                         return_type,
-                    } => {
-                        // TODO: Implement proper argument count/type checking for command calls (UFCS context)
-                        (parameters.clone(), return_type.clone())
-                    }
+                    } => (parameters.clone(), return_type.clone(), true),
                     _ => {
                         self.error_reporter.add_error(CompilerError::type_error(
                             format!(
@@ -2337,8 +2346,11 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 };
 
-                let call_parameters =
-                    self.builtin_call_parameters(&function_name, &expected_param_types);
+                let call_parameters = self.builtin_call_parameters(
+                    &function_name,
+                    &expected_param_types,
+                    is_builtin_call,
+                );
                 let min_args = Self::minimum_argument_count(&call_parameters);
                 let has_variadic = Self::has_variadic_parameter(&call_parameters);
                 let max_args = if has_variadic {
@@ -2691,7 +2703,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         | SymbolType::Int16
                         | SymbolType::Int8
                         | SymbolType::Float
-                        | SymbolType::Fixed
+                        | SymbolType::Fixed { .. }
                         | SymbolType::String
                         | SymbolType::Bool
                 );
@@ -2833,7 +2845,22 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.validate_type_annotation(key, location.clone())?;
                 self.validate_type_annotation(val, location)
             }
-            SymbolType::Secret(inner) => self.validate_type_annotation(inner, location),
+            SymbolType::Secret(inner) => {
+                if inner.underlying_type() == &SymbolType::Float {
+                    self.error_reporter.add_error(
+                        CompilerError::type_error(
+                            "secret float64 is not supported by the current MPC protocol"
+                                .to_string(),
+                            location,
+                        )
+                        .with_hint(
+                            "Use 'secret fix64' for MPC fixed-point values; the pinned mpc-protocols crate exposes SecretFixedPoint but no SecretFloat type.",
+                        ),
+                    );
+                    return Err(());
+                }
+                self.validate_type_annotation(inner, location)
+            }
             SymbolType::Generic(name, params) => {
                 // Validate the base name as a TypeName
                 self.validate_type_annotation(
@@ -2867,7 +2894,7 @@ fn declared_type_to_string(sym_type: &SymbolType) -> String {
         SymbolType::UInt16 => "uint16".to_string(),
         SymbolType::UInt8 => "uint8".to_string(),
         SymbolType::Float => "float".to_string(),
-        SymbolType::Fixed => "fix64".to_string(),
+        SymbolType::Fixed { bits } => format!("fix{bits}"),
         SymbolType::String => "string".to_string(),
         SymbolType::Bool => "bool".to_string(),
         SymbolType::Nil => "None".to_string(),
