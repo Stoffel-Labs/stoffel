@@ -283,10 +283,8 @@ impl<'a> Parser<'a> {
                         literal.clear();
                     }
                     let mut segments = expr.split('.');
-                    let mut node = AstNode::Identifier(
-                        segments.next().unwrap().to_string(),
-                        location.clone(),
-                    );
+                    let mut node =
+                        AstNode::Identifier(segments.next().unwrap().to_string(), location.clone());
                     for field in segments {
                         node = AstNode::FieldAccess {
                             object: Box::new(node),
@@ -361,10 +359,7 @@ impl<'a> Parser<'a> {
 
         let result_name = self.gensym("comprehension");
         let append_call = AstNode::FunctionCall {
-            function: Box::new(AstNode::Identifier(
-                "append".to_string(),
-                location.clone(),
-            )),
+            function: Box::new(AstNode::Identifier("append".to_string(), location.clone())),
             arguments: vec![
                 AstNode::Identifier(result_name.clone(), location.clone()),
                 element,
@@ -477,10 +472,7 @@ impl<'a> Parser<'a> {
                 Some(pattern) => {
                     let condition = AstNode::BinaryOperation {
                         op: "==".to_string(),
-                        left: Box::new(AstNode::Identifier(
-                            subject_name.clone(),
-                            location.clone(),
-                        )),
+                        left: Box::new(AstNode::Identifier(subject_name.clone(), location.clone())),
                         right: Box::new(pattern),
                         location: location.clone(),
                     };
@@ -931,10 +923,8 @@ impl<'a> Parser<'a> {
             self.parse_object_definition(location)
         } else if self.check_keyword("enum") {
             self.advance(); // Consume 'enum'
-            let name_token = self.consume(
-                &TokenKind::Identifier("".to_string()),
-                "Expected enum name",
-            )?;
+            let name_token =
+                self.consume(&TokenKind::Identifier("".to_string()), "Expected enum name")?;
             let name = match &name_token.kind {
                 TokenKind::Identifier(n) => n.clone(),
                 _ => unreachable!(),
@@ -2259,7 +2249,9 @@ impl<'a> Parser<'a> {
                 "Tuple unpacking is not supported: a declaration binds exactly one variable",
                 self.get_location(),
             )
-            .with_hint("Declare each variable on its own line, e.g. 'var a = 1' then 'var b = 2'"));
+            .with_hint(
+                "Declare each variable on its own line, e.g. 'var a = 1' then 'var b = 2'",
+            ));
         }
 
         // Parse optional type annotation

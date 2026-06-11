@@ -195,24 +195,24 @@ macro_rules! integer_shift_arms {
             (Value::I64(a), Value::I64(b)) => {
                 Some(checked_shift($operation, *a, *b, i64::$method).map(Value::I64))
             }
-            (Value::I32(a), Value::I32(b)) => Some(
-                checked_shift($operation, *a, i64::from(*b), i32::$method).map(Value::I32),
-            ),
-            (Value::I16(a), Value::I16(b)) => Some(
-                checked_shift($operation, *a, i64::from(*b), i16::$method).map(Value::I16),
-            ),
-            (Value::I8(a), Value::I8(b)) => Some(
-                checked_shift($operation, *a, i64::from(*b), i8::$method).map(Value::I8),
-            ),
-            (Value::U8(a), Value::U8(b)) => Some(
-                checked_shift($operation, *a, i64::from(*b), u8::$method).map(Value::U8),
-            ),
-            (Value::U16(a), Value::U16(b)) => Some(
-                checked_shift($operation, *a, i64::from(*b), u16::$method).map(Value::U16),
-            ),
-            (Value::U32(a), Value::U32(b)) => Some(
-                checked_shift($operation, *a, i64::from(*b), u32::$method).map(Value::U32),
-            ),
+            (Value::I32(a), Value::I32(b)) => {
+                Some(checked_shift($operation, *a, i64::from(*b), i32::$method).map(Value::I32))
+            }
+            (Value::I16(a), Value::I16(b)) => {
+                Some(checked_shift($operation, *a, i64::from(*b), i16::$method).map(Value::I16))
+            }
+            (Value::I8(a), Value::I8(b)) => {
+                Some(checked_shift($operation, *a, i64::from(*b), i8::$method).map(Value::I8))
+            }
+            (Value::U8(a), Value::U8(b)) => {
+                Some(checked_shift($operation, *a, i64::from(*b), u8::$method).map(Value::U8))
+            }
+            (Value::U16(a), Value::U16(b)) => {
+                Some(checked_shift($operation, *a, i64::from(*b), u16::$method).map(Value::U16))
+            }
+            (Value::U32(a), Value::U32(b)) => {
+                Some(checked_shift($operation, *a, i64::from(*b), u32::$method).map(Value::U32))
+            }
             (Value::U64(a), Value::U64(b)) => Some(match i64::try_from(*b) {
                 Ok(amount) => checked_shift($operation, *a, amount, u64::$method).map(Value::U64),
                 Err(_) => Err(ValueOpError::ShiftOutOfRange {

@@ -844,14 +844,7 @@ async fn run(args: RunArgs) -> Result<()> {
             }
         }
     }
-    let mut builder = apply_run_inputs(run_source.builder, &args.inputs, &args.client_inputs)?;
-    if let Some(expected_output_clients) = args.expected_output_clients {
-        builder = builder.expected_output_clients(expected_output_clients);
-    }
-    if let Some(path) = args.runner {
-        builder = builder.local_runner_path(path);
-    }
-    let runtime = builder.clone().build().with_context(|| {
+    let runtime = run_source.builder.clone().build().with_context(|| {
         execution_build_context(
             "stoffel run",
             build.path.as_deref(),
@@ -864,9 +857,17 @@ async fn run(args: RunArgs) -> Result<()> {
         &args.entry,
         "stoffel run",
     )?;
-    validate_entry_and_named_inputs(runtime.program(), &args.entry, &args.inputs, "stoffel run")?;
+    let inputs = normalize_entry_inputs(runtime.program(), &args.entry, &args.inputs);
+    validate_entry_and_named_inputs(runtime.program(), &args.entry, &inputs, "stoffel run")?;
     if args.program_info {
         print_program_summary(runtime.program());
+    }
+    let mut builder = apply_run_inputs(run_source.builder, &inputs, &args.client_inputs)?;
+    if let Some(expected_output_clients) = args.expected_output_clients {
+        builder = builder.expected_output_clients(expected_output_clients);
+    }
+    if let Some(path) = args.runner {
+        builder = builder.local_runner_path(path);
     }
     let result = builder
         .execute_local_function_with_timeout(&args.entry, Duration::from_secs(args.timeout_secs))
@@ -908,17 +909,17 @@ async fn run_network(args: RunArgs) -> Result<()> {
         &args.entry,
         "stoffel run --network",
     )?;
+    let normalized_inputs = normalize_entry_inputs(runtime.program(), &args.entry, &args.inputs);
     validate_entry_and_named_inputs(
         runtime.program(),
         &args.entry,
-        &args.inputs,
+        &normalized_inputs,
         "stoffel run --network",
     )?;
     if args.program_info {
         print_program_summary(runtime.program());
     }
-    let inputs = args
-        .inputs
+    let inputs = normalized_inputs
         .iter()
         .map(|input| input.value.clone())
         .collect::<Vec<_>>();
@@ -2250,6 +2251,49 @@ fn apply_run_inputs(
     Ok(builder)
 }
 
+fn normalize_entry_inputs(program: &Program, entry: &str, inputs: &[InputArg]) -> Vec<InputArg> {
+    let Some(function) = program.function(entry) else {
+        return inputs.to_vec();
+    };
+    let parameter_types = function
+        .parameter_names()
+        .zip(function.parameter_types())
+        .collect::<BTreeMap<_, _>>();
+    inputs
+        .iter()
+        .map(|input| {
+            let value = parameter_types
+                .get(input.name.as_str())
+                .map(|ty| normalize_input_value_for_type(&input.value, ty))
+                .unwrap_or_else(|| input.value.clone());
+            InputArg {
+                name: input.name.clone(),
+                value,
+            }
+        })
+        .collect()
+}
+
+fn normalize_input_value_for_type(value: &Value, ty: &FunctionType) -> Value {
+    match ty.underlying_type() {
+        FunctionType::Bool => match value {
+            Value::I64(0) | Value::U64(0) => Value::Bool(false),
+            Value::I64(1) | Value::U64(1) => Value::Bool(true),
+            _ => value.clone(),
+        },
+        FunctionType::List(element_type) => match value {
+            Value::List(values) => Value::List(
+                values
+                    .iter()
+                    .map(|value| normalize_input_value_for_type(value, element_type))
+                    .collect(),
+            ),
+            _ => value.clone(),
+        },
+        _ => value.clone(),
+    }
+}
+
 fn validate_entry_and_named_inputs(
     program: &Program,
     entry: &str,
@@ -3020,6 +3064,29 @@ mod tests {
         assert_eq!(
             parse_value("1,10").unwrap(),
             Value::List(vec![Value::I64(1), Value::I64(10)])
+        );
+    }
+
+    #[test]
+    fn normalize_input_value_accepts_numeric_bool_bits_for_secret_bool_lists() {
+        let ty = FunctionType::List(Box::new(FunctionType::Secret(Box::new(FunctionType::Bool))));
+
+        assert_eq!(
+            normalize_input_value_for_type(
+                &Value::List(vec![
+                    Value::I64(0),
+                    Value::I64(1),
+                    Value::Bool(true),
+                    Value::I64(2),
+                ]),
+                &ty,
+            ),
+            Value::List(vec![
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::I64(2),
+            ])
         );
     }
 

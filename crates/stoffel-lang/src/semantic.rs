@@ -131,9 +131,7 @@ impl<'a> SemanticAnalyzer<'a> {
         function_name: &str,
         location: &SourceLocation,
     ) -> Result<Vec<AstNode>, ()> {
-        let is_variadic = signature
-            .last()
-            .is_some_and(|(_, _, variadic)| *variadic);
+        let is_variadic = signature.last().is_some_and(|(_, _, variadic)| *variadic);
 
         // Pack extra positional arguments into a list for a trailing *args.
         if is_variadic {
@@ -194,8 +192,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     location: arg_loc,
                 } => {
                     seen_named = true;
-                    let Some(index) =
-                        signature.iter().position(|(param, _, _)| *param == name)
+                    let Some(index) = signature.iter().position(|(param, _, _)| *param == name)
                     else {
                         self.error_reporter.add_error(CompilerError::semantic_error(
                             format!(
@@ -272,8 +269,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 ..
             } => match else_branch {
                 Some(else_branch) => {
-                    Self::node_always_returns(then_branch)
-                        && Self::node_always_returns(else_branch)
+                    Self::node_always_returns(then_branch) && Self::node_always_returns(else_branch)
                 }
                 None => false,
             },
@@ -1575,8 +1571,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
 
                 if !is_builtin {
-                    if let Some(position) = parameters.iter().position(|param| param.is_variadic)
-                    {
+                    if let Some(position) = parameters.iter().position(|param| param.is_variadic) {
                         if position + 1 != parameters.len() {
                             self.error_reporter.add_error(CompilerError::semantic_error(
                                 "A variadic parameter (*args) must be the last parameter",
@@ -1600,18 +1595,16 @@ impl<'a> SemanticAnalyzer<'a> {
                             .as_deref()
                             .is_some_and(|value| !matches!(value, AstNode::Literal { .. }))
                     }) {
-                        self.error_reporter.add_error(
-                            CompilerError::semantic_error(
-                                format!(
-                                    "Default value for parameter '{}' must be a literal",
-                                    param.name
-                                ),
-                                param
-                                    .type_annotation
-                                    .as_ref()
-                                    .map_or_else(|| location.clone(), |node| node.location()),
+                        self.error_reporter.add_error(CompilerError::semantic_error(
+                            format!(
+                                "Default value for parameter '{}' must be a literal",
+                                param.name
                             ),
-                        );
+                            param
+                                .type_annotation
+                                .as_ref()
+                                .map_or_else(|| location.clone(), |node| node.location()),
+                        ));
                         return Err(());
                     }
                     let mut seen_default = false;
@@ -1619,15 +1612,13 @@ impl<'a> SemanticAnalyzer<'a> {
                         if param.default_value.is_some() {
                             seen_default = true;
                         } else if seen_default {
-                            self.error_reporter.add_error(
-                                CompilerError::semantic_error(
-                                    format!(
-                                        "Parameter '{}' without a default follows a parameter with one",
-                                        param.name
-                                    ),
-                                    location.clone(),
+                            self.error_reporter.add_error(CompilerError::semantic_error(
+                                format!(
+                                    "Parameter '{}' without a default follows a parameter with one",
+                                    param.name
                                 ),
-                            );
+                                location.clone(),
+                            ));
                             return Err(());
                         }
                     }
@@ -3124,10 +3115,8 @@ impl<'a> SemanticAnalyzer<'a> {
                 if matches!(op.as_str(), "shl" | "shr") {
                     let l_under = left_ty.underlying_type().clone();
                     let r_under = right_ty.underlying_type().clone();
-                    let left_ok =
-                        l_under.is_integer() || matches!(l_under, SymbolType::Unknown);
-                    let right_ok =
-                        r_under.is_integer() || matches!(r_under, SymbolType::Unknown);
+                    let left_ok = l_under.is_integer() || matches!(l_under, SymbolType::Unknown);
+                    let right_ok = r_under.is_integer() || matches!(r_under, SymbolType::Unknown);
                     if !left_ok || !right_ok {
                         self.error_reporter.add_error(CompilerError::type_error(
                             format!(
@@ -3216,10 +3205,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     let unknown_involved = matches!(l_under, SymbolType::Unknown)
                         || matches!(r_under, SymbolType::Unknown);
                     if unknown_involved {
-                        return Ok((
-                            rebuild(checked_left, checked_right),
-                            SymbolType::Unknown,
-                        ));
+                        return Ok((rebuild(checked_left, checked_right), SymbolType::Unknown));
                     }
 
                     // Opaque Share values support arithmetic via the MPC runtime;
@@ -3254,27 +3240,20 @@ impl<'a> SemanticAnalyzer<'a> {
                             } else {
                                 r_under
                             };
-                            return Ok((
-                                rebuild(checked_left, checked_right),
-                                wrap(result_under),
-                            ));
+                            return Ok((rebuild(checked_left, checked_right), wrap(result_under)));
                         }
                         // int64 <-> float/fixed coercion is supported by the VM
                         // (clear fixed-point values share the float representation).
                         let i64_real_mix = (l_under == SymbolType::Int64
                             && Self::is_clear_real_type(&r_under))
-                            || (Self::is_clear_real_type(&l_under)
-                                && r_under == SymbolType::Int64);
+                            || (Self::is_clear_real_type(&l_under) && r_under == SymbolType::Int64);
                         if i64_real_mix {
                             let result_under = if Self::is_clear_real_type(&l_under) {
                                 l_under
                             } else {
                                 r_under
                             };
-                            return Ok((
-                                rebuild(checked_left, checked_right),
-                                wrap(result_under),
-                            ));
+                            return Ok((rebuild(checked_left, checked_right), wrap(result_under)));
                         }
                         let hint = if l_under.is_integer() && r_under.is_integer() {
                             "Give both operands the same width, e.g. with literal suffixes like 10i32"
@@ -3518,10 +3497,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     if let Some(members) = self.enum_members.get(object_name) {
                         let Some(value) = members.get(&field_name).copied() else {
                             self.error_reporter.add_error(CompilerError::semantic_error(
-                                format!(
-                                    "Enum '{}' has no member '{}'",
-                                    object_name, field_name
-                                ),
+                                format!("Enum '{}' has no member '{}'", object_name, field_name),
                                 location.clone(),
                             ));
                             return Err(());

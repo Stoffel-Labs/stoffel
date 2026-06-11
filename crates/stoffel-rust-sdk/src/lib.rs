@@ -577,7 +577,7 @@ fn flatten_local_named_input(
             }
             Ok(())
         }
-        (_, crate::program::LocalInputShape::Share) => {
+        (_, crate::program::LocalInputShape::Share(_)) => {
             out.push(value.clone());
             Ok(())
         }

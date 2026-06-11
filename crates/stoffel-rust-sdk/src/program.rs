@@ -28,7 +28,7 @@ pub struct Program {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LocalInputShape {
     Clear(Value),
-    Share,
+    Share(ShareType),
     List(Vec<LocalInputShape>),
     Object(Vec<(String, LocalInputShape)>),
 }
@@ -50,11 +50,11 @@ impl LocalInputShape {
             ),
             Value::I64(_)
             | Value::U64(_)
-            | Value::Bool(_)
             | Value::Float(_)
             | Value::String(_)
             | Value::Bytes(_)
-            | Value::Unit => Self::Share,
+            | Value::Unit => Self::Share(ShareType::default_secret_int()),
+            Value::Bool(_) => Self::Share(ShareType::SecretInt { bit_length: 1 }),
         }
     }
 
@@ -79,9 +79,26 @@ impl LocalInputShape {
     fn share_count(&self) -> usize {
         match self {
             Self::Clear(_) => 0,
-            Self::Share => 1,
+            Self::Share(_) => 1,
             Self::List(items) => items.iter().map(Self::share_count).sum(),
             Self::Object(fields) => fields.iter().map(|(_, shape)| shape.share_count()).sum(),
+        }
+    }
+
+    fn share_types(&self, out: &mut Vec<ShareType>) {
+        match self {
+            Self::Clear(_) => {}
+            Self::Share(ty) => out.push(*ty),
+            Self::List(items) => {
+                for item in items {
+                    item.share_types(out);
+                }
+            }
+            Self::Object(fields) => {
+                for (_, shape) in fields {
+                    shape.share_types(out);
+                }
+            }
         }
     }
 }
@@ -405,6 +422,10 @@ impl Program {
             .iter()
             .map(LocalInputShape::share_count)
             .sum::<usize>();
+        let mut input_types = Vec::with_capacity(input_count);
+        for shape in input_shapes {
+            shape.share_types(&mut input_types);
+        }
 
         let mut instructions = Vec::with_capacity(input_count * 8 + input_shapes.len() + 2);
         let first_clear_arg_register = 2;
@@ -451,7 +472,7 @@ impl Program {
         } else {
             vec![ClientIoSchema {
                 client_slot: 0,
-                inputs: vec![ShareType::default_secret_int(); input_count],
+                inputs: input_types,
                 outputs: Vec::new(),
             }]
         };
@@ -781,7 +802,7 @@ fn emit_local_input_shape(
             instructions.push(CompiledInstruction::LDI(dest, const_index));
             Ok(dest)
         }
-        LocalInputShape::Share => {
+        LocalInputShape::Share(_) => {
             let dest = allocate_wrapper_register(next_secret_register);
             let client_index_const = binary.constants.len();
             binary.constants.push(VmValue::U64(0));
@@ -885,7 +906,10 @@ mod tests {
         let wrapped = program.with_local_client_input_wrapper(
             "main",
             "__stoffel_sdk_local_entry",
-            &[LocalInputShape::Share, LocalInputShape::Share],
+            &[
+                LocalInputShape::Share(ShareType::default_secret_int()),
+                LocalInputShape::Share(ShareType::default_secret_int()),
+            ],
         )?;
         let wrapper = wrapped
             .binary
@@ -930,6 +954,33 @@ mod tests {
             "the local wrapper should return the VM value and leave share reveals to the runner"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn local_client_input_wrapper_preserves_secret_bool_share_type() -> Result<()> {
+        let program = crate::compiler::compile_source(
+            "def main(a: list[secret bool]) -> bool:\n  return a[0].reveal()",
+            "test.stfl",
+            MpcBackend::HoneyBadger,
+        )?;
+
+        let wrapped = program.with_local_client_input_wrapper(
+            "main",
+            "__stoffel_sdk_local_entry",
+            &[LocalInputShape::List(vec![
+                LocalInputShape::Share(ShareType::SecretInt { bit_length: 1 }),
+                LocalInputShape::Share(ShareType::SecretInt { bit_length: 1 }),
+            ])],
+        )?;
+
+        assert_eq!(
+            wrapped.binary.client_io_manifest.clients[0].inputs,
+            vec![
+                ShareType::SecretInt { bit_length: 1 },
+                ShareType::SecretInt { bit_length: 1 },
+            ]
+        );
         Ok(())
     }
 

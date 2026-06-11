@@ -3403,7 +3403,10 @@ def main() -> int64:
             value: stoffellang::ast::Value::Int { value, .. },
             ..
         } => assert_eq!(*value, 0, "outer condition must compare against 0, not 10"),
-        other => panic!("expected integer literal in outer condition, got {:?}", other),
+        other => panic!(
+            "expected integer literal in outer condition, got {:?}",
+            other
+        ),
     }
 }
 
@@ -3713,8 +3716,8 @@ def main() -> string:
   var who = "Stoffel"
   return f"{who} computes {n}!"
 "#;
-    let program = compile(source, "test.stfl", &default_options())
-        .expect("f-strings should compile");
+    let program =
+        compile(source, "test.stfl", &default_options()).expect("f-strings should compile");
     assert!(
         program
             .main_chunk

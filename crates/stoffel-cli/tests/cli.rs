@@ -210,6 +210,39 @@ fn run_executes_default_secret_bool_circuit_project() {
 }
 
 #[test]
+fn run_accepts_numeric_bits_for_secret_bool_list_inputs() {
+    let _guard = local_mpc_guard();
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    fs::write(
+        temp.path().join("src/main.stfl"),
+        "def main(a: list[secret bool]) -> bool:\n  return a[0].reveal()\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(temp.path())
+        .args([
+            "run",
+            "--input",
+            "a=0,1,1,1",
+            "--timeout-secs",
+            LOCAL_MPC_TEST_TIMEOUT_SECS,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("0"))
+        .stderr(predicate::str::contains("expects bool, got i64").not());
+}
+
+#[test]
 fn build_writes_bytecode_to_target() {
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")

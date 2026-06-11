@@ -87,11 +87,9 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
                 let index = resolve_pythonic_index(&key, len, "string index")?;
                 return match value.chars().nth(index) {
                     Some(ch) => Ok(Value::String(ch.to_string())),
-                    None => Err(format!(
-                        "string index {} out of range (length {})",
-                        index, len
-                    )
-                    .into()),
+                    None => {
+                        Err(format!("string index {} out of range (length {})", index, len).into())
+                    }
                 };
             }
             let Some(table_ref) = TableRef::from_value(&target) else {
@@ -113,11 +111,9 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
             None => match (table_ref, value_to_usize(&key, "array index")) {
                 (TableRef::Array(array_ref), Ok(index)) => {
                     let len = ctx.read_array_ref_len(array_ref)?;
-                    return Err(format!(
-                        "array index {} out of range (length {})",
-                        index, len
-                    )
-                    .into());
+                    return Err(
+                        format!("array index {} out of range (length {})", index, len).into(),
+                    );
                 }
                 _ => Value::Unit,
             },
@@ -815,14 +811,22 @@ fn value_to_signed_index(value: &Value, name: &str) -> Result<i128, String> {
         Value::U32(v) => Ok(*v as i128),
         Value::U16(v) => Ok(*v as i128),
         Value::U8(v) => Ok(*v as i128),
-        other => Err(format!("{} must be an integer, found {}", name, other.type_name())),
+        other => Err(format!(
+            "{} must be an integer, found {}",
+            name,
+            other.type_name()
+        )),
     }
 }
 
 /// Resolves a possibly-negative index Pythonically: -1 is the last element.
 fn resolve_pythonic_index(key: &Value, len: usize, name: &str) -> Result<usize, String> {
     let index = value_to_signed_index(key, name)?;
-    let resolved = if index < 0 { index + len as i128 } else { index };
+    let resolved = if index < 0 {
+        index + len as i128
+    } else {
+        index
+    };
     usize::try_from(resolved)
         .map_err(|_| format!("{} {} out of range (length {})", name, index, len))
 }

@@ -610,10 +610,7 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
                         ),
                         Err(_) => {
                             return Err(CompilerError::syntax_error(
-                                format!(
-                                    "Integer literal '{}' is too large (max 128 bits)",
-                                    digits
-                                ),
+                                format!("Integer literal '{}' is too large (max 128 bits)", digits),
                                 make_location(line, start_col),
                             ));
                         }
@@ -709,11 +706,8 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
                 };
                 let snippet = extract_source_snippet(source, &location, 2);
                 let error = if c == '\'' {
-                    CompilerError::syntax_error(
-                        "Single-quoted strings are not supported",
-                        location,
-                    )
-                    .with_hint("Use double quotes: \"text\"")
+                    CompilerError::syntax_error("Single-quoted strings are not supported", location)
+                        .with_hint("Use double quotes: \"text\"")
                 } else {
                     CompilerError::syntax_error(format!("Unexpected character: {}", c), location)
                 };

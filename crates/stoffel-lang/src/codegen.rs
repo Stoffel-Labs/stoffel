@@ -1247,18 +1247,16 @@ impl CodeGenerator {
                         let zero_vr = self.allocate_virtual_register(false);
                         // The zero must match the operand's width: the VM rejects
                         // mixed-width SUB, so `-x` on int32 needs an I32 zero.
-                        let zero_constant = match operand_type_hint
-                            .as_ref()
-                            .map(SymbolType::underlying_type)
-                        {
-                            Some(SymbolType::Float | SymbolType::Fixed { .. }) => {
-                                Constant::Float(crate::bytecode::F64::new(0.0))
-                            }
-                            Some(SymbolType::Int32) => Constant::I32(0),
-                            Some(SymbolType::Int16) => Constant::I16(0),
-                            Some(SymbolType::Int8) => Constant::I8(0),
-                            _ => Constant::I64(0),
-                        };
+                        let zero_constant =
+                            match operand_type_hint.as_ref().map(SymbolType::underlying_type) {
+                                Some(SymbolType::Float | SymbolType::Fixed { .. }) => {
+                                    Constant::Float(crate::bytecode::F64::new(0.0))
+                                }
+                                Some(SymbolType::Int32) => Constant::I32(0),
+                                Some(SymbolType::Int16) => Constant::I16(0),
+                                Some(SymbolType::Int8) => Constant::I8(0),
+                                _ => Constant::I64(0),
+                            };
                         self.identified_constants.push(zero_constant.clone());
                         self.emit(Instruction::LDI(
                             zero_vr.0,
