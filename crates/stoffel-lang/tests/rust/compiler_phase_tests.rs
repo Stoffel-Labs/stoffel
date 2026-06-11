@@ -3828,7 +3828,7 @@ def main(x: uint64, mod: uint64):
 }
 
 #[test]
-fn test_uint64_inverse_with_inferred_literals_reports_assignment_roots() {
+fn test_uint64_inverse_with_inferred_literals_compiles_until_explicit_inv_mismatch() {
     let source = r#"
 def multiplicative_inverse(x: uint64, mod: uint64) -> uint64:
   if mod == 0:
@@ -3864,20 +3864,6 @@ def main(x: uint64, mod: uint64):
     let messages: Vec<&str> = errors.iter().map(|error| error.message.as_str()).collect();
 
     assert!(
-        messages.contains(&"Cannot assign value of type 'uint64' to 's' of type 'int64'"),
-        "expected s assignment type error, got {errors:?}"
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("Arithmetic '+' requires matching numeric types")),
-        "expected old_s += mod mixed numeric type error, got {errors:?}"
-    );
-    assert!(
-        messages.contains(&"Cannot return value of type 'int64' from function returning 'uint64'"),
-        "expected contextual return type error, got {errors:?}"
-    );
-    assert!(
         messages.contains(
             &"Cannot initialize variable 'inv' of type 'int64' with value of type 'uint64'"
         ),
@@ -3891,8 +3877,78 @@ def main(x: uint64, mod: uint64):
     );
     assert_eq!(
         errors.len(),
-        4,
-        "expected only root type errors, got {errors:?}"
+        1,
+        "expected only the explicit int64/uint64 mismatch, got {errors:?}"
+    );
+}
+
+#[test]
+fn test_backward_inference_from_return_type_uses_integer_width() {
+    let source = r#"
+def narrow() -> int32:
+  var x = 0
+  return x
+
+def main() -> int32:
+  return narrow()
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("return context should infer the local integer width");
+}
+
+#[test]
+fn test_backward_inference_from_bool_condition() {
+    let source = r#"
+def main() -> int64:
+  var flag = 1
+  if flag:
+    return 1
+  return 0
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("if condition should infer bool for a 0/1 literal local");
+}
+
+#[test]
+fn test_backward_inference_from_call_argument_for_containers() {
+    let source = r#"
+def first_name(names: list[string]) -> string:
+  return names[0]
+
+def main() -> string:
+  var names = []
+  names = ["ada"]
+  return first_name(names)
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("call and assignment context should infer list[string]");
+}
+
+#[test]
+fn test_backward_inference_conflict_reports_single_variable() {
+    let source = r#"
+def takes_u64(x: uint64):
+  return
+
+def takes_string(x: string):
+  return
+
+def main():
+  var x = 0
+  takes_u64(x)
+  takes_string(x)
+"#;
+    let errors = analyze_source_errors(source);
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected one inference conflict, got {errors:?}"
+    );
+    assert!(
+        errors[0]
+            .message
+            .contains("Cannot infer a single type for variable 'x'"),
+        "expected rich inference conflict, got {errors:?}"
     );
 }
 

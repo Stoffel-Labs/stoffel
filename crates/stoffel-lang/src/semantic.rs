@@ -34,6 +34,20 @@ struct CallParameterInfo {
     is_variadic: bool,
 }
 
+#[derive(Debug, Clone)]
+struct InferenceConstraint {
+    ty: SymbolType,
+    location: SourceLocation,
+    reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct LocalInference {
+    location: SourceLocation,
+    explicit: bool,
+    constraints: Vec<InferenceConstraint>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SemanticError;
 
@@ -887,6 +901,1258 @@ impl<'a> SemanticAnalyzer<'a> {
         );
         *argument = refined_arg;
         *argument_type = refined_type;
+    }
+
+    fn type_annotation_for_inferred_type(
+        ty: &SymbolType,
+        location: SourceLocation,
+    ) -> Option<AstNode> {
+        match ty {
+            SymbolType::Int64 => Some(AstNode::Identifier("int64".to_string(), location)),
+            SymbolType::Int32 => Some(AstNode::Identifier("int32".to_string(), location)),
+            SymbolType::Int16 => Some(AstNode::Identifier("int16".to_string(), location)),
+            SymbolType::Int8 => Some(AstNode::Identifier("int8".to_string(), location)),
+            SymbolType::UInt64 => Some(AstNode::Identifier("uint64".to_string(), location)),
+            SymbolType::UInt32 => Some(AstNode::Identifier("uint32".to_string(), location)),
+            SymbolType::UInt16 => Some(AstNode::Identifier("uint16".to_string(), location)),
+            SymbolType::UInt8 => Some(AstNode::Identifier("uint8".to_string(), location)),
+            SymbolType::Float => Some(AstNode::Identifier("float".to_string(), location)),
+            SymbolType::Fixed { bits } => {
+                Some(AstNode::Identifier(format!("fixed{bits}"), location))
+            }
+            SymbolType::String => Some(AstNode::Identifier("string".to_string(), location)),
+            SymbolType::Bool => Some(AstNode::Identifier("bool".to_string(), location)),
+            SymbolType::Nil => Some(AstNode::Identifier("None".to_string(), location)),
+            SymbolType::Void | SymbolType::Unknown | SymbolType::TypeVar(_) => None,
+            SymbolType::Secret(inner) => Self::type_annotation_for_inferred_type(inner, location)
+                .map(|inner| AstNode::SecretType(Box::new(inner))),
+            SymbolType::List(elem) => Self::type_annotation_for_inferred_type(elem, location)
+                .map(|elem| AstNode::ListType(Box::new(elem))),
+            SymbolType::Dict(key, value) => {
+                let key_type = Self::type_annotation_for_inferred_type(key, location.clone())?;
+                let value_type = Self::type_annotation_for_inferred_type(value, location.clone())?;
+                Some(AstNode::DictType {
+                    key_type: Box::new(key_type),
+                    value_type: Box::new(value_type),
+                    location,
+                })
+            }
+            SymbolType::TypeName(name) | SymbolType::Object(name) => {
+                Some(AstNode::Identifier(name.clone(), location))
+            }
+            SymbolType::Generic(name, params) => {
+                let mut type_params = Vec::with_capacity(params.len());
+                for param in params {
+                    type_params.push(Self::type_annotation_for_inferred_type(
+                        param,
+                        location.clone(),
+                    )?);
+                }
+                Some(AstNode::GenericType {
+                    base_name: name.clone(),
+                    type_params,
+                    location,
+                })
+            }
+        }
+    }
+
+    fn is_concrete_inference_type(ty: &SymbolType) -> bool {
+        !matches!(
+            ty,
+            SymbolType::Unknown | SymbolType::Void | SymbolType::TypeVar(_)
+        ) && !Self::contains_type_var(ty)
+    }
+
+    fn weak_literal_type(node: &AstNode, ty: &SymbolType) -> bool {
+        Self::is_untyped_int_literal(node)
+            || matches!(ty, SymbolType::Unknown)
+            || matches!(node, AstNode::ListLiteral { elements, .. } if elements.is_empty())
+            || matches!(node, AstNode::DictLiteral { pairs, .. } if pairs.is_empty())
+    }
+
+    fn add_inference_constraint(
+        locals: &mut HashMap<String, LocalInference>,
+        name: &str,
+        ty: SymbolType,
+        location: SourceLocation,
+        reason: impl Into<String>,
+    ) -> bool {
+        if !Self::is_concrete_inference_type(&ty) {
+            return false;
+        }
+        let Some(local) = locals.get_mut(name) else {
+            return false;
+        };
+        if local.explicit {
+            return false;
+        }
+        let reason = reason.into();
+        if local
+            .constraints
+            .iter()
+            .any(|constraint| constraint.ty == ty && constraint.reason == reason)
+        {
+            return false;
+        }
+        local.constraints.push(InferenceConstraint {
+            ty,
+            location,
+            reason,
+        });
+        true
+    }
+
+    fn resolved_local_types(
+        &mut self,
+        locals: &HashMap<String, LocalInference>,
+    ) -> Result<HashMap<String, SymbolType>, ()> {
+        let mut resolved = HashMap::new();
+        for (name, local) in locals {
+            if local.explicit {
+                continue;
+            }
+            let mut chosen: Option<&InferenceConstraint> = None;
+            for constraint in &local.constraints {
+                let Some(previous) = chosen else {
+                    chosen = Some(constraint);
+                    continue;
+                };
+                if previous.ty == constraint.ty
+                    || Self::types_compatible(&constraint.ty, &previous.ty)
+                {
+                    continue;
+                }
+                self.error_reporter.add_error(
+                    CompilerError::type_error(
+                        format!(
+                            "Cannot infer a single type for variable '{}': {} requires '{}', but {} requires '{}'",
+                            name,
+                            previous.reason,
+                            declared_type_to_string(&previous.ty),
+                            constraint.reason,
+                            declared_type_to_string(&constraint.ty)
+                        ),
+                        constraint.location.clone(),
+                    )
+                    .with_hint(format!(
+                        "Add an explicit type annotation to '{}' to choose the intended type; declaration is at {}",
+                        name, local.location
+                    )),
+                );
+                return Err(());
+            }
+            if let Some(chosen) = chosen {
+                resolved.insert(name.clone(), chosen.ty.clone());
+            }
+        }
+        Ok(resolved)
+    }
+
+    fn infer_function_body_types(
+        &mut self,
+        body: AstNode,
+        return_type: &SymbolType,
+    ) -> Result<AstNode, ()> {
+        let mut locals = HashMap::new();
+        Self::collect_local_declarations(&body, &mut locals);
+
+        let mut env = HashMap::new();
+        for (name, local) in &locals {
+            if local.explicit {
+                if let Some(constraint) = local.constraints.first() {
+                    env.insert(name.clone(), constraint.ty.clone());
+                }
+            }
+        }
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let resolved = self.resolved_local_types(&locals)?;
+            for (name, ty) in resolved {
+                if env.get(&name) != Some(&ty) {
+                    env.insert(name, ty);
+                    changed = true;
+                }
+            }
+            changed |= self.collect_inference_constraints(&body, return_type, &env, &mut locals);
+        }
+
+        let resolved = self.resolved_local_types(&locals)?;
+        Ok(Self::apply_inferred_types(body, &resolved))
+    }
+
+    fn collect_local_declarations(node: &AstNode, locals: &mut HashMap<String, LocalInference>) {
+        match node {
+            AstNode::VariableDeclaration {
+                name,
+                type_annotation,
+                location,
+                ..
+            } => {
+                let mut constraints = Vec::new();
+                if let Some(annotation) = type_annotation {
+                    constraints.push(InferenceConstraint {
+                        ty: SymbolType::from_ast(annotation),
+                        location: annotation.location(),
+                        reason: "explicit annotation".to_string(),
+                    });
+                }
+                locals.entry(name.clone()).or_insert(LocalInference {
+                    location: location.clone(),
+                    explicit: type_annotation.is_some(),
+                    constraints,
+                });
+            }
+            AstNode::Block(statements)
+            | AstNode::TupleLiteral(statements)
+            | AstNode::SetLiteral(statements) => {
+                for stmt in statements {
+                    Self::collect_local_declarations(stmt, locals);
+                }
+            }
+            AstNode::IfExpression {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                Self::collect_local_declarations(condition, locals);
+                Self::collect_local_declarations(then_branch, locals);
+                if let Some(else_branch) = else_branch {
+                    Self::collect_local_declarations(else_branch, locals);
+                }
+            }
+            AstNode::WhileLoop {
+                condition, body, ..
+            } => {
+                Self::collect_local_declarations(condition, locals);
+                Self::collect_local_declarations(body, locals);
+            }
+            AstNode::ForLoop { iterable, body, .. } => {
+                Self::collect_local_declarations(iterable, locals);
+                Self::collect_local_declarations(body, locals);
+            }
+            AstNode::Assignment { target, value, .. } => {
+                Self::collect_local_declarations(target, locals);
+                Self::collect_local_declarations(value, locals);
+            }
+            AstNode::Return { value, .. } | AstNode::Yield(value) => {
+                if let Some(value) = value {
+                    Self::collect_local_declarations(value, locals);
+                }
+            }
+            AstNode::BinaryOperation { left, right, .. } => {
+                Self::collect_local_declarations(left, locals);
+                Self::collect_local_declarations(right, locals);
+            }
+            AstNode::UnaryOperation { operand, .. } => {
+                Self::collect_local_declarations(operand, locals);
+            }
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                ..
+            } => {
+                Self::collect_local_declarations(function, locals);
+                for arg in arguments {
+                    Self::collect_local_declarations(arg, locals);
+                }
+            }
+            AstNode::NamedArgument { value, .. } => {
+                Self::collect_local_declarations(value, locals);
+            }
+            AstNode::CommandCall {
+                command, arguments, ..
+            } => {
+                Self::collect_local_declarations(command, locals);
+                for arg in arguments {
+                    Self::collect_local_declarations(arg, locals);
+                }
+            }
+            AstNode::FieldAccess { object, .. } => {
+                Self::collect_local_declarations(object, locals);
+            }
+            AstNode::IndexAccess { base, index, .. } => {
+                Self::collect_local_declarations(base, locals);
+                Self::collect_local_declarations(index, locals);
+            }
+            AstNode::ListLiteral { elements, .. } => {
+                for element in elements {
+                    Self::collect_local_declarations(element, locals);
+                }
+            }
+            AstNode::DictLiteral { pairs, .. } => {
+                for (key, value) in pairs {
+                    Self::collect_local_declarations(key, locals);
+                    Self::collect_local_declarations(value, locals);
+                }
+            }
+            AstNode::FunctionDefinition { .. } => {}
+            _ => {}
+        }
+    }
+
+    fn collect_inference_constraints(
+        &self,
+        node: &AstNode,
+        return_type: &SymbolType,
+        env: &HashMap<String, SymbolType>,
+        locals: &mut HashMap<String, LocalInference>,
+    ) -> bool {
+        let mut changed = false;
+        match node {
+            AstNode::VariableDeclaration {
+                name,
+                type_annotation,
+                value,
+                location,
+                is_secret,
+                ..
+            } => {
+                if let Some(value) = value.as_deref() {
+                    let value_type = self.inference_expr_type(value, env);
+                    if let Some(annotation) = type_annotation {
+                        let mut expected =
+                            self.resolve_type_aliases(&SymbolType::from_ast(annotation));
+                        if expected.is_secret() || *is_secret {
+                            expected = expected.with_secret_modifier();
+                        }
+                        changed |= self.apply_expected_inference(
+                            value,
+                            &expected,
+                            value.location(),
+                            format!("initializer for '{}'", name),
+                            env,
+                            locals,
+                        );
+                    } else if !Self::weak_literal_type(value, &value_type)
+                        && Self::is_concrete_inference_type(&value_type)
+                    {
+                        let mut inferred = value_type;
+                        if inferred.is_secret() || *is_secret {
+                            inferred = inferred.with_secret_modifier();
+                        }
+                        changed |= Self::add_inference_constraint(
+                            locals,
+                            name,
+                            inferred,
+                            location.clone(),
+                            "initializer",
+                        );
+                    }
+                    changed |= self.collect_inference_constraints(value, return_type, env, locals);
+                }
+            }
+            AstNode::Assignment {
+                target,
+                value,
+                location,
+            } => {
+                let target_type = self.inference_expr_type(target, env);
+                let value_type = self.inference_expr_type(value, env);
+                if Self::is_concrete_inference_type(&target_type) {
+                    changed |= self.apply_expected_inference(
+                        value,
+                        &target_type,
+                        location.clone(),
+                        "assignment target".to_string(),
+                        env,
+                        locals,
+                    );
+                }
+                if Self::is_concrete_inference_type(&value_type) {
+                    changed |= self.apply_expected_inference(
+                        target,
+                        &value_type,
+                        location.clone(),
+                        "assigned value".to_string(),
+                        env,
+                        locals,
+                    );
+                }
+                changed |= self.collect_inference_constraints(target, return_type, env, locals);
+                changed |= self.collect_inference_constraints(value, return_type, env, locals);
+            }
+            AstNode::Return { value, location } => {
+                if let Some(value) = value.as_deref() {
+                    let expected = match return_type {
+                        SymbolType::Secret(inner) => inner.as_ref(),
+                        _ => return_type,
+                    };
+                    changed |= self.apply_expected_inference(
+                        value,
+                        expected,
+                        location.clone(),
+                        "function return type".to_string(),
+                        env,
+                        locals,
+                    );
+                    changed |= self.collect_inference_constraints(value, return_type, env, locals);
+                }
+            }
+            AstNode::BinaryOperation {
+                op,
+                left,
+                right,
+                location,
+            } => {
+                let left_type = self.inference_expr_type(left, env);
+                let right_type = self.inference_expr_type(right, env);
+                if matches!(
+                    op.as_str(),
+                    "+" | "-"
+                        | "*"
+                        | "/"
+                        | "%"
+                        | "shl"
+                        | "shr"
+                        | "and"
+                        | "or"
+                        | "xor"
+                        | "=="
+                        | "!="
+                        | "<"
+                        | "<="
+                        | ">"
+                        | ">="
+                ) {
+                    if Self::is_concrete_inference_type(&left_type)
+                        && (Self::is_clear_numeric_type(left_type.underlying_type())
+                            || matches!(
+                                left_type.underlying_type(),
+                                SymbolType::Bool | SymbolType::String
+                            ))
+                    {
+                        changed |= self.apply_expected_inference(
+                            right,
+                            left_type.underlying_type(),
+                            location.clone(),
+                            format!("left operand of '{}'", op),
+                            env,
+                            locals,
+                        );
+                    }
+                    if Self::is_concrete_inference_type(&right_type)
+                        && (Self::is_clear_numeric_type(right_type.underlying_type())
+                            || matches!(
+                                right_type.underlying_type(),
+                                SymbolType::Bool | SymbolType::String
+                            ))
+                    {
+                        changed |= self.apply_expected_inference(
+                            left,
+                            right_type.underlying_type(),
+                            location.clone(),
+                            format!("right operand of '{}'", op),
+                            env,
+                            locals,
+                        );
+                    }
+                }
+                changed |= self.collect_inference_constraints(left, return_type, env, locals);
+                changed |= self.collect_inference_constraints(right, return_type, env, locals);
+            }
+            AstNode::UnaryOperation {
+                op,
+                operand,
+                location,
+            } => {
+                if op == "not" {
+                    changed |= self.apply_expected_inference(
+                        operand,
+                        &SymbolType::Bool,
+                        location.clone(),
+                        "operand of 'not'".to_string(),
+                        env,
+                        locals,
+                    );
+                }
+                changed |= self.collect_inference_constraints(operand, return_type, env, locals);
+            }
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                location,
+                ..
+            } => {
+                if let Some((function_name, params, is_builtin)) =
+                    self.inference_call_signature(function, arguments, env)
+                {
+                    let call_parameters =
+                        self.builtin_call_parameters(&function_name, &params, is_builtin);
+                    for (idx, arg) in arguments.iter().enumerate() {
+                        if let Some(expected) =
+                            Self::expected_argument_type_for_index(&call_parameters, idx)
+                        {
+                            changed |= self.apply_expected_inference(
+                                arg,
+                                expected,
+                                arg.location(),
+                                format!("argument {} of '{}'", idx + 1, function_name),
+                                env,
+                                locals,
+                            );
+                        }
+                    }
+                } else {
+                    changed |=
+                        self.collect_inference_constraints(function, return_type, env, locals);
+                }
+                for arg in arguments {
+                    changed |= self.collect_inference_constraints(arg, return_type, env, locals);
+                }
+                let _ = location;
+            }
+            AstNode::CommandCall {
+                command, arguments, ..
+            } => {
+                if let Some((function_name, params, is_builtin)) =
+                    self.inference_call_signature(command, arguments, env)
+                {
+                    let call_parameters =
+                        self.builtin_call_parameters(&function_name, &params, is_builtin);
+                    for (idx, arg) in arguments.iter().enumerate() {
+                        if let Some(expected) =
+                            Self::expected_argument_type_for_index(&call_parameters, idx)
+                        {
+                            changed |= self.apply_expected_inference(
+                                arg,
+                                expected,
+                                arg.location(),
+                                format!("argument {} of '{}'", idx + 1, function_name),
+                                env,
+                                locals,
+                            );
+                        }
+                    }
+                } else {
+                    changed |=
+                        self.collect_inference_constraints(command, return_type, env, locals);
+                }
+                for arg in arguments {
+                    changed |= self.collect_inference_constraints(arg, return_type, env, locals);
+                }
+            }
+            AstNode::ListLiteral { elements, .. } => {
+                let element_type = elements
+                    .iter()
+                    .map(|element| self.inference_expr_type(element, env))
+                    .find(Self::is_concrete_inference_type);
+                if let Some(element_type) = element_type {
+                    for element in elements {
+                        changed |= self.apply_expected_inference(
+                            element,
+                            &element_type,
+                            element.location(),
+                            "list element type".to_string(),
+                            env,
+                            locals,
+                        );
+                    }
+                }
+                for element in elements {
+                    changed |=
+                        self.collect_inference_constraints(element, return_type, env, locals);
+                }
+            }
+            AstNode::DictLiteral { pairs, .. } => {
+                let key_type = pairs
+                    .iter()
+                    .map(|(key, _)| self.inference_expr_type(key, env))
+                    .find(Self::is_concrete_inference_type);
+                let value_type = pairs
+                    .iter()
+                    .map(|(_, value)| self.inference_expr_type(value, env))
+                    .find(Self::is_concrete_inference_type);
+                for (key, value) in pairs {
+                    if let Some(key_type) = &key_type {
+                        changed |= self.apply_expected_inference(
+                            key,
+                            key_type,
+                            key.location(),
+                            "dict key type".to_string(),
+                            env,
+                            locals,
+                        );
+                    }
+                    if let Some(value_type) = &value_type {
+                        changed |= self.apply_expected_inference(
+                            value,
+                            value_type,
+                            value.location(),
+                            "dict value type".to_string(),
+                            env,
+                            locals,
+                        );
+                    }
+                    changed |= self.collect_inference_constraints(key, return_type, env, locals);
+                    changed |= self.collect_inference_constraints(value, return_type, env, locals);
+                }
+            }
+            AstNode::IndexAccess { base, index, .. } => {
+                let base_type = self.inference_expr_type(base, env);
+                match base_type.underlying_type() {
+                    SymbolType::List(_) | SymbolType::String => {
+                        changed |= self.apply_expected_inference(
+                            index,
+                            &SymbolType::Int64,
+                            index.location(),
+                            "list/string index".to_string(),
+                            env,
+                            locals,
+                        );
+                    }
+                    SymbolType::Dict(key, _) => {
+                        changed |= self.apply_expected_inference(
+                            index,
+                            key,
+                            index.location(),
+                            "dict key type".to_string(),
+                            env,
+                            locals,
+                        );
+                    }
+                    _ => {}
+                }
+                changed |= self.collect_inference_constraints(base, return_type, env, locals);
+                changed |= self.collect_inference_constraints(index, return_type, env, locals);
+            }
+            AstNode::Block(statements)
+            | AstNode::TupleLiteral(statements)
+            | AstNode::SetLiteral(statements) => {
+                for stmt in statements {
+                    changed |= self.collect_inference_constraints(stmt, return_type, env, locals);
+                }
+            }
+            AstNode::IfExpression {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                changed |= self.apply_expected_inference(
+                    condition,
+                    &SymbolType::Bool,
+                    condition.location(),
+                    "if condition".to_string(),
+                    env,
+                    locals,
+                );
+                changed |= self.collect_inference_constraints(condition, return_type, env, locals);
+                changed |=
+                    self.collect_inference_constraints(then_branch, return_type, env, locals);
+                if let Some(else_branch) = else_branch {
+                    changed |=
+                        self.collect_inference_constraints(else_branch, return_type, env, locals);
+                }
+            }
+            AstNode::WhileLoop {
+                condition, body, ..
+            } => {
+                changed |= self.apply_expected_inference(
+                    condition,
+                    &SymbolType::Bool,
+                    condition.location(),
+                    "while condition".to_string(),
+                    env,
+                    locals,
+                );
+                changed |= self.collect_inference_constraints(condition, return_type, env, locals);
+                changed |= self.collect_inference_constraints(body, return_type, env, locals);
+            }
+            AstNode::ForLoop { iterable, body, .. } => {
+                changed |= self.collect_inference_constraints(iterable, return_type, env, locals);
+                changed |= self.collect_inference_constraints(body, return_type, env, locals);
+            }
+            AstNode::NamedArgument { value, .. } => {
+                changed |= self.collect_inference_constraints(value, return_type, env, locals);
+            }
+            AstNode::FieldAccess { object, .. } => {
+                changed |= self.collect_inference_constraints(object, return_type, env, locals);
+            }
+            AstNode::FunctionDefinition { .. } => {}
+            _ => {}
+        }
+        changed
+    }
+
+    fn apply_expected_inference(
+        &self,
+        expr: &AstNode,
+        expected: &SymbolType,
+        location: SourceLocation,
+        reason: String,
+        env: &HashMap<String, SymbolType>,
+        locals: &mut HashMap<String, LocalInference>,
+    ) -> bool {
+        if !Self::is_concrete_inference_type(expected) || Self::contains_type_var(expected) {
+            return false;
+        }
+        match expr {
+            AstNode::Identifier(name, _) => {
+                Self::add_inference_constraint(locals, name, expected.clone(), location, reason)
+            }
+            AstNode::ListLiteral { elements, .. } => {
+                if let SymbolType::List(element_type) = expected.underlying_type() {
+                    let mut changed = false;
+                    for element in elements {
+                        changed |= self.apply_expected_inference(
+                            element,
+                            element_type,
+                            element.location(),
+                            reason.clone(),
+                            env,
+                            locals,
+                        );
+                    }
+                    changed
+                } else {
+                    false
+                }
+            }
+            AstNode::DictLiteral { pairs, .. } => {
+                if let SymbolType::Dict(key_type, value_type) = expected.underlying_type() {
+                    let mut changed = false;
+                    for (key, value) in pairs {
+                        changed |= self.apply_expected_inference(
+                            key,
+                            key_type,
+                            key.location(),
+                            reason.clone(),
+                            env,
+                            locals,
+                        );
+                        changed |= self.apply_expected_inference(
+                            value,
+                            value_type,
+                            value.location(),
+                            reason.clone(),
+                            env,
+                            locals,
+                        );
+                    }
+                    changed
+                } else {
+                    false
+                }
+            }
+            AstNode::BinaryOperation {
+                op,
+                left,
+                right,
+                location,
+            } if matches!(
+                op.as_str(),
+                "+" | "-" | "*" | "/" | "%" | "shl" | "shr" | "and" | "or" | "xor"
+            ) =>
+            {
+                let mut changed = false;
+                changed |= self.apply_expected_inference(
+                    left,
+                    expected,
+                    location.clone(),
+                    reason.clone(),
+                    env,
+                    locals,
+                );
+                changed |= self.apply_expected_inference(
+                    right,
+                    expected,
+                    location.clone(),
+                    reason,
+                    env,
+                    locals,
+                );
+                changed
+            }
+            AstNode::UnaryOperation { op, operand, .. } if op == "-" || op == "not" => {
+                self.apply_expected_inference(operand, expected, location, reason, env, locals)
+            }
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                ..
+            }
+            | AstNode::CommandCall {
+                command: function,
+                arguments,
+                ..
+            } => {
+                let mut changed = false;
+                if let Some((function_name, params, is_builtin)) =
+                    self.inference_call_signature(function, arguments, env)
+                {
+                    let call_parameters =
+                        self.builtin_call_parameters(&function_name, &params, is_builtin);
+                    for (idx, arg) in arguments.iter().enumerate() {
+                        if let Some(expected) =
+                            Self::expected_argument_type_for_index(&call_parameters, idx)
+                        {
+                            changed |= self.apply_expected_inference(
+                                arg,
+                                expected,
+                                arg.location(),
+                                format!("argument {} of '{}'", idx + 1, function_name),
+                                env,
+                                locals,
+                            );
+                        }
+                    }
+                }
+                changed
+            }
+            _ => false,
+        }
+    }
+
+    fn inference_expr_type(&self, expr: &AstNode, env: &HashMap<String, SymbolType>) -> SymbolType {
+        match expr {
+            AstNode::Literal { value, .. } => match value {
+                Value::Int {
+                    kind: Some(kind), ..
+                } => match kind {
+                    crate::ast::IntKind::Signed(width) => match width {
+                        crate::ast::IntWidth::W8 => SymbolType::Int8,
+                        crate::ast::IntWidth::W16 => SymbolType::Int16,
+                        crate::ast::IntWidth::W32 => SymbolType::Int32,
+                        crate::ast::IntWidth::W64 => SymbolType::Int64,
+                    },
+                    crate::ast::IntKind::Unsigned(width) => match width {
+                        crate::ast::IntWidth::W8 => SymbolType::UInt8,
+                        crate::ast::IntWidth::W16 => SymbolType::UInt16,
+                        crate::ast::IntWidth::W32 => SymbolType::UInt32,
+                        crate::ast::IntWidth::W64 => SymbolType::UInt64,
+                    },
+                },
+                Value::Int { kind: None, .. } => SymbolType::Unknown,
+                Value::Float(_) => SymbolType::Float,
+                Value::String(_) => SymbolType::String,
+                Value::Bool(_) => SymbolType::Bool,
+                Value::Nil => SymbolType::Nil,
+            },
+            AstNode::Identifier(name, _) => env
+                .get(name)
+                .cloned()
+                .or_else(|| {
+                    self.symbol_table
+                        .lookup_symbol(name)
+                        .map(|info| info.symbol_type.clone())
+                })
+                .unwrap_or(SymbolType::Unknown),
+            AstNode::VariableDeclaration {
+                type_annotation,
+                value,
+                is_secret,
+                ..
+            } => {
+                if let Some(annotation) = type_annotation {
+                    let mut ty = self.resolve_type_aliases(&SymbolType::from_ast(annotation));
+                    if ty.is_secret() || *is_secret {
+                        ty = ty.with_secret_modifier();
+                    }
+                    ty
+                } else {
+                    value
+                        .as_deref()
+                        .map(|value| self.inference_expr_type(value, env))
+                        .unwrap_or(SymbolType::Unknown)
+                }
+            }
+            AstNode::UnaryOperation { op, operand, .. } => {
+                if op == "not" {
+                    SymbolType::Bool
+                } else {
+                    self.inference_expr_type(operand, env)
+                }
+            }
+            AstNode::BinaryOperation {
+                op, left, right, ..
+            } => {
+                let left_type = self.inference_expr_type(left, env);
+                let right_type = self.inference_expr_type(right, env);
+                if matches!(op.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=" | "in") {
+                    return SymbolType::Bool;
+                }
+                if op == "+" && left_type == SymbolType::String && right_type == SymbolType::String
+                {
+                    return SymbolType::String;
+                }
+                if matches!(
+                    op.as_str(),
+                    "+" | "-" | "*" | "/" | "%" | "shl" | "shr" | "and" | "or" | "xor"
+                ) {
+                    if Self::is_concrete_inference_type(&left_type)
+                        && (right_type == SymbolType::Unknown || left_type == right_type)
+                    {
+                        return left_type;
+                    }
+                    if Self::is_concrete_inference_type(&right_type) {
+                        return right_type;
+                    }
+                }
+                SymbolType::Unknown
+            }
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                ..
+            }
+            | AstNode::CommandCall {
+                command: function,
+                arguments,
+                ..
+            } => self
+                .inference_call_signature(function, arguments, env)
+                .map(|(_, _, _)| self.inference_call_return_type(function, env))
+                .unwrap_or(SymbolType::Unknown),
+            AstNode::ListLiteral { elements, .. } => {
+                let element_type = elements
+                    .iter()
+                    .map(|element| self.inference_expr_type(element, env))
+                    .find(Self::is_concrete_inference_type)
+                    .unwrap_or(SymbolType::Unknown);
+                SymbolType::List(Box::new(element_type))
+            }
+            AstNode::DictLiteral { pairs, .. } => {
+                let key_type = pairs
+                    .iter()
+                    .map(|(key, _)| self.inference_expr_type(key, env))
+                    .find(Self::is_concrete_inference_type)
+                    .unwrap_or(SymbolType::Unknown);
+                let value_type = pairs
+                    .iter()
+                    .map(|(_, value)| self.inference_expr_type(value, env))
+                    .find(Self::is_concrete_inference_type)
+                    .unwrap_or(SymbolType::Unknown);
+                SymbolType::Dict(Box::new(key_type), Box::new(value_type))
+            }
+            AstNode::IndexAccess { base, .. } => {
+                match self.inference_expr_type(base, env).underlying_type() {
+                    SymbolType::List(elem) => elem.as_ref().clone(),
+                    SymbolType::Dict(_, value) => value.as_ref().clone(),
+                    SymbolType::String => SymbolType::String,
+                    _ => SymbolType::Unknown,
+                }
+            }
+            AstNode::NamedArgument { value, .. } => self.inference_expr_type(value, env),
+            AstNode::FieldAccess {
+                object, field_name, ..
+            } => {
+                let object_type = self.inference_expr_type(object, env);
+                match object_type.underlying_type() {
+                    SymbolType::Object(name) | SymbolType::TypeName(name) => self
+                        .symbol_table
+                        .lookup_user_object(name)
+                        .and_then(|info| info.fields.get(field_name))
+                        .cloned()
+                        .unwrap_or(SymbolType::Unknown),
+                    _ => SymbolType::Unknown,
+                }
+            }
+            _ => SymbolType::Unknown,
+        }
+    }
+
+    fn inference_call_signature(
+        &self,
+        function: &AstNode,
+        arguments: &[AstNode],
+        env: &HashMap<String, SymbolType>,
+    ) -> Option<(String, Vec<SymbolType>, bool)> {
+        match function {
+            AstNode::Identifier(name, _) => {
+                if let Some((object_name, method_name)) = name.split_once('.') {
+                    let method = self
+                        .symbol_table
+                        .lookup_builtin_method(object_name, method_name)?;
+                    let call_name = if crate::builtin_registry::builtin_registry()
+                        .is_receiver_bound_method(object_name, method_name)
+                    {
+                        method_name.to_string()
+                    } else {
+                        name.clone()
+                    };
+                    return Some((call_name, method.parameters.clone(), true));
+                }
+                if let Some(info) = self.symbol_table.lookup_symbol(name) {
+                    return match &info.kind {
+                        SymbolKind::Function { parameters, .. } => {
+                            Some((name.clone(), parameters.clone(), false))
+                        }
+                        SymbolKind::BuiltinFunction { parameters, .. } => {
+                            Some((name.clone(), parameters.clone(), true))
+                        }
+                        _ => None,
+                    };
+                }
+                if let Some(first_arg) = arguments.first() {
+                    let receiver_type = self.inference_expr_type(first_arg, env);
+                    if let Some(method) = self
+                        .symbol_table
+                        .lookup_builtin_method_for_receiver(&receiver_type, name)
+                    {
+                        return Some((name.clone(), method.parameters.clone(), true));
+                    }
+                }
+                None
+            }
+            AstNode::FieldAccess {
+                object, field_name, ..
+            } => {
+                if let AstNode::Identifier(object_name, _) = object.as_ref() {
+                    let qualified_name = format!("{}.{}", object_name, field_name);
+                    if let Some(info) = self.symbol_table.lookup_symbol(&qualified_name) {
+                        return match &info.kind {
+                            SymbolKind::Function { parameters, .. } => {
+                                Some((qualified_name, parameters.clone(), false))
+                            }
+                            SymbolKind::BuiltinFunction { parameters, .. } => {
+                                Some((qualified_name, parameters.clone(), true))
+                            }
+                            _ => None,
+                        };
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn inference_call_return_type(
+        &self,
+        function: &AstNode,
+        env: &HashMap<String, SymbolType>,
+    ) -> SymbolType {
+        match function {
+            AstNode::Identifier(name, _) => {
+                if let Some((object_name, method_name)) = name.split_once('.') {
+                    return self
+                        .symbol_table
+                        .lookup_builtin_method(object_name, method_name)
+                        .map(|method| method.return_type.clone())
+                        .unwrap_or(SymbolType::Unknown);
+                }
+                self.symbol_table
+                    .lookup_symbol(name)
+                    .map(|info| info.symbol_type.clone())
+                    .unwrap_or_else(|| env.get(name).cloned().unwrap_or(SymbolType::Unknown))
+            }
+            AstNode::FieldAccess {
+                object, field_name, ..
+            } => {
+                if let AstNode::Identifier(object_name, _) = object.as_ref() {
+                    let qualified_name = format!("{}.{}", object_name, field_name);
+                    return self
+                        .symbol_table
+                        .lookup_symbol(&qualified_name)
+                        .map(|info| info.symbol_type.clone())
+                        .unwrap_or(SymbolType::Unknown);
+                }
+                SymbolType::Unknown
+            }
+            _ => SymbolType::Unknown,
+        }
+    }
+
+    fn apply_inferred_types(node: AstNode, resolved: &HashMap<String, SymbolType>) -> AstNode {
+        match node {
+            AstNode::VariableDeclaration {
+                name,
+                type_annotation,
+                value,
+                is_mutable,
+                is_secret,
+                location,
+            } => {
+                let inferred = type_annotation.or_else(|| {
+                    resolved.get(&name).and_then(|ty| {
+                        Self::type_annotation_for_inferred_type(ty, location.clone()).map(Box::new)
+                    })
+                });
+                let expected = resolved.get(&name).cloned();
+                let value = value.map(|value| {
+                    let value = Self::apply_inferred_types(*value, resolved);
+                    if let Some(expected) = expected.as_ref() {
+                        let (value, _) = Self::refine_expression_type_with_expected(
+                            value,
+                            &SymbolType::Unknown,
+                            expected,
+                        );
+                        Box::new(value)
+                    } else {
+                        Box::new(value)
+                    }
+                });
+                AstNode::VariableDeclaration {
+                    name,
+                    type_annotation: inferred,
+                    value,
+                    is_mutable,
+                    is_secret,
+                    location,
+                }
+            }
+            AstNode::Assignment {
+                target,
+                value,
+                location,
+            } => AstNode::Assignment {
+                target: Box::new(Self::apply_inferred_types(*target, resolved)),
+                value: Box::new(Self::apply_inferred_types(*value, resolved)),
+                location,
+            },
+            AstNode::BinaryOperation {
+                op,
+                left,
+                right,
+                location,
+            } => AstNode::BinaryOperation {
+                op,
+                left: Box::new(Self::apply_inferred_types(*left, resolved)),
+                right: Box::new(Self::apply_inferred_types(*right, resolved)),
+                location,
+            },
+            AstNode::UnaryOperation {
+                op,
+                operand,
+                location,
+            } => AstNode::UnaryOperation {
+                op,
+                operand: Box::new(Self::apply_inferred_types(*operand, resolved)),
+                location,
+            },
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                location,
+                resolved_return_type,
+            } => AstNode::FunctionCall {
+                function: Box::new(Self::apply_inferred_types(*function, resolved)),
+                arguments: arguments
+                    .into_iter()
+                    .map(|arg| Self::apply_inferred_types(arg, resolved))
+                    .collect(),
+                location,
+                resolved_return_type,
+            },
+            AstNode::CommandCall {
+                command,
+                arguments,
+                location,
+                resolved_return_type,
+            } => AstNode::CommandCall {
+                command: Box::new(Self::apply_inferred_types(*command, resolved)),
+                arguments: arguments
+                    .into_iter()
+                    .map(|arg| Self::apply_inferred_types(arg, resolved))
+                    .collect(),
+                location,
+                resolved_return_type,
+            },
+            AstNode::NamedArgument {
+                name,
+                value,
+                location,
+            } => AstNode::NamedArgument {
+                name,
+                value: Box::new(Self::apply_inferred_types(*value, resolved)),
+                location,
+            },
+            AstNode::IfExpression {
+                condition,
+                then_branch,
+                else_branch,
+            } => AstNode::IfExpression {
+                condition: Box::new(Self::apply_inferred_types(*condition, resolved)),
+                then_branch: Box::new(Self::apply_inferred_types(*then_branch, resolved)),
+                else_branch: else_branch
+                    .map(|branch| Box::new(Self::apply_inferred_types(*branch, resolved))),
+            },
+            AstNode::WhileLoop {
+                condition,
+                body,
+                location,
+            } => AstNode::WhileLoop {
+                condition: Box::new(Self::apply_inferred_types(*condition, resolved)),
+                body: Box::new(Self::apply_inferred_types(*body, resolved)),
+                location,
+            },
+            AstNode::ForLoop {
+                variables,
+                iterable,
+                body,
+                location,
+            } => AstNode::ForLoop {
+                variables,
+                iterable: Box::new(Self::apply_inferred_types(*iterable, resolved)),
+                body: Box::new(Self::apply_inferred_types(*body, resolved)),
+                location,
+            },
+            AstNode::Block(statements) => AstNode::Block(
+                statements
+                    .into_iter()
+                    .map(|stmt| Self::apply_inferred_types(stmt, resolved))
+                    .collect(),
+            ),
+            AstNode::Return { value, location } => AstNode::Return {
+                value: value.map(|value| Box::new(Self::apply_inferred_types(*value, resolved))),
+                location,
+            },
+            AstNode::Yield(value) => AstNode::Yield(
+                value.map(|value| Box::new(Self::apply_inferred_types(*value, resolved))),
+            ),
+            AstNode::FieldAccess {
+                object,
+                field_name,
+                location,
+            } => AstNode::FieldAccess {
+                object: Box::new(Self::apply_inferred_types(*object, resolved)),
+                field_name,
+                location,
+            },
+            AstNode::IndexAccess {
+                base,
+                index,
+                location,
+            } => AstNode::IndexAccess {
+                base: Box::new(Self::apply_inferred_types(*base, resolved)),
+                index: Box::new(Self::apply_inferred_types(*index, resolved)),
+                location,
+            },
+            AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
+                elements: elements
+                    .into_iter()
+                    .map(|element| Self::apply_inferred_types(element, resolved))
+                    .collect(),
+                location,
+            },
+            AstNode::TupleLiteral(elements) => AstNode::TupleLiteral(
+                elements
+                    .into_iter()
+                    .map(|element| Self::apply_inferred_types(element, resolved))
+                    .collect(),
+            ),
+            AstNode::SetLiteral(elements) => AstNode::SetLiteral(
+                elements
+                    .into_iter()
+                    .map(|element| Self::apply_inferred_types(element, resolved))
+                    .collect(),
+            ),
+            AstNode::DictLiteral { pairs, location } => AstNode::DictLiteral {
+                pairs: pairs
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (
+                            Self::apply_inferred_types(key, resolved),
+                            Self::apply_inferred_types(value, resolved),
+                        )
+                    })
+                    .collect(),
+                location,
+            },
+            other => other,
+        }
     }
 
     fn check_generic_compat(
@@ -1816,6 +3082,8 @@ impl<'a> SemanticAnalyzer<'a> {
                         };
                         self.symbol_table.declare_symbol(param_info);
                     }
+
+                    let body = Box::new(self.infer_function_body_types(*body, &final_return_type)?);
 
                     // Recursively analyze the body
                     let errors_before_body = self.error_reporter.error_count();
