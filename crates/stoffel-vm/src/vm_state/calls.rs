@@ -466,6 +466,14 @@ impl VMState {
                     clear_share_input(&clear_value, Some(ShareType::try_secret_int(bit_length)?))?;
                 Ok(PendingMpcBuiltinOperation::InputShare { clear })
             }
+            MpcOnlineBuiltin::FromClearUInt => {
+                args.require_min(2, "2 arguments: value, bit_length")?;
+                let clear_value = args.cloned(0)?;
+                let bit_length = args.usize(1, "bit_length")?;
+                let clear =
+                    clear_share_input(&clear_value, Some(ShareType::try_secret_uint(bit_length)?))?;
+                Ok(PendingMpcBuiltinOperation::InputShare { clear })
+            }
             MpcOnlineBuiltin::FromClearFixed => {
                 args.require_min(3, "3 arguments: value, total_bits, frac_bits")?;
                 let clear_value = args.cloned(0)?;

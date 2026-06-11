@@ -14,6 +14,7 @@ pub type ForeignFunctionPtr =
 pub(crate) enum MpcOnlineBuiltin {
     FromClear,
     FromClearInt,
+    FromClearUInt,
     FromClearFixed,
     Mul,
     BatchMul,
@@ -39,6 +40,7 @@ impl MpcOnlineBuiltin {
         match self {
             Self::FromClear => "Share.from_clear",
             Self::FromClearInt => "Share.from_clear_int",
+            Self::FromClearUInt => "Share.from_clear_uint",
             Self::FromClearFixed => "Share.from_clear_fixed",
             Self::Mul => "Share.mul",
             Self::BatchMul => "Share.batch_mul",

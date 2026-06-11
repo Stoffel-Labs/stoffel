@@ -118,6 +118,36 @@ def main(a: list[list[int64]], a_rows: int64, a_cols: int64) -> list[int64]:
 }
 
 #[test]
+fn compiled_nested_list_index_assignment_autovivifies_inner_lists() {
+    let mut vm = compile_vm_source(
+        r#"
+def main() -> list[list[int64]]:
+  var rows: list[list[int64]]
+  rows[0][0] = 11
+  rows[0][1] = 12
+  rows[1].append(21)
+  rows[1].append(22)
+  return rows
+"#,
+    );
+
+    let result = vm
+        .execute_with_args("main", &[])
+        .expect("nested list mutation program should execute");
+
+    let rows = read_vm_array(&mut vm, result);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        read_vm_array(&mut vm, rows[0].clone()),
+        vec![Value::I64(11), Value::I64(12)]
+    );
+    assert_eq!(
+        read_vm_array(&mut vm, rows[1].clone()),
+        vec![Value::I64(21), Value::I64(22)]
+    );
+}
+
+#[test]
 fn compiled_list_methods_follow_python_style_mutation_semantics() {
     let mut vm = compile_vm_source(
         r#"
@@ -2138,6 +2168,7 @@ fn try_new_exposes_fallible_default_construction() {
 
     assert!(vm.has_function("create_object"));
     assert!(vm.has_function("Share.from_clear"));
+    assert!(vm.has_function("Share.from_clear_uint"));
 }
 
 #[test]

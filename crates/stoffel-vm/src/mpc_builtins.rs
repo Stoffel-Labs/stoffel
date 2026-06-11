@@ -47,6 +47,7 @@ pub use crate::mpc_values::{avss_fields, avss_object};
 const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Share.from_clear",
     "Share.from_clear_int",
+    "Share.from_clear_uint",
     "Share.from_clear_fixed",
     "Share.add",
     "Share.sub",

@@ -535,9 +535,10 @@ impl<'a> SemanticAnalyzer<'a> {
 
         match name.as_str() {
             "Share.random" => Self::share_random_expected_type(dst),
-            "ClientStore.take_share" | "Share.from_clear" | "Share.from_clear_int" => {
-                dst.is_secret() && dst.is_integer()
-            }
+            "ClientStore.take_share"
+            | "Share.from_clear"
+            | "Share.from_clear_int"
+            | "Share.from_clear_uint" => dst.is_secret() && dst.is_integer(),
             "ClientStore.take_share_fixed" | "Share.from_clear_fixed" => matches!(
                 dst,
                 SymbolType::Secret(inner)

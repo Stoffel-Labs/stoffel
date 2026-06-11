@@ -13,6 +13,7 @@ builtin object MpcOutput:
 builtin object Share:
   def from_clear(value: int64) -> Share {.builtin.}:
   def from_clear_int(value: int64, bit_length: int64) -> Share {.builtin.}:
+  def from_clear_uint(value: uint64, bit_length: int64) -> Share {.builtin.}:
   def from_clear_fixed(value: fix64, total_bits: int64, frac_bits: int64) -> Share {.builtin.}:
   def add(share1: Share, share2: Share) -> Share {.builtin.}:
   def sub(share1: Share, share2: Share) -> Share {.builtin.}:

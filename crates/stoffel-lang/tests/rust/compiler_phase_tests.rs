@@ -1243,6 +1243,52 @@ def main() -> secret bool:
 }
 
 #[test]
+fn test_compile_secret_bool_literal_initializer_lowers_to_typed_share() {
+    let source = r#"
+def main() -> secret bool:
+  var acc: secret bool = 1
+  return acc
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let instructions = &program.main_chunk.instructions;
+    let call_names = collect_call_names(instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.from_clear_int"),
+        "secret bool literal initializer should lower to typed clear-to-share, got {call_names:?}"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::LDI(_, Value::I64(1)))),
+        "secret bool literal initializer should request a 1-bit share, got {instructions:?}"
+    );
+}
+
+#[test]
+fn test_compile_secret_uint_literal_initializer_lowers_to_typed_share() {
+    let source = r#"
+def main() -> secret uint8:
+  var acc: secret uint8 = 1
+  return acc
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let instructions = &program.main_chunk.instructions;
+    let call_names = collect_call_names(instructions);
+    assert!(
+        call_names
+            .iter()
+            .any(|name| name == "Share.from_clear_uint"),
+        "secret uint literal initializer should lower to typed clear-to-share, got {call_names:?}"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::LDI(_, Value::I64(8)))),
+        "secret uint8 literal initializer should request an 8-bit share, got {instructions:?}"
+    );
+}
+
+#[test]
 fn test_compile_share_random_contextual_secret_uint8_lowers_to_typed_random() {
     let source = r#"
 def main() -> secret uint8:
@@ -3613,6 +3659,94 @@ def main() -> int64:
             .iter()
             .any(|constant| matches!(constant, Constant::I32(1))),
         "literal 1 should become an I32 constant next to an int32 operand"
+    );
+}
+
+#[test]
+fn test_uint64_arithmetic_does_not_infer_int64() {
+    let source = r#"
+def reduce(x: uint64, modulus: uint64) -> uint64:
+  var old_r: uint64 = x % modulus
+  var r: uint64 = modulus
+  var q = old_r / r
+  var temp_r: uint64 = old_r - q * r
+  return temp_r
+
+def main(x: uint64, modulus: uint64) -> uint64:
+  var result = reduce(x, modulus)
+  return result
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("uint64 arithmetic should remain uint64 throughout inference");
+}
+
+#[test]
+fn test_uint64_arguments_do_not_rewrite_int64_function_signature() {
+    let source = r#"
+def signed_identity(x: int64) -> int64:
+  return x
+
+def main(x: uint64) -> int64:
+  return signed_identity(x)
+"#;
+    let errors = analyze_source_errors(source);
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .contains("Cannot implicitly convert from 'uint64' to 'int64'")),
+        "expected uint64-to-int64 argument error, got {errors:?}"
+    );
+    assert!(
+        !errors.iter().any(|error| error
+            .message
+            .contains("declares return type 'uint64'")),
+        "argument refinement should not rewrite signed_identity's declared return type, got {errors:?}"
+    );
+}
+
+#[test]
+fn test_uint64_call_into_int64_inverse_reports_only_argument_mismatch() {
+    let source = r#"
+def multiplicative_inverse(x: int64, mod: int64) -> int64:
+  if mod == 0:
+    return 0
+
+  x = x % mod
+  var old_r: int64 = x
+  var r: int64 = mod
+  var old_s: int64 = 1
+  var s: int64 = 0
+
+  while r != 0:
+    var q = old_r / r
+    var temp_r: int64 = old_r - q * r
+    old_r = r
+    r = temp_r
+    var temp_s = old_r - q * r
+    old_s = s
+    s = temp_s
+
+  if old_r != 1:
+    return 0
+
+  if old_s < 0:
+    old_s += mod
+  return old_s
+
+def main(x: uint64, mod: uint64):
+  var inv = multiplicative_inverse(x, mod)
+"#;
+    let errors = analyze_source_errors(source);
+    assert_eq!(
+        errors.len(),
+        1,
+        "reported inverse should fail with one root-cause error, got {errors:?}"
+    );
+    assert!(
+        errors[0]
+            .message
+            .contains("Cannot implicitly convert from 'uint64' to 'int64'"),
+        "expected call-site uint64-to-int64 mismatch, got {errors:?}"
     );
 }
 

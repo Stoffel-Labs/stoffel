@@ -135,6 +135,34 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         Ok(value)
     });
 
+    register_standard_builtin!("get_or_create_array_field", |mut ctx| {
+        let (table_ref, key) = {
+            let args = ctx.named_args("get_or_create_array_field");
+            args.require_min(2, "at least 2 arguments: object and key")?;
+            (args.table_ref(0, "First argument")?, args.cloned(1)?)
+        };
+
+        let key = if let TableRef::Array(array_ref) = table_ref {
+            let len = ctx.read_array_ref_len(array_ref)?;
+            resolve_array_key(&key, len, "array index")?
+        } else {
+            key
+        };
+
+        match ctx.read_table_field(table_ref, &key)? {
+            Some(value) if TableRef::from_value(&value).is_some() => Ok(value),
+            Some(value) if value != Value::Unit => {
+                Err("Cannot autovivify nested list through a non-list value".into())
+            }
+            _ => {
+                let inner_ref = ctx.create_array_ref(0)?;
+                let inner_value = Value::from(inner_ref);
+                ctx.set_table_field(table_ref, key, inner_value.clone())?;
+                Ok(inner_value)
+            }
+        }
+    });
+
     register_standard_builtin!("set_field", |mut ctx| {
         let (table_ref, key, new_value) = {
             let args = ctx.named_args("set_field");

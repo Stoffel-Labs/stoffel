@@ -1195,6 +1195,7 @@ mod tests {
         let expected_methods = [
             "from_clear",
             "from_clear_int",
+            "from_clear_uint",
             "from_clear_fixed",
             "add",
             "sub",

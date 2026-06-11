@@ -42,6 +42,9 @@ fn infer_single_share_type(node: &AstNode) -> Option<ShareType> {
             AstNode::Identifier(name, _) if name.ends_with("from_clear_int") => {
                 Some(ShareType::default_secret_int())
             }
+            AstNode::Identifier(name, _) if name.ends_with("from_clear_uint") => {
+                Some(ShareType::secret_uint(64))
+            }
             _ => None,
         },
         _ => None,
@@ -907,6 +910,71 @@ impl CodeGenerator {
         }
     }
 
+    fn is_clear_scalar_literal_for_share(node: &AstNode, share_type: ShareType) -> bool {
+        match node {
+            AstNode::Literal { value, .. } => match (share_type, value) {
+                (ShareType::SecretInt { .. }, crate::ast::Value::Int { .. })
+                | (ShareType::SecretInt { .. }, crate::ast::Value::Bool(_)) => true,
+                (ShareType::SecretUInt { .. }, crate::ast::Value::Int { .. }) => true,
+                (ShareType::SecretFixedPoint { .. }, crate::ast::Value::Int { .. })
+                | (ShareType::SecretFixedPoint { .. }, crate::ast::Value::Float(_)) => true,
+                _ => false,
+            },
+            AstNode::UnaryOperation { op, operand, .. } if op == "-" => {
+                Self::is_clear_scalar_literal_for_share(operand, share_type)
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_i64_literal(&mut self, value: i64) -> VirtualRegister {
+        let vr = self.allocate_virtual_register(false);
+        self.identified_constants.push(Constant::I64(value));
+        self.emit(Instruction::LDI(
+            vr.0,
+            crate::core_types::Value::from(Constant::I64(value)),
+        ));
+        vr
+    }
+
+    fn compile_clear_scalar_literal_as_share(
+        &mut self,
+        expr: &AstNode,
+        share_type: ShareType,
+    ) -> CompilerResult<Option<(VirtualRegister, bool)>> {
+        if !Self::is_clear_scalar_literal_for_share(expr, share_type) {
+            return Ok(None);
+        }
+
+        let (clear_vr, _clear_is_secret) = self.compile_node(expr)?;
+        match share_type {
+            ShareType::SecretInt { bit_length } => {
+                let bit_length_vr = self.emit_i64_literal(bit_length as i64);
+                self.emit(Instruction::PUSHARG(clear_vr.0));
+                self.emit(Instruction::PUSHARG(bit_length_vr.0));
+                self.emit(Instruction::CALL("Share.from_clear_int".to_string()));
+            }
+            ShareType::SecretUInt { bit_length } => {
+                let bit_length_vr = self.emit_i64_literal(bit_length as i64);
+                self.emit(Instruction::PUSHARG(clear_vr.0));
+                self.emit(Instruction::PUSHARG(bit_length_vr.0));
+                self.emit(Instruction::CALL("Share.from_clear_uint".to_string()));
+            }
+            ShareType::SecretFixedPoint { precision } => {
+                let total_bits_vr = self.emit_i64_literal(precision.total_bits() as i64);
+                let fractional_bits_vr = self.emit_i64_literal(precision.fractional_bits() as i64);
+                self.emit(Instruction::PUSHARG(clear_vr.0));
+                self.emit(Instruction::PUSHARG(total_bits_vr.0));
+                self.emit(Instruction::PUSHARG(fractional_bits_vr.0));
+                self.emit(Instruction::CALL("Share.from_clear_fixed".to_string()));
+            }
+        }
+
+        let result_vr = self.allocate_virtual_register(true);
+        self.emit(Instruction::MOV(result_vr.0, 0));
+        Ok(Some((result_vr, true)))
+    }
+
     fn client_io_manifest(&self) -> ClientIoManifest {
         let mut slots = self
             .client_inputs
@@ -1068,6 +1136,36 @@ impl CodeGenerator {
         }
     }
 
+    fn expression_has_list_type(&self, node: &AstNode) -> bool {
+        self.type_hint_for_node(node)
+            .is_some_and(|ty| matches!(ty.underlying_type(), SymbolType::List(_)))
+    }
+
+    fn is_autovivifying_list_mutator(function_name: &str) -> bool {
+        matches!(function_name, "append" | "array_push" | "extend" | "insert")
+    }
+
+    fn compile_autovivified_list_expression(
+        &mut self,
+        node: &AstNode,
+    ) -> CompilerResult<(VirtualRegister, bool)> {
+        match node {
+            AstNode::IndexAccess { base, index, .. } if self.expression_has_list_type(node) => {
+                let (base_vr, base_is_secret) = self.compile_autovivified_list_expression(base)?;
+                let (index_vr, index_is_secret) = self.compile_node(index)?;
+
+                self.emit(Instruction::PUSHARG(base_vr.0));
+                self.emit(Instruction::PUSHARG(index_vr.0));
+                self.emit(Instruction::CALL("get_or_create_array_field".to_string()));
+
+                let result_vr = self.allocate_virtual_register(false);
+                self.emit(Instruction::MOV(result_vr.0, 0));
+                Ok((result_vr, base_is_secret || index_is_secret))
+            }
+            _ => self.compile_node(node),
+        }
+    }
+
     fn field_type_for_object_type(
         &self,
         object_type: &SymbolType,
@@ -1192,7 +1290,16 @@ impl CodeGenerator {
 
                 let (value_vr, value_is_secret) = match value {
                     Some(val_expr) => {
-                        let (vr, is_sec) = self.compile_node(val_expr)?; // Compile the expression first
+                        let (vr, is_sec) = if let Some(share_type) = annotation_share_type {
+                            match self
+                                .compile_clear_scalar_literal_as_share(val_expr, share_type)?
+                            {
+                                Some(result) => result,
+                                None => self.compile_node(val_expr)?,
+                            }
+                        } else {
+                            self.compile_node(val_expr)?
+                        };
                         let needs_secret = explicit_secret || is_sec;
                         let target_vr = self.allocate_virtual_register(needs_secret);
                         self.emit(Instruction::MOV(target_vr.0, vr.0));
@@ -1447,7 +1554,22 @@ impl CodeGenerator {
             } => {
                 match target.as_ref() {
                     AstNode::Identifier(name, _target_loc) => {
-                        let (value_vr, _value_is_secret) = self.compile_node(value)?;
+                        let target_share_type =
+                            self.variable_share_types.get(name).copied().or_else(|| {
+                                self.symbol_types
+                                    .get(name)
+                                    .and_then(share_type_for_secret_scalar_symbol_type)
+                            });
+                        let (value_vr, _value_is_secret) = if let Some(share_type) =
+                            target_share_type
+                        {
+                            match self.compile_clear_scalar_literal_as_share(value, share_type)? {
+                                Some(result) => result,
+                                None => self.compile_node(value)?,
+                            }
+                        } else {
+                            self.compile_node(value)?
+                        };
                         let dest_vr_index =
                             self.symbol_table.get(name).cloned().ok_or_else(|| {
                                 CompilerError::internal_error(format!(
@@ -1499,7 +1621,8 @@ impl CodeGenerator {
                         location: _,
                     } => {
                         // Compile base, index, and value
-                        let (base_vr, _base_is_secret) = self.compile_node(base)?;
+                        let (base_vr, _base_is_secret) =
+                            self.compile_autovivified_list_expression(base)?;
                         let (idx_vr, _idx_is_secret) = self.compile_node(index)?;
                         let (val_vr, _val_is_secret) = self.compile_node(value)?;
 
@@ -1619,8 +1742,13 @@ impl CodeGenerator {
 
                 // 3. Compile arguments first (do NOT emit PUSHARG yet) to keep PUSHARGs contiguous before CALL
                 let mut arg_vrs = Vec::with_capacity(arguments.len());
-                for arg in arguments {
-                    let (arg_vr, _arg_is_secret) = self.compile_node(arg)?;
+                for (index, arg) in arguments.iter().enumerate() {
+                    let (arg_vr, _arg_is_secret) =
+                        if index == 0 && Self::is_autovivifying_list_mutator(&function_name) {
+                            self.compile_autovivified_list_expression(arg)?
+                        } else {
+                            self.compile_node(arg)?
+                        };
                     arg_vrs.push(arg_vr);
                 }
                 // After all arguments are compiled, emit contiguous PUSHARGs in order
