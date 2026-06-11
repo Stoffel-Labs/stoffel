@@ -12,6 +12,7 @@ example folder has a `main.stfl` source file and a short README.
 - `local_dynamic_workflow`: dynamic objects, runtime type inspection, arrays, and callbacks.
 - `local_closure_counter`: captured upvalues and stateful closure callbacks.
 - `local_text_processing`: string iteration for text checksums.
+- `local_uint64_inverse`: overflow-safe unsigned modular inverse arithmetic.
 - `language_policy_engine`: import-driven policy scoring with numeric widths and boolean logic.
 - `language_mpc_schemas`: object schemas with secret-typed fields for MPC jobs.
 - `mpc_client_private_score`: client input shares, private share computation, and client output shares.

@@ -11,14 +11,14 @@ exercises.
 | `main` entry points, typed and inferred-return `def` functions, explicit `return`, `discard` | Most examples; see `language_policy_engine`, `local_dynamic_workflow`, `mpc_client_private_score`, `mpc_share_toolkit` |
 | Module imports and import aliases | `language_policy_engine` imports `math_rules as rules` |
 | Type aliases and all core scalar type names | `language_policy_engine`, `language_mpc_schemas` |
-| Integer literal widths and suffixes | `language_policy_engine` uses signed and unsigned 8/16/32/64-bit literals |
+| Integer literal widths and suffixes | `language_policy_engine` uses signed and unsigned 8/16/32/64-bit literals; `local_uint64_inverse` exercises `uint64` literals and arithmetic |
 | `None`, `bool`, `float`/`float64`, `bytes` aliases | `language_policy_engine`, `language_mpc_schemas`, crypto and signature examples |
 | Lists, dictionaries, nested generics, indexing, assignment through index | `language_policy_engine`, `language_mpc_schemas`, `local_dynamic_workflow`, `local_collections`, `local_nested_generics` |
 | Dynamic objects and runtime field access | `local_dynamic_workflow` |
 | Object schema declarations, base object syntax, secret-typed fields | `language_mpc_schemas` |
 | Secret values and MPC secret flow | `mpc_boolean_circuit`, `mpc_aes128_circuit`, `mpc_client_federated_average`, `avss_certificate/sign`, `mpc_share_toolkit` |
 | `if`/`elif`/`else`, `while`, `for` over ranges, lists, and strings | `language_policy_engine`, `local_control_flow`, `local_text_processing` |
-| Unary `-` and `not`, arithmetic, comparison, boolean operators | `language_policy_engine`, `local_control_flow` |
+| Unary `-` and `not`, arithmetic, comparison, boolean operators | `language_policy_engine`, `local_control_flow`, `local_uint64_inverse` |
 | Compound assignment `+=`, `-=`, `*=`, `/=`, `%=` | `language_policy_engine` |
 | Field-access method syntax and object builtin syntax | `local_collections`, `mpc_runtime_info`, `mpc_share_toolkit` |
 | Closures exposed by the language stdlib | `local_dynamic_workflow`, `local_closure_counter` |

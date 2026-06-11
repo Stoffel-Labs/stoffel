@@ -1,0 +1,74 @@
+# Unsigned modular multiplicative inverse.
+#
+# Computes inverse(3, 11) = 4 using only uint64 arithmetic. The coefficient
+# update is kept modulo `mod`, so the algorithm never needs signed
+# intermediate Bezout coefficients. The expected return value is 4u64.
+
+def add_mod(a: uint64, b: uint64, mod: uint64) -> uint64:
+  if mod == 0u64:
+    return 0u64
+
+  var left: uint64 = a % mod
+  var right: uint64 = b % mod
+
+  if left >= mod - right:
+    return left - (mod - right)
+
+  return left + right
+
+def sub_mod(a: uint64, b: uint64, mod: uint64) -> uint64:
+  if mod == 0u64:
+    return 0u64
+
+  var left: uint64 = a % mod
+  var right: uint64 = b % mod
+
+  if left >= right:
+    return left - right
+
+  return mod - (right - left)
+
+def mul_mod(a: uint64, b: uint64, mod: uint64) -> uint64:
+  if mod == 0u64:
+    return 0u64
+
+  var result: uint64 = 0u64
+  var base: uint64 = a % mod
+  var multiplier: uint64 = b
+
+  while multiplier != 0u64:
+    if multiplier % 2u64 == 1u64:
+      result = add_mod(result, base, mod)
+    multiplier = multiplier / 2u64
+    if multiplier != 0u64:
+      base = add_mod(base, base, mod)
+
+  return result
+
+def multiplicative_inverse(x: uint64, mod: uint64) -> uint64:
+  if mod <= 1u64:
+    return 0u64
+
+  var old_r: uint64 = x % mod
+  var r: uint64 = mod
+  var old_s: uint64 = 1u64
+  var s: uint64 = 0u64
+
+  while r != 0u64:
+    var q: uint64 = old_r / r
+
+    var next_r: uint64 = old_r - q * r
+    old_r = r
+    r = next_r
+
+    var next_s: uint64 = sub_mod(old_s, mul_mod(q, s, mod), mod)
+    old_s = s
+    s = next_s
+
+  if old_r != 1u64:
+    return 0u64
+
+  return old_s % mod
+
+def main() -> uint64:
+  return multiplicative_inverse(3u64, 11u64)

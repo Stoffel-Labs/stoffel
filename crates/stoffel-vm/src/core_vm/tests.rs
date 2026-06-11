@@ -216,6 +216,82 @@ def main() -> list[int64]:
     );
 }
 
+#[test]
+fn compiled_lists_cover_python_style_indexing_slicing_and_mutation() {
+    let mut vm = compile_vm_source(
+        r#"
+def main() -> list[int64]:
+  var items: list[int64] = [0, 1, 2, 3, 4, 5]
+  var evens: list[int64] = items[::2]
+  var reverse_middle: list[int64] = items[4:1:-2]
+  var tail: list[int64] = items[-3:]
+  var stepped_range: list[int64] = range(5, -1, -2)
+  var found: int64 = items.index(3, -4, -1)
+  items.delete(0)
+  var popped: int64 = items.pop()
+  items.insert(-100, 9)
+  items.remove(3)
+  return evens + reverse_middle + tail + stepped_range + [found, popped] + items
+"#,
+    );
+
+    let result = vm
+        .execute_with_args("main", &[])
+        .expect("python-style list program should execute");
+
+    assert_eq!(
+        read_vm_array(&mut vm, result),
+        vec![
+            Value::I64(0),
+            Value::I64(2),
+            Value::I64(4),
+            Value::I64(4),
+            Value::I64(2),
+            Value::I64(3),
+            Value::I64(4),
+            Value::I64(5),
+            Value::I64(5),
+            Value::I64(3),
+            Value::I64(1),
+            Value::I64(3),
+            Value::I64(5),
+            Value::I64(9),
+            Value::I64(1),
+            Value::I64(2),
+            Value::I64(4),
+        ]
+    );
+}
+
+#[test]
+fn compiled_lists_compare_by_value_and_strings_support_stepped_slices() {
+    let mut vm = compile_vm_source(
+        r#"
+def main() -> list[int64]:
+  var left: list[int64] = [1, 2, 3]
+  var same: list[int64] = [1, 2, 3]
+  var different: list[int64] = [1, 2]
+  var text: string = "abcdef"[::-2] + "|" + "abcdef"[1:5:2]
+  var result: list[int64] = []
+  if left == same:
+    result.append(1)
+  if left != different:
+    result.append(2)
+  result.append(len(text))
+  return result
+"#,
+    );
+
+    let result = vm
+        .execute_with_args("main", &[])
+        .expect("list equality and string slice program should execute");
+
+    assert_eq!(
+        read_vm_array(&mut vm, result),
+        vec![Value::I64(1), Value::I64(2), Value::I64(6)]
+    );
+}
+
 struct ClonePreservedEngine;
 
 impl MpcEngine for ClonePreservedEngine {

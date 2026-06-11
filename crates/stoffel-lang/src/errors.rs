@@ -229,6 +229,11 @@ impl ErrorReporter {
         self.has_errors
     }
 
+    /// Returns the number of reported errors, excluding warnings.
+    pub fn error_count(&self) -> usize {
+        self.errors.len()
+    }
+
     /// Returns all errors and warnings
     pub fn get_all(&self) -> Vec<&CompilerError> {
         let mut all = Vec::new();

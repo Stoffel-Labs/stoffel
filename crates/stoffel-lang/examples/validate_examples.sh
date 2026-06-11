@@ -108,6 +108,7 @@ run_vm local_text_processing.stflb
 run_vm local_dynamic_workflow.stflb
 run_vm local_closure_counter.stflb
 run_vm language_mpc_schemas.stflb
+run_vm local_uint64_inverse.stflb
 
 LOCAL_STORE="$(mktemp -d "${TMPDIR:-/tmp}/stoffel-local-store.XXXXXX")"
 trap 'rm -rf "$LOCAL_STORE"' EXIT

@@ -1076,6 +1076,118 @@ impl<'a> SemanticAnalyzer<'a> {
         Ok(())
     }
 
+    fn clear_integer_conversion_error(
+        src_node: Option<&AstNode>,
+        src_type: &SymbolType,
+        dst_type: &SymbolType,
+    ) -> bool {
+        if !src_type.is_integer() || !dst_type.is_integer() {
+            return false;
+        }
+        if src_type.underlying_type() == dst_type.underlying_type() {
+            return false;
+        }
+        if src_node.and_then(Self::int_literal_value).is_some() {
+            return false;
+        }
+        !src_type.can_widen_to(dst_type)
+    }
+
+    fn add_variable_initializer_type_error(
+        &mut self,
+        name: &str,
+        src_type: &SymbolType,
+        dst_type: &SymbolType,
+        location: SourceLocation,
+    ) {
+        self.error_reporter.add_error(
+            CompilerError::type_error(
+                format!(
+                    "Cannot initialize variable '{}' of type '{}' with value of type '{}'",
+                    name,
+                    declared_type_to_string(dst_type),
+                    declared_type_to_string(src_type)
+                ),
+                location,
+            )
+            .with_hint("Use matching signedness and width for the variable and initializer"),
+        );
+    }
+
+    fn add_call_argument_type_error(
+        &mut self,
+        function_name: &str,
+        argument_index: usize,
+        src_type: &SymbolType,
+        dst_type: &SymbolType,
+        location: SourceLocation,
+    ) {
+        self.error_reporter.add_error(
+            CompilerError::type_error(
+                format!(
+                    "Argument {} to function '{}' has type '{}', but parameter expects '{}'",
+                    argument_index + 1,
+                    function_name,
+                    declared_type_to_string(src_type),
+                    declared_type_to_string(dst_type)
+                ),
+                location,
+            )
+            .with_hint(
+                "Use matching signedness and width at the call site or in the function signature",
+            ),
+        );
+    }
+
+    fn assignment_target_description(target: &AstNode) -> String {
+        match target {
+            AstNode::Identifier(name, _) => format!("'{}'", name),
+            AstNode::FieldAccess { field_name, .. } => format!("field '{}'", field_name),
+            AstNode::IndexAccess { .. } => "indexed value".to_string(),
+            _ => "assignment target".to_string(),
+        }
+    }
+
+    fn add_assignment_type_error(
+        &mut self,
+        target: &AstNode,
+        src_type: &SymbolType,
+        dst_type: &SymbolType,
+        location: SourceLocation,
+    ) {
+        self.error_reporter.add_error(
+            CompilerError::type_error(
+                format!(
+                    "Cannot assign value of type '{}' to {} of type '{}'",
+                    declared_type_to_string(src_type),
+                    Self::assignment_target_description(target),
+                    declared_type_to_string(dst_type)
+                ),
+                location,
+            )
+            .with_hint("Use matching signedness and width on both sides of the assignment"),
+        );
+    }
+
+    fn add_return_type_error(
+        &mut self,
+        src_type: &SymbolType,
+        dst_type: &SymbolType,
+        location: SourceLocation,
+    ) {
+        self.error_reporter.add_error(
+            CompilerError::type_error(
+                format!(
+                    "Cannot return value of type '{}' from function returning '{}'",
+                    declared_type_to_string(src_type),
+                    declared_type_to_string(dst_type)
+                ),
+                location,
+            )
+            .with_hint("Return a value whose signedness and width match the function return type"),
+        );
+    }
+
     fn resolve_type_aliases(&self, sym_type: &SymbolType) -> SymbolType {
         self.resolve_type_aliases_inner(sym_type, 0)
     }
@@ -1359,6 +1471,20 @@ impl<'a> SemanticAnalyzer<'a> {
                     && target_type != SymbolType::Unknown
                 {
                     // Enforce integer compatibility (includes literal range check)
+                    if Self::clear_integer_conversion_error(
+                        Some(&checked_value),
+                        &value_type,
+                        &target_type,
+                    ) {
+                        self.add_assignment_type_error(
+                            &checked_target,
+                            &value_type,
+                            &target_type,
+                            loc.clone(),
+                        );
+                        return Err(());
+                    }
+
                     if self
                         .check_integer_compat(
                             Some(&checked_value),
@@ -1453,18 +1579,33 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
 
                 // 3. Check for type consistency (with integer width/range rules)
-                if type_annotation.is_some()
-                    && value_type != SymbolType::Unknown
-                    && self
-                        .check_integer_compat(
+                if type_annotation.is_some() && value_type != SymbolType::Unknown {
+                    let initializer_has_type_error = if Self::clear_integer_conversion_error(
+                        checked_value_node.as_deref(),
+                        &value_type,
+                        &declared_type,
+                    ) {
+                        self.add_variable_initializer_type_error(
+                            &name,
+                            &value_type,
+                            &declared_type,
+                            location.clone(),
+                        );
+                        true
+                    } else {
+                        self.check_integer_compat(
                             checked_value_node.as_deref(),
                             &value_type,
                             &declared_type,
                             location.clone(),
                         )
                         .is_err()
-                {
-                    return Err(());
+                    };
+
+                    if initializer_has_type_error {
+                        // Keep the declared symbol available with its annotation so later
+                        // statements do not cascade into undeclared-identifier errors.
+                    }
                 }
 
                 // 4. Handle 'secret' keyword and type secrecy
@@ -1677,14 +1818,19 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
 
                     // Recursively analyze the body
+                    let errors_before_body = self.error_reporter.error_count();
                     let (checked_body_node, _body_type) = self.analyze_node(*body)?;
+                    let body_has_errors = self.error_reporter.error_count() > errors_before_body;
 
                     // Every path through a value-returning function must return.
                     let needs_return = !matches!(
                         final_return_type.underlying_type(),
                         SymbolType::Void | SymbolType::Nil | SymbolType::Unknown
                     );
-                    if needs_return && !Self::node_always_returns(&checked_body_node) {
+                    if !body_has_errors
+                        && needs_return
+                        && !Self::node_always_returns(&checked_body_node)
+                    {
                         self.error_reporter.add_error(
                             CompilerError::semantic_error(
                                 format!(
@@ -2172,6 +2318,15 @@ impl<'a> SemanticAnalyzer<'a> {
                             );
                             return Err(());
                         }
+                        if Self::clear_integer_conversion_error(
+                            checked_expr_node.as_deref(),
+                            &return_value_type,
+                            &expected,
+                        ) {
+                            self.add_return_type_error(&return_value_type, &expected, loc);
+                            return Err(());
+                        }
+
                         if self
                             .check_integer_compat(
                                 checked_expr_node.as_deref(),
@@ -2673,6 +2828,21 @@ impl<'a> SemanticAnalyzer<'a> {
                         return Err(());
                     }
 
+                    if Self::clear_integer_conversion_error(
+                        Some(&checked_arguments[idx]),
+                        &argument_types[idx],
+                        expected_ty,
+                    ) {
+                        self.add_call_argument_type_error(
+                            &function_name,
+                            idx,
+                            &argument_types[idx],
+                            expected_ty,
+                            arg_loc,
+                        );
+                        return Err(());
+                    }
+
                     if self
                         .check_generic_compat(
                             Some(&checked_arguments[idx]),
@@ -2882,6 +3052,34 @@ impl<'a> SemanticAnalyzer<'a> {
                     // Validate operand types. Equality also supports booleans.
                     let l_under = left_ty.underlying_type().clone();
                     let r_under = right_ty.underlying_type().clone();
+                    if matches!(op.as_str(), "==" | "!=") {
+                        if let (SymbolType::List(left_elem), SymbolType::List(right_elem)) =
+                            (&l_under, &r_under)
+                        {
+                            if !Self::types_compatible(left_elem, right_elem) {
+                                self.error_reporter.add_error(CompilerError::type_error(
+                                    format!(
+                                        "Cannot compare lists with incompatible element types '{}' and '{}'",
+                                        declared_type_to_string(left_elem),
+                                        declared_type_to_string(right_elem)
+                                    ),
+                                    location.clone(),
+                                ));
+                                return Err(());
+                            }
+
+                            return Ok((
+                                AstNode::BinaryOperation {
+                                    op,
+                                    left: Box::new(checked_left),
+                                    right: Box::new(checked_right),
+                                    location,
+                                },
+                                SymbolType::Bool,
+                            ));
+                        }
+                    }
+
                     let is_left_numeric = Self::is_clear_numeric_type(&l_under);
                     let is_right_numeric = Self::is_clear_numeric_type(&r_under);
                     let is_same_clear_comparable = l_under == r_under

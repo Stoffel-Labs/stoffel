@@ -2276,6 +2276,7 @@ fn normalize_entry_inputs(program: &Program, entry: &str, inputs: &[InputArg]) -
 
 fn normalize_input_value_for_type(value: &Value, ty: &FunctionType) -> Value {
     match ty.underlying_type() {
+        FunctionType::Int { signed, bits } => normalize_integer_input_value(value, *signed, *bits),
         FunctionType::Bool => match value {
             Value::I64(0) | Value::U64(0) => Value::Bool(false),
             Value::I64(1) | Value::U64(1) => Value::Bool(true),
@@ -2290,6 +2291,40 @@ fn normalize_input_value_for_type(value: &Value, ty: &FunctionType) -> Value {
             ),
             _ => value.clone(),
         },
+        _ => value.clone(),
+    }
+}
+
+fn normalize_integer_input_value(value: &Value, signed: bool, bits: u8) -> Value {
+    let max_unsigned = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+
+    if signed {
+        let min = if bits >= 64 {
+            i64::MIN
+        } else {
+            -(1i64 << (bits - 1))
+        };
+        let max = if bits >= 64 {
+            i64::MAX
+        } else {
+            (1i64 << (bits - 1)) - 1
+        };
+        return match value {
+            Value::U64(value) if *value <= max as u64 => Value::I64(*value as i64),
+            Value::I64(value) if *value >= min && *value <= max => Value::I64(*value),
+            _ => value.clone(),
+        };
+    }
+
+    match value {
+        Value::I64(value) if *value >= 0 && (*value as u64) <= max_unsigned => {
+            Value::U64(*value as u64)
+        }
+        Value::U64(value) if *value <= max_unsigned => Value::U64(*value),
         _ => value.clone(),
     }
 }
@@ -2815,6 +2850,9 @@ fn parse_value(value: &str) -> Result<Value> {
     {
         return Ok(Value::Bytes(parse_hex_bytes(hex)?));
     }
+    if let Some(value) = parse_suffixed_integer_value(value)? {
+        return Ok(value);
+    }
     if let Ok(value) = value.parse::<i64>() {
         return Ok(Value::I64(value));
     }
@@ -2828,6 +2866,54 @@ fn parse_value(value: &str) -> Result<Value> {
         return Ok(Value::Float(value));
     }
     Ok(Value::String(value.to_owned()))
+}
+
+fn parse_suffixed_integer_value(value: &str) -> Result<Option<Value>> {
+    let lower = value.to_ascii_lowercase();
+    let suffixes = [
+        ("uint64", false),
+        ("uint32", false),
+        ("uint16", false),
+        ("uint8", false),
+        ("u64", false),
+        ("u32", false),
+        ("u16", false),
+        ("u8", false),
+        ("int64", true),
+        ("int32", true),
+        ("int16", true),
+        ("int8", true),
+        ("i64", true),
+        ("i32", true),
+        ("i16", true),
+        ("i8", true),
+    ];
+
+    for (suffix, signed) in suffixes {
+        let Some(number) = lower.strip_suffix(suffix) else {
+            continue;
+        };
+        if number.is_empty() || number == "-" || number == "+" {
+            anyhow::bail!("integer suffix '{suffix}' must follow a numeric value");
+        }
+        if signed {
+            return number
+                .parse::<i64>()
+                .map(Value::I64)
+                .map(Some)
+                .map_err(|error| anyhow::anyhow!("invalid signed integer '{value}': {error}"));
+        }
+        if number.starts_with('-') {
+            anyhow::bail!("unsigned integer '{value}' cannot be negative");
+        }
+        return number
+            .parse::<u64>()
+            .map(Value::U64)
+            .map(Some)
+            .map_err(|error| anyhow::anyhow!("invalid unsigned integer '{value}': {error}"));
+    }
+
+    Ok(None)
 }
 
 fn parse_object_value(value: &str) -> Result<Value> {
@@ -3064,6 +3150,37 @@ mod tests {
         assert_eq!(
             parse_value("1,10").unwrap(),
             Value::List(vec![Value::I64(1), Value::I64(10)])
+        );
+    }
+
+    #[test]
+    fn parse_value_accepts_integer_type_suffixes() {
+        assert_eq!(parse_value("3u64").unwrap(), Value::U64(3));
+        assert_eq!(parse_value("3uint64").unwrap(), Value::U64(3));
+        assert_eq!(parse_value("3U32").unwrap(), Value::U64(3));
+        assert_eq!(parse_value("3i64").unwrap(), Value::I64(3));
+        assert_eq!(parse_value("-3int64").unwrap(), Value::I64(-3));
+
+        let err = parse_value("-3u64").unwrap_err().to_string();
+        assert!(err.contains("cannot be negative"));
+    }
+
+    #[test]
+    fn normalize_input_value_coerces_integer_values_to_expected_signedness() {
+        assert_eq!(
+            normalize_input_value_for_type(&Value::I64(3), &FunctionType::uint64()),
+            Value::U64(3)
+        );
+        assert_eq!(
+            normalize_input_value_for_type(&Value::U64(3), &FunctionType::int64()),
+            Value::I64(3)
+        );
+        assert_eq!(
+            normalize_input_value_for_type(
+                &Value::U64(i64::MAX as u64 + 1),
+                &FunctionType::int64()
+            ),
+            Value::U64(i64::MAX as u64 + 1)
         );
     }
 

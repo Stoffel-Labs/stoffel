@@ -1412,6 +1412,8 @@ impl CodeGenerator {
                     Some(SymbolType::List(_))
                 );
                 let is_list_repeat = op == "*" && (is_left_list || is_right_list);
+                let is_list_equality =
+                    matches!(op.as_str(), "==" | "!=") && is_left_list && is_right_list;
                 let (left_vr, left_is_secret) = self.compile_node(left)?;
                 let (right_vr, right_is_secret) = self.compile_node(right)?;
 
@@ -1439,6 +1441,19 @@ impl CodeGenerator {
 
                     let result_vr = self.allocate_virtual_register(false);
                     self.emit(Instruction::MOV(result_vr.0, 0));
+                    return Ok((result_vr, false));
+                }
+
+                if is_list_equality {
+                    self.emit(Instruction::PUSHARG(left_vr.0));
+                    self.emit(Instruction::PUSHARG(right_vr.0));
+                    self.emit(Instruction::CALL("array_equals".to_string()));
+
+                    let result_vr = self.allocate_virtual_register(false);
+                    self.emit(Instruction::MOV(result_vr.0, 0));
+                    if op == "!=" {
+                        self.emit(Instruction::NOT(result_vr.0, result_vr.0));
+                    }
                     return Ok((result_vr, false));
                 }
 

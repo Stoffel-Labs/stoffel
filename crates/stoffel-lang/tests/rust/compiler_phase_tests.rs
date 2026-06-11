@@ -3693,7 +3693,7 @@ def main(x: uint64) -> int64:
     assert!(
         errors.iter().any(|error| error
             .message
-            .contains("Cannot implicitly convert from 'uint64' to 'int64'")),
+            .contains("Argument 1 to function 'signed_identity' has type 'uint64', but parameter expects 'int64'")),
         "expected uint64-to-int64 argument error, got {errors:?}"
     );
     assert!(
@@ -3745,8 +3745,154 @@ def main(x: uint64, mod: uint64):
     assert!(
         errors[0]
             .message
-            .contains("Cannot implicitly convert from 'uint64' to 'int64'"),
+            .contains("Argument 1 to function 'multiplicative_inverse' has type 'uint64', but parameter expects 'int64'"),
         "expected call-site uint64-to-int64 mismatch, got {errors:?}"
+    );
+}
+
+#[test]
+fn test_uint64_inverse_with_int64_locals_reports_type_roots_without_cascade() {
+    let source = r#"
+def multiplicative_inverse(x: uint64, mod: uint64) -> uint64:
+  if mod == 0:
+    return 0
+
+  x = x % mod
+  var old_r: int64 = x
+  var r: int64 = mod
+  var old_s: int64 = 1
+  var s: int64 = 0
+
+  while r != 0:
+    var q = old_r / r
+    var temp_r: int64 = old_r - q * r
+    old_r = r
+    r = temp_r
+    var temp_s = old_r - q * r
+    old_s = s
+    s = temp_s
+
+  if old_r != 1:
+    return 0
+
+  if old_s < 0:
+    old_s += mod
+  return old_s
+
+def main(x: uint64, mod: uint64):
+  var inv = multiplicative_inverse(x, mod)
+"#;
+    let errors = analyze_source_errors(source);
+    let messages: Vec<&str> = errors.iter().map(|error| error.message.as_str()).collect();
+
+    assert!(
+        messages.contains(
+            &"Cannot initialize variable 'old_r' of type 'int64' with value of type 'uint64'"
+        ),
+        "expected old_r initializer type error, got {errors:?}"
+    );
+    assert!(
+        messages.contains(
+            &"Cannot initialize variable 'r' of type 'int64' with value of type 'uint64'"
+        ),
+        "expected r initializer type error, got {errors:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Arithmetic '+' requires matching numeric types")),
+        "expected old_s += mod mixed numeric type error, got {errors:?}"
+    );
+    assert!(
+        messages.iter().any(|message| message
+            .contains("Cannot return value of type 'int64' from function returning 'uint64'")),
+        "expected return type mismatch, got {errors:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("Use of undeclared identifier")),
+        "type recovery should suppress undeclared-variable cascades, got {errors:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("not all paths return a value")),
+        "return-path checking should not cascade after body type errors, got {errors:?}"
+    );
+    assert_eq!(
+        errors.len(),
+        4,
+        "expected only root type errors, got {errors:?}"
+    );
+}
+
+#[test]
+fn test_uint64_inverse_with_inferred_literals_reports_assignment_roots() {
+    let source = r#"
+def multiplicative_inverse(x: uint64, mod: uint64) -> uint64:
+  if mod == 0:
+    return 0
+
+  x = x % mod
+  var old_r = x
+  var r = mod
+  var old_s = 1
+  var s = 0
+
+  while r != 0:
+    var q = old_r / r
+    var temp_r = old_r - q * r
+    old_r = r
+    r = temp_r
+    var temp_s = old_r - q * r
+    old_s = s
+    s = temp_s
+
+  if old_r != 1:
+    return 0
+
+  if old_s < 0:
+    old_s += mod
+  return old_s
+
+def main(x: uint64, mod: uint64):
+  var inv: int64 = multiplicative_inverse(x, mod)
+  print(inv)
+"#;
+    let errors = analyze_source_errors(source);
+    let messages: Vec<&str> = errors.iter().map(|error| error.message.as_str()).collect();
+
+    assert!(
+        messages.contains(&"Cannot assign value of type 'uint64' to 's' of type 'int64'"),
+        "expected s assignment type error, got {errors:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Arithmetic '+' requires matching numeric types")),
+        "expected old_s += mod mixed numeric type error, got {errors:?}"
+    );
+    assert!(
+        messages.contains(&"Cannot return value of type 'int64' from function returning 'uint64'"),
+        "expected contextual return type error, got {errors:?}"
+    );
+    assert!(
+        messages.contains(
+            &"Cannot initialize variable 'inv' of type 'int64' with value of type 'uint64'"
+        ),
+        "expected inv initializer type error, got {errors:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("Use of undeclared identifier")),
+        "type recovery should suppress undeclared-variable cascades, got {errors:?}"
+    );
+    assert_eq!(
+        errors.len(),
+        4,
+        "expected only root type errors, got {errors:?}"
     );
 }
 

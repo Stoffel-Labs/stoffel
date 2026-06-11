@@ -32,20 +32,21 @@ def call_closure[T](closure: Closure) -> T {.builtin.}:
 def call_closure_with_arg[T, U](closure: Closure, value: T) -> U {.builtin: "call_closure".}:
 def get_upvalue[T](name: string) -> T {.builtin.}:
 def set_upvalue[T](name: string, value: T) -> void {.builtin.}:
-def append[T](array: list[T], value: T) -> int64 {.builtin: "append".}:
-def extend[T](array: list[T], values: list[T]) -> int64 {.builtin: "extend".}:
+def append[T](array: list[T], value: T) -> void {.builtin: "append".}:
+def extend[T](array: list[T], values: list[T]) -> void {.builtin: "extend".}:
 def copy[T](array: list[T]) -> list[T] {.builtin: "copy".}:
 def count[T](array: list[T], value: T) -> int64 {.builtin: "count".}:
-def index[T](array: list[T], value: T) -> int64 {.builtin: "index".}:
+def index[T](array: list[T], value: T, start: int64 = 0, stop: int64 = 9223372036854775807) -> int64 {.builtin: "index".}:
 def pop[T](array: list[T], index: int64 = -1) -> T {.builtin: "pop".}:
 def remove[T](array: list[T], value: T) -> void {.builtin: "remove".}:
 def insert[T](array: list[T], index: int64, value: T) -> void {.builtin: "insert".}:
 def clear[T](array: list[T]) -> void {.builtin: "clear".}:
 def reverse[T](array: list[T]) -> void {.builtin: "reverse".}:
 def sort[T](array: list[T]) -> void {.builtin: "sort".}:
+def delete[T](array: list[T], index: int64) -> void {.builtin: "delete".}:
 def len[T](array: list[T]) -> int64 {.builtin: "len".}:
-def range(start: int64, stop: int64) -> list[int64] {.builtin.}:
-def slice[T](value: T, start: int64, stop: int64) -> T {.builtin: "slice".}:
+def range(start: int64, stop: int64, step: int64 = 1) -> list[int64] {.builtin.}:
+def slice[T](value: T, start: int64, stop: int64, step: int64 = 1) -> T {.builtin: "slice".}:
 def contains[T, U](container: T, value: U) -> bool {.builtin: "contains".}:
 def to_string[T](value: T) -> string {.builtin: "to_string".}:
 def assert(condition: bool, message: string = "assertion failed") -> void {.builtin: "assert".}:

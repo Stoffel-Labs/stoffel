@@ -1845,20 +1845,38 @@ impl<'a> Parser<'a> {
                     value: Value::Int { value, kind: None },
                     location: location.clone(),
                 };
+                let slice_start_default = |location: &SourceLocation| {
+                    slice_bound_default(i64::MAX as u128, location)
+                };
+                let slice_stop_default = |location: &SourceLocation| {
+                    slice_bound_default(i64::MAX as u128, location)
+                };
+                let slice_step_default = |location: &SourceLocation| {
+                    slice_bound_default(1, location)
+                };
 
                 let start = if self.check(&TokenKind::Colon) {
-                    slice_bound_default(0, &operator_location)
+                    slice_start_default(&operator_location)
                 } else {
                     self.parse_expression()?
                 };
 
                 if self.check(&TokenKind::Colon) {
                     self.advance(); // Consume ':'
-                    let stop = if self.check(&TokenKind::RBracket) {
-                        // Omitted end: i64::MAX clamps to the length at runtime.
-                        slice_bound_default(i64::MAX as u128, &operator_location)
+                    let stop = if self.check(&TokenKind::RBracket) || self.check(&TokenKind::Colon) {
+                        slice_stop_default(&operator_location)
                     } else {
                         self.parse_expression()?
+                    };
+                    let step = if self.check(&TokenKind::Colon) {
+                        self.advance(); // Consume ':'
+                        if self.check(&TokenKind::RBracket) {
+                            slice_step_default(&operator_location)
+                        } else {
+                            self.parse_expression()?
+                        }
+                    } else {
+                        slice_step_default(&operator_location)
                     };
                     self.consume(&TokenKind::RBracket, "Expected ']' after slice")?;
                     return Ok(AstNode::FunctionCall {
@@ -1866,7 +1884,7 @@ impl<'a> Parser<'a> {
                             "slice".to_string(),
                             operator_location.clone(),
                         )),
-                        arguments: vec![left, start, stop],
+                        arguments: vec![left, start, stop, step],
                         location: operator_location,
                         resolved_return_type: None,
                     });

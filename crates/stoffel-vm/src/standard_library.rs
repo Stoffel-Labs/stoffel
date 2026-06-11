@@ -16,11 +16,13 @@ pub(crate) const FUNCTION_NAMES: &[&str] = &[
     "create_object",
     "create_array",
     "get_field",
+    "get_or_create_array_field",
     "set_field",
     "array_length",
     "array_push",
     "array_concat",
     "array_repeat",
+    "array_equals",
     "append",
     "extend",
     "copy",
@@ -32,6 +34,7 @@ pub(crate) const FUNCTION_NAMES: &[&str] = &[
     "clear",
     "reverse",
     "sort",
+    "delete",
     "len",
     "range",
     "ClientStore.get_number_clients",
@@ -294,6 +297,21 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         Ok(Value::from(result_ref))
     });
 
+    register_standard_builtin!("array_equals", |mut ctx| {
+        let (left_ref, right_ref) = {
+            let args = ctx.named_args("array_equals");
+            args.require_exact(2, "2 arguments: left array and right array")?;
+            (
+                args.array_ref(0, "First argument")?,
+                args.array_ref(1, "Second argument")?,
+            )
+        };
+
+        Ok(Value::Bool(arrays_equal(
+            &mut ctx, left_ref, right_ref, 64,
+        )?))
+    });
+
     register_standard_builtin!("append", |mut ctx| {
         let array_ref = {
             let args = ctx.named_args("append");
@@ -301,8 +319,8 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
             args.array_ref(0, "First argument")?
         };
 
-        let len = ctx.push_array_args_from(array_ref, 1, "append")?;
-        Ok(Value::I64(usize_to_vm_i64(len, "array length")?))
+        ctx.push_array_args_from(array_ref, 1, "append")?;
+        Ok(Value::Unit)
     });
 
     register_standard_builtin!("extend", |mut ctx| {
@@ -316,8 +334,8 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         };
 
         let values = collect_array_values(&mut ctx, values_ref)?;
-        let len = ctx.push_array_ref_values(array_ref, &values)?;
-        Ok(Value::I64(usize_to_vm_i64(len, "array length")?))
+        ctx.push_array_ref_values(array_ref, &values)?;
+        Ok(Value::Unit)
     });
 
     register_standard_builtin!("copy", |mut ctx| {
@@ -353,16 +371,33 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     });
 
     register_standard_builtin!("index", |mut ctx| {
-        let (array_ref, needle) = {
+        let (array_ref, needle, start_arg, stop_arg) = {
             let args = ctx.named_args("index");
-            args.require_exact(2, "2 arguments: array and value")?;
-            (args.array_ref(0, "First argument")?, args.cloned(1)?)
+            args.require_min(2, "at least 2 arguments: array and value")?;
+            if args.len() > 4 {
+                return Err(
+                    "index expects at most 4 arguments: array, value, start, and stop".into(),
+                );
+            }
+            (
+                args.array_ref(0, "First argument")?,
+                args.cloned(1)?,
+                if args.len() >= 3 {
+                    Some(args.cloned(2)?)
+                } else {
+                    None
+                },
+                if args.len() >= 4 {
+                    Some(args.cloned(3)?)
+                } else {
+                    None
+                },
+            )
         };
 
-        for (index, value) in collect_array_values(&mut ctx, array_ref)?
-            .into_iter()
-            .enumerate()
-        {
+        let values = collect_array_values(&mut ctx, array_ref)?;
+        let (start, stop) = normalize_search_bounds(start_arg, stop_arg, values.len())?;
+        for (index, value) in values.into_iter().enumerate().take(stop).skip(start) {
             if values_equal(&mut ctx, &value, &needle, 64)? {
                 return Ok(Value::I64(usize_to_vm_i64(index, "index")?));
             }
@@ -472,6 +507,22 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         Ok(Value::Unit)
     });
 
+    register_standard_builtin!("delete", |mut ctx| {
+        let (array_ref, raw_index) = {
+            let args = ctx.named_args("delete");
+            args.require_exact(2, "2 arguments: array and index")?;
+            (
+                args.array_ref(0, "First argument")?,
+                value_to_i64(args.get(1)?, "index")?,
+            )
+        };
+
+        let len = ctx.read_array_ref_len(array_ref)?;
+        let index = normalize_existing_index(raw_index, len)?;
+        ctx.pop_array_ref_value(array_ref, index)?;
+        Ok(Value::Unit)
+    });
+
     register_standard_builtin!("len", |mut ctx| {
         let len = {
             let args = ctx.named_args("len");
@@ -497,24 +548,37 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     });
 
     register_standard_builtin!("range", |mut ctx| {
-        let (start, stop) = {
+        let (start, stop, step) = {
             let args = ctx.named_args("range");
-            args.require_exact(2, "2 arguments: start and stop")?;
+            args.require_min(2, "at least 2 arguments: start and stop")?;
+            if args.len() > 3 {
+                return Err("range expects at most 3 arguments: start, stop, and step".into());
+            }
             (
                 value_to_i64(&args.cloned(0)?, "range start")?,
                 value_to_i64(&args.cloned(1)?, "range stop")?,
+                if args.len() == 3 {
+                    value_to_i64(&args.cloned(2)?, "range step")?
+                } else {
+                    1
+                },
             )
         };
+        if step == 0 {
+            return Err("range step argument must not be zero".into());
+        }
 
-        let count = if stop <= start {
-            0
-        } else {
-            usize::try_from(i128::from(stop) - i128::from(start))
-                .map_err(|_| "range length is too large".to_owned())?
-        };
+        let count = stepped_range_len(start, stop, step)?;
         let array_ref = ctx.create_array_ref(count)?;
         if count > 0 {
-            let values: Vec<Value> = (start..stop).map(Value::I64).collect();
+            let mut values = Vec::with_capacity(count);
+            let mut value = start;
+            for _ in 0..count {
+                values.push(Value::I64(value));
+                value = value
+                    .checked_add(step)
+                    .ok_or_else(|| "range value overflowed i64".to_owned())?;
+            }
             ctx.push_array_ref_values(array_ref, &values)?;
         }
         Ok(Value::from(array_ref))
@@ -793,16 +857,31 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     });
 
     register_standard_builtin!("slice", |mut ctx| {
-        let (container, start, stop) = {
+        let (container, start, stop, step) = {
             let args = ctx.named_args("slice");
-            args.require_exact(3, "3 arguments: value, start, and stop")?;
-            (args.cloned(0)?, args.cloned(1)?, args.cloned(2)?)
+            args.require_min(3, "at least 3 arguments: value, start, and stop")?;
+            if args.len() > 4 {
+                return Err(
+                    "slice expects at most 4 arguments: value, start, stop, and step".into(),
+                );
+            }
+            (
+                args.cloned(0)?,
+                args.cloned(1)?,
+                args.cloned(2)?,
+                if args.len() == 4 {
+                    args.cloned(3)?
+                } else {
+                    Value::I64(1)
+                },
+            )
         };
 
         if let Value::String(text) = &container {
             let len = text.chars().count();
-            let (start, stop) = resolve_slice_bounds(&start, &stop, len)?;
-            let sliced: String = text.chars().skip(start).take(stop - start).collect();
+            let indices = resolve_slice_indices(&start, &stop, &step, len)?;
+            let chars: Vec<char> = text.chars().collect();
+            let sliced: String = indices.into_iter().map(|index| chars[index]).collect();
             return Ok(Value::String(sliced));
         }
 
@@ -814,9 +893,9 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
             .into());
         };
         let len = ctx.read_array_ref_len(array_ref)?;
-        let (start, stop) = resolve_slice_bounds(&start, &stop, len)?;
-        let result_ref = ctx.create_array_ref(stop - start)?;
-        for index in start..stop {
+        let indices = resolve_slice_indices(&start, &stop, &step, len)?;
+        let result_ref = ctx.create_array_ref(indices.len())?;
+        for index in indices {
             let value = ctx
                 .read_table_field(TableRef::from(array_ref), &Value::I64(index as i64))?
                 .unwrap_or(Value::Unit);
@@ -870,19 +949,95 @@ fn resolve_array_key(key: &Value, len: usize, name: &str) -> Result<Value, Strin
     }
 }
 
-/// Resolves Pythonic slice bounds: negatives are length-relative, both ends
-/// clamp to [0, len], and an inverted range yields an empty slice.
-fn resolve_slice_bounds(start: &Value, stop: &Value, len: usize) -> Result<(usize, usize), String> {
-    let resolve = |value: &Value, default: i128| -> Result<i128, String> {
-        if matches!(value, Value::Unit) {
-            return Ok(default);
+fn is_omitted_slice_bound(value: &Value) -> bool {
+    matches!(value, Value::Unit | Value::I64(i64::MAX))
+}
+
+fn slice_bound_to_i128(value: &Value, name: &str) -> Result<i128, String> {
+    value_to_signed_index(value, name)
+}
+
+fn resolve_slice_indices(
+    start: &Value,
+    stop: &Value,
+    step: &Value,
+    len: usize,
+) -> Result<Vec<usize>, String> {
+    let step = value_to_signed_index(step, "slice step")?;
+    if step == 0 {
+        return Err("slice step cannot be zero".to_owned());
+    }
+
+    let len_i = i128::try_from(len).map_err(|_| "slice length is too large".to_owned())?;
+    let (mut start_i, stop_i) = if step > 0 {
+        let start_i = if is_omitted_slice_bound(start) {
+            0
+        } else {
+            let raw = slice_bound_to_i128(start, "slice start")?;
+            if raw < 0 {
+                raw + len_i
+            } else {
+                raw
+            }
         }
-        let v = value_to_signed_index(value, "slice bound")?;
-        Ok(if v < 0 { v + len as i128 } else { v })
+        .clamp(0, len_i);
+
+        let stop_i = if is_omitted_slice_bound(stop) {
+            len_i
+        } else {
+            let raw = slice_bound_to_i128(stop, "slice stop")?;
+            if raw < 0 {
+                raw + len_i
+            } else {
+                raw
+            }
+        }
+        .clamp(0, len_i);
+
+        (start_i, stop_i)
+    } else {
+        let start_i = if is_omitted_slice_bound(start) {
+            len_i - 1
+        } else {
+            let raw = slice_bound_to_i128(start, "slice start")?;
+            if raw < 0 {
+                raw + len_i
+            } else {
+                raw
+            }
+        }
+        .clamp(-1, len_i - 1);
+
+        let stop_i = if is_omitted_slice_bound(stop) {
+            -1
+        } else {
+            let raw = slice_bound_to_i128(stop, "slice stop")?;
+            if raw < 0 {
+                raw + len_i
+            } else {
+                raw
+            }
+        }
+        .clamp(-1, len_i - 1);
+
+        (start_i, stop_i)
     };
-    let start = resolve(start, 0)?.clamp(0, len as i128) as usize;
-    let stop = resolve(stop, len as i128)?.clamp(0, len as i128) as usize;
-    Ok((start, stop.max(start)))
+
+    let mut indices = Vec::new();
+    if step > 0 {
+        while start_i < stop_i {
+            indices
+                .push(usize::try_from(start_i).map_err(|_| "slice index is too large".to_owned())?);
+            start_i += step;
+        }
+    } else {
+        while start_i > stop_i {
+            indices
+                .push(usize::try_from(start_i).map_err(|_| "slice index is too large".to_owned())?);
+            start_i += step;
+        }
+    }
+    Ok(indices)
 }
 
 fn format_print_value(
@@ -1001,6 +1156,46 @@ fn normalize_insert_index(index: i64, len: usize) -> usize {
     } else {
         usize::try_from(normalized).unwrap_or(len)
     }
+}
+
+fn normalize_search_bounds(
+    start: Option<Value>,
+    stop: Option<Value>,
+    len: usize,
+) -> Result<(usize, usize), String> {
+    let len_i = i128::try_from(len).map_err(|_| "list length exceeds i128 range".to_owned())?;
+    let normalize = |value: Option<Value>, default: i128| -> Result<usize, String> {
+        let raw = match value {
+            Some(value) => value_to_signed_index(&value, "index bound")?,
+            None => default,
+        };
+        let normalized = if raw < 0 { raw + len_i } else { raw }.clamp(0, len_i);
+        usize::try_from(normalized).map_err(|_| "index bound is too large".to_owned())
+    };
+
+    let start = normalize(start, 0)?;
+    let stop = normalize(stop, len_i)?;
+    Ok((start, stop.max(start)))
+}
+
+fn stepped_range_len(start: i64, stop: i64, step: i64) -> Result<usize, String> {
+    let start = i128::from(start);
+    let stop = i128::from(stop);
+    let step = i128::from(step);
+
+    let count = if step > 0 {
+        if start >= stop {
+            0
+        } else {
+            ((stop - start - 1) / step) + 1
+        }
+    } else if start <= stop {
+        0
+    } else {
+        ((start - stop - 1) / -step) + 1
+    };
+
+    usize::try_from(count).map_err(|_| "range length is too large".to_owned())
 }
 
 fn sort_values(values: &mut [Value]) -> Result<(), String> {
@@ -1227,7 +1422,7 @@ mod tests {
         assert_eq!(
             vm.execute_with_args("append", &[array.clone(), Value::I64(7)])
                 .expect("append value"),
-            Value::I64(1)
+            Value::Unit
         );
         assert_eq!(
             vm.execute_with_args("len", &[array]).expect("array length"),
