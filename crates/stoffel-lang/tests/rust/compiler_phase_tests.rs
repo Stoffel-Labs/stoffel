@@ -1057,6 +1057,18 @@ def main() -> fix64:
 }
 
 #[test]
+fn test_fixed_point_annotation_context_refines_decimal_binary_literals() {
+    let source = r#"
+def main():
+  var x: fix64 = 1-0.0001
+  print(1-0.0001)
+"#;
+
+    compile(source, "test.stfl", &default_options())
+        .expect("fix64 initializer context should refine decimal literal arithmetic");
+}
+
+#[test]
 fn test_unary_minus_rejects_unsigned_integer_values() {
     let source = r#"
 def main(x: uint64) -> int64:
@@ -1111,6 +1123,67 @@ def main() -> list[float64]:
         program.main_chunk.return_type,
         FunctionType::List(Box::new(FunctionType::Float))
     );
+}
+
+#[test]
+fn test_int_literals_refine_to_integer_container_annotation_contexts() {
+    let source = r#"
+def main() -> int32:
+  var values: list[int32] = [1, 2]
+  var lookup: dict[string, int32] = {"one": 1}
+  return values[0] + lookup["one"]
+"#;
+
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("integer literals should refine in list and dict annotation contexts");
+
+    assert_eq!(
+        program.main_chunk.return_type,
+        FunctionType::Int {
+            signed: true,
+            bits: 32
+        }
+    );
+}
+
+#[test]
+fn test_membership_infers_candidate_type_from_container() {
+    let source = r#"
+def main() -> bool:
+  var values: list[int32] = [1, 2]
+  var needle = 1
+  return needle in values
+"#;
+
+    compile(source, "test.stfl", &default_options())
+        .expect("'in' should infer the candidate type from the container element type");
+}
+
+#[test]
+fn test_discard_statement_participates_in_call_argument_inference() {
+    let source = r#"
+def take_i32(value: int32):
+  return
+
+def main():
+  var value = 1
+  discard take_i32(value)
+"#;
+
+    compile(source, "test.stfl", &default_options())
+        .expect("discarded calls should still infer argument types");
+}
+
+#[test]
+fn test_integer_container_context_does_not_narrow_typed_values() {
+    let source = r#"
+def main() -> int64:
+  var explicit: int64 = 1
+  var values: list[int32] = [explicit]
+  return 0
+"#;
+
+    assert!(expect_error_containing(source, "Type mismatch"));
 }
 
 #[test]

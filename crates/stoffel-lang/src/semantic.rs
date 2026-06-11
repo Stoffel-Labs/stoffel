@@ -115,6 +115,19 @@ impl<'a> SemanticAnalyzer<'a> {
         }
     }
 
+    fn untyped_int_literal_value(node: &AstNode) -> Option<i128> {
+        match node {
+            AstNode::Literal {
+                value: Value::Int { value, kind: None },
+                ..
+            } if *value <= i128::MAX as u128 => Some(*value as i128),
+            AstNode::UnaryOperation { op, operand, .. } if op == "-" => {
+                Self::untyped_int_literal_value(operand).map(|value| -value)
+            }
+            _ => None,
+        }
+    }
+
     fn int_literal_bool_value(node: &AstNode) -> Option<bool> {
         match Self::int_literal_value(node)? {
             0 => Some(false),
@@ -346,6 +359,76 @@ impl<'a> SemanticAnalyzer<'a> {
             } => true,
             AstNode::UnaryOperation { op, operand, .. } if op == "-" => {
                 Self::is_untyped_int_literal(operand)
+            }
+            _ => false,
+        }
+    }
+
+    fn expression_can_refine_to_expected(expr: &AstNode, expected_type: &SymbolType) -> bool {
+        match expr {
+            AstNode::Literal {
+                value: Value::String(_),
+                ..
+            } => expected_type.underlying_type() == &SymbolType::String,
+            AstNode::Literal {
+                value: Value::Bool(_),
+                ..
+            } => expected_type.underlying_type() == &SymbolType::Bool,
+            AstNode::Literal {
+                value: Value::Nil, ..
+            } => expected_type.underlying_type() == &SymbolType::Nil,
+            AstNode::Literal {
+                value: Value::Int { kind: None, .. },
+                ..
+            } => {
+                if expected_type.underlying_type() == &SymbolType::Bool {
+                    return Self::int_literal_bool_value(expr).is_some();
+                }
+                if expected_type.underlying_type().is_integer() {
+                    return Self::untyped_int_literal_value(expr)
+                        .is_some_and(|value| expected_type.fits_literal_i128(value));
+                }
+                Self::is_clear_real_type(expected_type)
+                    && Self::untyped_int_literal_value(expr).is_some()
+            }
+            AstNode::UnaryOperation { op, .. } if op == "-" => {
+                if expected_type.underlying_type().is_integer() {
+                    return Self::untyped_int_literal_value(expr)
+                        .is_some_and(|value| expected_type.fits_literal_i128(value));
+                }
+                Self::is_clear_real_type(expected_type)
+                    && Self::untyped_int_literal_value(expr).is_some()
+            }
+            AstNode::Literal {
+                value: Value::Float(_),
+                ..
+            } => Self::is_clear_real_type(expected_type),
+            AstNode::BinaryOperation {
+                op, left, right, ..
+            } if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%")
+                && Self::is_clear_real_type(expected_type) =>
+            {
+                Self::expression_can_refine_to_expected(left, expected_type)
+                    && Self::expression_can_refine_to_expected(right, expected_type)
+            }
+            AstNode::ListLiteral { elements, .. } => {
+                if let SymbolType::List(element_type) = expected_type.underlying_type() {
+                    elements.iter().all(|element| {
+                        Self::expression_can_refine_to_expected(element, element_type)
+                    })
+                } else {
+                    false
+                }
+            }
+            AstNode::DictLiteral { pairs, .. } => {
+                if let SymbolType::Dict(key_type, value_type) = expected_type.underlying_type() {
+                    pairs.iter().all(|(key, value)| {
+                        Self::expression_can_refine_to_expected(key, key_type)
+                            && Self::expression_can_refine_to_expected(value, value_type)
+                    })
+                } else {
+                    false
+                }
             }
             _ => false,
         }
@@ -769,6 +852,27 @@ impl<'a> SemanticAnalyzer<'a> {
             {
                 expected.clone()
             }
+            (AstNode::BinaryOperation { op, .. }, inferred, expected)
+                if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%")
+                    && Self::is_clear_real_type(inferred)
+                    && Self::is_clear_real_type(expected) =>
+            {
+                expected.clone()
+            }
+            (AstNode::ListLiteral { .. }, inferred, expected)
+                if matches!(expected.underlying_type(), SymbolType::List(_))
+                    && (Self::types_compatible(inferred, expected)
+                        || Self::expression_can_refine_to_expected(&expr, expected)) =>
+            {
+                expected.clone()
+            }
+            (AstNode::DictLiteral { .. }, inferred, expected)
+                if matches!(expected.underlying_type(), SymbolType::Dict(_, _))
+                    && (Self::types_compatible(inferred, expected)
+                        || Self::expression_can_refine_to_expected(&expr, expected)) =>
+            {
+                expected.clone()
+            }
             (AstNode::FunctionCall { function, .. }, inferred, expected)
                 if (Self::is_share_alias_type(inferred)
                     || matches!(function.as_ref(), AstNode::Identifier(name, _) if name == "Share.random"))
@@ -858,6 +962,31 @@ impl<'a> SemanticAnalyzer<'a> {
                 AstNode::UnaryOperation {
                     op,
                     operand: Box::new(refined_operand),
+                    location,
+                }
+            }
+            AstNode::BinaryOperation {
+                op,
+                left,
+                right,
+                location,
+            } if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%")
+                && Self::is_clear_real_type(expected_type) =>
+            {
+                let (refined_left, _) = Self::refine_expression_type_with_expected(
+                    *left,
+                    &SymbolType::Unknown,
+                    expected_type,
+                );
+                let (refined_right, _) = Self::refine_expression_type_with_expected(
+                    *right,
+                    &SymbolType::Unknown,
+                    expected_type,
+                );
+                AstNode::BinaryOperation {
+                    op,
+                    left: Box::new(refined_left),
+                    right: Box::new(refined_right),
                     location,
                 }
             }
@@ -1162,6 +1291,9 @@ impl<'a> SemanticAnalyzer<'a> {
             AstNode::NamedArgument { value, .. } => {
                 Self::collect_local_declarations(value, locals);
             }
+            AstNode::DiscardStatement { expression, .. } => {
+                Self::collect_local_declarations(expression, locals);
+            }
             AstNode::CommandCall {
                 command, arguments, ..
             } => {
@@ -1299,6 +1431,41 @@ impl<'a> SemanticAnalyzer<'a> {
             } => {
                 let left_type = self.inference_expr_type(left, env);
                 let right_type = self.inference_expr_type(right, env);
+                if op == "in" {
+                    match right_type.underlying_type() {
+                        SymbolType::List(element_type) => {
+                            changed |= self.apply_expected_inference(
+                                left,
+                                element_type,
+                                location.clone(),
+                                "membership element type".to_string(),
+                                env,
+                                locals,
+                            );
+                        }
+                        SymbolType::Dict(key_type, _) => {
+                            changed |= self.apply_expected_inference(
+                                left,
+                                key_type,
+                                location.clone(),
+                                "membership key type".to_string(),
+                                env,
+                                locals,
+                            );
+                        }
+                        SymbolType::String => {
+                            changed |= self.apply_expected_inference(
+                                left,
+                                &SymbolType::String,
+                                location.clone(),
+                                "string membership value".to_string(),
+                                env,
+                                locals,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
                 if matches!(
                     op.as_str(),
                     "+" | "-"
@@ -1566,6 +1733,9 @@ impl<'a> SemanticAnalyzer<'a> {
             }
             AstNode::NamedArgument { value, .. } => {
                 changed |= self.collect_inference_constraints(value, return_type, env, locals);
+            }
+            AstNode::DiscardStatement { expression, .. } => {
+                changed |= self.collect_inference_constraints(expression, return_type, env, locals);
             }
             AstNode::FieldAccess { object, .. } => {
                 changed |= self.collect_inference_constraints(object, return_type, env, locals);
@@ -2149,6 +2319,13 @@ impl<'a> SemanticAnalyzer<'a> {
                         )
                     })
                     .collect(),
+                location,
+            },
+            AstNode::DiscardStatement {
+                expression,
+                location,
+            } => AstNode::DiscardStatement {
+                expression: Box::new(Self::apply_inferred_types(*expression, resolved)),
                 location,
             },
             other => other,
@@ -4778,7 +4955,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 // The element type is set by the first element that is not an
                 // untyped integer literal (literals adapt to their context,
                 // e.g. [0, local] where local is a float).
-                let element_type = analyzed
+                let element_type_entry = analyzed
                     .iter()
                     .find(|(node, ty)| {
                         !matches!(ty, SymbolType::Unknown) && !Self::is_untyped_int_literal(node)
@@ -4787,7 +4964,10 @@ impl<'a> SemanticAnalyzer<'a> {
                         analyzed
                             .iter()
                             .find(|(_, ty)| !matches!(ty, SymbolType::Unknown))
-                    })
+                    });
+                let element_type_from_untyped_literal =
+                    element_type_entry.is_some_and(|(node, _)| Self::is_untyped_int_literal(node));
+                let element_type = element_type_entry
                     .map(|(_, ty)| ty.clone())
                     .unwrap_or(SymbolType::Unknown);
 
@@ -4795,6 +4975,8 @@ impl<'a> SemanticAnalyzer<'a> {
                 for (mut checked_elem, mut elem_ty) in analyzed {
                     if !matches!(element_type, SymbolType::Unknown)
                         && !matches!(elem_ty, SymbolType::Unknown)
+                        && !(element_type_from_untyped_literal
+                            && Self::is_untyped_int_literal(&checked_elem))
                     {
                         Self::refine_argument_with_expected(
                             &mut checked_elem,
@@ -4832,6 +5014,8 @@ impl<'a> SemanticAnalyzer<'a> {
                 let mut checked_pairs = Vec::with_capacity(pairs.len());
                 let mut key_type = SymbolType::Unknown;
                 let mut value_type = SymbolType::Unknown;
+                let mut key_type_from_untyped_literal = false;
+                let mut value_type_from_untyped_literal = false;
 
                 for (key, value) in pairs {
                     let (mut checked_key, mut key_ty) = self.analyze_node(key)?;
@@ -4839,42 +5023,53 @@ impl<'a> SemanticAnalyzer<'a> {
                     // Infer types from first pair; later pairs must agree.
                     if matches!(key_type, SymbolType::Unknown) {
                         key_type = key_ty.clone();
+                        key_type_from_untyped_literal = Self::is_untyped_int_literal(&checked_key);
                     } else if !matches!(key_ty, SymbolType::Unknown) {
-                        Self::refine_argument_with_expected(
-                            &mut checked_key,
-                            &mut key_ty,
-                            &key_type,
-                        );
-                        if !Self::types_compatible(&key_ty, &key_type) {
-                            self.error_reporter.add_error(CompilerError::type_error(
-                                format!(
-                                    "Dict keys must share one type: expected '{}', found '{}'",
-                                    declared_type_to_string(&key_type),
-                                    declared_type_to_string(&key_ty)
-                                ),
-                                checked_key.location(),
-                            ));
-                            return Err(());
+                        if !(key_type_from_untyped_literal
+                            && Self::is_untyped_int_literal(&checked_key))
+                        {
+                            Self::refine_argument_with_expected(
+                                &mut checked_key,
+                                &mut key_ty,
+                                &key_type,
+                            );
+                            if !Self::types_compatible(&key_ty, &key_type) {
+                                self.error_reporter.add_error(CompilerError::type_error(
+                                    format!(
+                                        "Dict keys must share one type: expected '{}', found '{}'",
+                                        declared_type_to_string(&key_type),
+                                        declared_type_to_string(&key_ty)
+                                    ),
+                                    checked_key.location(),
+                                ));
+                                return Err(());
+                            }
                         }
                     }
                     if matches!(value_type, SymbolType::Unknown) {
                         value_type = val_ty.clone();
+                        value_type_from_untyped_literal =
+                            Self::is_untyped_int_literal(&checked_value);
                     } else if !matches!(val_ty, SymbolType::Unknown) {
-                        Self::refine_argument_with_expected(
-                            &mut checked_value,
-                            &mut val_ty,
-                            &value_type,
-                        );
-                        if !Self::types_compatible(&val_ty, &value_type) {
-                            self.error_reporter.add_error(CompilerError::type_error(
-                                format!(
-                                    "Dict values must share one type: expected '{}', found '{}'",
-                                    declared_type_to_string(&value_type),
-                                    declared_type_to_string(&val_ty)
-                                ),
-                                checked_value.location(),
-                            ));
-                            return Err(());
+                        if !(value_type_from_untyped_literal
+                            && Self::is_untyped_int_literal(&checked_value))
+                        {
+                            Self::refine_argument_with_expected(
+                                &mut checked_value,
+                                &mut val_ty,
+                                &value_type,
+                            );
+                            if !Self::types_compatible(&val_ty, &value_type) {
+                                self.error_reporter.add_error(CompilerError::type_error(
+                                    format!(
+                                        "Dict values must share one type: expected '{}', found '{}'",
+                                        declared_type_to_string(&value_type),
+                                        declared_type_to_string(&val_ty)
+                                    ),
+                                    checked_value.location(),
+                                ));
+                                return Err(());
+                            }
                         }
                     }
                     checked_pairs.push((checked_key, checked_value));
