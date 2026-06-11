@@ -69,8 +69,10 @@ pub fn is_std_module_path(module_path: &ModulePath) -> bool {
 #[derive(Debug, Clone)]
 pub struct ImportInfo {
     pub module_path: ModulePath,
+    pub raw_path: Option<String>,
     pub alias: Option<String>,
     pub location: SourceLocation,
+    pub resolved_module_key: Option<String>,
 }
 
 /// A resolved module with its source, AST, and dependencies.
@@ -307,6 +309,7 @@ impl ModuleResolver {
         let _ = self.resolve_module_from_file(
             &entry_file,
             ModulePath::new(vec![entry_module_name.clone()]),
+            entry_module_name.clone(),
         );
 
         if !self.errors.is_empty() {
@@ -321,9 +324,8 @@ impl ModuleResolver {
         &mut self,
         file_path: &Path,
         module_path: ModulePath,
+        module_key: String,
     ) -> Result<(), ()> {
-        let module_key = module_path.as_string();
-
         // Skip if already resolved
         if self.resolved_modules.contains_key(&module_key) {
             return Ok(());
@@ -391,7 +393,7 @@ impl ModuleResolver {
         };
 
         // Extract imports from the AST
-        let imports = Self::collect_imports(&ast);
+        let mut imports = Self::collect_imports(&ast);
 
         // Add this module to the graph
         self.dependency_graph.add_module(&module_key);
@@ -400,19 +402,31 @@ impl ModuleResolver {
         let base_dir = file_path.parent().unwrap_or(Path::new("."));
 
         // Process each import
-        for import_info in &imports {
+        for import_info in &mut imports {
             if is_std_module_path(&import_info.module_path) {
                 continue;
             }
 
-            let imported_module_key = import_info.module_path.as_string();
+            let imported_file_path = if let Some(raw_path) = &import_info.raw_path {
+                base_dir.join(raw_path)
+            } else {
+                import_info.module_path.to_file_path(base_dir)
+            };
+
+            let imported_module_key =
+                if import_info.raw_path.is_some() && imported_file_path.exists() {
+                    imported_file_path
+                        .canonicalize()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| imported_file_path.to_string_lossy().into_owned())
+                } else {
+                    import_info.module_path.as_string()
+                };
+            import_info.resolved_module_key = Some(imported_module_key.clone());
 
             // Add edge in dependency graph
             self.dependency_graph
                 .add_edge(&module_key, &imported_module_key);
-
-            // Resolve the imported module's file path
-            let imported_file_path = import_info.module_path.to_file_path(base_dir);
 
             // Check if file exists
             if !imported_file_path.exists() {
@@ -431,8 +445,11 @@ impl ModuleResolver {
             }
 
             // Recursively resolve the imported module
-            let _ =
-                self.resolve_module_from_file(&imported_file_path, import_info.module_path.clone());
+            let _ = self.resolve_module_from_file(
+                &imported_file_path,
+                import_info.module_path.clone(),
+                imported_module_key,
+            );
         }
 
         // Mark this module as no longer being resolved
@@ -464,14 +481,17 @@ impl ModuleResolver {
         match node {
             AstNode::Import {
                 module_path,
+                raw_path,
                 alias,
                 location,
                 ..
             } => {
                 imports.push(ImportInfo {
                     module_path: ModulePath::new(module_path.clone()),
+                    raw_path: raw_path.clone(),
                     alias: alias.clone(),
                     location: location.clone(),
+                    resolved_module_key: None,
                 });
             }
             AstNode::Block(statements) => {
@@ -749,8 +769,10 @@ mod tests {
     fn test_import_info_creation() {
         let info = ImportInfo {
             module_path: ModulePath::new(vec!["utils".to_string()]),
+            raw_path: None,
             alias: Some("u".to_string()),
             location: SourceLocation::default(),
+            resolved_module_key: None,
         };
         assert_eq!(info.module_path.as_string(), "utils");
         assert_eq!(info.alias, Some("u".to_string()));

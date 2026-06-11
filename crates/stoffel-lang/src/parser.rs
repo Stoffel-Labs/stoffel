@@ -1504,35 +1504,57 @@ impl<'a> Parser<'a> {
 
     /// Parses an import statement.
     /// Syntax: import module.submodule [as alias]
+    /// Syntax: import "../relative/path.stfl" [as alias]
     /// Example: import utils.math
     /// Example: import utils.math as m
+    /// Example: import "../shared/main.stfl" as shared
     fn parse_import_statement(&mut self) -> CompilerResult<AstNode> {
         let start_location = self.get_location();
         self.consume_keyword("import", "Expected 'import'")?;
 
-        // Parse module path: identifier.identifier.identifier...
-        let mut module_path = Vec::new();
-        let first_ident = self.consume(
-            &TokenKind::Identifier("".to_string()),
-            "Expected module name after 'import'",
-        )?;
-        module_path.push(match &first_ident.kind {
-            TokenKind::Identifier(n) => n.clone(),
-            _ => unreachable!(),
-        });
+        let (module_path, raw_path) = match self.current_token_info {
+            Some(TokenInfo {
+                kind: TokenKind::StringLiteral(path),
+                ..
+            }) => {
+                let raw_path = path.clone();
+                self.advance();
+                let stem = std::path::Path::new(&raw_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("module")
+                    .to_string();
+                (vec![stem], Some(raw_path))
+            }
+            _ => {
+                // Parse module path: identifier.identifier.identifier...
+                let mut module_path = Vec::new();
+                let first_ident = self.consume(
+                    &TokenKind::Identifier("".to_string()),
+                    "Expected module name or quoted path after 'import'",
+                )?;
+                module_path.push(match &first_ident.kind {
+                    TokenKind::Identifier(n) => n.clone(),
+                    _ => unreachable!(),
+                });
 
-        // Continue parsing dot-separated identifiers
-        while self.check(&TokenKind::Dot) {
-            self.advance(); // consume '.'
-            let next_ident = self.consume(
-                &TokenKind::Identifier("".to_string()),
-                "Expected module name after '.'",
-            )?;
-            module_path.push(match &next_ident.kind {
-                TokenKind::Identifier(n) => n.clone(),
-                _ => unreachable!(),
-            });
-        }
+                // Continue parsing dot-separated identifiers
+                while self.check(&TokenKind::Dot) {
+                    self.advance(); // consume '.'
+                    let next_ident = self.consume(
+                        &TokenKind::Identifier("".to_string()),
+                        "Expected module name after '.'",
+                    )?;
+                    module_path.push(match &next_ident.kind {
+                        TokenKind::Identifier(n) => n.clone(),
+                        _ => unreachable!(),
+                    });
+                }
+
+                (module_path, None)
+            }
+        };
 
         // Optional alias: "as <identifier>"
         let alias = if self.check_keyword("as") {
@@ -1565,6 +1587,7 @@ impl<'a> Parser<'a> {
 
         Ok(AstNode::Import {
             module_path,
+            raw_path,
             alias,
             imported_items: None, // For future "from X import Y" syntax
             location: start_location,

@@ -113,6 +113,30 @@ fn test_nested_imports() {
     );
 }
 
+// ==================== Relative Path Import Tests ====================
+
+/// Tests sibling-directory imports written as quoted filesystem paths.
+#[test]
+fn test_relative_path_import_from_sibling_directory() {
+    let result = compile_test_file("relative/consumer/main.stfl");
+    assert!(
+        result.is_ok(),
+        "Relative path import should compile: {:?}",
+        result.err()
+    );
+}
+
+/// Tests aliases on quoted filesystem imports.
+#[test]
+fn test_relative_path_import_with_alias() {
+    let result = compile_test_file("relative/consumer/main_with_alias.stfl");
+    assert!(
+        result.is_ok(),
+        "Aliased relative path import should compile: {:?}",
+        result.err()
+    );
+}
+
 // ==================== Error Cases ====================
 
 /// Tests that circular imports are detected and reported.

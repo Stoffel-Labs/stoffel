@@ -7,7 +7,7 @@
 //! - Symbol table merging for imported modules
 //! - Linking compiled modules into a single program
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::ast::AstNode;
@@ -137,7 +137,11 @@ impl MultiFileCompiler {
                 continue;
             }
 
-            let module_key = import.module_path.as_string();
+            let module_key = import
+                .resolved_module_key
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| import.module_path.as_string());
 
             let compiled = self.compiled_modules.get(&module_key).ok_or_else(|| {
                 vec![CompilerError::syntax_error(
@@ -147,7 +151,8 @@ impl MultiFileCompiler {
             })?;
 
             // Determine the prefix for imported symbols
-            let prefix = import.alias.as_ref().unwrap_or(&module_key);
+            let import_prefix = import.module_path.as_string();
+            let prefix = import.alias.as_ref().unwrap_or(&import_prefix);
 
             // Add function exports
             for (name, (params, ret_type)) in &compiled.exports.functions {
@@ -197,8 +202,9 @@ impl MultiFileCompiler {
         // Clone the AST for transformation
         let ast = resolved.ast.clone();
 
-        // Apply UFCS transformation
-        let transformed_ast = ufcs::transform_ufcs(ast);
+        // Apply UFCS transformation, preserving known module-qualified calls.
+        let module_prefixes = Self::module_prefixes_for_imports(&resolved.imports);
+        let transformed_ast = ufcs::transform_ufcs_with_module_prefixes(ast, &module_prefixes);
 
         // Semantic analysis with imported symbols
         let analyzed_ast = self.analyze_with_imports(
@@ -241,6 +247,19 @@ impl MultiFileCompiler {
         // Use the semantic analyzer with imported symbols
         semantic::analyze_with_imports(ast, error_reporter, filename, imported_symbols.clone())
             .map_err(|_| error_reporter.get_all().into_iter().cloned().collect())
+    }
+
+    fn module_prefixes_for_imports(imports: &[ImportInfo]) -> HashSet<String> {
+        imports
+            .iter()
+            .filter(|import| !is_std_module_path(&import.module_path))
+            .map(|import| {
+                import
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| import.module_path.as_string())
+            })
+            .collect()
     }
 
     /// Extracts exported symbols from a compiled AST.

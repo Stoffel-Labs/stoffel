@@ -1,0 +1,4 @@
+import "../provider/main.stfl"
+
+def main() -> int64:
+  return provided_value()

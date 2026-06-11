@@ -1,4 +1,5 @@
 use crate::ast::AstNode;
+use std::collections::HashSet;
 
 /// Checks if a name is a builtin object that uses qualified method names
 fn is_builtin_object(name: &str) -> bool {
@@ -18,6 +19,14 @@ fn is_builtin_object(name: &str) -> bool {
 /// - ClientStore.method(args) is transformed to call "ClientStore.method" directly
 /// - The object is NOT prepended as an argument (VM doesn't expect it)
 pub fn transform_ufcs(node: AstNode) -> AstNode {
+    transform_ufcs_with_module_prefixes(node, &HashSet::new())
+}
+
+/// Transforms UFCS while preserving calls through known module prefixes.
+pub fn transform_ufcs_with_module_prefixes(
+    node: AstNode,
+    module_prefixes: &HashSet<String>,
+) -> AstNode {
     match node {
         AstNode::FunctionCall {
             function,
@@ -47,11 +56,39 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
                             resolved_return_type,
                         };
                     }
+
+                    if module_prefixes.contains(obj_name) {
+                        return AstNode::FunctionCall {
+                            function: Box::new(AstNode::FieldAccess {
+                                object: Box::new(AstNode::Identifier(
+                                    obj_name.clone(),
+                                    fa_location.clone(),
+                                )),
+                                field_name,
+                                location: fa_location.clone(),
+                            }),
+                            arguments: arguments
+                                .into_iter()
+                                .map(|arg| {
+                                    transform_ufcs_with_module_prefixes(arg, module_prefixes)
+                                })
+                                .collect(),
+                            location,
+                            resolved_return_type,
+                        };
+                    }
                 }
 
                 // For regular objects, use standard UFCS: prepend object as first argument
-                let mut new_args = vec![transform_ufcs(*object)];
-                new_args.extend(arguments.into_iter().map(transform_ufcs));
+                let mut new_args = vec![transform_ufcs_with_module_prefixes(
+                    *object,
+                    module_prefixes,
+                )];
+                new_args.extend(
+                    arguments
+                        .into_iter()
+                        .map(|arg| transform_ufcs_with_module_prefixes(arg, module_prefixes)),
+                );
                 return AstNode::FunctionCall {
                     function: Box::new(AstNode::Identifier(field_name, location)),
                     arguments: new_args,
@@ -61,8 +98,14 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             }
             // Recursively transform arguments and the function expression itself
             AstNode::FunctionCall {
-                function: Box::new(transform_ufcs(*function)),
-                arguments: arguments.into_iter().map(transform_ufcs).collect(),
+                function: Box::new(transform_ufcs_with_module_prefixes(
+                    *function,
+                    module_prefixes,
+                )),
+                arguments: arguments
+                    .into_iter()
+                    .map(|arg| transform_ufcs_with_module_prefixes(arg, module_prefixes))
+                    .collect(),
                 location,
                 resolved_return_type,
             }
@@ -77,18 +120,22 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             // If the command is an identifier, transform to a regular function call
             // with the first argument as the object
             if !arguments.is_empty() {
-                let first_arg = transform_ufcs(arguments[0].clone());
+                let first_arg =
+                    transform_ufcs_with_module_prefixes(arguments[0].clone(), module_prefixes);
                 let remaining_args = arguments
                     .into_iter()
                     .skip(1)
-                    .map(transform_ufcs)
+                    .map(|arg| transform_ufcs_with_module_prefixes(arg, module_prefixes))
                     .collect::<Vec<_>>();
 
                 let mut new_args = vec![first_arg];
                 new_args.extend(remaining_args);
 
                 return AstNode::FunctionCall {
-                    function: Box::new(transform_ufcs(*command)),
+                    function: Box::new(transform_ufcs_with_module_prefixes(
+                        *command,
+                        module_prefixes,
+                    )),
                     arguments: new_args,
                     location,
                     resolved_return_type, // Pass the resolved type along
@@ -96,8 +143,14 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             }
             // If no arguments, just transform the command part
             AstNode::CommandCall {
-                command: Box::new(transform_ufcs(*command)),
-                arguments: arguments.into_iter().map(transform_ufcs).collect(),
+                command: Box::new(transform_ufcs_with_module_prefixes(
+                    *command,
+                    module_prefixes,
+                )),
+                arguments: arguments
+                    .into_iter()
+                    .map(|arg| transform_ufcs_with_module_prefixes(arg, module_prefixes))
+                    .collect(),
                 location,
                 resolved_return_type, // Keep type even if no args
             }
@@ -111,7 +164,10 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             // Check if this field access is followed by a function call (handled in FunctionCall case)
             // Otherwise, leave it as is
             AstNode::FieldAccess {
-                object: Box::new(transform_ufcs(*object)),
+                object: Box::new(transform_ufcs_with_module_prefixes(
+                    *object,
+                    module_prefixes,
+                )),
                 field_name,
                 location,
             }
@@ -127,7 +183,8 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
         } => AstNode::VariableDeclaration {
             name,
             type_annotation,
-            value: value.map(|v| Box::new(transform_ufcs(*v))),
+            value: value
+                .map(|v| Box::new(transform_ufcs_with_module_prefixes(*v, module_prefixes))),
             is_mutable,
             is_secret,
             location,
@@ -137,11 +194,19 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             value,
             location,
         } => AstNode::Assignment {
-            target: Box::new(transform_ufcs(*target)),
-            value: Box::new(transform_ufcs(*value)),
+            target: Box::new(transform_ufcs_with_module_prefixes(
+                *target,
+                module_prefixes,
+            )),
+            value: Box::new(transform_ufcs_with_module_prefixes(*value, module_prefixes)),
             location,
         },
-        AstNode::Block(nodes) => AstNode::Block(nodes.into_iter().map(transform_ufcs).collect()),
+        AstNode::Block(nodes) => AstNode::Block(
+            nodes
+                .into_iter()
+                .map(|node| transform_ufcs_with_module_prefixes(node, module_prefixes))
+                .collect(),
+        ),
         AstNode::FunctionDefinition {
             name,
             type_params,
@@ -157,7 +222,7 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             type_params,
             parameters,
             return_type,
-            body: Box::new(transform_ufcs(*body)),
+            body: Box::new(transform_ufcs_with_module_prefixes(*body, module_prefixes)),
             is_secret,
             pragmas,
             location,
@@ -169,7 +234,10 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             location,
         } => AstNode::BuiltinObjectDefinition {
             name,
-            methods: methods.into_iter().map(transform_ufcs).collect(),
+            methods: methods
+                .into_iter()
+                .map(|method| transform_ufcs_with_module_prefixes(method, module_prefixes))
+                .collect(),
             location,
         },
         AstNode::IfExpression {
@@ -177,17 +245,27 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             then_branch,
             else_branch,
         } => AstNode::IfExpression {
-            condition: Box::new(transform_ufcs(*condition)),
-            then_branch: Box::new(transform_ufcs(*then_branch)),
-            else_branch: else_branch.map(|e| Box::new(transform_ufcs(*e))),
+            condition: Box::new(transform_ufcs_with_module_prefixes(
+                *condition,
+                module_prefixes,
+            )),
+            then_branch: Box::new(transform_ufcs_with_module_prefixes(
+                *then_branch,
+                module_prefixes,
+            )),
+            else_branch: else_branch
+                .map(|e| Box::new(transform_ufcs_with_module_prefixes(*e, module_prefixes))),
         },
         AstNode::WhileLoop {
             condition,
             body,
             location,
         } => AstNode::WhileLoop {
-            condition: Box::new(transform_ufcs(*condition)),
-            body: Box::new(transform_ufcs(*body)),
+            condition: Box::new(transform_ufcs_with_module_prefixes(
+                *condition,
+                module_prefixes,
+            )),
+            body: Box::new(transform_ufcs_with_module_prefixes(*body, module_prefixes)),
             location,
         },
         AstNode::ForLoop {
@@ -197,12 +275,16 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             location,
         } => AstNode::ForLoop {
             variables,
-            iterable: Box::new(transform_ufcs(*iterable)),
-            body: Box::new(transform_ufcs(*body)),
+            iterable: Box::new(transform_ufcs_with_module_prefixes(
+                *iterable,
+                module_prefixes,
+            )),
+            body: Box::new(transform_ufcs_with_module_prefixes(*body, module_prefixes)),
             location,
         },
         AstNode::Return { value, location } => AstNode::Return {
-            value: value.map(|v| Box::new(transform_ufcs(*v))),
+            value: value
+                .map(|v| Box::new(transform_ufcs_with_module_prefixes(*v, module_prefixes))),
             location,
         },
         AstNode::BinaryOperation {
@@ -212,8 +294,8 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             location,
         } => AstNode::BinaryOperation {
             op,
-            left: Box::new(transform_ufcs(*left)),
-            right: Box::new(transform_ufcs(*right)),
+            left: Box::new(transform_ufcs_with_module_prefixes(*left, module_prefixes)),
+            right: Box::new(transform_ufcs_with_module_prefixes(*right, module_prefixes)),
             location,
         },
         AstNode::UnaryOperation {
@@ -222,14 +304,20 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             location,
         } => AstNode::UnaryOperation {
             op,
-            operand: Box::new(transform_ufcs(*operand)),
+            operand: Box::new(transform_ufcs_with_module_prefixes(
+                *operand,
+                module_prefixes,
+            )),
             location,
         },
         AstNode::DiscardStatement {
             expression,
             location,
         } => AstNode::DiscardStatement {
-            expression: Box::new(transform_ufcs(*expression)),
+            expression: Box::new(transform_ufcs_with_module_prefixes(
+                *expression,
+                module_prefixes,
+            )),
             location,
         },
         AstNode::NamedArgument {
@@ -238,7 +326,7 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             location,
         } => AstNode::NamedArgument {
             name,
-            value: Box::new(transform_ufcs(*value)),
+            value: Box::new(transform_ufcs_with_module_prefixes(*value, module_prefixes)),
             location,
         },
         AstNode::IndexAccess {
@@ -246,24 +334,38 @@ pub fn transform_ufcs(node: AstNode) -> AstNode {
             index,
             location,
         } => AstNode::IndexAccess {
-            base: Box::new(transform_ufcs(*base)),
-            index: Box::new(transform_ufcs(*index)),
+            base: Box::new(transform_ufcs_with_module_prefixes(*base, module_prefixes)),
+            index: Box::new(transform_ufcs_with_module_prefixes(*index, module_prefixes)),
             location,
         },
         AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
-            elements: elements.into_iter().map(transform_ufcs).collect(),
+            elements: elements
+                .into_iter()
+                .map(|element| transform_ufcs_with_module_prefixes(element, module_prefixes))
+                .collect(),
             location,
         },
-        AstNode::TupleLiteral(elements) => {
-            AstNode::TupleLiteral(elements.into_iter().map(transform_ufcs).collect())
-        }
-        AstNode::SetLiteral(elements) => {
-            AstNode::SetLiteral(elements.into_iter().map(transform_ufcs).collect())
-        }
+        AstNode::TupleLiteral(elements) => AstNode::TupleLiteral(
+            elements
+                .into_iter()
+                .map(|element| transform_ufcs_with_module_prefixes(element, module_prefixes))
+                .collect(),
+        ),
+        AstNode::SetLiteral(elements) => AstNode::SetLiteral(
+            elements
+                .into_iter()
+                .map(|element| transform_ufcs_with_module_prefixes(element, module_prefixes))
+                .collect(),
+        ),
         AstNode::DictLiteral { pairs, location } => AstNode::DictLiteral {
             pairs: pairs
                 .into_iter()
-                .map(|(key, value)| (transform_ufcs(key), transform_ufcs(value)))
+                .map(|(key, value)| {
+                    (
+                        transform_ufcs_with_module_prefixes(key, module_prefixes),
+                        transform_ufcs_with_module_prefixes(value, module_prefixes),
+                    )
+                })
                 .collect(),
             location,
         },

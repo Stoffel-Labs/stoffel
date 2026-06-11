@@ -205,6 +205,7 @@ pub enum AstNode {
     },
     Import {
         module_path: Vec<String>,
+        raw_path: Option<String>,
         alias: Option<String>,
         imported_items: Option<Vec<String>>,
         location: SourceLocation,

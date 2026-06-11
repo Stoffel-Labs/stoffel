@@ -4959,6 +4959,20 @@ impl<'a> SemanticAnalyzer<'a> {
                 field_name,
                 location,
             } => {
+                if let AstNode::Identifier(object_name, _) = object.as_ref() {
+                    let qualified_name = format!("{}.{}", object_name, field_name);
+                    if let Some(info) = self.symbol_table.lookup_symbol(&qualified_name) {
+                        return Ok((
+                            AstNode::FieldAccess {
+                                object,
+                                field_name,
+                                location,
+                            },
+                            info.symbol_type.clone(),
+                        ));
+                    }
+                }
+
                 // Enum member access (Color.Red) lowers to its int64 constant.
                 if let AstNode::Identifier(object_name, _) = object.as_ref() {
                     if let Some(members) = self.enum_members.get(object_name) {
