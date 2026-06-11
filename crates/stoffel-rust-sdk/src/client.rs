@@ -1175,11 +1175,9 @@ where
             )));
         }
         let mut coord = coord;
-        let mut reservations = Vec::with_capacity(inputs.len());
         for ordinal in 0..inputs.len() {
             let reserved_index = config.input_start_index + ordinal as u64;
             coord.reserve_mask_index(reserved_index).await?;
-            reservations.push((reserved_index, ordinal as u64));
         }
         let node_rpc = OffChainNodeRPCClient::<Fr, S>::start_rpc_client(
             config.threshold,
@@ -1188,25 +1186,14 @@ where
             config.key_der.clone(),
         )
         .await?;
-        let masks = node_rpc.receive_assigned_masks(inputs.len()).await?;
+        let masks = node_rpc.receive_assigned_masks().await?;
         for (ordinal, (input, share_type)) in
             inputs.iter().zip(config.input_types.iter()).enumerate()
         {
-            let (reserved_index, input_ordinal) = reservations
-                .iter()
-                .copied()
-                .find(|(_, input_ordinal)| *input_ordinal as usize == ordinal)
-                .ok_or_else(|| {
-                    Error::Coordinator(stoffel_mpc_coordinator::CoordinatorError::JSONError(
-                        format!("missing assigned mask reservation for input ordinal {ordinal}"),
-                    ))
-                })?;
+            let reserved_index = config.input_start_index + ordinal as u64;
             let (_, mask) = masks
                 .iter()
-                .find(|(metadata, _)| {
-                    metadata.reserved_index == reserved_index
-                        && metadata.input_ordinal == input_ordinal
-                })
+                .find(|(metadata, _)| metadata.reserved_index == reserved_index)
                 .ok_or_else(|| {
                     Error::Coordinator(stoffel_mpc_coordinator::CoordinatorError::JSONError(
                         format!("missing assigned mask for input ordinal {ordinal}"),
