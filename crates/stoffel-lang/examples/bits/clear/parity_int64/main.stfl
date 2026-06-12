@@ -1,0 +1,44 @@
+# Parity (xor of all 64 bits) of int64 values via xor-folding,
+# validated against a naive set-bit counter. Works for negative
+# (sign-extended) values too: only ever the low bits of each fold matter.
+
+def parity_fold(x: int64) -> int64:
+  var v: int64 = x
+  v = v xor (v shr 32)
+  v = v xor (v shr 16)
+  v = v xor (v shr 8)
+  v = v xor (v shr 4)
+  v = v xor (v shr 2)
+  v = v xor (v shr 1)
+  return v and 1
+
+def count_bits(x: int64) -> int64:
+  # Shift-based reference counter. (Kernighan's v and (v - 1) trick is
+  # unusable here: for negative inputs it eventually reaches i64 min,
+  # where v - 1 overflows — and overflow is a checked error in Stoffel.)
+  var count: int64 = 0
+  var i: int64 = 0
+  while i < 64:
+    count += (x shr i) and 1
+    i += 1
+  return count
+
+def main() -> int64:
+  var inputs: list[int64] = [0, 1, 2, 3, 7, 255, 256, -1, -2, -7, 1023, 4097, -9223372036854775807]
+
+  var i: int64 = 0
+  while i < inputs.len():
+    var x: int64 = inputs[i]
+    var folded: int64 = parity_fold(x)
+    var counted: int64 = count_bits(x) % 2
+    assert folded == counted, "xor-fold parity disagrees with bit count"
+    i += 1
+
+  # A couple of fixed sanity points.
+  assert parity_fold(0) == 0, "parity of 0"
+  assert parity_fold(1) == 1, "parity of 1"
+  assert parity_fold(3) == 0, "parity of 0b11"
+  assert parity_fold(-1) == 0, "parity of all 64 ones"
+
+  print("parity: xor-fold matches naive count on 13 inputs")
+  return 0

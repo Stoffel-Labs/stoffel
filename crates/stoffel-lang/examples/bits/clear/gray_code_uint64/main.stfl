@@ -1,0 +1,50 @@
+# Reflected binary Gray code on uint64: encode with one xor-shift,
+# decode with a cascade of xor-shifts, and check the defining property
+# that consecutive codewords differ in exactly one bit.
+
+def to_gray(x: uint64) -> uint64:
+  return x xor (x shr 1u64)
+
+def from_gray(g: uint64) -> uint64:
+  var v: uint64 = g
+  v = v xor (v shr 1u64)
+  v = v xor (v shr 2u64)
+  v = v xor (v shr 4u64)
+  v = v xor (v shr 8u64)
+  v = v xor (v shr 16u64)
+  v = v xor (v shr 32u64)
+  return v
+
+def is_power_of_two(x: uint64) -> bool:
+  if x == 0u64:
+    return False
+  return (x and (x - 1u64)) == 0u64
+
+def main() -> int64:
+  # Known small codes: 0,1,3,2,6,7,5,4 for 0..7.
+  var expected: list[uint64] = [0u64, 1u64, 3u64, 2u64, 6u64, 7u64, 5u64, 4u64]
+  var n: uint64 = 0u64
+  var i: int64 = 0
+  while i < expected.len():
+    assert to_gray(n) == expected[i], "small Gray code mismatch"
+    n += 1u64
+    i += 1
+
+  # Round trip and single-bit-change property over a contiguous range.
+  var v: uint64 = 0u64
+  while v < 256u64:
+    var g: uint64 = to_gray(v)
+    assert from_gray(g) == v, "Gray round trip must be lossless"
+    var g_next: uint64 = to_gray(v + 1u64)
+    assert is_power_of_two(g xor g_next), "consecutive Gray codes differ in one bit"
+    v += 1u64
+
+  # Round trip on large scattered values.
+  var samples: list[uint64] = [0xDEADBEEFu64, 0xFFFFFFFFFFFFFFFFu64, 0x8000000000000000u64, 999999999999u64]
+  i = 0
+  while i < samples.len():
+    assert from_gray(to_gray(samples[i])) == samples[i], "large Gray round trip"
+    i += 1
+
+  print("gray code: round trip and adjacency property verified")
+  return 0

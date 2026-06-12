@@ -343,6 +343,24 @@ impl LocalCoordinatorRunner {
         if self.binary.client_io_manifest.clients.is_empty() && self.client_inputs.is_empty() {
             return Ok(());
         }
+        // The reserved-index layout is uniform (client_store_index =
+        // reserved_index / client_input_count), so every input client must
+        // provide the same number of values. Catch mismatches here instead
+        // of deadlocking in wait_for_indices.
+        let counts: Vec<(u64, usize)> = self
+            .client_inputs
+            .iter()
+            .filter(|client| !client.values.is_empty())
+            .map(|client| (client.client_slot, client.values.len()))
+            .collect();
+        if let Some((_, first_count)) = counts.first() {
+            if counts.iter().any(|(_, count)| count != first_count) {
+                return Err(LocalCoordinatorRunnerError::Configuration(format!(
+                    "all clients must provide the same number of inputs (the reserved share-index layout is uniform); got {:?} as (client_slot, count) pairs — pad shorter clients with explicit values",
+                    counts
+                )));
+            }
+        }
         if !self.binary.client_io_manifest.clients.is_empty()
             && self.client_inputs.is_empty()
             && self
@@ -1032,6 +1050,14 @@ fn coordinator_wrong_round(error: &stoffel_mpc_coordinator::CoordinatorError) ->
 
 fn parse_input_as_field(value: &str) -> LocalCoordinatorRunnerResult<Fr> {
     let value = value.trim();
+    // Booleans are advertised by the CLI as valid client inputs; share them
+    // as the field bits 1/0 so secret-bool gates work on them.
+    if value.eq_ignore_ascii_case("true") {
+        return Ok(Fr::from(1u64));
+    }
+    if value.eq_ignore_ascii_case("false") {
+        return Ok(Fr::from(0u64));
+    }
     if let Some(hex) = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))

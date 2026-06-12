@@ -5,6 +5,7 @@ use crate::foreign_functions::{
     ForeignFunctionContext, ForeignFunctionError, MpcOnlineBuiltin,
 };
 use crate::mpc_values::clear_share_input;
+use crate::mpc_values::share_object::{self, ShareOrScalar};
 use crate::net::client_store::ClientOutputShareCount;
 use crate::net::mpc_engine::{AbaSessionId, MpcExponentGenerator, MpcPartyId};
 use crate::net::share_runtime::ensure_matching_share_data_format;
@@ -18,7 +19,9 @@ use crate::vm_state::mpc_operation::{
 };
 use smallvec::SmallVec;
 use std::sync::Arc;
-use stoffel_vm_types::core_types::{Closure, ObjectRef, ShareType, TableRef, Upvalue, Value};
+use stoffel_vm_types::core_types::{
+    Closure, ObjectRef, ShareData, ShareType, TableRef, Upvalue, Value,
+};
 use stoffel_vm_types::instructions::Instruction;
 use stoffel_vm_types::registers::RegisterIndex;
 
@@ -433,6 +436,49 @@ impl VMState {
         ))
     }
 
+    /// Clear integer operands that can scale a share locally.
+    fn clear_integer_scalar(value: &Value) -> Option<i64> {
+        match value {
+            Value::I64(v) => Some(*v),
+            Value::I32(v) => Some(i64::from(*v)),
+            Value::I16(v) => Some(i64::from(*v)),
+            Value::I8(v) => Some(i64::from(*v)),
+            Value::U8(v) => Some(i64::from(*v)),
+            Value::U16(v) => Some(i64::from(*v)),
+            Value::U32(v) => Some(i64::from(*v)),
+            Value::U64(v) => i64::try_from(*v).ok(),
+            _ => None,
+        }
+    }
+
+    /// If one operand is a share and the other a clear integer, compute the
+    /// product as a local scaling (no multiplication triple needed).
+    fn try_local_scalar_mul(
+        &mut self,
+        left: &Value,
+        right: &Value,
+    ) -> ForeignFunctionCallbackResult<Option<PendingMpcBuiltinOperation>> {
+        let (share_value, scalar) = match (
+            Self::clear_integer_scalar(left),
+            Self::clear_integer_scalar(right),
+        ) {
+            (None, Some(scalar)) => (left, scalar),
+            (Some(scalar), None) => (right, scalar),
+            _ => return Ok(None),
+        };
+        if !share_object::is_share_object(self.table_memory.as_mut(), share_value) {
+            return Ok(None);
+        }
+        let (share_type, share_data) = self.extract_share_data(share_value)?;
+        let share_data = self
+            .share_runtime()?
+            .mul_scalar_data(share_type, &share_data, scalar)?;
+        Ok(Some(PendingMpcBuiltinOperation::LocalShare {
+            share_type,
+            share_data,
+        }))
+    }
+
     fn foreign_callback_failed(
         function: &'static str,
         source: ForeignFunctionCallbackError,
@@ -489,6 +535,11 @@ impl VMState {
                 args.require_min(2, "2 arguments: share1, share2")?;
                 let left = args.cloned(0)?;
                 let right = args.cloned(1)?;
+                // A share multiplied by a clear integer is a local scaling;
+                // no multiplication triple or MPC round is needed.
+                if let Some(operation) = self.try_local_scalar_mul(&left, &right)? {
+                    return Ok(operation);
+                }
                 let (share_type, left_data, right_data) =
                     self.extract_matching_share_pair(&left, &right, "Share.mul")?;
                 ensure_matching_share_data_format("async_multiply_share", &left_data, &right_data)?;
@@ -502,35 +553,94 @@ impl VMState {
                 args.require_exact(2, "2 arguments: lefts_array, rights_array")?;
                 let lefts_arg = args.cloned(0)?;
                 let rights_arg = args.cloned(1)?;
-                let Some((share_type, left_data)) = self
-                    .extract_homogeneous_share_array(&lefts_arg, "Share.batch_mul lefts_array")?
-                else {
+                let lefts =
+                    self.extract_share_or_scalar_array(&lefts_arg, "Share.batch_mul lefts_array")?;
+                let rights = self
+                    .extract_share_or_scalar_array(&rights_arg, "Share.batch_mul rights_array")?;
+
+                if lefts.is_empty() && rights.is_empty() {
                     return Ok(PendingMpcBuiltinOperation::BatchMul {
                         share_type: ShareType::default_secret_int(),
                         left_data: Vec::new(),
                         right_data: Vec::new(),
                     });
-                };
-                let Some((right_share_type, right_data)) = self
-                    .extract_homogeneous_share_array(&rights_arg, "Share.batch_mul rights_array")?
-                else {
-                    return Err(
-                        "Share.batch_mul requires both arrays to be empty or non-empty".into(),
-                    );
-                };
-
-                if share_type != right_share_type {
-                    return Err("Share.batch_mul requires arrays with matching share types".into());
                 }
-                if left_data.len() != right_data.len() {
+                if lefts.len() != rights.len() {
                     return Err("Share.batch_mul requires arrays with the same length".into());
                 }
-                for (left, right) in left_data.iter().zip(right_data.iter()) {
-                    ensure_matching_share_data_format("async_batch_multiply_share", left, right)?;
+
+                // Pairs with a clear integer operand are local scalings and
+                // are computed immediately; only share-by-share pairs go to
+                // the engine.
+                let mut share_type: Option<ShareType> = None;
+                let mut precomputed: Vec<Option<ShareData>> = Vec::with_capacity(lefts.len());
+                let mut left_data: Vec<ShareData> = Vec::new();
+                let mut right_data: Vec<ShareData> = Vec::new();
+
+                let mut require_type = |ty: ShareType| -> Result<(), ForeignFunctionCallbackError> {
+                    match share_type {
+                        None => {
+                            share_type = Some(ty);
+                            Ok(())
+                        }
+                        Some(existing) if existing == ty => Ok(()),
+                        Some(_) => {
+                            Err("Share.batch_mul requires arrays with matching share types".into())
+                        }
+                    }
+                };
+
+                let mut local_products: Vec<(usize, ShareType, ShareData, i64)> = Vec::new();
+                for (index, (left, right)) in lefts.into_iter().zip(rights.into_iter()).enumerate()
+                {
+                    match (left, right) {
+                        (ShareOrScalar::Share(lt, ld), ShareOrScalar::Share(rt, rd)) => {
+                            require_type(lt)?;
+                            require_type(rt)?;
+                            ensure_matching_share_data_format(
+                                "async_batch_multiply_share",
+                                &ld,
+                                &rd,
+                            )?;
+                            precomputed.push(None);
+                            left_data.push(ld);
+                            right_data.push(rd);
+                        }
+                        (ShareOrScalar::Share(ty, data), ShareOrScalar::Scalar(scalar))
+                        | (ShareOrScalar::Scalar(scalar), ShareOrScalar::Share(ty, data)) => {
+                            require_type(ty)?;
+                            precomputed.push(None); // placeholder, filled below
+                            local_products.push((index, ty, data, scalar));
+                        }
+                        (ShareOrScalar::Scalar(_), ShareOrScalar::Scalar(_)) => {
+                            return Err(
+                                "Share.batch_mul requires at least one share per pair".into()
+                            );
+                        }
+                    }
                 }
 
-                Ok(PendingMpcBuiltinOperation::BatchMul {
+                for (index, ty, data, scalar) in local_products {
+                    let scaled = self.share_runtime()?.mul_scalar_data(ty, &data, scalar)?;
+                    precomputed[index] = Some(scaled);
+                }
+
+                let share_type =
+                    share_type.expect("non-empty batch always sees at least one share");
+
+                if precomputed.iter().all(Option::is_none) {
+                    // Pure share-by-share batch: keep the original operation
+                    // shape (and its effect accounting).
+                    return Ok(PendingMpcBuiltinOperation::BatchMul {
+                        share_type,
+                        left_data,
+                        right_data,
+                    });
+                }
+
+                Ok(PendingMpcBuiltinOperation::BatchMulMixed {
                     share_type,
+                    precomputed,
                     left_data,
                     right_data,
                 })

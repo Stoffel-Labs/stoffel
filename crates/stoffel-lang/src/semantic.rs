@@ -391,13 +391,22 @@ impl<'a> SemanticAnalyzer<'a> {
                 Self::is_clear_real_type(expected_type)
                     && Self::untyped_int_literal_value(expr).is_some()
             }
-            AstNode::UnaryOperation { op, .. } if op == "-" => {
+            AstNode::UnaryOperation { op, operand, .. } if op == "-" => {
                 if expected_type.underlying_type().is_integer() {
                     return Self::untyped_int_literal_value(expr)
                         .is_some_and(|value| expected_type.fits_literal_i128(value));
                 }
+                // Negated int literals (-3) and negated float literals (-1.5)
+                // both adopt a clear real (float/fix64) context.
                 Self::is_clear_real_type(expected_type)
-                    && Self::untyped_int_literal_value(expr).is_some()
+                    && (Self::untyped_int_literal_value(expr).is_some()
+                        || matches!(
+                            operand.as_ref(),
+                            AstNode::Literal {
+                                value: Value::Float(_),
+                                ..
+                            }
+                        ))
             }
             AstNode::Literal {
                 value: Value::Float(_),
@@ -405,7 +414,7 @@ impl<'a> SemanticAnalyzer<'a> {
             } => Self::is_clear_real_type(expected_type),
             AstNode::BinaryOperation {
                 op, left, right, ..
-            } if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%")
+            } if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "mod")
                 && Self::is_clear_real_type(expected_type) =>
             {
                 Self::expression_can_refine_to_expected(left, expected_type)
@@ -853,7 +862,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 expected.clone()
             }
             (AstNode::BinaryOperation { op, .. }, inferred, expected)
-                if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%")
+                if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "mod")
                     && Self::is_clear_real_type(inferred)
                     && Self::is_clear_real_type(expected) =>
             {
@@ -884,6 +893,35 @@ impl<'a> SemanticAnalyzer<'a> {
         };
 
         let refined_expr = match expr {
+            // Fold a negated float literal into a single negative literal so
+            // later phases see an ordinary literal of the refined type
+            // (e.g. -1.5 inside a list[fix64] literal).
+            AstNode::UnaryOperation {
+                op,
+                operand,
+                location,
+            } if op == "-"
+                && matches!(
+                    operand.as_ref(),
+                    AstNode::Literal {
+                        value: Value::Float(_),
+                        ..
+                    }
+                ) =>
+            {
+                if let AstNode::Literal {
+                    value: Value::Float(bits),
+                    ..
+                } = operand.as_ref()
+                {
+                    AstNode::Literal {
+                        value: Value::Float((-f64::from_bits(*bits)).to_bits()),
+                        location,
+                    }
+                } else {
+                    unreachable!("guarded by matches! above")
+                }
+            }
             AstNode::FunctionCall {
                 function,
                 arguments,
@@ -970,7 +1008,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 left,
                 right,
                 location,
-            } if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%")
+            } if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "mod")
                 && Self::is_clear_real_type(expected_type) =>
             {
                 let (refined_left, _) = Self::refine_expression_type_with_expected(
@@ -1472,6 +1510,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         | "*"
                         | "/"
                         | "%"
+                        | "mod"
                         | "shl"
                         | "shr"
                         | "and"
@@ -1813,7 +1852,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 location,
             } if matches!(
                 op.as_str(),
-                "+" | "-" | "*" | "/" | "%" | "shl" | "shr" | "and" | "or" | "xor"
+                "+" | "-" | "*" | "/" | "%" | "mod" | "shl" | "shr" | "and" | "or" | "xor"
             ) =>
             {
                 let mut changed = false;
@@ -1949,7 +1988,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
                 if matches!(
                     op.as_str(),
-                    "+" | "-" | "*" | "/" | "%" | "shl" | "shr" | "and" | "or" | "xor"
+                    "+" | "-" | "*" | "/" | "%" | "mod" | "shl" | "shr" | "and" | "or" | "xor"
                 ) {
                     if Self::is_concrete_inference_type(&left_type)
                         && (right_type == SymbolType::Unknown || left_type == right_type)
@@ -2843,10 +2882,21 @@ impl<'a> SemanticAnalyzer<'a> {
                             } else {
                                 SymbolType::Bool
                             }
+                        } else if operand_under.is_integer() {
+                            // Nim-style: on clear integers 'not' is the bitwise
+                            // complement, preserving the operand's width.
+                            if operand_ty.is_secret() {
+                                self.error_reporter.add_error(CompilerError::semantic_error(
+                                    "Bitwise 'not' is not supported on secret integers (only secret bool)",
+                                    location.clone(),
+                                ));
+                                return Err(());
+                            }
+                            operand_under.clone()
                         } else {
                             self.error_reporter.add_error(CompilerError::type_error(
                                 format!(
-                                    "Unary 'not' requires a bool operand, found '{}'",
+                                    "Unary 'not' requires a bool or integer operand, found '{}'",
                                     declared_type_to_string(&operand_ty)
                                 ),
                                 location.clone(),
@@ -4803,7 +4853,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     ));
                 }
 
-                if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%") {
+                if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "mod") {
                     let mut checked_left = checked_left;
                     let mut checked_right = checked_right;
                     let mut left_ty = left_ty;

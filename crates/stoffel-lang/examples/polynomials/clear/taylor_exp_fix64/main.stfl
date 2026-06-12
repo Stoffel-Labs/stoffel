@@ -1,0 +1,55 @@
+# The Taylor series of e^x summed in fix64: term k is x^k / k!,
+# accumulated until the terms vanish below fixed-point resolution.
+# Convergence, the addition law e^a * e^b = e^(a+b), and monotonicity
+# of partial sums are all asserted.
+
+def taylor_exp(x: fix64, terms: int64) -> fix64:
+  var total: fix64 = 1.0
+  var term: fix64 = 1.0
+  var k: fix64 = 1.0
+  var i: int64 = 1
+  while i < terms:
+    # term <- term * x / k, computed in fixed point.
+    term = term * x / k
+    total = total + term
+    k = k + 1.0
+    i += 1
+  return total
+
+def fabs(x: fix64) -> fix64:
+  if x < 0.0:
+    return -x
+  return x
+
+def main() -> int64:
+  var tol: fix64 = 0.005
+
+  # Known values.
+  assert taylor_exp(0.0, 12) == 1.0, "e^0 is exactly 1"
+  var e1: fix64 = taylor_exp(1.0, 14)
+  assert fabs(e1 - 2.7182818) < tol, "e^1"
+  var e2: fix64 = taylor_exp(2.0, 18)
+  assert fabs(e2 - 7.3890561) < 0.02, "e^2"
+
+  # Addition law: e^0.5 squared is e.
+  var e_half: fix64 = taylor_exp(0.5, 14)
+  assert fabs(e_half * e_half - e1) < 0.01, "e^0.5 * e^0.5 = e"
+
+  # Reciprocal law: e^1 * e^-1 = 1 (alternating series for x = -1).
+  var e_neg: fix64 = taylor_exp(-1.0, 16)
+  assert fabs(e1 * e_neg - 1.0) < 0.01, "e * e^-1 = 1"
+
+  # For x > 0 every term is positive, so partial sums increase.
+  var previous: fix64 = 0.0
+  var terms: int64 = 1
+  while terms <= 10:
+    var partial: fix64 = taylor_exp(1.0, terms)
+    assert partial > previous, "partial sums increase monotonically"
+    previous = partial
+    terms += 1
+
+  # Adding terms beyond fix64 resolution stops changing the sum.
+  assert fabs(taylor_exp(1.0, 14) - taylor_exp(1.0, 20)) < 0.0001, "series has converged"
+
+  print("taylor exp: convergence, addition law and monotonicity verified")
+  return 0

@@ -2230,7 +2230,10 @@ where
     //   - Clone 1 (`processing_node`): handles incoming messages via process()
     //   - Clone 2 (inside `engine`): initiates preprocessing via run_preprocessing()
     // Both share the same Arc<Mutex> stores, but only ONE processes each message.
-    let default_n_triples = (2 * t + 1).max(1);
+    // Floor of 16 so reveal-batched programs with a handful of share-by-share
+    // products per batch do not hit NotEnoughPreprocessing out of the box;
+    // override with STOFFEL_PREPROCESSING_TRIPLES when tuning.
+    let default_n_triples = (2 * t + 1).max(16);
     let n_triples = std::env::var("STOFFEL_PREPROCESSING_TRIPLES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())

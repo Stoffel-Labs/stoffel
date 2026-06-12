@@ -998,21 +998,15 @@ def main() -> float64:
     let program = compile(source, "test.stfl", &default_options())
         .expect("negative decimal literals should compile");
 
+    // Negated float literals are folded into a single negative constant
+    // (no runtime 0.0 - x subtraction).
     assert!(
         program
             .main_chunk
             .constants
             .iter()
-            .any(|constant| matches!(constant, Constant::Float(value) if value.0 == 0.125)),
-        "positive operand of unary minus should be stored as f64 0.125"
-    );
-    assert!(
-        program
-            .main_chunk
-            .constants
-            .iter()
-            .any(|constant| matches!(constant, Constant::Float(value) if value.0 == 0.0)),
-        "unary minus for real values should use a real zero"
+            .any(|constant| matches!(constant, Constant::Float(value) if value.0 == -0.125)),
+        "negated decimal literal should fold to the f64 constant -0.125"
     );
 }
 
@@ -3804,13 +3798,13 @@ def main(x: uint64) -> int64:
 #[test]
 fn test_uint64_call_into_int64_inverse_reports_only_argument_mismatch() {
     let source = r#"
-def multiplicative_inverse(x: int64, mod: int64) -> int64:
-  if mod == 0:
+def multiplicative_inverse(x: int64, modulus: int64) -> int64:
+  if modulus == 0:
     return 0
 
-  x = x % mod
+  x = x % modulus
   var old_r: int64 = x
-  var r: int64 = mod
+  var r: int64 = modulus
   var old_s: int64 = 1
   var s: int64 = 0
 
@@ -3827,11 +3821,11 @@ def multiplicative_inverse(x: int64, mod: int64) -> int64:
     return 0
 
   if old_s < 0:
-    old_s += mod
+    old_s += modulus
   return old_s
 
-def main(x: uint64, mod: uint64):
-  var inv = multiplicative_inverse(x, mod)
+def main(x: uint64, modulus: uint64):
+  var inv = multiplicative_inverse(x, modulus)
 "#;
     let errors = analyze_source_errors(source);
     assert_eq!(
@@ -3850,13 +3844,13 @@ def main(x: uint64, mod: uint64):
 #[test]
 fn test_uint64_inverse_with_int64_locals_reports_type_roots_without_cascade() {
     let source = r#"
-def multiplicative_inverse(x: uint64, mod: uint64) -> uint64:
-  if mod == 0:
+def multiplicative_inverse(x: uint64, modulus: uint64) -> uint64:
+  if modulus == 0:
     return 0
 
-  x = x % mod
+  x = x % modulus
   var old_r: int64 = x
-  var r: int64 = mod
+  var r: int64 = modulus
   var old_s: int64 = 1
   var s: int64 = 0
 
@@ -3873,11 +3867,11 @@ def multiplicative_inverse(x: uint64, mod: uint64) -> uint64:
     return 0
 
   if old_s < 0:
-    old_s += mod
+    old_s += modulus
   return old_s
 
-def main(x: uint64, mod: uint64):
-  var inv = multiplicative_inverse(x, mod)
+def main(x: uint64, modulus: uint64):
+  var inv = multiplicative_inverse(x, modulus)
 "#;
     let errors = analyze_source_errors(source);
     let messages: Vec<&str> = errors.iter().map(|error| error.message.as_str()).collect();
@@ -3898,7 +3892,7 @@ def main(x: uint64, mod: uint64):
         messages
             .iter()
             .any(|message| message.contains("Arithmetic '+' requires matching numeric types")),
-        "expected old_s += mod mixed numeric type error, got {errors:?}"
+        "expected old_s += modulus mixed numeric type error, got {errors:?}"
     );
     assert!(
         messages.iter().any(|message| message
@@ -3927,13 +3921,13 @@ def main(x: uint64, mod: uint64):
 #[test]
 fn test_uint64_inverse_with_inferred_literals_compiles_until_explicit_inv_mismatch() {
     let source = r#"
-def multiplicative_inverse(x: uint64, mod: uint64) -> uint64:
-  if mod == 0:
+def multiplicative_inverse(x: uint64, modulus: uint64) -> uint64:
+  if modulus == 0:
     return 0
 
-  x = x % mod
+  x = x % modulus
   var old_r = x
-  var r = mod
+  var r = modulus
   var old_s = 1
   var s = 0
 
@@ -3950,11 +3944,11 @@ def multiplicative_inverse(x: uint64, mod: uint64) -> uint64:
     return 0
 
   if old_s < 0:
-    old_s += mod
+    old_s += modulus
   return old_s
 
-def main(x: uint64, mod: uint64):
-  var inv: int64 = multiplicative_inverse(x, mod)
+def main(x: uint64, modulus: uint64):
+  var inv: int64 = multiplicative_inverse(x, modulus)
   print(inv)
 "#;
     let errors = analyze_source_errors(source);
@@ -4290,4 +4284,85 @@ def main(x: int64) -> int64:
   return x
 "#;
     compile(source, "test.stfl", &default_options()).expect("assert should compile");
+}
+
+#[test]
+fn test_multiline_collection_literals_compile() {
+    let source = r#"
+def main() -> int64:
+  var m: list[list[int64]] = [
+    [1, 2, 3],
+    [4, 5, 6]
+  ]
+  var d = {
+    "a": 1,
+    "b": 2
+  }
+  var total: int64 = 0
+  for row in m:
+    for v in row:
+      total += v
+  return total + d["a"]
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("newlines inside brackets should be implicitly joined");
+}
+
+#[test]
+fn test_negative_float_literal_adopts_fix64_list_context() {
+    let source = r#"
+def main() -> int64:
+  var xs: list[fix64] = [0.5, -1.5, 2.25]
+  if xs[1] < 0.0:
+    return 1
+  return 0
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("negated float literals should adopt the fix64 element type");
+}
+
+#[test]
+fn test_bitwise_not_on_clear_integers_compiles() {
+    let source = r#"
+def main() -> int64:
+  var a: int64 = 12
+  var b: int64 = not a
+  var c: uint64 = 0u64
+  var d: uint64 = not c
+  var flag: bool = not (b == a)
+  if flag and b == -13 and d == 18446744073709551615u64:
+    return 1
+  return 0
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("'not' should act as bitwise complement on clear integers");
+}
+
+#[test]
+fn test_bitwise_not_on_secret_integer_rejected() {
+    let source = r#"
+def main() -> int64:
+  var s: secret int64 = Share.from_clear(5)
+  var t: secret int64 = not s
+  return 0
+"#;
+    assert!(expect_error_containing(
+        source,
+        "Bitwise 'not' is not supported on secret integers"
+    ));
+}
+
+#[test]
+fn test_mod_keyword_and_percent_remainder_compile() {
+    let source = r#"
+def main() -> int64:
+  var floored: int64 = -7 mod 3
+  var remainder: int64 = -7 % 3
+  var precedence: int64 = 1 + 7 mod 3
+  if floored == 2 and remainder == -1 and precedence == 2:
+    return 1
+  return 0
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("'mod' (floored) and '%' (remainder) should both compile");
 }

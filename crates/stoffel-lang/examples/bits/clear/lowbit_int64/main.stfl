@@ -1,0 +1,55 @@
+# Two's-complement low-bit tricks on int64: isolate the lowest set bit
+# with n and -n, strip it with n and (n - 1), and detect powers of two.
+# Each trick is validated against a loop-based reference.
+
+def lowest_set_bit(n: int64) -> int64:
+  return n and -n
+
+def strip_lowest_bit(n: int64) -> int64:
+  return n and (n - 1)
+
+def is_power_of_two(n: int64) -> bool:
+  if n <= 0:
+    return False
+  return (n and (n - 1)) == 0
+
+def lowest_set_bit_reference(n: int64) -> int64:
+  # Probe bits from the bottom with a moving mask.
+  if n == 0:
+    return 0
+  var mask: int64 = 1
+  while (n and mask) == 0:
+    mask = mask shl 1
+  return mask
+
+def main() -> int64:
+  var inputs: list[int64] = [1, 2, 3, 12, 40, 96, 1024, 1025, 700000, 4611686018427387904]
+
+  var i: int64 = 0
+  while i < inputs.len():
+    var n: int64 = inputs[i]
+    var low: int64 = lowest_set_bit(n)
+    assert low == lowest_set_bit_reference(n), "n and -n disagrees with mask probe"
+    # The isolated bit is itself a power of two and divides nothing else of n.
+    assert is_power_of_two(low), "isolated bit must be a power of two"
+    # Stripping the lowest bit then adding it back restores n.
+    assert strip_lowest_bit(n) + low == n, "strip plus isolate must restore n"
+    i += 1
+
+  # Power-of-two detection across positives, zero and negatives.
+  assert is_power_of_two(1), "1 is 2^0"
+  assert is_power_of_two(4096), "4096 is a power of two"
+  assert not is_power_of_two(0), "0 is not a power of two"
+  assert not is_power_of_two(-8), "negative values are not powers of two"
+  assert not is_power_of_two(6), "6 is not a power of two"
+
+  # Count set bits by repeated stripping: 0b1011011 has 5 bits.
+  var v: int64 = 91
+  var count: int64 = 0
+  while v != 0:
+    v = strip_lowest_bit(v)
+    count += 1
+  assert count == 5, "91 has five set bits"
+
+  print("lowbit tricks: isolate, strip and power-of-two checks pass")
+  return 0

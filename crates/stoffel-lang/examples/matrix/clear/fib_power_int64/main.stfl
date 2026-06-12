@@ -1,0 +1,68 @@
+# Fibonacci numbers from powers of the Q-matrix [[1,1],[1,0]],
+# computed by exponentiation-by-squaring in O(log n) 2x2 multiplies
+# and verified against the plain iterative recurrence.
+
+def matmul2(a: list[list[int64]], b: list[list[int64]]) -> list[list[int64]]:
+  return [
+    [a[0][0] * b[0][0] + a[0][1] * b[1][0], a[0][0] * b[0][1] + a[0][1] * b[1][1]],
+    [a[1][0] * b[0][0] + a[1][1] * b[1][0], a[1][0] * b[0][1] + a[1][1] * b[1][1]]
+  ]
+
+def mat_power(base: list[list[int64]], n: int64) -> list[list[int64]]:
+  var result: list[list[int64]] = [[1, 0], [0, 1]]
+  var square: list[list[int64]] = base
+  var e: int64 = n
+  while e > 0:
+    if e % 2 == 1:
+      result = matmul2(result, square)
+    e = e / 2
+    # Only square while more bits remain; squaring past the top bit
+    # would overflow int64 for large n even though the result is done.
+    if e > 0:
+      square = matmul2(square, square)
+  return result
+
+def fib_matrix(n: int64) -> int64:
+  # Q^n = [[F(n+1), F(n)], [F(n), F(n-1)]]
+  if n == 0:
+    return 0
+  var q: list[list[int64]] = [[1, 1], [1, 0]]
+  var p: list[list[int64]] = mat_power(q, n)
+  return p[0][1]
+
+def fib_iterative(n: int64) -> int64:
+  var a: int64 = 0
+  var b: int64 = 1
+  var i: int64 = 0
+  while i < n:
+    var next: int64 = a + b
+    a = b
+    b = next
+    i += 1
+  return a
+
+def main() -> int64:
+  # Small values against the textbook sequence.
+  var known: list[int64] = [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
+  var n: int64 = 0
+  while n < known.len():
+    assert fib_matrix(n) == known[n], "small Fibonacci value"
+    n += 1
+
+  # Larger values against the iterative recurrence.
+  var checks: list[int64] = [20, 35, 50, 70, 90]
+  var i: int64 = 0
+  while i < checks.len():
+    assert fib_matrix(checks[i]) == fib_iterative(checks[i]), "matrix power vs iteration"
+    i += 1
+
+  # The Cassini identity F(n-1)*F(n+1) - F(n)^2 = (-1)^n, via the matrix det.
+  var f19: int64 = fib_matrix(19)
+  var f20: int64 = fib_matrix(20)
+  var f21: int64 = fib_matrix(21)
+  assert f19 * f21 - f20 * f20 == 1, "Cassini identity at n=20"
+
+  var f90: int64 = fib_matrix(90)
+  print(f"fib(90)={f90}")
+  print("fibonacci: matrix exponentiation matches iteration up to n=90")
+  return 0

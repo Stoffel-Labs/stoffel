@@ -1,0 +1,82 @@
+# Gaussian elimination with partial pivoting in fix64: forward
+# elimination on an augmented 3x4 matrix, back substitution, and a
+# residual check on every original equation.
+
+def fabs(x: fix64) -> fix64:
+  if x < 0.0:
+    return -x
+  return x
+
+def solve3(matrix: list[list[fix64]]) -> list[fix64]:
+  # matrix is 3 rows of [a0, a1, a2, b], modified in place.
+  var n: int64 = 3
+  var col: int64 = 0
+  while col < n:
+    # Partial pivot: bring the largest-magnitude entry to the diagonal.
+    var pivot_row: int64 = col
+    var best: fix64 = fabs(matrix[col][col])
+    var r: int64 = col + 1
+    while r < n:
+      if fabs(matrix[r][col]) > best:
+        best = fabs(matrix[r][col])
+        pivot_row = r
+      r += 1
+    if pivot_row != col:
+      var tmp: list[fix64] = matrix[col]
+      matrix[col] = matrix[pivot_row]
+      matrix[pivot_row] = tmp
+
+    # Eliminate everything below the pivot.
+    r = col + 1
+    while r < n:
+      var factor: fix64 = matrix[r][col] / matrix[col][col]
+      var c: int64 = col
+      while c < n + 1:
+        matrix[r][c] = matrix[r][c] - factor * matrix[col][c]
+        c += 1
+      r += 1
+    col += 1
+
+  # Back substitution.
+  var x: list[fix64] = [0.0, 0.0, 0.0]
+  var row: int64 = n - 1
+  while row >= 0:
+    var acc: fix64 = matrix[row][3]
+    var back_col: int64 = row + 1
+    while back_col < n:
+      acc = acc - matrix[row][back_col] * x[back_col]
+      back_col += 1
+    x[row] = acc / matrix[row][row]
+    row -= 1
+  return x
+
+def main() -> int64:
+  # System chosen so the exact solution (1.5, 0.5, 2.25) is binary-exact.
+  var a: list[list[fix64]] = [
+    [2.0, 1.0, 1.0, 5.75],
+    [1.0, 3.0, 2.0, 7.5],
+    [1.0, 0.0, 1.0, 3.75]
+  ]
+  # Keep an untouched copy for the residual check.
+  var original: list[list[fix64]] = [
+    [2.0, 1.0, 1.0, 5.75],
+    [1.0, 3.0, 2.0, 7.5],
+    [1.0, 0.0, 1.0, 3.75]
+  ]
+
+  var x: list[fix64] = solve3(a)
+  var tol: fix64 = 0.01
+
+  assert fabs(x[0] - 1.5) < tol, "x0 component"
+  assert fabs(x[1] - 0.5) < tol, "x1 component"
+  assert fabs(x[2] - 2.25) < tol, "x2 component"
+
+  # Residual of each original equation must vanish.
+  var i: int64 = 0
+  while i < 3:
+    var lhs: fix64 = original[i][0] * x[0] + original[i][1] * x[1] + original[i][2] * x[2]
+    assert fabs(lhs - original[i][3]) < tol, "equation residual"
+    i += 1
+
+  print("gaussian elimination: solved 3x3 system, residuals within tolerance")
+  return 0

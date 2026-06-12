@@ -1608,8 +1608,8 @@ impl<'a> Parser<'a> {
                 "==" | "!=" | "<" | "<=" | ">" | ">=" | "is" | "in" => 3, // Comparison operators
                 ".." => 4,                                                // Range operator
                 "+" | "-" => 5,                                           // Addition/Subtraction
-                "*" | "/" | "%" => 6, // Multiplication/Division/Modulo
-                "shl" | "shr" => 6,   // Bit shifts (Nim-style keywords)
+                "*" | "/" | "%" | "mod" => 6, // Multiplication/Division/Remainder/Modulo
+                "shl" | "shr" => 6,           // Bit shifts (Nim-style keywords)
                 // Add other operators like power (**), bitwise (&, |, ^), etc.
                 _ => 0, // Not an infix operator or lowest precedence
             },

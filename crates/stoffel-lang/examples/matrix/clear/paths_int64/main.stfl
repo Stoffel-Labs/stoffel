@@ -1,0 +1,73 @@
+# Powers of the adjacency matrix count walks: (A^k)[i][j] is the
+# number of length-k walks from i to j. Checked by hand on a directed
+# 4-cycle with a chord, then used to count triangles in an undirected
+# graph via trace(A^3) = 6 * triangles.
+
+def matmul(a: list[list[int64]], b: list[list[int64]]) -> list[list[int64]]:
+  var n: int64 = a.len()
+  var out: list[list[int64]] = []
+  var i: int64 = 0
+  while i < n:
+    var row: list[int64] = []
+    var j: int64 = 0
+    while j < n:
+      var acc: int64 = 0
+      var k: int64 = 0
+      while k < n:
+        acc += a[i][k] * b[k][j]
+        k += 1
+      row.append(acc)
+      j += 1
+    out.append(row)
+    i += 1
+  return out
+
+def trace(a: list[list[int64]]) -> int64:
+  var acc: int64 = 0
+  var i: int64 = 0
+  while i < a.len():
+    acc += a[i][i]
+    i += 1
+  return acc
+
+def main() -> int64:
+  # Directed graph: 0->1, 1->2, 2->3, 3->0, plus chord 0->2.
+  var a: list[list[int64]] = [
+    [0, 1, 1, 0],
+    [0, 0, 1, 0],
+    [0, 0, 0, 1],
+    [1, 0, 0, 0]
+  ]
+
+  var a2: list[list[int64]] = matmul(a, a)
+  # Two-step walks from 0: 0->1->2 and 0->2->3.
+  assert a2[0][2] == 1, "exactly one 2-walk 0 to 2"
+  assert a2[0][3] == 1, "exactly one 2-walk 0 to 3"
+  assert a2[0][0] == 0, "no 2-walk returns to 0"
+
+  var a3: list[list[int64]] = matmul(a2, a)
+  # Three-step walks from 0: 0->1->2->3 and 0->2->3->0.
+  assert a3[0][3] == 1, "one 3-walk 0 to 3"
+  assert a3[0][0] == 1, "one 3-cycle through 0 (0->2->3->0)"
+  # The only directed 3-cycle is 0->2->3->0, so the trace counts each
+  # of its vertices once.
+  assert trace(a3) == 3, "trace counts the rotations of the 3-cycle"
+
+  # Reachability within 3 steps: A + A^2 + A^3 has no zero entries
+  # except where genuinely unreachable; on this strongly connected
+  # graph node 1 reaches node 0 only in exactly 3 steps.
+  assert a[1][0] == 0 and a2[1][0] == 0 and a3[1][0] == 1, "1 reaches 0 in three steps"
+
+  # Undirected triangle graph plus a pendant vertex.
+  var u: list[list[int64]] = [
+    [0, 1, 1, 0],
+    [1, 0, 1, 0],
+    [1, 1, 0, 1],
+    [0, 0, 1, 0]
+  ]
+  var u3: list[list[int64]] = matmul(matmul(u, u), u)
+  # trace(U^3) counts each triangle 6 times (3 vertices x 2 directions).
+  assert trace(u3) == 6, "exactly one triangle"
+
+  print("adjacency powers: walk counts and triangle census verified")
+  return 0

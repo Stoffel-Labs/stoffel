@@ -81,6 +81,9 @@ fn get_keywords() -> HashMap<String, TokenKind> {
     keywords.insert("pass".to_string(), TokenKind::Keyword("pass".to_string()));
     keywords.insert("shl".to_string(), TokenKind::Operator("shl".to_string()));
     keywords.insert("shr".to_string(), TokenKind::Operator("shr".to_string()));
+    // 'mod' is the floored modulo keyword (result follows the divisor's
+    // sign); '%' stays the truncating remainder (result follows the dividend).
+    keywords.insert("mod".to_string(), TokenKind::Operator("mod".to_string()));
     keywords.insert(
         "return".to_string(),
         TokenKind::Keyword("return".to_string()),
@@ -116,6 +119,10 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
     let mut column = 1;
     let mut indent_stack: Vec<usize> = vec![0]; // Stack to keep track of indentation levels
     let mut at_line_start = true;
+    // Depth of open (), [] and {} groups. Newlines inside brackets are
+    // implicitly joined (Python-style), so multi-line literals and call
+    // argument lists lex as a single logical line.
+    let mut bracket_depth: usize = 0;
 
     let make_location = |current_line: usize, current_column: usize| -> SourceLocation {
         SourceLocation {
@@ -242,11 +249,18 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
                 column += 1;
             }
             '\n' => {
-                // Emit Newline, reset state for next line
-                push_token(TokenKind::Newline, make_location(line, column));
-                line += 1;
-                column = 1;
-                at_line_start = true;
+                if bracket_depth > 0 {
+                    // Implicit line joining: inside brackets a newline is just
+                    // whitespace; no Newline token and no indent processing.
+                    line += 1;
+                    column = 1;
+                } else {
+                    // Emit Newline, reset state for next line
+                    push_token(TokenKind::Newline, make_location(line, column));
+                    line += 1;
+                    column = 1;
+                    at_line_start = true;
+                }
             }
             '#' => {
                 // Comments
@@ -262,10 +276,12 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
             }
             '(' => {
                 push_token(TokenKind::LParen, make_location(line, column));
+                bracket_depth += 1;
                 column += 1;
             }
             ')' => {
                 push_token(TokenKind::RParen, make_location(line, column));
+                bracket_depth = bracket_depth.saturating_sub(1);
                 column += 1;
             }
             '{' => {
@@ -275,19 +291,23 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
                     column += 2;
                 } else {
                     push_token(TokenKind::LBrace, make_location(line, column));
+                    bracket_depth += 1;
                     column += 1;
                 }
             }
             '}' => {
                 push_token(TokenKind::RBrace, make_location(line, column));
+                bracket_depth = bracket_depth.saturating_sub(1);
                 column += 1;
             }
             '[' => {
                 push_token(TokenKind::LBracket, make_location(line, column));
+                bracket_depth += 1;
                 column += 1;
             }
             ']' => {
                 push_token(TokenKind::RBracket, make_location(line, column));
+                bracket_depth = bracket_depth.saturating_sub(1);
                 column += 1;
             }
             ',' => {

@@ -95,6 +95,18 @@ fn stfl_fixtures_follow_expected_success_by_name() {
 
 #[test]
 fn canonical_examples_compile_to_vm_bytecode() {
+    // The compiler recurses with expression depth, and the largest circuit
+    // examples overflow the default 2 MiB test-thread stack in debug
+    // builds; run the sweep on a roomier stack instead.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(canonical_examples_compile_to_vm_bytecode_impl)
+        .expect("spawn test thread")
+        .join()
+        .expect("examples compile sweep panicked");
+}
+
+fn canonical_examples_compile_to_vm_bytecode_impl() {
     let examples_root = manifest_dir().join("examples");
     let examples = collect_stoffel_files(&examples_root)
         .into_iter()

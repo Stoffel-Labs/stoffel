@@ -111,7 +111,8 @@ impl VmEffectSummary {
                     Self::new(VmEffectKind::BuiltinInput, 1)
                 }
                 PendingMpcBuiltinOperation::Mul { .. } => Self::new(VmEffectKind::BuiltinMul, 1),
-                PendingMpcBuiltinOperation::BatchMul { left_data, .. } => {
+                PendingMpcBuiltinOperation::BatchMul { left_data, .. }
+                | PendingMpcBuiltinOperation::BatchMulMixed { left_data, .. } => {
                     Self::new(VmEffectKind::BuiltinBatchMul, left_data.len())
                 }
                 PendingMpcBuiltinOperation::Open { .. } => Self::new(VmEffectKind::BuiltinOpen, 1),

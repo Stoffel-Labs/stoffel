@@ -1,0 +1,64 @@
+# Fixed-point 2D rotation matrices: rotating by 30 degrees twice must
+# match rotating by 60 degrees once, and rotations preserve length,
+# all within fix64 tolerance.
+
+def fabs(x: fix64) -> fix64:
+  if x < 0.0:
+    return -x
+  return x
+
+def approx(a: fix64, b: fix64, tol: fix64) -> bool:
+  return fabs(a - b) < tol
+
+def rotate(m: list[list[fix64]], v: list[fix64]) -> list[fix64]:
+  return [
+    m[0][0] * v[0] + m[0][1] * v[1],
+    m[1][0] * v[0] + m[1][1] * v[1]
+  ]
+
+def matmul2(a: list[list[fix64]], b: list[list[fix64]]) -> list[list[fix64]]:
+  return [
+    [a[0][0] * b[0][0] + a[0][1] * b[1][0], a[0][0] * b[0][1] + a[0][1] * b[1][1]],
+    [a[1][0] * b[0][0] + a[1][1] * b[1][0], a[1][0] * b[0][1] + a[1][1] * b[1][1]]
+  ]
+
+def main() -> int64:
+  var cos30: fix64 = 0.8660254
+  var sin30: fix64 = 0.5
+  var cos60: fix64 = 0.5
+  var sin60: fix64 = 0.8660254
+  var tol: fix64 = 0.005
+
+  var r30: list[list[fix64]] = [[cos30, -sin30], [sin30, cos30]]
+  var r60: list[list[fix64]] = [[cos60, -sin60], [sin60, cos60]]
+
+  # Rotating the unit x-vector by 60 degrees lands on (0.5, 0.866).
+  var v: list[fix64] = [1.0, 0.0]
+  var direct: list[fix64] = rotate(r60, v)
+  assert approx(direct[0], 0.5, tol), "cos of 60 degrees"
+  assert approx(direct[1], 0.8660254, tol), "sin of 60 degrees"
+
+  # Composition: applying R30 twice equals applying R60 once.
+  var twice: list[fix64] = rotate(r30, rotate(r30, v))
+  assert approx(twice[0], direct[0], tol), "x of R30*R30 vs R60"
+  assert approx(twice[1], direct[1], tol), "y of R30*R30 vs R60"
+
+  # The same holds at the matrix level: R30*R30 ~ R60 entrywise.
+  var composed: list[list[fix64]] = matmul2(r30, r30)
+  var i: int64 = 0
+  while i < 2:
+    var j: int64 = 0
+    while j < 2:
+      assert approx(composed[i][j], r60[i][j], tol), "matrix composition entry"
+      j += 1
+    i += 1
+
+  # Rotation preserves squared length.
+  var p: list[fix64] = [0.75, -1.25]
+  var before: fix64 = p[0] * p[0] + p[1] * p[1]
+  var q: list[fix64] = rotate(r30, p)
+  var after: fix64 = q[0] * q[0] + q[1] * q[1]
+  assert approx(before, after, 0.01), "rotation preserves length"
+
+  print("rotation matrices: composition and isometry verified in fix64")
+  return 0

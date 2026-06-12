@@ -749,12 +749,12 @@ impl CodeGenerator {
         }
     }
 
-    fn override_client_input_share_type_for_take_share_fixed(
+    fn override_client_input_share_type_for_annotation(
         &mut self,
         value: Option<&AstNode>,
         share_type: Option<ShareType>,
     ) {
-        let Some(share_type @ ShareType::SecretFixedPoint { .. }) = share_type else {
+        let Some(share_type) = share_type else {
             return;
         };
         let Some(AstNode::FunctionCall {
@@ -768,7 +768,17 @@ impl CodeGenerator {
         let AstNode::Identifier(function_name, _) = function.as_ref() else {
             return;
         };
-        if function_name != "ClientStore.take_share_fixed" {
+        // An explicit annotation refines the manifest entry beyond the
+        // builtin's default: `secret bool`/`secret uintN` for take_share,
+        // a concrete fixed-point layout for take_share_fixed.
+        let annotation_applies = match function_name.as_str() {
+            "ClientStore.take_share" => !matches!(share_type, ShareType::SecretFixedPoint { .. }),
+            "ClientStore.take_share_fixed" => {
+                matches!(share_type, ShareType::SecretFixedPoint { .. })
+            }
+            _ => false,
+        };
+        if !annotation_applies {
             return;
         }
         let Some(client_slot) = int_literal_u64(arguments.first()) else {
@@ -1316,7 +1326,7 @@ impl CodeGenerator {
                     self.variable_share_types.remove(name);
                 } else if let Some(share_type) = value_share_type {
                     self.variable_share_types.insert(name.clone(), share_type);
-                    self.override_client_input_share_type_for_take_share_fixed(
+                    self.override_client_input_share_type_for_annotation(
                         value.as_deref(),
                         Some(share_type),
                     );
@@ -1466,6 +1476,20 @@ impl CodeGenerator {
                         let result_vr = self.allocate_virtual_register(false);
                         self.emit(Instruction::MOV(result_vr.0, 0));
                         Ok((result_vr, false))
+                    }
+                    "mod" => {
+                        // Floored modulo, lowered from the truncating MOD
+                        // (remainder) instruction as ((a % b) + b) % b. This
+                        // yields a result with the divisor's sign for every
+                        // operand-sign combination, whereas '%' keeps the
+                        // dividend's sign.
+                        let rem_vr = self.allocate_virtual_register(result_is_secret);
+                        self.emit(Instruction::MOD(rem_vr.0, left_vr.0, right_vr.0));
+                        let shifted_vr = self.allocate_virtual_register(result_is_secret);
+                        self.emit(Instruction::ADD(shifted_vr.0, rem_vr.0, right_vr.0));
+                        let dest_vr = self.allocate_virtual_register(result_is_secret);
+                        self.emit(Instruction::MOD(dest_vr.0, shifted_vr.0, right_vr.0));
+                        Ok((dest_vr, result_is_secret))
                     }
                     "+" | "-" | "*" | "/" | "%" | // Arithmetic
                     "and" | "or" | "xor" | // Logical/Bitwise

@@ -1,0 +1,63 @@
+# A permission system as an int64 bitmask, exercising all four Nim-style
+# bitwise keywords: or to set, and+not to clear, xor to toggle.
+
+def set_flag(flags: int64, mask: int64) -> int64:
+  return flags or mask
+
+def clear_flag(flags: int64, mask: int64) -> int64:
+  return flags and (not mask)
+
+def toggle_flag(flags: int64, mask: int64) -> int64:
+  return flags xor mask
+
+def has_flag(flags: int64, mask: int64) -> bool:
+  return (flags and mask) == mask
+
+def has_any(flags: int64, mask: int64) -> bool:
+  return (flags and mask) != 0
+
+def main() -> int64:
+  var read: int64 = 1
+  var write: int64 = 2
+  var exec: int64 = 4
+  var admin: int64 = 8
+  var audit: int64 = 4096
+
+  # Grant read and write.
+  var perms: int64 = 0
+  perms = set_flag(perms, read)
+  perms = set_flag(perms, write)
+  assert perms == 3, "read+write is 0b11"
+  assert has_flag(perms, read), "read granted"
+  assert has_flag(perms, write), "write granted"
+  assert not has_flag(perms, exec), "exec not granted"
+
+  # Setting an already-set flag is idempotent.
+  assert set_flag(perms, read) == perms, "set is idempotent"
+
+  # Grant everything, then revoke admin.
+  perms = set_flag(perms, exec or admin or audit)
+  assert has_flag(perms, read or write or exec or admin or audit), "all granted"
+  perms = clear_flag(perms, admin)
+  assert not has_flag(perms, admin), "admin revoked"
+  assert has_flag(perms, exec), "revoking admin keeps exec"
+  assert has_flag(perms, audit), "revoking admin keeps audit"
+
+  # Clearing an absent flag changes nothing.
+  assert clear_flag(perms, admin) == perms, "clear is idempotent"
+
+  # Toggle flips state both ways.
+  var toggled: int64 = toggle_flag(perms, exec)
+  assert not has_flag(toggled, exec), "toggle removes a set flag"
+  assert toggle_flag(toggled, exec) == perms, "double toggle restores"
+
+  # has_any vs has_flag on a multi-bit query.
+  assert has_any(perms, exec or admin), "has_any sees exec even without admin"
+  assert not has_flag(perms, exec or admin), "has_flag needs every queried bit"
+
+  # Bitwise complement identities: not m == m xor -1, and not not m == m.
+  assert (not admin) == (admin xor -1), "complement equals xor with all ones"
+  assert (not (not perms)) == perms, "double complement restores the word"
+
+  print("flags: set/clear/toggle/test lifecycle verified")
+  return 0

@@ -1,0 +1,65 @@
+# Modular exponentiation by squaring, then put to work as a Fermat
+# primality test: primes always pass, most composites fail, and the
+# Carmichael number 561 fools every coprime base.
+
+def mod_pow(base: int64, exp: int64, modulus: int64) -> int64:
+  var result: int64 = 1 % modulus
+  var b: int64 = base % modulus
+  var e: int64 = exp
+  while e > 0:
+    if e % 2 == 1:
+      result = (result * b) % modulus
+    e = e / 2
+    if e > 0:
+      b = (b * b) % modulus
+  return result
+
+def gcd(a: int64, b: int64) -> int64:
+  var x: int64 = a
+  var y: int64 = b
+  while y != 0:
+    var t: int64 = x % y
+    x = y
+    y = t
+  return x
+
+def fermat_passes(n: int64, base: int64) -> bool:
+  return mod_pow(base, n - 1, n) == 1
+
+def main() -> int64:
+  # Square-and-multiply basics.
+  assert mod_pow(2, 10, 1000) == 24, "2^10 mod 1000"
+  assert mod_pow(3, 0, 7) == 1, "zero exponent"
+  assert mod_pow(5, 1, 7) == 5, "unit exponent"
+  assert mod_pow(7, 2, 100) == 49, "small square"
+  # Big exponent against a 9-digit prime stays inside int64.
+  assert mod_pow(2, 1000000006, 1000000007) == 1, "Fermat at a large prime"
+
+  # Primes pass Fermat for every base tried.
+  var primes: list[int64] = [5, 13, 97, 569, 7919]
+  var bases: list[int64] = [2, 3, 5, 7]
+  var i: int64 = 0
+  while i < primes.len():
+    var j: int64 = 0
+    while j < bases.len():
+      if primes[i] != bases[j]:
+        assert fermat_passes(primes[i], bases[j]), "prime passes Fermat"
+      j += 1
+    i += 1
+
+  # Ordinary composites fail some small base.
+  assert not fermat_passes(15, 2), "15 fails base 2"
+  assert not fermat_passes(91, 2), "91 fails base 2"
+  assert not fermat_passes(1001, 2), "1001 fails base 2"
+
+  # 561 = 3 * 11 * 17 is Carmichael: it passes EVERY base coprime to it.
+  var base: int64 = 2
+  while base < 100:
+    if gcd(base, 561) == 1:
+      assert fermat_passes(561, base), "561 fools every coprime base"
+    base += 1
+  # Only sharing a factor exposes it.
+  assert not fermat_passes(561, 3), "a shared factor unmasks 561"
+
+  print("modexp: Fermat tests separate primes, composites and 561")
+  return 0

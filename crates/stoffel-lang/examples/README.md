@@ -29,6 +29,120 @@ example folder has a `main.stfl` source file and a short README.
 - `threshold_signatures/*`: threshold signature programs based on the VM fixtures.
 - `avss_certificate/*`: AVSS certificate keygen/signing flows based on the VM fixtures.
 
+## Algorithm gallery
+
+Eighty self-checking programs organised as
+`<category>/<clear|secret>/<name>` under `bits/`, `matrix/`, `polynomials/`
+and `number_theory/`. Each category has ten clear programs varying
+`uint64`/`int64`/`fix64` usage and ten secret programs whose private inputs
+arrive from clients via `ClientStore`. Every program asserts its own results;
+clear programs run with `stoffel run .`, secret ones document their
+`--client-input` flags in a `# run-args:` header and in their READMEs.
+
+Bit operations (clear):
+
+- `bits/clear/popcount_uint64`: popcount three ways (naive, Kernighan, SWAR fold).
+- `bits/clear/reverse_uint64`: bit reversal by loop and by mask-and-swap.
+- `bits/clear/parity_int64`: xor-fold parity, including negative values.
+- `bits/clear/rotate_uint64`: rotations built from shifts, with algebraic laws.
+- `bits/clear/gray_code_uint64`: Gray code round trips and adjacency.
+- `bits/clear/lowbit_int64`: two's-complement lowest-set-bit tricks.
+- `bits/clear/clz_log2_uint64`: leading/trailing zeros and floor(log2).
+- `bits/clear/flags_int64`: permission bitmasks with `and`/`or`/`xor`/`not`.
+- `bits/clear/morton_uint64`: Morton Z-order interleaving and its inverse.
+- `bits/clear/xorshift_uint64`: xorshift64 PRNG walked backwards to its seed.
+
+Bit operations (secret, client inputs):
+
+- `bits/secret/ripple_adder`: two clients' numbers added by full-adder gates.
+- `bits/secret/equality_check`: access-code equality, one verdict bit revealed.
+- `bits/secret/majority_vote`: five private ballots tallied by a counting circuit.
+- `bits/secret/otp_xor`: one-time pad encrypt/decrypt over bool shares.
+- `bits/secret/masks_meet`: permission mask intersection and union.
+- `bits/secret/oblivious_mux`: per-bit blending under a private selection mask.
+- `bits/secret/gt_comparator`: the millionaires' problem, bit by bit.
+- `bits/secret/popcount_circuit`: private flags counted, positions hidden.
+- `bits/secret/parity_checksum`: codeword validity verdicts via XOR folds.
+- `bits/secret/pattern_match`: blind substring search, one found-bit revealed.
+
+Matrix operations (clear):
+
+- `matrix/clear/multiply_int64`: dense matmul, identity, associativity.
+- `matrix/clear/transpose_uint64`: rectangular transpose and involution.
+- `matrix/clear/determinant_int64`: cofactor determinants and det(AB)=det(A)det(B).
+- `matrix/clear/fib_power_int64`: Fibonacci via matrix exponentiation.
+- `matrix/clear/rotation_fix64`: fixed-point rotation matrices and isometry.
+- `matrix/clear/gauss_fix64`: Gaussian elimination with partial pivoting.
+- `matrix/clear/convolution_int64`: 2D convolution with zero padding.
+- `matrix/clear/scalar_uint64`: trace, scalar and Hadamard algebra.
+- `matrix/clear/markov_fix64`: Markov chain power iteration to steady state.
+- `matrix/clear/paths_int64`: adjacency powers count walks and triangles.
+
+Matrix operations (secret, client inputs):
+
+- `matrix/secret/matvec`: client-owned matrix rows times a public query.
+- `matrix/secret/average_fix64`: element-wise averaging of private matrices.
+- `matrix/secret/dot_similarity`: cross-client inner-product scoring.
+- `matrix/secret/linear_layer`: private features through public weights.
+- `matrix/secret/covariance`: covariance across split data ownership.
+- `matrix/secret/trace_aggregate`: total load revealed via trace linearity.
+- `matrix/secret/matmul`: full 2x2 share-by-share matrix product.
+- `matrix/secret/outer_product`: rank-1 interaction table from private factors.
+- `matrix/secret/weighted_fix64`: reliability-weighted fixed-point sensor fusion.
+- `matrix/secret/hadamard_mask`: consent-masked disclosure of matrix cells.
+
+Polynomial operations (clear):
+
+- `polynomials/clear/horner_int64`: Horner vs naive evaluation.
+- `polynomials/clear/multiply_uint64`: coefficient convolution and the evaluation homomorphism.
+- `polynomials/clear/divmod_int64`: long division and the remainder theorem.
+- `polynomials/clear/calculus_fix64`: derivatives, antiderivatives, definite integrals.
+- `polynomials/clear/lagrange_fix64`: Lagrange interpolation through fixed-point samples.
+- `polynomials/clear/newton_sqrt_fix64`: Newton root finding on x^2 - a and a cubic.
+- `polynomials/clear/pascal_uint64`: binomial coefficients vs powers of 2 and 3.
+- `polynomials/clear/finite_diff_int64`: difference-engine tables and sequence extension.
+- `polynomials/clear/chebyshev_fix64`: Chebyshev recurrence, trig identity, composition.
+- `polynomials/clear/taylor_exp_fix64`: the exp series with convergence and addition laws.
+
+Polynomial operations (secret, client inputs):
+
+- `polynomials/secret/membership`: allowlist membership via root polynomials.
+- `polynomials/secret/aggregate_fix64`: consensus model from private coefficients.
+- `polynomials/secret/oblivious_eval`: a public tariff at a private query point.
+- `polynomials/secret/shamir_roundtrip`: Shamir dealing and reconstruction in-language.
+- `polynomials/secret/blind_root_check`: root knowledge proven, both sides secret.
+- `polynomials/secret/extrapolate`: next-quarter forecast from confidential samples.
+- `polynomials/secret/cross_correlation`: private template matching by convolution.
+- `polynomials/secret/vandermonde_encode`: Reed-Solomon coding of a private message.
+- `polynomials/secret/power_sums`: pooled power sums and Newton's identities.
+- `polynomials/secret/derivative_aggregate`: symbolic derivative of a combined model.
+
+Number theory (clear, Euclid and extended Euclid):
+
+- `number_theory/clear/gcd_iterative_int64`: remainder-based Euclid with signed inputs.
+- `number_theory/clear/cf_euclid_uint64`: continued fractions from Euclid's quotients.
+- `number_theory/clear/gcd_fix64_anthyphairesis`: subtraction-based Euclid on fix64 magnitudes.
+- `number_theory/clear/gcd_binary_uint64`: Stein's shift-and-subtract binary GCD.
+- `number_theory/clear/xgcd_iterative_int64`: iterative extended Euclid with Bezout certificates.
+- `number_theory/clear/diophantine_int64`: linear Diophantine solver and solution families.
+- `number_theory/clear/modinv_crt_int64`: modular inverses, congruences and CRT.
+- `number_theory/clear/lcm_fold_uint64`: overflow-safe lcm/gcd folds and lattice laws.
+- `number_theory/clear/fib_gcd_int64`: the gcd(F(m), F(n)) = F(gcd(m, n)) identity.
+- `number_theory/clear/modexp_int64`: modular exponentiation and Fermat/Carmichael tests.
+
+Number theory (secret, client inputs):
+
+- `number_theory/secret/gcd_int64`: two clients' gcd with a share-verified Bezout certificate.
+- `number_theory/secret/modinv_uint64`: modular inverse verified by one opened product.
+- `number_theory/secret/crt_residues`: CRT combination on shares with public Bezout weights.
+- `number_theory/secret/common_factor_audit`: pairwise gcd audit of private moduli.
+- `number_theory/secret/wegman_mac`: Carter-Wegman tags from a split key and messages.
+- `number_theory/secret/blind_divisibility`: divisibility proofs by quotient witness.
+- `number_theory/secret/gcd_certificate`: gcd validity proven entirely on shares.
+- `number_theory/secret/private_equality`: blinded difference equality testing.
+- `number_theory/secret/egcd_chain`: three-party gcd with a three-term certificate.
+- `number_theory/secret/diophantine`: settlement of a committed private amount.
+
 See `COVERAGE.md` for the syntax, semantic, and builtin coverage matrix.
 
 ## Validate

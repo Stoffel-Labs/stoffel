@@ -1,0 +1,53 @@
+# Bit reversal of uint64 values, computed two independent ways:
+# a bit-at-a-time loop and logarithmic mask-and-swap steps.
+
+def reverse_loop(x: uint64) -> uint64:
+  var result: uint64 = 0u64
+  var v: uint64 = x
+  var i: uint64 = 0u64
+  while i < 64u64:
+    result = result shl 1u64
+    result = result or (v and 1u64)
+    v = v shr 1u64
+    i += 1u64
+  return result
+
+def reverse_swap(x: uint64) -> uint64:
+  # Swap adjacent bits, then pairs, nibbles, bytes, halfwords, words.
+  var v: uint64 = x
+  v = ((v shr 1u64) and 0x5555555555555555u64) or ((v and 0x5555555555555555u64) shl 1u64)
+  v = ((v shr 2u64) and 0x3333333333333333u64) or ((v and 0x3333333333333333u64) shl 2u64)
+  v = ((v shr 4u64) and 0x0F0F0F0F0F0F0F0Fu64) or ((v and 0x0F0F0F0F0F0F0F0Fu64) shl 4u64)
+  v = ((v shr 8u64) and 0x00FF00FF00FF00FFu64) or ((v and 0x00FF00FF00FF00FFu64) shl 8u64)
+  v = ((v shr 16u64) and 0x0000FFFF0000FFFFu64) or ((v and 0x0000FFFF0000FFFFu64) shl 16u64)
+  v = (v shr 32u64) or (v shl 32u64)
+  return v
+
+def main() -> int64:
+  # Known reversals.
+  assert reverse_loop(1u64) == 0x8000000000000000u64, "reverse of 1"
+  assert reverse_loop(0xFu64) == 0xF000000000000000u64, "reverse of 0xF"
+  assert reverse_loop(0u64) == 0u64, "reverse of 0"
+  assert reverse_loop(0xFFFFFFFFFFFFFFFFu64) == 0xFFFFFFFFFFFFFFFFu64, "reverse of all ones"
+
+  var inputs: list[uint64] = [
+    0u64,
+    1u64,
+    0xDEADBEEFCAFEBABEu64,
+    0x0123456789ABCDEFu64,
+    0x8000000000000001u64,
+    42u64
+  ]
+
+  var i: int64 = 0
+  while i < inputs.len():
+    var x: uint64 = inputs[i]
+    var a: uint64 = reverse_loop(x)
+    var b: uint64 = reverse_swap(x)
+    assert a == b, "loop and swap reversal disagree"
+    # Reversal is an involution: applying it twice returns the input.
+    assert reverse_swap(b) == x, "double reversal must be identity"
+    i += 1
+
+  print("bit reversal: loop and mask-swap agree, involution holds")
+  return 0

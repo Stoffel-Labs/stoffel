@@ -1,5 +1,6 @@
 use super::{CompletedVmEffect, VMState};
 use crate::error::{MpcBackendResultExt, VmError, VmResult};
+use crate::foreign_functions::ForeignFunctionError;
 use crate::mpc_values::clear_share_input;
 use crate::net::client_store::ClientOutputShareCount;
 use crate::net::curve::clear_share_value_to_vm_value;
@@ -112,6 +113,22 @@ pub(crate) enum PendingMpcBuiltinOperation {
     },
     BatchMul {
         share_type: ShareType,
+        left_data: Vec<ShareData>,
+        right_data: Vec<ShareData>,
+    },
+    /// A share already combined with a public scalar locally; completes
+    /// without any MPC interaction.
+    LocalShare {
+        share_type: ShareType,
+        share_data: ShareData,
+    },
+    /// Batch multiplication where some pairs were share-by-public-scalar
+    /// products computed locally (`precomputed[i] == Some(data)`), and the
+    /// remaining `None` slots are filled, in order, from the engine batch
+    /// over `left_data`/`right_data`.
+    BatchMulMixed {
+        share_type: ShareType,
+        precomputed: Vec<Option<ShareData>>,
         left_data: Vec<ShareData>,
         right_data: Vec<ShareData>,
     },
@@ -445,6 +462,52 @@ impl PendingMpcBuiltinCall {
                     share_data,
                 }
             }
+            PendingMpcBuiltinOperation::LocalShare {
+                share_type,
+                share_data,
+            } => CompletedMpcBuiltinResult::ShareObject {
+                share_type,
+                share_data,
+            },
+            PendingMpcBuiltinOperation::BatchMulMixed {
+                share_type,
+                precomputed,
+                left_data,
+                right_data,
+            } => {
+                let engine_results = if left_data.is_empty() {
+                    Vec::new()
+                } else {
+                    let pairs: Vec<(Vec<u8>, Vec<u8>)> = left_data
+                        .iter()
+                        .zip(right_data.iter())
+                        .map(|(left, right)| (left.as_bytes().to_vec(), right.as_bytes().to_vec()))
+                        .collect();
+                    engine
+                        .batch_multiply_share_async(share_type, &pairs)
+                        .await
+                        .map_mpc_backend_err("async_batch_multiply_share")?
+                };
+
+                let mut engine_results = engine_results.into_iter();
+                let mut share_data = Vec::with_capacity(precomputed.len());
+                for slot in precomputed {
+                    match slot {
+                        Some(data) => share_data.push(data),
+                        None => share_data.push(engine_results.next().ok_or_else(|| {
+                            VmError::ForeignFunction(ForeignFunctionError::CallbackFailed {
+                                function: "Share.batch_mul".to_owned(),
+                                source: "engine returned fewer batch products than requested"
+                                    .into(),
+                            })
+                        })?),
+                    }
+                }
+                CompletedMpcBuiltinResult::ShareValues {
+                    share_type,
+                    share_data,
+                }
+            }
             PendingMpcBuiltinOperation::Open {
                 share_type,
                 share_data,
@@ -613,11 +676,19 @@ impl PendingMpcBuiltinCall {
     fn ensure_engine_can_execute<E: AsyncMpcEngine + ?Sized>(&self, engine: &E) -> VmResult<()> {
         match &self.operation {
             PendingMpcBuiltinOperation::InputShare { .. } => {}
+            PendingMpcBuiltinOperation::LocalShare { .. } => {}
             PendingMpcBuiltinOperation::Mul { .. }
             | PendingMpcBuiltinOperation::BatchMul { .. } => {
                 engine
                     .multiplication_ops()
                     .map_mpc_backend_err("multiplication_ops")?;
+            }
+            PendingMpcBuiltinOperation::BatchMulMixed { left_data, .. } => {
+                if !left_data.is_empty() {
+                    engine
+                        .multiplication_ops()
+                        .map_mpc_backend_err("multiplication_ops")?;
+                }
             }
             PendingMpcBuiltinOperation::Open { .. }
             | PendingMpcBuiltinOperation::BatchOpen { .. } => {}

@@ -19,6 +19,11 @@ exercises.
 | Secret values and MPC secret flow | `mpc_boolean_circuit`, `mpc_aes128_circuit`, `mpc_client_federated_average`, `avss_certificate/sign`, `mpc_share_toolkit` |
 | `if`/`elif`/`else`, `while`, `for` over ranges, lists, and strings | `language_policy_engine`, `local_control_flow`, `local_text_processing` |
 | Unary `-` and `not`, arithmetic, comparison, boolean operators | `language_policy_engine`, `local_control_flow`, `local_uint64_inverse` |
+| `mod` (floored modulo) vs `%` (truncating remainder) | `number_theory/clear/modinv_crt_int64`, `number_theory/clear/xgcd_iterative_int64` |
+| Bitwise keywords `and`/`or`/`xor`/`not`/`shl`/`shr` on integers, hex literals, multi-line list literals | The `bits/clear/*` gallery (popcount, reversal, parity, rotation, Gray code, clz, flags) |
+| Fixed-point `fix64` arithmetic, division, comparisons, tolerance checks | `matrix/clear/rotation_fix64`, `matrix/clear/gauss_fix64`, `polynomials/clear/*_fix64`, `number_theory/clear/gcd_fix64_anthyphairesis` |
+| Secret-share arithmetic incl. share-by-public scaling, secret bool gate circuits | `bits/secret/*`, `matrix/secret/*`, `polynomials/secret/*`, `number_theory/secret/*` |
+| `ClientStore.take_share`/`take_share_fixed` typed client inputs (int, uint, bool, fixed), multi-client and multi-input | the `*/secret/*` gallery (each documents its `--client-input` flags) |
 | Compound assignment `+=`, `-=`, `*=`, `/=`, `%=` | `language_policy_engine` |
 | Field-access method syntax and object builtin syntax | `local_collections`, `mpc_runtime_info`, `mpc_share_toolkit` |
 | Closures exposed by the language stdlib | `local_dynamic_workflow`, `local_closure_counter` |

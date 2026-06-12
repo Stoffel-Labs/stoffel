@@ -1,0 +1,104 @@
+# Dense int64 matrix multiplication on nested lists, with identity
+# neutrality and the mixed-associativity law (A*B)*v == A*(B*v).
+
+def matmul(a: list[list[int64]], b: list[list[int64]]) -> list[list[int64]]:
+  var rows: int64 = a.len()
+  var inner: int64 = b.len()
+  var cols: int64 = b[0].len()
+  var out: list[list[int64]] = []
+  var i: int64 = 0
+  while i < rows:
+    var row: list[int64] = []
+    var j: int64 = 0
+    while j < cols:
+      var acc: int64 = 0
+      var k: int64 = 0
+      while k < inner:
+        acc += a[i][k] * b[k][j]
+        k += 1
+      row.append(acc)
+      j += 1
+    out.append(row)
+    i += 1
+  return out
+
+def matvec(a: list[list[int64]], v: list[int64]) -> list[int64]:
+  var out: list[int64] = []
+  var i: int64 = 0
+  while i < a.len():
+    var acc: int64 = 0
+    var k: int64 = 0
+    while k < v.len():
+      acc += a[i][k] * v[k]
+      k += 1
+    out.append(acc)
+    i += 1
+  return out
+
+def identity(n: int64) -> list[list[int64]]:
+  var out: list[list[int64]] = []
+  var i: int64 = 0
+  while i < n:
+    var row: list[int64] = []
+    var j: int64 = 0
+    while j < n:
+      if i == j:
+        row.append(1)
+      else:
+        row.append(0)
+      j += 1
+    out.append(row)
+    i += 1
+  return out
+
+def mat_equal(a: list[list[int64]], b: list[list[int64]]) -> bool:
+  if a.len() != b.len():
+    return False
+  var i: int64 = 0
+  while i < a.len():
+    var j: int64 = 0
+    while j < a[i].len():
+      if a[i][j] != b[i][j]:
+        return False
+      j += 1
+    i += 1
+  return True
+
+def vec_equal(a: list[int64], b: list[int64]) -> bool:
+  if a.len() != b.len():
+    return False
+  var i: int64 = 0
+  while i < a.len():
+    if a[i] != b[i]:
+      return False
+    i += 1
+  return True
+
+def main() -> int64:
+  var a: list[list[int64]] = [[1, 2], [3, 4]]
+  var b: list[list[int64]] = [[5, 6], [7, 8]]
+
+  # Hand-checked product.
+  var ab: list[list[int64]] = matmul(a, b)
+  assert mat_equal(ab, [[19, 22], [43, 50]]), "2x2 product"
+
+  # Identity is neutral on both sides.
+  var eye: list[list[int64]] = identity(2)
+  assert mat_equal(matmul(a, eye), a), "A*I == A"
+  assert mat_equal(matmul(eye, a), a), "I*A == A"
+
+  # (A*B)*v == A*(B*v) for a rectangular case too.
+  var c: list[list[int64]] = [[2, 0, 1], [-1, 3, 2]]
+  var d: list[list[int64]] = [[1, 4], [0, -2], [5, 1]]
+  var v: list[int64] = [3, -7]
+  var left: list[int64] = matvec(matmul(c, d), v)
+  var right: list[int64] = matvec(c, matvec(d, v))
+  assert vec_equal(left, right), "(C*D)*v must equal C*(D*v)"
+
+  # Rectangular product shape: (2x3)*(3x2) is 2x2.
+  var cd: list[list[int64]] = matmul(c, d)
+  assert cd.len() == 2, "result row count"
+  assert cd[0].len() == 2, "result column count"
+
+  print("matmul: product, identity and associativity checks pass")
+  return 0

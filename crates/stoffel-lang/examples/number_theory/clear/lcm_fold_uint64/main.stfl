@@ -1,0 +1,71 @@
+# LCM on uint64 via the overflow-safe form (a / gcd(a,b)) * b, folded
+# across lists, with the absorption laws connecting gcd and lcm.
+
+def gcd(a: uint64, b: uint64) -> uint64:
+  var x: uint64 = a
+  var y: uint64 = b
+  while y != 0u64:
+    var t: uint64 = x % y
+    x = y
+    y = t
+  return x
+
+def lcm(a: uint64, b: uint64) -> uint64:
+  if a == 0u64 or b == 0u64:
+    return 0u64
+  # Divide first so the intermediate never exceeds the result.
+  return (a / gcd(a, b)) * b
+
+def lcm_fold(values: list[uint64]) -> uint64:
+  var acc: uint64 = 1u64
+  var i: int64 = 0
+  while i < values.len():
+    acc = lcm(acc, values[i])
+    i += 1
+  return acc
+
+def gcd_fold(values: list[uint64]) -> uint64:
+  var acc: uint64 = 0u64
+  var i: int64 = 0
+  while i < values.len():
+    acc = gcd(acc, values[i])
+    i += 1
+  return acc
+
+def main() -> int64:
+  # Pairwise basics.
+  assert lcm(4u64, 6u64) == 12u64, "lcm(4, 6)"
+  assert lcm(7u64, 13u64) == 91u64, "coprime lcm is the product"
+  assert lcm(12u64, 12u64) == 12u64, "lcm is idempotent"
+  assert lcm(5u64, 0u64) == 0u64, "lcm with zero"
+
+  # gcd * lcm == a * b for every pair in a grid.
+  var values: list[uint64] = [4u64, 6u64, 9u64, 10u64, 14u64, 15u64, 21u64, 25u64]
+  var i: int64 = 0
+  while i < values.len():
+    var j: int64 = 0
+    while j < values.len():
+      var a: uint64 = values[i]
+      var b: uint64 = values[j]
+      assert gcd(a, b) * lcm(a, b) == a * b, "gcd*lcm == a*b"
+      # Absorption laws.
+      assert gcd(a, lcm(a, b)) == a, "gcd absorbs lcm"
+      assert lcm(a, gcd(a, b)) == a, "lcm absorbs gcd"
+      j += 1
+    i += 1
+
+  # Folds across lists: 1..10 has lcm 2520.
+  var one_to_ten: list[uint64] = [1u64, 2u64, 3u64, 4u64, 5u64, 6u64, 7u64, 8u64, 9u64, 10u64]
+  assert lcm_fold(one_to_ten) == 2520u64, "lcm of 1..10"
+
+  var multiples: list[uint64] = [84u64, 36u64, 120u64]
+  assert gcd_fold(multiples) == 12u64, "gcd fold of 84, 36, 120"
+  assert lcm_fold(multiples) == 2520u64, "lcm fold of 84, 36, 120"
+
+  # The overflow-safe ordering matters: this lcm is near 2^63 and the
+  # naive a*b would have needed 2^90.
+  var big: uint64 = lcm(9000000000000000000u64, 6000000000000000000u64)
+  assert big == 18000000000000000000u64, "huge lcm computed without overflow"
+
+  print("lcm/gcd folds: lattice laws on an 8x8 grid, lcm(1..10)=2520")
+  return 0

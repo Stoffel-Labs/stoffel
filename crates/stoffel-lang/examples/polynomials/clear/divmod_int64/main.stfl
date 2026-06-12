@@ -1,0 +1,105 @@
+# Polynomial long division over int64 with monic divisors: produces
+# quotient and remainder, then verifies the division identity
+# p == q*d + r and the remainder degree bound, plus the remainder
+# theorem p(c) == remainder of p / (x - c).
+
+def degree(p: list[int64]) -> int64:
+  var d: int64 = p.len() - 1
+  while d > 0 and p[d] == 0:
+    d -= 1
+  return d
+
+def poly_divmod(p: list[int64], d: list[int64]) -> list[list[int64]]:
+  # Returns [quotient, remainder]; d must be monic (leading coeff 1).
+  var deg_d: int64 = degree(d)
+  var rem: list[int64] = []
+  var i: int64 = 0
+  while i < p.len():
+    rem.append(p[i])
+    i += 1
+
+  var deg_p: int64 = degree(rem)
+  var quot: list[int64] = []
+  i = 0
+  while i < deg_p - deg_d + 1:
+    quot.append(0)
+    i += 1
+  if quot.len() == 0:
+    quot.append(0)
+
+  while degree(rem) >= deg_d and not (degree(rem) == 0 and rem[0] == 0):
+    var deg_r: int64 = degree(rem)
+    var shift: int64 = deg_r - deg_d
+    var coeff: int64 = rem[deg_r]
+    if coeff == 0:
+      break
+    quot[shift] = coeff
+    var k: int64 = 0
+    while k <= deg_d:
+      rem[shift + k] = rem[shift + k] - coeff * d[k]
+      k += 1
+  return [quot, rem]
+
+def poly_mul(p: list[int64], q: list[int64]) -> list[int64]:
+  var out: list[int64] = []
+  var size: int64 = p.len() + q.len() - 1
+  var i: int64 = 0
+  while i < size:
+    out.append(0)
+    i += 1
+  i = 0
+  while i < p.len():
+    var j: int64 = 0
+    while j < q.len():
+      out[i + j] = out[i + j] + p[i] * q[j]
+      j += 1
+    i += 1
+  return out
+
+def poly_eval(p: list[int64], x: int64) -> int64:
+  var acc: int64 = 0
+  var i: int64 = p.len() - 1
+  while i >= 0:
+    acc = acc * x + p[i]
+    i -= 1
+  return acc
+
+def main() -> int64:
+  # p(x) = x^3 - 2x^2 + 4, divided by d(x) = x - 3.
+  var p: list[int64] = [4, 0, -2, 1]
+  var d: list[int64] = [-3, 1]
+
+  var result: list[list[int64]] = poly_divmod(p, d)
+  var quot: list[int64] = result[0]
+  var rem: list[int64] = result[1]
+
+  # Hand-checked: quotient x^2 + x + 3, remainder 13.
+  assert quot[2] == 1 and quot[1] == 1 and quot[0] == 3, "quotient coefficients"
+  assert degree(rem) == 0 and rem[0] == 13, "remainder is the constant 13"
+
+  # Remainder theorem: p(3) equals the remainder.
+  assert poly_eval(p, 3) == 13, "remainder theorem at x=3"
+
+  # Division identity p == q*d + r, coefficient by coefficient.
+  var recombined: list[int64] = poly_mul(quot, d)
+  var i: int64 = 0
+  while i < p.len():
+    var c: int64 = recombined[i]
+    if i < rem.len():
+      c += rem[i]
+    assert c == p[i], "p == q*d + r"
+    i += 1
+
+  # A second division with a quadratic divisor: x^4 + 1 by x^2 + 1.
+  var p2: list[int64] = [1, 0, 0, 0, 1]
+  var d2: list[int64] = [1, 0, 1]
+  var result2: list[list[int64]] = poly_divmod(p2, d2)
+  var quot2: list[int64] = result2[0]
+  var rem2: list[int64] = result2[1]
+  # x^4 + 1 = (x^2 - 1)(x^2 + 1) + 2.
+  assert quot2[2] == 1 and quot2[0] == -1, "quadratic quotient"
+  assert degree(rem2) == 0 and rem2[0] == 2, "constant remainder 2"
+  assert degree(rem2) < degree(d2), "remainder degree bound"
+
+  print("poly divmod: division identity and remainder theorem verified")
+  return 0

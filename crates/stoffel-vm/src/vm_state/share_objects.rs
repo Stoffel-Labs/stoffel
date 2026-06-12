@@ -40,6 +40,18 @@ impl VMState {
         )?)
     }
 
+    pub(crate) fn extract_share_or_scalar_array(
+        &mut self,
+        value: &Value,
+        context: &'static str,
+    ) -> VmResult<Vec<share_object::ShareOrScalar>> {
+        Ok(share_object::extract_share_or_scalar_array(
+            self.table_memory.as_mut(),
+            value,
+            context,
+        )?)
+    }
+
     pub(crate) fn share_type(&mut self, value: &Value) -> VmResult<ShareType> {
         Ok(share_object::get_share_type(
             self.table_memory.as_mut(),

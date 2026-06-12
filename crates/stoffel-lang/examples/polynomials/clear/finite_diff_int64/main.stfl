@@ -1,0 +1,68 @@
+# Forward difference tables of int64 polynomial sequences, in the
+# style of Babbage's difference engine: the k-th differences of a
+# degree-k polynomial are the constant k! * leading coefficient, and
+# the table alone extends the sequence without ever evaluating the
+# polynomial again.
+
+def f(n: int64) -> int64:
+  # Degree-3 polynomial: n^3 - 2n + 1, leading coefficient 1.
+  return n * n * n - 2 * n + 1
+
+def differences(seq: list[int64]) -> list[int64]:
+  var out: list[int64] = []
+  var i: int64 = 0
+  while i < seq.len() - 1:
+    out.append(seq[i + 1] - seq[i])
+    i += 1
+  return out
+
+def main() -> int64:
+  # Tabulate f at n = 0..7.
+  var seq: list[int64] = []
+  var n: int64 = 0
+  while n < 8:
+    seq.append(f(n))
+    n += 1
+
+  # Build the difference table down to the third row.
+  var d1: list[int64] = differences(seq)
+  var d2: list[int64] = differences(d1)
+  var d3: list[int64] = differences(d2)
+
+  # Third differences of a cubic are constant 3! * 1 = 6.
+  var i: int64 = 0
+  while i < d3.len():
+    assert d3[i] == 6, "third differences of a cubic are 3! times the lead"
+    i += 1
+
+  # Fourth differences vanish entirely.
+  var d4: list[int64] = differences(d3)
+  i = 0
+  while i < d4.len():
+    assert d4[i] == 0, "fourth differences of a cubic vanish"
+    i += 1
+
+  # Difference-engine step: extend the sequence using only the table.
+  # New bottom value stays 6; fold back up to predict f(8).
+  var next_d2: int64 = d2[d2.len() - 1] + 6
+  var next_d1: int64 = d1[d1.len() - 1] + next_d2
+  var predicted: int64 = seq[seq.len() - 1] + next_d1
+  assert predicted == f(8), "difference engine predicts f(8)"
+
+  # Repeat once more for f(9) to show the process iterates.
+  var next_d2b: int64 = next_d2 + 6
+  var next_d1b: int64 = next_d1 + next_d2b
+  var predicted9: int64 = predicted + next_d1b
+  assert predicted9 == f(9), "difference engine predicts f(9)"
+
+  # A quadratic sequence for contrast: second differences of n^2 are 2.
+  var squares: list[int64] = [0, 1, 4, 9, 16, 25, 36]
+  var sq_d2: list[int64] = differences(differences(squares))
+  i = 0
+  while i < sq_d2.len():
+    assert sq_d2[i] == 2, "second differences of squares are 2"
+    i += 1
+
+  print(f"difference engine: predicted f(8)={predicted}, f(9)={predicted9}")
+  print("finite differences: constancy, vanishing and extension verified")
+  return 0
