@@ -6,7 +6,7 @@ native secret-boolean `not`, `and`, `or`, and `xor` operations element-by-elemen
 Run it through the local MPC CLI from the repository root:
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_bitwise_share/main.stfl --input 'a=[true,false,true,false]' --input 'b=[true,true,false,false]'
+stoffel run crates/stoffel-lang/examples/mpc_bitwise_share --input 'a=[true,false,true,false]' --input 'b=[true,true,false,false]'
 ```
 
 The local MPC run should keep the inputs and results as one-bit shares:

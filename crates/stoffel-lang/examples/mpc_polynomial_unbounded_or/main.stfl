@@ -1,0 +1,15 @@
+def polynomial_unbounded_or(a: list[secret bool]) -> secret bool:
+  var one: secret bool = Share.from_clear_int(1, 1)
+  var acc: secret bool = one
+
+  for bit in a:
+    var complement: secret bool = Share.sub(one, bit)
+    acc = Share.mul(acc, complement)
+
+  return Share.sub(one, acc)
+
+def main(a: list[secret bool]) -> bool:
+  var or_res: secret bool = polynomial_unbounded_or(a)
+  var revealed: bool = or_res.reveal()
+  print(revealed)
+  return revealed
