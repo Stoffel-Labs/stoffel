@@ -13,7 +13,7 @@ use stoffel_mpc_coordinator::off_chain::{
 };
 use stoffel_mpc_coordinator::self_signed_certs;
 use stoffel_mpc_coordinator::tests::fake_coord::off_chain::{
-    FakeCoordinatorConnection, FakeCoordinatorRPCServerSharedBase,
+    HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
 };
 use stoffel_mpc_coordinator::Coordinator;
 use stoffel_vm_types::compiled_binary::{utils::save_to_file, CompiledBinary};
@@ -129,7 +129,7 @@ impl LocalCoordinatorRunner {
         let coord_port = reserve_port()?;
         let coord_cert = self_signed_certs::server_cert();
         let (n_inputs, output_clients) = self.coordinator_client_io_binding(&client_bindings)?;
-        let coord_state = FakeCoordinatorRPCServerSharedBase::new(
+        let coord_state = HoneyBadgerCoordinatorRPCServerSharedBase::new(
             program_id,
             self.parties as u64,
             self.threshold as u64,
@@ -137,7 +137,7 @@ impl LocalCoordinatorRunner {
             n_inputs,
             output_clients,
         );
-        let coord = OffChainCoordinatorServer::<FakeCoordinatorConnection>::start_coord(
+        let coord = OffChainCoordinatorServer::<HoneyBadgerCoordinatorConnection>::start_coord(
             coord_state,
             "127.0.0.1",
             coord_port,
