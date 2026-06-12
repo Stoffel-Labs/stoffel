@@ -4867,6 +4867,27 @@ impl<'a> SemanticAnalyzer<'a> {
 
                     let both_numeric = Self::is_clear_numeric_type(&l_under)
                         && Self::is_clear_numeric_type(&r_under);
+                    let left_secret_bool = left_ty.is_secret() && l_under == SymbolType::Bool;
+                    let right_secret_bool = right_ty.is_secret() && r_under == SymbolType::Bool;
+                    let left_bool_share_operand = left_secret_bool
+                        || (right_secret_bool
+                            && Self::is_untyped_int_literal(&checked_left)
+                            && Self::int_literal_bool_value(&checked_left).is_some());
+                    let right_bool_share_operand = right_secret_bool
+                        || (left_secret_bool
+                            && Self::is_untyped_int_literal(&checked_right)
+                            && Self::int_literal_bool_value(&checked_right).is_some());
+                    if matches!(op.as_str(), "+" | "-" | "*")
+                        && (left_secret_bool || right_secret_bool)
+                        && left_bool_share_operand
+                        && right_bool_share_operand
+                    {
+                        return Ok((
+                            rebuild(checked_left, checked_right),
+                            SymbolType::Secret(Box::new(SymbolType::Bool)),
+                        ));
+                    }
+
                     if both_numeric {
                         // Same type: fine.
                         if l_under == r_under {

@@ -1338,6 +1338,30 @@ def main() -> secret bool:
 }
 
 #[test]
+fn test_compile_secret_bool_share_arithmetic_operators() {
+    let source = r#"
+def main(a: secret bool, b: secret bool) -> secret bool:
+  var acc: secret bool = 1
+  acc *= (1 - a)
+  return acc * b
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let instructions = &program.main_chunk.instructions;
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::SUB(_, _, _))),
+        "secret bool share subtraction should lower to SUB, got {instructions:?}"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::MUL(_, _, _))),
+        "secret bool share multiplication should lower to MUL, got {instructions:?}"
+    );
+}
+
+#[test]
 fn test_compile_secret_uint_literal_initializer_lowers_to_typed_share() {
     let source = r#"
 def main() -> secret uint8:
