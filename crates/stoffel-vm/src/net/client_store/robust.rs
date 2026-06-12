@@ -35,6 +35,42 @@ impl ClientInputStore {
             .collect()
     }
 
+    fn robust_client_shares_with_types<F>(
+        client_id: ClientId,
+        shares: Vec<RobustShare<F>>,
+        share_types: &[ShareType],
+    ) -> Result<Vec<ClientShare>, ClientInputStoreError>
+    where
+        F: ark_ff::FftField,
+    {
+        if shares.len() != share_types.len() {
+            return Err(ClientInputStoreError::ShareTypeCountMismatch {
+                client_id,
+                share_count: shares.len(),
+                type_count: share_types.len(),
+            });
+        }
+
+        shares
+            .into_iter()
+            .zip(share_types.iter().copied())
+            .enumerate()
+            .map(|(share_index, (share, share_type))| {
+                let share_index = ClientShareIndex::new(share_index);
+                let mut bytes = Vec::new();
+                share.serialize_compressed(&mut bytes).map_err(|error| {
+                    ClientInputStoreError::RobustShareSerialization {
+                        client_id,
+                        share_index,
+                        reason: error.to_string(),
+                    }
+                })?;
+
+                Ok(ClientShare::typed(share_type, ShareData::Opaque(bytes)))
+            })
+            .collect()
+    }
+
     /// Store typed robust shares from a client.
     pub fn store_client_input<F>(&self, client_id: ClientId, shares: Vec<RobustShare<F>>)
     where
@@ -117,6 +153,22 @@ impl ClientInputStore {
         F: ark_ff::FftField,
     {
         let client_shares = Self::robust_client_shares(client_id, shares, Some(share_type))?;
+        let count = client_shares.len();
+        self.store_client_shares(client_id, client_shares);
+        Ok(count)
+    }
+
+    /// Store robust shares with per-input VM-level type metadata.
+    pub fn try_store_client_input_with_types<F>(
+        &self,
+        client_id: ClientId,
+        shares: Vec<RobustShare<F>>,
+        share_types: &[ShareType],
+    ) -> Result<usize, ClientInputStoreError>
+    where
+        F: ark_ff::FftField,
+    {
+        let client_shares = Self::robust_client_shares_with_types(client_id, shares, share_types)?;
         let count = client_shares.len();
         self.store_client_shares(client_id, client_shares);
         Ok(count)

@@ -39,7 +39,7 @@ use stoffel_vm_types::compiled_binary::{
     CompiledBinary, MpcCurve, MPC_BACKEND_MANIFEST_FORMAT_VERSION,
     MPC_CURVE_MANIFEST_FORMAT_VERSION,
 };
-use stoffel_vm_types::core_types::Value;
+use stoffel_vm_types::core_types::{ShareType, Value};
 use stoffelmpc_mpc::avss_mpc::{AvssMPCClient, AvssSessionId};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
@@ -53,6 +53,21 @@ use stoffelnet::transports::quic::{NetworkManager, QuicNetworkManager};
 use tokio::sync::mpsc;
 use x509_parser::prelude::*;
 type HbCoordinatorShare<F> = RobustShare<F>;
+
+fn manifest_client_input_types(
+    binary: &CompiledBinary,
+) -> std::collections::BTreeMap<usize, Vec<ShareType>> {
+    binary
+        .client_io_manifest
+        .clients
+        .iter()
+        .filter_map(|schema| {
+            usize::try_from(schema.client_slot)
+                .ok()
+                .map(|slot| (slot, schema.inputs.clone()))
+        })
+        .collect()
+}
 type HbOffChainCoordinator<F> = OffChainCoordinatorClient<F, HbCoordinatorShare<F>>;
 type HbOffChainNodeRpcClient<F> = OffChainNodeRPCClient<F, HbCoordinatorShare<F>>;
 type HbOffChainNodeRpcServer<F> = OffChainNodeRPCServer<F, HbCoordinatorShare<F>>;
@@ -215,6 +230,7 @@ fn store_reserved_client_inputs<F, I>(
     client_inputs: std::collections::HashMap<I, Vec<RobustShare<F>>>,
     client_input_count: usize,
     client_input_slots: &[usize],
+    client_input_types: &std::collections::BTreeMap<usize, Vec<ShareType>>,
 ) where
     F: ark_ff::FftField,
     I: Eq + std::hash::Hash + std::fmt::Debug,
@@ -312,7 +328,12 @@ fn store_reserved_client_inputs<F, I>(
             .get(client_store_index)
             .copied()
             .unwrap_or(client_store_index);
-        if let Err(error) = vm.try_store_client_input(client_slot, shares) {
+        let result = if let Some(share_types) = client_input_types.get(&client_slot) {
+            vm.try_store_client_input_with_types(client_slot, shares, share_types)
+        } else {
+            vm.try_store_client_input(client_slot, shares)
+        };
+        if let Err(error) = result {
             eprintln!(
                 "Failed to store input shares for client slot {}: {}",
                 client_slot, error
@@ -327,6 +348,7 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
     client_inputs: std::collections::HashMap<I, Vec<FeldmanShamirShare<F, G>>>,
     client_input_count: usize,
     client_input_slots: &[usize],
+    client_input_types: &std::collections::BTreeMap<usize, Vec<ShareType>>,
 ) where
     F: SupportedMpcField,
     G: CurveGroup<ScalarField = F>,
@@ -427,7 +449,12 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
             .get(client_store_index)
             .copied()
             .unwrap_or(client_store_index);
-        if let Err(error) = vm.try_store_client_input_feldman(client_slot, shares) {
+        let result = if let Some(share_types) = client_input_types.get(&client_slot) {
+            vm.try_store_client_input_feldman_with_types(client_slot, shares, share_types)
+        } else {
+            vm.try_store_client_input_feldman(client_slot, shares)
+        };
+        if let Err(error) = result {
             eprintln!(
                 "Failed to store AVSS input shares for client slot {}: {}",
                 client_slot, error
@@ -2087,6 +2114,7 @@ struct HbPartySetup<'a> {
     expected_client_count: Option<usize>,
     coordinator_client_count_hint: usize,
     client_input_count: usize,
+    client_input_types: &'a std::collections::BTreeMap<usize, Vec<ShareType>>,
     program_hash: [u8; 32],
     preproc_store_path: Option<&'a str>,
 }
@@ -2108,6 +2136,7 @@ where
         expected_client_count,
         coordinator_client_count_hint,
         client_input_count,
+        client_input_types,
         program_hash,
         preproc_store_path,
     } = setup;
@@ -2492,7 +2521,11 @@ where
                 .find(|(i, _)| *i == idx)
                 .map(|(_, tid)| *tid)
                 .unwrap_or(idx);
-            vm.try_store_client_input(idx, shares)?;
+            if let Some(share_types) = client_input_types.get(&idx) {
+                vm.try_store_client_input_with_types(idx, shares, share_types)?;
+            } else {
+                vm.try_store_client_input(idx, shares)?;
+            }
             eprintln!(
                 "[party {}] Stored inputs for client index {} (client {})",
                 my_id, idx, transport_cid
@@ -2502,7 +2535,7 @@ where
 
     Ok(engine)
 }
-struct AvssPartySetup {
+struct AvssPartySetup<'a> {
     my_id: usize,
     local_identity: DurableIdentityDigest,
     n: usize,
@@ -2510,11 +2543,12 @@ struct AvssPartySetup {
     instance_id: u64,
     expected_client_count: Option<usize>,
     client_input_count: usize,
+    client_input_types: &'a std::collections::BTreeMap<usize, Vec<ShareType>>,
 }
 async fn setup_avss_party_for_curve<F, G>(
     vm: &mut VirtualMachine,
     net: Arc<QuicNetworkManager>,
-    setup: AvssPartySetup,
+    setup: AvssPartySetup<'_>,
 ) -> Result<Arc<stoffel_vm::net::avss_engine::AvssMpcEngine<F, G>>, String>
 where
     F: SupportedMpcField,
@@ -2528,6 +2562,7 @@ where
         instance_id,
         expected_client_count,
         client_input_count,
+        client_input_types,
     } = setup;
 
     // ---- Phase 1: Wait for clients ----
@@ -2959,7 +2994,11 @@ where
                 .find(|(i, _)| *i == idx)
                 .map(|(_, tid)| *tid)
                 .unwrap_or(idx);
-            vm.try_store_client_input_feldman(idx, shares)?;
+            if let Some(share_types) = client_input_types.get(&idx) {
+                vm.try_store_client_input_feldman_with_types(idx, shares, share_types)?;
+            } else {
+                vm.try_store_client_input_feldman(idx, shares)?;
+            }
             eprintln!(
                 "[party {}] Stored inputs for client index {} (client {})",
                 my_id, idx, transport_cid
@@ -3024,6 +3063,7 @@ where
             .map_err(|e| e.to_string())?;
     }
 
+    let client_input_types = std::collections::BTreeMap::new();
     let engine = setup_avss_party_for_curve::<F, G>(
         vm,
         net,
@@ -3035,6 +3075,7 @@ where
             instance_id,
             expected_client_count: None,
             client_input_count: 1,
+            client_input_types: &client_input_types,
         },
     )
     .await?;
@@ -3118,7 +3159,15 @@ where
         .wait_for_inputs(input_ids.len() as u64, mask_shares)
         .await
         .map_err(|e| e.to_string())?;
-    store_reserved_client_inputs_feldman::<F, G, _>(vm, &client_to_indices, client_inputs, 1, &[]);
+    let client_input_types = std::collections::BTreeMap::new();
+    store_reserved_client_inputs_feldman::<F, G, _>(
+        vm,
+        &client_to_indices,
+        client_inputs,
+        1,
+        &[],
+        &client_input_types,
+    );
 
     if as_leader {
         coord.start_mpc().await.map_err(|e| e.to_string())?;
@@ -4096,6 +4145,7 @@ async fn main() {
     };
     let mut f = File::open(&load_path).expect("open binary file");
     let binary = CompiledBinary::deserialize(&mut f).expect("deserialize compiled binary");
+    let client_input_types = manifest_client_input_types(&binary);
     let functions = match binary.try_to_vm_functions() {
         Ok(functions) => functions,
         Err(err) => {
@@ -4458,6 +4508,7 @@ async fn main() {
                                 expected_client_count,
                                 coordinator_client_count_hint: 0,
                                 client_input_count,
+                                client_input_types: &client_input_types,
                                 program_hash: program_id,
                                 preproc_store_path: preproc_store_path.as_deref(),
                             },
@@ -4494,6 +4545,7 @@ async fn main() {
                             expected_client_count: None, // coordinator handles clients
                             coordinator_client_count_hint: output_ids.len(),
                             client_input_count,
+                            client_input_types: &client_input_types,
                             program_hash: program_id,
                             preproc_store_path: preproc_store_path.as_deref(),
                         },
@@ -4622,6 +4674,7 @@ async fn main() {
                                 client_inputs,
                                 client_input_count,
                                 &client_input_slots,
+                                &client_input_types,
                             );
                         }
                     }
@@ -4732,6 +4785,7 @@ async fn main() {
                                 client_inputs,
                                 client_input_count,
                                 &[],
+                                &client_input_types,
                             );
                         }
                     }
@@ -4829,6 +4883,7 @@ async fn main() {
                                 instance_id,
                                 expected_client_count,
                                 client_input_count,
+                                client_input_types: &client_input_types,
                             },
                         )
                         .await

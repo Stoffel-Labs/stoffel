@@ -30,10 +30,6 @@ impl ClientShareRequest {
         Self { requested_type }
     }
 
-    pub(super) fn default_secret_int() -> Self {
-        Self::new(ShareType::default_secret_int())
-    }
-
     const fn requested_type(self) -> ShareType {
         self.requested_type
     }
@@ -228,6 +224,21 @@ impl MpcRuntimeState {
             .client_store
             .try_store_client_input(client_id, shares)?)
     }
+
+    pub(super) fn try_store_client_input_with_types<F>(
+        &self,
+        client_id: ClientId,
+        shares: Vec<RobustShare<F>>,
+        share_types: &[ShareType],
+    ) -> VmResult<usize>
+    where
+        F: ark_ff::FftField,
+    {
+        Ok(self
+            .client_store
+            .try_store_client_input_with_types(client_id, shares, share_types)?)
+    }
+
     pub(super) fn try_store_client_input_feldman<F, G>(
         &self,
         client_id: ClientId,
@@ -240,6 +251,21 @@ impl MpcRuntimeState {
         Ok(self
             .client_store
             .try_store_client_input_feldman(client_id, shares)?)
+    }
+
+    pub(super) fn try_store_client_input_feldman_with_types<F, G>(
+        &self,
+        client_id: ClientId,
+        shares: Vec<stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare<F, G>>,
+        share_types: &[ShareType],
+    ) -> VmResult<usize>
+    where
+        F: ark_ff::FftField + ark_ff::PrimeField,
+        G: ark_ec::CurveGroup<ScalarField = F>,
+    {
+        Ok(self
+            .client_store
+            .try_store_client_input_feldman_with_types(client_id, shares, share_types)?)
     }
     pub(super) fn try_replace_client_input<F, I>(&self, inputs: I) -> VmResult<usize>
     where
@@ -284,6 +310,21 @@ impl MpcRuntimeState {
             None => requested_type,
         };
 
+        Ok(Value::Share(share_type, share.into_data()))
+    }
+
+    pub(super) fn client_share_inferred_or_default(
+        &self,
+        client_id: ClientId,
+        index: ClientShareIndex,
+    ) -> VmResult<Value> {
+        let share = self
+            .client_store
+            .get_client_share_data(client_id, index)
+            .ok_or(VmError::ClientShareNotFound { client_id, index })?;
+        let share_type = share
+            .share_type()
+            .unwrap_or_else(ShareType::default_secret_int);
         Ok(Value::Share(share_type, share.into_data()))
     }
 

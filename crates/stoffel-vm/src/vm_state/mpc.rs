@@ -139,6 +139,20 @@ impl VMState {
         self.mpc_runtime.try_store_client_input(client_id, shares)
     }
 
+    /// Store HoneyBadger client shares with per-input manifest share types.
+    pub(crate) fn try_store_client_input_with_types<F>(
+        &self,
+        client_id: ClientId,
+        shares: Vec<RobustShare<F>>,
+        share_types: &[ShareType],
+    ) -> VmResult<usize>
+    where
+        F: ark_ff::FftField,
+    {
+        self.mpc_runtime
+            .try_store_client_input_with_types(client_id, shares, share_types)
+    }
+
     /// Store AVSS Feldman client shares through the runtime boundary.
     pub(crate) fn try_store_client_input_feldman<F, G>(
         &self,
@@ -151,6 +165,21 @@ impl VMState {
     {
         self.mpc_runtime
             .try_store_client_input_feldman(client_id, shares)
+    }
+
+    /// Store AVSS Feldman client shares with per-input manifest share types.
+    pub(crate) fn try_store_client_input_feldman_with_types<F, G>(
+        &self,
+        client_id: ClientId,
+        shares: Vec<stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare<F, G>>,
+        share_types: &[ShareType],
+    ) -> VmResult<usize>
+    where
+        F: ark_ff::FftField + ark_ff::PrimeField,
+        G: ark_ec::CurveGroup<ScalarField = F>,
+    {
+        self.mpc_runtime
+            .try_store_client_input_feldman_with_types(client_id, shares, share_types)
     }
 
     /// Replace all VM client inputs with robust shares.
@@ -181,7 +210,7 @@ impl VMState {
         index: ClientShareIndex,
     ) -> VmResult<Value> {
         self.mpc_runtime
-            .client_share_as(client_id, index, ClientShareRequest::default_secret_int())
+            .client_share_inferred_or_default(client_id, index)
     }
 
     /// Load a client's input share with an explicit VM share type.

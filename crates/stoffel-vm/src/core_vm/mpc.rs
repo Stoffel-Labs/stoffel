@@ -94,6 +94,23 @@ impl VirtualMachine {
         Ok(self.state.try_store_client_input(client_id, shares)?)
     }
 
+    /// Store HoneyBadger client shares with per-input manifest share types.
+    pub fn try_store_client_input_with_types<F>(
+        &self,
+        client_id: stoffelnet::network_utils::ClientId,
+        shares: Vec<
+            stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare<F>,
+        >,
+        share_types: &[ShareType],
+    ) -> VirtualMachineResult<usize>
+    where
+        F: ark_ff::FftField,
+    {
+        Ok(self
+            .state
+            .try_store_client_input_with_types(client_id, shares, share_types)?)
+    }
+
     /// Replace all client inputs with HoneyBadger client shares.
     ///
     /// This is the HoneyBadger-specific hydration boundary for code that still
@@ -144,6 +161,22 @@ impl VirtualMachine {
         Ok(self
             .state
             .try_store_client_input_feldman(client_id, shares)?)
+    }
+
+    /// Store AVSS Feldman client shares with per-input manifest share types.
+    pub fn try_store_client_input_feldman_with_types<F, G>(
+        &self,
+        client_id: stoffelnet::network_utils::ClientId,
+        shares: Vec<stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare<F, G>>,
+        share_types: &[ShareType],
+    ) -> VirtualMachineResult<usize>
+    where
+        F: ark_ff::FftField + ark_ff::PrimeField,
+        G: ark_ec::CurveGroup<ScalarField = F>,
+    {
+        Ok(self
+            .state
+            .try_store_client_input_feldman_with_types(client_id, shares, share_types)?)
     }
 
     /// Hydrate client inputs from the configured MPC backend into the VM store.

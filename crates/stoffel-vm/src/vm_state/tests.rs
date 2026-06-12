@@ -2578,7 +2578,21 @@ fn client_share_load_accepts_explicit_share_type_request() {
 }
 
 #[test]
-fn client_share_load_rejects_mismatched_stored_type() {
+fn client_share_load_infers_stored_type() {
+    let vm = VMState::new();
+    let share_type = ShareType::default_secret_fixed_point();
+    let share_data = ShareData::Opaque(vec![1, 2, 3]);
+    vm.store_client_shares(42, vec![ClientShare::typed(share_type, share_data.clone())]);
+
+    let loaded = vm
+        .load_client_share(42, ClientShareIndex::new(0))
+        .expect("untyped load should infer stored type");
+
+    assert_eq!(loaded, Value::Share(share_type, share_data));
+}
+
+#[test]
+fn client_share_load_rejects_mismatched_explicit_type_request() {
     let vm = VMState::new();
     vm.store_client_shares(
         42,
@@ -2589,7 +2603,11 @@ fn client_share_load_rejects_mismatched_stored_type() {
     );
 
     let err = vm
-        .load_client_share(42, ClientShareIndex::new(0))
+        .load_client_share_as(
+            42,
+            ClientShareIndex::new(0),
+            ShareType::default_secret_int(),
+        )
         .unwrap_err();
 
     assert!(
