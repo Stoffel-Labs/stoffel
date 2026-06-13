@@ -27,6 +27,7 @@ pub use crate::coordinator::{
 pub use crate::error::{
     ConsensusError, CoordinatorError, Error, ErrorCategory, NetworkError, Result,
 };
+pub use crate::input_file::{load_client_inputs_file, load_named_inputs_file};
 pub use crate::networking::{NetworkManager, QuicNetworkConfig, QuicNetworkManager};
 pub use crate::observability::{
     init_tracing, HealthStatus, OpenTelemetryGuard, ServerMetrics, ServerMetricsSnapshot,

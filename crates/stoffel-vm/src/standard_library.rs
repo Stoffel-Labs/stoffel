@@ -613,6 +613,23 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         Ok(ctx.load_client_share(client_id, share_index)?)
     });
 
+    register_standard_builtin!("ClientStore.take_share_bool", |ctx| {
+        let args = ctx.named_args("ClientStore.take_share_bool");
+        args.require_exact(2, "2 arguments: client_index, share_index")?;
+
+        let client_index = ClientInputIndex::new(args.usize(0, "client_index")?);
+        let share_index = ClientShareIndex::new(args.usize(1, "share_index")?);
+
+        let client_id = ctx
+            .client_id_at_index(client_index)
+            .ok_or_else(|| format!("No client at index {}", client_index))?;
+
+        // Load the client's secret input as a boolean (1-bit) share so it can be
+        // consumed by the secret-bool gates (NOT/AND/XOR). Plain `take_share`
+        // yields a default 64-bit integer share, which those gates reject.
+        Ok(ctx.load_client_share_as(client_id, share_index, ShareType::boolean())?)
+    });
+
     register_standard_builtin!("ClientStore.take_share_fixed", |ctx| {
         let args = ctx.named_args("ClientStore.take_share_fixed");
         args.require_exact(2, "2 arguments: client_index, share_index")?;

@@ -2,6 +2,7 @@ def reveal[T](value: secret T) -> T {.builtin: "Share.open".}:
 
 builtin object ClientStore:
   def take_share(client_id: int64, share_id: int64) -> Share {.builtin.}:
+  def take_share_bool(client_id: int64, share_id: int64) -> Share {.builtin.}:
   def take_share_fixed(client_id: int64, share_id: int64) -> Share {.builtin.}:
   def get_number_clients() -> int64 {.builtin.}:
   def get_number_input_clients() -> int64 {.builtin.}:

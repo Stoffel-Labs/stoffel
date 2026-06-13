@@ -927,7 +927,7 @@ fn default_cargo_toml_text(name: &str) -> String {
 }
 
 fn default_main_rs_text() -> &'static str {
-    "use stoffel::prelude::*;\n\nmod stoffel_bindings;\n\n#[tokio::main]\nasync fn main() -> stoffel::Result<()> {\n    let _manifest = stoffel_bindings::ProgramManifest;\n    let result = Stoffel::compile_file(\"src/main.stfl\")?\n        .parties(5)\n        .threshold(1)\n        .execute_local()\n        .await?;\n\n    println!(\"{}\", result[0]);\n    Ok(())\n}\n"
+    "use stoffel::prelude::*;\n\nmod stoffel_bindings;\n\n#[tokio::main]\nasync fn main() -> stoffel::Result<()> {\n    let _manifest = stoffel_bindings::ProgramManifest;\n    let result = Stoffel::compile_file(\"src/main.stfl\")?\n        .parties(5)\n        .threshold(1)\n        // Load named function inputs from JSON, CSV, or TXT when your program takes parameters.\n        // Examples:\n        //   inputs.json: {\"a\": 40, \"b\": 2}\n        //   inputs.csv:  a,b\\n40,2\n        //   inputs.txt:  a=40\\nb=2\n        // .with_input_file(\"inputs.json\")?\n        // Load ClientStore values for no-argument MPC programs with:\n        // .with_client_input_file(\"client-inputs.json\")?\n        .execute_local()\n        .await?;\n\n    println!(\"{}\", result[0]);\n    Ok(())\n}\n"
 }
 
 fn default_bindings_rs_text() -> &'static str {

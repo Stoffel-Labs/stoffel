@@ -256,6 +256,12 @@ impl StoffelRuntime {
         self
     }
 
+    /// Replace named function inputs with values loaded from a `.json`, `.csv`, or `.txt` file.
+    pub fn with_input_file(mut self, path: impl AsRef<Path>) -> Result<Self> {
+        self.inputs = crate::input_file::load_named_inputs_file(path)?;
+        Ok(self)
+    }
+
     /// Add one coordinator client input set for local networked execution.
     pub fn with_client_input<V>(mut self, client_slot: u64, values: &[V]) -> Self
     where
@@ -266,6 +272,12 @@ impl StoffelRuntime {
             values.iter().cloned().map(Into::into).collect(),
         ));
         self
+    }
+
+    /// Replace local ClientStore inputs with values loaded from a `.json`, `.csv`, or `.txt` file.
+    pub fn with_client_input_file(mut self, path: impl AsRef<Path>) -> Result<Self> {
+        self.client_inputs = crate::input_file::load_client_inputs_file(path)?;
+        Ok(self)
     }
 
     /// Replace all coordinator client input sets for local networked execution.

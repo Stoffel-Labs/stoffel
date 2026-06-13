@@ -287,6 +287,9 @@ struct RunArgs {
     /// Function argument value, written as NAME=VALUE. Repeat once per argument.
     #[arg(long = "input", visible_alias = "inputs", value_name = "NAME=VALUE")]
     inputs: Vec<InputArg>,
+    /// Load named function inputs from a .json, .csv, or .txt file.
+    #[arg(long = "input-file", value_name = "FILE")]
+    input_files: Vec<PathBuf>,
     /// Local simulation input for a numeric client slot, written as SLOT=VALUE.
     #[arg(
         long = "client-input",
@@ -295,6 +298,9 @@ struct RunArgs {
         allow_hyphen_values = true
     )]
     client_inputs: Vec<ClientInputArg>,
+    /// Load local ClientStore inputs from a .json, .csv, or .txt file.
+    #[arg(long = "client-input-file", value_name = "FILE")]
+    client_input_files: Vec<PathBuf>,
     /// Declare local output-capable client slots 0..N-1 for ClientStore programs.
     #[arg(
         long = "expected-output-clients",
@@ -416,6 +422,9 @@ struct DevArgs {
     /// Function argument value, written as NAME=VALUE. Repeat once per argument.
     #[arg(long = "input", visible_alias = "inputs", value_name = "NAME=VALUE")]
     inputs: Vec<InputArg>,
+    /// Load named function inputs from a .json, .csv, or .txt file.
+    #[arg(long = "input-file", value_name = "FILE")]
+    input_files: Vec<PathBuf>,
     /// Local simulation input for a numeric client slot, written as SLOT=VALUE.
     #[arg(
         long = "client-input",
@@ -424,6 +433,9 @@ struct DevArgs {
         allow_hyphen_values = true
     )]
     client_inputs: Vec<ClientInputArg>,
+    /// Load local ClientStore inputs from a .json, .csv, or .txt file.
+    #[arg(long = "client-input-file", value_name = "FILE")]
+    client_input_files: Vec<PathBuf>,
     /// Path to the stoffel-run helper binary. Only used with --local.
     #[arg(long)]
     runner: Option<PathBuf>,
@@ -545,13 +557,13 @@ struct PlannedCommandArgs {
     args: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct InputArg {
     name: String,
     value: Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct ClientInputArg {
     client_slot: u64,
     value: Value,
@@ -826,13 +838,15 @@ fn build(command: &str, args: BuildArgs) -> Result<()> {
 
 async fn run(args: RunArgs) -> Result<()> {
     validate_run_args(&args)?;
+    let inputs = merged_named_inputs(&args.input_files, &args.inputs)?;
+    let client_inputs = merged_client_inputs(&args.client_input_files, &args.client_inputs)?;
     if args.network || args.config.is_some() {
-        return run_network(args).await;
+        return run_network(args, inputs).await;
     }
 
     let build = args.build.to_build_args();
     let mut run_source = run_builder(&build)?;
-    if !args.inputs.is_empty() {
+    if !inputs.is_empty() {
         if let (Some(_bytecode_path), Some(source_path)) = (
             run_source.bytecode_path.as_ref(),
             run_source.source_path.clone(),
@@ -857,12 +871,12 @@ async fn run(args: RunArgs) -> Result<()> {
         &args.entry,
         "stoffel run",
     )?;
-    let inputs = normalize_entry_inputs(runtime.program(), &args.entry, &args.inputs);
+    let inputs = normalize_entry_inputs(runtime.program(), &args.entry, &inputs);
     validate_entry_and_named_inputs(runtime.program(), &args.entry, &inputs, "stoffel run")?;
     if args.program_info {
         print_program_summary(runtime.program());
     }
-    let mut builder = apply_run_inputs(run_source.builder, &inputs, &args.client_inputs)?;
+    let mut builder = apply_run_inputs(run_source.builder, &inputs, &client_inputs)?;
     if let Some(expected_output_clients) = args.expected_output_clients {
         builder = builder.expected_output_clients(expected_output_clients);
     }
@@ -876,16 +890,16 @@ async fn run(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-async fn run_network(args: RunArgs) -> Result<()> {
+async fn run_network(args: RunArgs, inputs: Vec<InputArg>) -> Result<()> {
     let config_path = args
         .config
         .as_ref()
         .context("network execution requires --config")?;
     let config_path = resolve_network_config_path(config_path, &args.build.to_build_args());
     validate_network_config_path(&config_path)?;
-    if !args.client_inputs.is_empty() {
+    if !args.client_inputs.is_empty() || !args.client_input_files.is_empty() {
         anyhow::bail!(
-            "network execution accepts --input values for the configured client slot; --client-input is only used for local ClientStore runs"
+            "network execution accepts --input or --input-file values for the configured client slot; --client-input and --client-input-file are only used for local ClientStore runs"
         );
     }
     if args.expected_output_clients.is_some() {
@@ -909,7 +923,7 @@ async fn run_network(args: RunArgs) -> Result<()> {
         &args.entry,
         "stoffel run --network",
     )?;
-    let normalized_inputs = normalize_entry_inputs(runtime.program(), &args.entry, &args.inputs);
+    let normalized_inputs = normalize_entry_inputs(runtime.program(), &args.entry, &inputs);
     validate_entry_and_named_inputs(
         runtime.program(),
         &args.entry,
@@ -1218,10 +1232,12 @@ fn prepare_dev_run(args: &DevArgs) -> Result<Stoffel> {
     };
     let project = Project::discover(build.path.as_deref())?;
     let source = dev_source_path(&project, build.path.as_deref());
+    let inputs = merged_named_inputs(&args.input_files, &args.inputs)?;
+    let client_inputs = merged_client_inputs(&args.client_input_files, &args.client_inputs)?;
     let mut builder = apply_run_inputs(
         configured_builder_for_source(&project, &build, &source)?,
-        &args.inputs,
-        &args.client_inputs,
+        &inputs,
+        &client_inputs,
     )?;
     if let Some(path) = &args.runner {
         builder = builder.local_runner_path(path);
@@ -1236,7 +1252,16 @@ fn prepare_dev_run(args: &DevArgs) -> Result<Stoffel> {
         &args.entry,
         "stoffel dev",
     )?;
-    validate_entry_and_named_inputs(runtime.program(), &args.entry, &args.inputs, "stoffel dev")?;
+    let inputs = normalize_entry_inputs(runtime.program(), &args.entry, &inputs);
+    validate_entry_and_named_inputs(runtime.program(), &args.entry, &inputs, "stoffel dev")?;
+    builder = apply_run_inputs(
+        configured_builder_for_source(&project, &build, &source)?,
+        &inputs,
+        &client_inputs,
+    )?;
+    if let Some(path) = &args.runner {
+        builder = builder.local_runner_path(path);
+    }
     Ok(builder)
 }
 
@@ -2230,6 +2255,47 @@ fn apply_inputs(mut builder: Stoffel, inputs: &[InputArg]) -> Stoffel {
         builder = builder.with_input(input.name.clone(), input.value.clone());
     }
     builder
+}
+
+fn merged_named_inputs(input_files: &[PathBuf], explicit: &[InputArg]) -> Result<Vec<InputArg>> {
+    let mut inputs = Vec::new();
+    for path in input_files {
+        let loaded = stoffel::load_named_inputs_file(path)
+            .with_context(|| format!("failed to load input file {}", path.display()))?;
+        inputs.extend(
+            loaded
+                .into_iter()
+                .map(|(name, value)| InputArg { name, value }),
+        );
+    }
+    for input in explicit {
+        inputs.retain(|existing| existing.name != input.name);
+    }
+    inputs.extend(explicit.iter().cloned());
+    Ok(inputs)
+}
+
+fn merged_client_inputs(
+    input_files: &[PathBuf],
+    explicit: &[ClientInputArg],
+) -> Result<Vec<ClientInputArg>> {
+    let mut inputs = Vec::new();
+    for path in input_files {
+        let loaded = stoffel::load_client_inputs_file(path)
+            .with_context(|| format!("failed to load client input file {}", path.display()))?;
+        for (client_slot, values) in loaded {
+            inputs.extend(
+                values
+                    .into_iter()
+                    .map(|value| ClientInputArg { client_slot, value }),
+            );
+        }
+    }
+    for input in explicit {
+        inputs.retain(|existing| existing.client_slot != input.client_slot);
+    }
+    inputs.extend(explicit.iter().cloned());
+    Ok(inputs)
 }
 
 fn apply_run_inputs(
@@ -3237,6 +3303,59 @@ mod tests {
     fn parse_value_rejects_malformed_lists() {
         let err = parse_value("[1, ]").unwrap_err().to_string();
         assert!(err.contains("empty element"));
+    }
+
+    #[test]
+    fn input_files_merge_before_explicit_cli_values() {
+        let named_file = tempfile::NamedTempFile::with_suffix(".json").unwrap();
+        std::fs::write(named_file.path(), r#"{"a": 1, "b": 2}"#).unwrap();
+        let inputs = merged_named_inputs(
+            &[named_file.path().to_path_buf()],
+            &[InputArg {
+                name: "b".to_owned(),
+                value: Value::I64(42),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            inputs,
+            vec![
+                InputArg {
+                    name: "a".to_owned(),
+                    value: Value::I64(1),
+                },
+                InputArg {
+                    name: "b".to_owned(),
+                    value: Value::I64(42),
+                },
+            ]
+        );
+
+        let client_file = tempfile::NamedTempFile::with_suffix(".txt").unwrap();
+        std::fs::write(client_file.path(), "0=1\n0=2\n1=3\n").unwrap();
+        let client_inputs = merged_client_inputs(
+            &[client_file.path().to_path_buf()],
+            &[ClientInputArg {
+                client_slot: 0,
+                value: Value::I64(99),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            client_inputs,
+            vec![
+                ClientInputArg {
+                    client_slot: 1,
+                    value: Value::I64(3),
+                },
+                ClientInputArg {
+                    client_slot: 0,
+                    value: Value::I64(99),
+                },
+            ]
+        );
     }
 }
 

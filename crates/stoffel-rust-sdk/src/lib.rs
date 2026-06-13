@@ -52,6 +52,7 @@ pub mod config;
 pub mod consensus;
 pub mod coordinator;
 pub mod error;
+pub mod input_file;
 pub mod networking;
 pub mod observability;
 pub mod prelude;
@@ -89,6 +90,7 @@ pub use coordinator::{
     OnChainCoordinatorSummary, ShareBound,
 };
 pub use error::{ConsensusError, CoordinatorError, Error, ErrorCategory, NetworkError, Result};
+pub use input_file::{load_client_inputs_file, load_named_inputs_file};
 pub use networking::{NetworkManager, QuicNetworkConfig, QuicNetworkManager};
 pub use observability::{
     init_tracing, HealthStatus, OpenTelemetryGuard, ServerMetrics, ServerMetricsSnapshot,
@@ -260,6 +262,12 @@ impl Stoffel {
         self
     }
 
+    /// Replace named inputs with values loaded from a `.json`, `.csv`, or `.txt` file.
+    pub fn with_input_file(mut self, path: impl AsRef<Path>) -> Result<Self> {
+        self.inputs = input_file::load_named_inputs_file(path)?;
+        Ok(self)
+    }
+
     /// Attach one coordinator client input set for local networked execution.
     ///
     /// This is distinct from named function parameters. It feeds programs that
@@ -273,6 +281,12 @@ impl Stoffel {
             values.iter().cloned().map(Into::into).collect(),
         ));
         self
+    }
+
+    /// Replace local ClientStore inputs with values loaded from a `.json`, `.csv`, or `.txt` file.
+    pub fn with_client_input_file(mut self, path: impl AsRef<Path>) -> Result<Self> {
+        self.client_inputs = input_file::load_client_inputs_file(path)?;
+        Ok(self)
     }
 
     /// Replace all coordinator client input sets for local networked execution.
