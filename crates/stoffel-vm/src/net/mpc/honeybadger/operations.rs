@@ -8,7 +8,10 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::any::TypeId;
 use std::time::Instant;
 use stoffel_vm_types::core_types::{ClearShareValue, ShareData, ShareType};
-use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme};
+use stoffelmpc_mpc::common::types::fixed::{
+    ClearFixedPoint, FixedPointPrecision, SecretFixedPoint,
+};
+use stoffelmpc_mpc::common::{MPCProtocol, MPCTypeOps, SecretSharingScheme};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 
 const MAX_HONEYBADGER_MUL_BATCH_RECON_CHUNKS: usize = 32;
@@ -86,6 +89,71 @@ where
                 Self::encode_share(&result_share).map(ShareData::Opaque)
             }
         }
+    }
+
+    /// Divide a secret fixed-point share by a public positive constant using the
+    /// HoneyBadger fixed-point division protocol (reciprocal + probabilistic
+    /// truncation). `divisor_scaled` is `round(divisor * 2^f)`, i.e. the divisor
+    /// in the same fixed-point scale as the share. The protocol node pulls (and,
+    /// if depleted, regenerates) the truncation randomness it needs internally.
+    pub async fn divide_fixed_by_constant_async(
+        &self,
+        ty: ShareType,
+        share_bytes: &[u8],
+        divisor_scaled: i64,
+    ) -> Result<ShareData, String> {
+        if !self.is_ready() {
+            return Err("MPC engine not ready".into());
+        }
+
+        let precision = match ty {
+            ShareType::SecretFixedPoint { precision } => precision,
+            _ => {
+                return Err(
+                    "fixed-point division requires a secret fix64 (SecretFixedPoint) share".into(),
+                )
+            }
+        };
+        if divisor_scaled <= 0 {
+            return Err("fixed-point division by a non-positive constant is not supported".into());
+        }
+
+        let dividend = Self::decode_share(share_bytes)?;
+        let proto_precision =
+            FixedPointPrecision::new(precision.total_bits(), precision.fractional_bits());
+        let x = SecretFixedPoint::new_with_precision(dividend, proto_precision);
+        let divisor_field = crate::net::curve::field_from_i64::<F>(divisor_scaled);
+        let y = ClearFixedPoint::new_with_precision(divisor_field, proto_precision);
+
+        let mut node = self.clone_node().await;
+        // Each division's truncation consumes `f` random bits and one random
+        // integer, which the VM's baseline preprocessing does not generate
+        // (`honeybadger_node_opts` requests zero prandbit/prandint). The
+        // protocol regenerates them on demand, but re-running that per division
+        // collides across parties; so on the first division (empty pool) we
+        // provision a pool covering several divisions in one preprocessing pass.
+        // The preprocessing-material store is shared across node clones, so
+        // later divisions consume from the pool and skip regeneration.
+        //
+        // Crucially, prandbit generation itself consumes one beaver triple and
+        // one random share per bit, and the protocol's preprocessing budget does
+        // NOT account for that. So we must also grow the triple/random targets
+        // by the pool size; otherwise prandbit generation exhausts the triples
+        // the computation needs (or fails outright). Configuring the demand here
+        // is what makes division self-sufficient without any protocol change.
+        const PRANDBIT_POOL_DIVS: usize = 16;
+        let f = precision.fractional_bits();
+        let pool = f.saturating_mul(PRANDBIT_POOL_DIVS);
+        node.params.n_prandbit = node.params.n_prandbit.max(pool);
+        node.params.n_prandint = node.params.n_prandint.max(PRANDBIT_POOL_DIVS);
+        node.params.n_triples = node.params.n_triples.saturating_add(pool);
+        node.params.n_random_shares = node.params.n_random_shares.saturating_add(pool);
+        let result = node
+            .div_with_const_fixed(x, y, self.net.clone())
+            .await
+            .map_err(|e| format!("MPC fixed-point division failed: {:?}", e))?;
+
+        Self::encode_share(result.value()).map(ShareData::Opaque)
     }
 
     pub async fn batch_multiply_share_async(

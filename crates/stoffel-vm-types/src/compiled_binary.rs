@@ -23,11 +23,13 @@ use std::io::{self, Read, Write};
 // Magic bytes that identify a StoffelVM bytecode file
 pub const MAGIC_BYTES: &[u8; 4] = b"STFL";
 // Current bytecode format version
-pub const FORMAT_VERSION: u16 = 7;
+pub const FORMAT_VERSION: u16 = 8;
 pub const CLIENT_IO_MANIFEST_FORMAT_VERSION: u16 = 2;
 pub const MPC_BACKEND_MANIFEST_FORMAT_VERSION: u16 = 3;
 pub const MPC_CURVE_MANIFEST_FORMAT_VERSION: u16 = 4;
 pub const FUNCTION_TYPE_METADATA_FORMAT_VERSION: u16 = 5;
+/// Version at which the client IO manifest carries a `PreprocessingDemand`.
+pub const PREPROCESSING_DEMAND_MANIFEST_FORMAT_VERSION: u16 = 8;
 
 const MAX_BINARY_COLLECTION_LEN: usize = 1_000_000;
 const MAX_BINARY_STRING_BYTES: usize = 16 * 1024 * 1024;
@@ -115,6 +117,12 @@ fn read_u16<R: Read>(reader: &mut R) -> BinaryResult<u16> {
     let mut bytes = [0u8; 2];
     reader.read_exact(&mut bytes)?;
     Ok(u16::from_le_bytes(bytes))
+}
+
+fn read_u8<R: Read>(reader: &mut R) -> BinaryResult<u8> {
+    let mut bytes = [0u8; 1];
+    reader.read_exact(&mut bytes)?;
+    Ok(bytes[0])
 }
 
 fn read_u32<R: Read>(reader: &mut R) -> BinaryResult<u32> {
@@ -208,6 +216,41 @@ pub struct ClientIoManifest {
     pub mpc_backend: MpcBackend,
     pub mpc_curve: MpcCurve,
     pub clients: Vec<ClientIoSchema>,
+    /// Static estimate of the MPC preprocessing material the program consumes,
+    /// emitted by the compiler so the runtime can pre-generate enough up front.
+    /// `#[serde(default)]` keeps older binaries (without this field) loadable.
+    #[serde(default)]
+    pub preprocessing_demand: PreprocessingDemand,
+}
+
+/// Compiler estimate of preprocessing material a program consumes, used to size
+/// the runtime preprocessing pass. Counts are *static estimates* weighted by
+/// literal loop bounds; `dynamic` flags that the true demand may exceed the
+/// estimate (e.g. data-dependent loops, recursion, or runtime-sized batches),
+/// so the runtime should also be ready to top up on the fly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreprocessingDemand {
+    /// Beaver triples — one per secret*secret multiplication.
+    pub triples: u64,
+    /// Random shares — masks for inputs/reveals and triple generation.
+    pub randoms: u64,
+    /// Random bits — `frac_bits` per secret fixed-point division (truncation).
+    pub prandbits: u64,
+    /// Random integers — one per secret fixed-point division (truncation).
+    pub prandints: u64,
+    /// True when the static estimate may undercount (data-dependent loops,
+    /// recursion, or runtime-sized batch operations).
+    pub dynamic: bool,
+}
+
+impl PreprocessingDemand {
+    /// Add another op's demand, saturating.
+    pub fn add(&mut self, triples: u64, randoms: u64, prandbits: u64, prandints: u64) {
+        self.triples = self.triples.saturating_add(triples);
+        self.randoms = self.randoms.saturating_add(randoms);
+        self.prandbits = self.prandbits.saturating_add(prandbits);
+        self.prandints = self.prandints.saturating_add(prandints);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -713,6 +756,7 @@ impl CompiledBinary {
                 &self.client_io_manifest,
                 self.version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION,
                 self.version >= MPC_CURVE_MANIFEST_FORMAT_VERSION,
+                self.version >= PREPROCESSING_DEMAND_MANIFEST_FORMAT_VERSION,
                 writer,
             )?;
         }
@@ -724,6 +768,7 @@ impl CompiledBinary {
         manifest: &ClientIoManifest,
         include_backend: bool,
         include_curve: bool,
+        include_demand: bool,
         writer: &mut W,
     ) -> BinaryResult<()> {
         if include_backend {
@@ -743,6 +788,14 @@ impl CompiledBinary {
             for share_type in &client.outputs {
                 Self::serialize_share_type(*share_type, writer)?;
             }
+        }
+        if include_demand {
+            let demand = &manifest.preprocessing_demand;
+            writer.write_all(&demand.triples.to_le_bytes())?;
+            writer.write_all(&demand.randoms.to_le_bytes())?;
+            writer.write_all(&demand.prandbits.to_le_bytes())?;
+            writer.write_all(&demand.prandints.to_le_bytes())?;
+            writer.write_all(&[u8::from(demand.dynamic)])?;
         }
         Ok(())
     }
@@ -1170,6 +1223,7 @@ impl CompiledBinary {
                 reader,
                 version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION,
                 version >= MPC_CURVE_MANIFEST_FORMAT_VERSION,
+                version >= PREPROCESSING_DEMAND_MANIFEST_FORMAT_VERSION,
             )?
         } else {
             ClientIoManifest::default()
@@ -1187,6 +1241,7 @@ impl CompiledBinary {
         reader: &mut R,
         has_backend: bool,
         has_curve: bool,
+        has_demand: bool,
     ) -> BinaryResult<ClientIoManifest> {
         let mpc_backend = if has_backend {
             Self::deserialize_mpc_backend(reader)?
@@ -1226,10 +1281,22 @@ impl CompiledBinary {
                 outputs,
             });
         }
+        let preprocessing_demand = if has_demand {
+            PreprocessingDemand {
+                triples: read_u64(reader)?,
+                randoms: read_u64(reader)?,
+                prandbits: read_u64(reader)?,
+                prandints: read_u64(reader)?,
+                dynamic: read_u8(reader)? != 0,
+            }
+        } else {
+            PreprocessingDemand::default()
+        };
         Ok(ClientIoManifest {
             mpc_backend,
             mpc_curve,
             clients,
+            preprocessing_demand,
         })
     }
 

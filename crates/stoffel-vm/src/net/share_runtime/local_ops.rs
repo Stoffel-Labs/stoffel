@@ -108,6 +108,24 @@ impl MpcShareRuntime<'_> {
         self.preserve_share_data_format(share_data, result)
     }
 
+    /// Divide a secret fixed-point share by a public positive constant using the
+    /// interactive MPC division protocol. `divisor_scaled` is `round(divisor *
+    /// 2^f)`. Unlike `div_scalar_data` (a local field operation), this performs a
+    /// truncation round so the result is the true fixed-point quotient.
+    pub(crate) fn div_fixed_by_const_data(
+        &self,
+        ty: ShareType,
+        share_data: &ShareData,
+        divisor_scaled: i64,
+    ) -> VmResult<ShareData> {
+        self.ensure_ready()?;
+        self.engine
+            .multiplication_ops()
+            .map_mpc_backend_err("multiplication_ops")?
+            .divide_fixed_by_constant(ty, share_data.as_bytes(), divisor_scaled)
+            .map_mpc_backend_err("divide_fixed_by_constant")
+    }
+
     pub(crate) fn mul_scalar_data(
         &self,
         ty: ShareType,

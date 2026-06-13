@@ -1,6 +1,6 @@
 # Secret Matrix Averaging (secret fix64)
 
-Element-wise averages three parties' secret `fix64` matrices: shares are summed under MPC, only the sums are opened, and the division by the client count happens on the opened values.
+Element-wise averages three parties' secret `fix64` matrices: each cell is summed and divided by the client count entirely under MPC (secure fixed-point division by a public constant), so only the averages are opened — even the per-cell sums stay secret. Three contributors keep any one client from deriving another's matrix from the aggregate.
 
 Validate and run from this directory:
 

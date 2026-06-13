@@ -24,6 +24,7 @@ exercises.
 | Fixed-point `fix64` arithmetic, division, comparisons, tolerance checks | `matrix/clear/rotation_fix64`, `matrix/clear/gauss_fix64`, `polynomials/clear/*_fix64`, `number_theory/clear/gcd_fix64_anthyphairesis` |
 | Secret-share arithmetic incl. share-by-public scaling, secret bool gate circuits | `bits/secret/*`, `matrix/secret/*`, `polynomials/secret/*`, `number_theory/secret/*` |
 | `ClientStore.take_share`/`take_share_fixed` typed client inputs (int, uint, bool, fixed), multi-client and multi-input | the `*/secret/*` gallery (each documents its `--client-input` flags) |
+| Secure fixed-point division by a public constant (`secret fix64 / <const>`) | `matrix/secret/scaled_mean_fix64` (division performed on shares; reciprocal + probabilistic truncation) |
 | Compound assignment `+=`, `-=`, `*=`, `/=`, `%=` | `language_policy_engine` |
 | Field-access method syntax and object builtin syntax | `local_collections`, `mpc_runtime_info`, `mpc_share_toolkit` |
 | Closures exposed by the language stdlib | `local_dynamic_workflow`, `local_closure_counter` |

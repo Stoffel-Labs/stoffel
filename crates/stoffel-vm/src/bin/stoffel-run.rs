@@ -24,8 +24,8 @@ use stoffel_vm::net::curve::{field_from_i64, field_to_i64, SupportedMpcField};
 use stoffel_vm::net::hb_engine::HoneyBadgerMpcEngine;
 use stoffel_vm::net::mpc_engine::{DurableIdentityDigest, MpcEngine, MpcSessionTopology};
 use stoffel_vm::net::{
-    avss_protocol_instance_id, honeybadger_node_opts, honeybadger_protocol_instance_id,
-    honeybadger_protocol_timeout, spawn_receive_loops_split,
+    avss_protocol_instance_id, honeybadger_node_opts_with_truncation,
+    honeybadger_protocol_instance_id, honeybadger_protocol_timeout, spawn_receive_loops_split,
 };
 use stoffel_vm::net::{
     program_id_from_bytes, register_and_wait_for_session, run_bootnode_with_config,
@@ -68,6 +68,80 @@ fn manifest_client_input_types(
         })
         .collect()
 }
+
+/// Planned preprocessing material counts for one program run.
+struct PlannedPreprocessing {
+    n_triples: usize,
+    n_random: usize,
+    n_prandbit: usize,
+    n_prandint: usize,
+}
+
+/// Round up to the next power of two (0 stays 0). The runtime generates this
+/// many of each material type, so the *observable preprocessing volume* reveals
+/// only which power-of-two band the program's demand falls in — its size octave,
+/// not its exact operation counts.
+fn band_pow2(n: u64) -> u64 {
+    if n == 0 {
+        0
+    } else {
+        n.next_power_of_two()
+    }
+}
+
+/// Turn the compiler's static preprocessing-demand estimate into concrete
+/// material counts to generate up front. Each count is rounded up to a power of
+/// two for privacy (see `band_pow2`); `dynamic` programs (data-dependent loops,
+/// recursion, runtime-sized batches) get an extra octave of headroom because the
+/// static estimate may undercount them. The triple/random counts absorb the
+/// dependency that prandbit generation itself consumes a triple + random per bit.
+/// `STOFFEL_PREPROCESSING_TRIPLES` / `STOFFEL_PREPROCESSING_PRANDBITS` override
+/// the estimate for unusually loop-heavy programs.
+fn plan_preprocessing(
+    demand: &stoffel_vm_types::compiled_binary::PreprocessingDemand,
+    threshold: usize,
+    n_client_random: usize,
+) -> PlannedPreprocessing {
+    let env_u64 = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+    };
+
+    // Dynamic programs may undercount, so give them an extra octave before banding.
+    let with_headroom = |n: u64| -> u64 { if demand.dynamic { n.saturating_mul(2) } else { n } };
+
+    let prandbits = env_u64("STOFFEL_PREPROCESSING_PRANDBITS")
+        .map(band_pow2)
+        .unwrap_or_else(|| band_pow2(with_headroom(demand.prandbits)));
+    let prandints = band_pow2(with_headroom(demand.prandints));
+
+    let direct_triples = env_u64("STOFFEL_PREPROCESSING_TRIPLES")
+        .map(band_pow2)
+        .unwrap_or_else(|| band_pow2(with_headroom(demand.triples)));
+
+    // prandbit generation consumes one triple + one random per bit.
+    let mut triple_target = direct_triples.saturating_add(prandbits);
+    if triple_target > 0 {
+        // Floor to the protocol's minimum triple batch so tiny programs still run.
+        triple_target = triple_target.max(2 * threshold as u64 + 1);
+    }
+    let n_triples = band_pow2(triple_target);
+    let n_random = band_pow2(
+        2u64.saturating_add(2u64.saturating_mul(n_triples))
+            .saturating_add(prandbits)
+            .saturating_add(n_client_random as u64),
+    );
+
+    PlannedPreprocessing {
+        n_triples: n_triples as usize,
+        n_random: n_random as usize,
+        n_prandbit: prandbits as usize,
+        n_prandint: prandints as usize,
+    }
+}
+
 type HbOffChainCoordinator<F> = OffChainCoordinatorClient<F, HbCoordinatorShare<F>>;
 type HbOffChainNodeRpcClient<F> = OffChainNodeRPCClient<F, HbCoordinatorShare<F>>;
 type HbOffChainNodeRpcServer<F> = OffChainNodeRPCServer<F, HbCoordinatorShare<F>>;
@@ -2115,6 +2189,7 @@ struct HbPartySetup<'a> {
     coordinator_client_count_hint: usize,
     client_input_count: usize,
     client_input_types: &'a std::collections::BTreeMap<usize, Vec<ShareType>>,
+    preprocessing_demand: stoffel_vm_types::compiled_binary::PreprocessingDemand,
     program_hash: [u8; 32],
     preproc_store_path: Option<&'a str>,
 }
@@ -2137,6 +2212,7 @@ where
         coordinator_client_count_hint,
         client_input_count,
         client_input_types,
+        preprocessing_demand,
         program_hash,
         preproc_store_path,
     } = setup;
@@ -2230,31 +2306,36 @@ where
     //   - Clone 1 (`processing_node`): handles incoming messages via process()
     //   - Clone 2 (inside `engine`): initiates preprocessing via run_preprocessing()
     // Both share the same Arc<Mutex> stores, but only ONE processes each message.
-    // Floor of 16 so reveal-batched programs with a handful of share-by-share
-    // products per batch do not hit NotEnoughPreprocessing out of the box;
-    // override with STOFFEL_PREPROCESSING_TRIPLES when tuning.
-    let default_n_triples = (2 * t + 1).max(16);
-    let n_triples = std::env::var("STOFFEL_PREPROCESSING_TRIPLES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default_n_triples);
+    // Plan the preprocessing material from the compiler's static demand
+    // estimate, rounding each count up to a power of 2 so the generated volume
+    // reveals only the program's size octave (privacy), not its exact operation
+    // counts. The plan folds in the dependency that prandbit generation consumes
+    // a triple + random per bit, and a baseline so light programs still run.
     let client_random_count = input_ids.len().max(coordinator_client_count_hint);
     let n_client_random = client_random_count.saturating_mul(client_input_count);
-    let n_random = 2 + 2 * n_triples + n_client_random;
+    let plan = plan_preprocessing(&preprocessing_demand, t, n_client_random);
+    let n_triples = plan.n_triples;
+    let n_random = plan.n_random;
+    let n_prandbit = plan.n_prandbit;
+    let n_prandint = plan.n_prandint;
     let protocol_timeout = honeybadger_protocol_timeout();
     eprintln!(
-        "[party {}] Creating MPC node opts (n_triples={}, n_random={}, timeout={}s)",
+        "[party {}] Creating MPC node opts (n_triples={}, n_random={}, n_prandbit={}, n_prandint={}, dynamic={}, timeout={}s)",
         my_id,
         n_triples,
         n_random,
+        n_prandbit,
+        n_prandint,
+        preprocessing_demand.dynamic,
         protocol_timeout.as_secs()
     );
-    let mpc_opts =
-        honeybadger_node_opts(n, t, n_triples, n_random, instance_id).unwrap_or_else(|e| {
-            eprintln!("Failed to create MPC node options: {}", e);
-            std::process::exit(2);
-        });
+    let mpc_opts = honeybadger_node_opts_with_truncation(
+        n, t, n_triples, n_random, n_prandbit, n_prandint, instance_id,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Failed to create MPC node options: {}", e);
+        std::process::exit(2);
+    });
 
     // Use sequential indices (0..n_clients) as client IDs for the MPC protocol
     // because the session_id only has 8 bits for the client_id field.
@@ -4149,6 +4230,7 @@ async fn main() {
     let mut f = File::open(&load_path).expect("open binary file");
     let binary = CompiledBinary::deserialize(&mut f).expect("deserialize compiled binary");
     let client_input_types = manifest_client_input_types(&binary);
+    let preprocessing_demand = binary.client_io_manifest.preprocessing_demand;
     let functions = match binary.try_to_vm_functions() {
         Ok(functions) => functions,
         Err(err) => {
@@ -4512,6 +4594,7 @@ async fn main() {
                                 coordinator_client_count_hint: 0,
                                 client_input_count,
                                 client_input_types: &client_input_types,
+                                preprocessing_demand,
                                 program_hash: program_id,
                                 preproc_store_path: preproc_store_path.as_deref(),
                             },
@@ -4549,6 +4632,7 @@ async fn main() {
                             coordinator_client_count_hint: output_ids.len(),
                             client_input_count,
                             client_input_types: &client_input_types,
+                            preprocessing_demand,
                             program_hash: program_id,
                             preproc_store_path: preproc_store_path.as_deref(),
                         },
@@ -5220,10 +5304,73 @@ Examples:
 #[cfg(test)]
 mod tests {
     use super::{
-        field_outputs_to_hex, format_coordinator_outputs, input_client_ids_from_output_ids,
-        render_fixed_point_i64, CoordinatorOutputFormat,
+        band_pow2, field_outputs_to_hex, format_coordinator_outputs,
+        input_client_ids_from_output_ids, plan_preprocessing, render_fixed_point_i64,
+        CoordinatorOutputFormat,
     };
     use stoffel_vm::net::MpcCurveConfig;
+    use stoffel_vm_types::compiled_binary::PreprocessingDemand;
+
+    fn demand(triples: u64, prandbits: u64, prandints: u64, dynamic: bool) -> PreprocessingDemand {
+        PreprocessingDemand {
+            triples,
+            randoms: 0,
+            prandbits,
+            prandints,
+            dynamic,
+        }
+    }
+
+    #[test]
+    fn band_pow2_rounds_up_to_next_octave_and_keeps_zero() {
+        assert_eq!(band_pow2(0), 0);
+        assert_eq!(band_pow2(1), 1);
+        assert_eq!(band_pow2(3), 4);
+        assert_eq!(band_pow2(16), 16);
+        assert_eq!(band_pow2(50), 64);
+    }
+
+    #[test]
+    fn plan_for_single_division_folds_prandbit_cost_into_triples_and_randoms() {
+        // 16 prandbits + 1 prandint (one secure fix64 / constant). prandbit
+        // generation consumes a triple + random per bit, so the triple/random
+        // pools must cover that on top of the banded prandbit count.
+        let plan = plan_preprocessing(&demand(0, 16, 1, false), 1, 0);
+        assert_eq!(plan.n_prandbit, 16);
+        assert_eq!(plan.n_prandint, 1);
+        assert_eq!(plan.n_triples, 16);
+        assert_eq!(plan.n_random, 64);
+    }
+
+    #[test]
+    fn plan_for_clear_program_still_provisions_minimal_random_pool() {
+        let plan = plan_preprocessing(&demand(0, 0, 0, false), 1, 0);
+        assert_eq!(plan.n_prandbit, 0);
+        assert_eq!(plan.n_prandint, 0);
+        assert_eq!(plan.n_triples, 0);
+        assert_eq!(plan.n_random, 2);
+    }
+
+    #[test]
+    fn plan_for_secret_multiplication_floors_to_protocol_triple_batch() {
+        // One triple demanded, but the protocol's minimum batch is 2t+1 = 3,
+        // banded up to the next octave (4).
+        let plan = plan_preprocessing(&demand(1, 0, 0, false), 1, 0);
+        assert_eq!(plan.n_prandbit, 0);
+        assert_eq!(plan.n_triples, 4);
+        assert_eq!(plan.n_random, 16);
+    }
+
+    #[test]
+    fn plan_gives_dynamic_programs_an_extra_octave_of_headroom() {
+        let stat = plan_preprocessing(&demand(0, 16, 1, false), 1, 0);
+        let dyn_ = plan_preprocessing(&demand(0, 16, 1, true), 1, 0);
+        // The dynamic flag doubles the estimate before banding, so the prandbit
+        // pool is one octave larger than the static plan's.
+        assert_eq!(stat.n_prandbit, 16);
+        assert_eq!(dyn_.n_prandbit, 32);
+        assert!(dyn_.n_triples >= stat.n_triples);
+    }
 
     #[test]
     fn formats_negative_field_outputs_as_signed_i64s() {

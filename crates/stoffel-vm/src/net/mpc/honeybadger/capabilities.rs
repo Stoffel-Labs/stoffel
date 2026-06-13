@@ -29,6 +29,20 @@ where
         crate::net::try_block_on_current(self.multiply_share_async(ty, left, right))
             .map_mpc_engine_operation("multiply_share")
     }
+
+    fn divide_fixed_by_constant(
+        &self,
+        ty: ShareType,
+        share_bytes: &[u8],
+        divisor_scaled: i64,
+    ) -> MpcEngineResult<ShareData> {
+        crate::net::try_block_on_current(self.divide_fixed_by_constant_async(
+            ty,
+            share_bytes,
+            divisor_scaled,
+        ))
+        .map_mpc_engine_operation("divide_fixed_by_constant")
+    }
 }
 
 impl<F, G> MpcEnginePreprocPersistence for HoneyBadgerMpcEngine<F, G>
@@ -162,6 +176,17 @@ where
         self.multiply_share_async(ty, left, right)
             .await
             .map_mpc_engine_operation("async_multiply_share")
+    }
+
+    async fn divide_fixed_by_constant_async(
+        &self,
+        ty: ShareType,
+        share_bytes: &[u8],
+        divisor_scaled: i64,
+    ) -> MpcEngineResult<ShareData> {
+        HoneyBadgerMpcEngine::divide_fixed_by_constant_async(self, ty, share_bytes, divisor_scaled)
+            .await
+            .map_mpc_engine_operation("async_divide_fixed_by_constant")
     }
 
     async fn batch_multiply_share_async(

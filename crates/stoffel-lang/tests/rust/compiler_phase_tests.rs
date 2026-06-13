@@ -4366,3 +4366,123 @@ def main() -> int64:
     compile(source, "test.stfl", &default_options())
         .expect("'mod' (floored) and '%' (remainder) should both compile");
 }
+
+#[test]
+fn test_secret_fixed_point_division_by_constant_types_to_secret_fixed() {
+    let source = r#"
+def main() -> fix64:
+  var a: secret fix64 = Share.from_clear_fixed(6.0, 64, 16)
+  var half: secret fix64 = a / 2.0
+  var third: secret fix64 = a / 3
+  var blended: secret fix64 = half + third
+  return blended.open_fixed()
+"#;
+    compile(source, "test.stfl", &default_options())
+        .expect("secret fix64 divided by a public constant should type to secret fix64");
+}
+
+// ===========================================
+// Preprocessing-demand emission (planner input)
+// ===========================================
+
+/// Compile `source` and return the preprocessing demand the planner reads.
+fn demand_of(source: &str) -> stoffel_vm_types::compiled_binary::PreprocessingDemand {
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    convert_to_binary(&program)
+        .client_io_manifest
+        .preprocessing_demand
+}
+
+#[test]
+fn clear_only_program_emits_zero_preprocessing_demand() {
+    let demand = demand_of(
+        r#"
+def main() -> int64:
+  var a: int64 = 3
+  var b: int64 = 4
+  return a + b
+"#,
+    );
+    assert_eq!(demand.triples, 0);
+    assert_eq!(demand.randoms, 0);
+    assert_eq!(demand.prandbits, 0);
+    assert_eq!(demand.prandints, 0);
+    assert!(!demand.dynamic);
+}
+
+#[test]
+fn secret_multiplication_emits_one_triple() {
+    let demand = demand_of(
+        r#"
+def main() -> int64:
+  var a: secret int64 = Share.from_clear(3)
+  var b: secret int64 = Share.from_clear(4)
+  var c: secret int64 = a * b
+  return c.reveal()
+"#,
+    );
+    assert_eq!(demand.triples, 1);
+    assert_eq!(demand.prandbits, 0);
+    assert_eq!(demand.prandints, 0);
+    assert!(!demand.dynamic);
+}
+
+#[test]
+fn single_secret_division_emits_frac_bits_prandbits_and_one_prandint() {
+    // One secure fix64 / constant runs the truncation protocol: f random bits
+    // (f = the operand's fractional bits, 16 by default) + 1 random integer.
+    let demand = demand_of(
+        r#"
+def main() -> fix64:
+  var a: secret fix64 = Share.from_clear_fixed(6.0, 64, 16)
+  var half: secret fix64 = a / 2.0
+  return half.open_fixed()
+"#,
+    );
+    assert_eq!(demand.triples, 0);
+    assert_eq!(demand.prandbits, 16);
+    assert_eq!(demand.prandints, 1);
+    assert!(!demand.dynamic);
+}
+
+#[test]
+fn literal_bounded_loop_multiplies_division_demand_by_iteration_count() {
+    // Four iterations of one division each => 4 * (16 prandbits + 1 prandint).
+    // The loop bound is a literal range, so the estimate stays static.
+    let demand = demand_of(
+        r#"
+def main() -> fix64:
+  var acc: secret fix64 = Share.from_clear_fixed(0.0, 64, 16)
+  for i in 0..4:
+    var a: secret fix64 = Share.from_clear_fixed(6.0, 64, 16)
+    acc = acc + a / 2.0
+  return acc.open_fixed()
+"#,
+    );
+    assert_eq!(demand.prandbits, 64);
+    assert_eq!(demand.prandints, 4);
+    assert_eq!(demand.triples, 0);
+    assert!(!demand.dynamic);
+}
+
+#[test]
+fn runtime_bounded_loop_marks_demand_dynamic() {
+    // The while-loop bound (a.len()) is unknown at compile time, so any MPC op
+    // inside is dynamic-demand and the planner must keep runtime headroom.
+    let demand = demand_of(
+        r#"
+def secret_dot(a: list[secret int64], b: list[secret int64]) -> secret int64:
+  var acc: secret int64 = Share.from_clear(0)
+  var i: int64 = 0
+  while i < a.len():
+    var prod: secret int64 = a[i] * b[i]
+    acc = acc + prod
+    i += 1
+  return acc
+
+def main(a: list[secret int64], b: list[secret int64]) -> int64:
+  return secret_dot(a, b).reveal()
+"#,
+    );
+    assert!(demand.dynamic);
+}

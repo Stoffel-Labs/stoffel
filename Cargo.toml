@@ -10,3 +10,15 @@ resolver = "2"
 exclude = [
     "vendor/mpc-protocols-limit-test",
 ]
+
+# Local patch: decouple sends from the message pump (per-peer outbound queues)
+# to fix the AES-circuit transport deadlock. Points stoffelnet at the local
+# clone on the same branch/rev as the git dependency.
+[patch."https://github.com/Stoffel-Labs/stoffel-networking.git"]
+stoffelnet = { path = "/Users/gabriel/RustroverProjects/stoffel-network" }
+
+# Local patch: fix the batch-multiplication RBC-remainder liveness deadlock
+# (parties skipped broadcasting their own remainder shares once they had
+# locally reconstructed). Same branch/rev as the git dependency.
+[patch."https://github.com/Stoffel-Labs/mpc-protocols.git"]
+stoffelmpc-mpc = { path = "/Users/gabriel/RustroverProjects/mpc-protocols/mpc" }

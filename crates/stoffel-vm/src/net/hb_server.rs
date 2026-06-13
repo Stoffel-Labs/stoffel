@@ -418,8 +418,10 @@ pub async fn spawn_receive_loops(
     node_id: PartyId,
     n_parties: usize,
     open_message_router: Arc<crate::net::open_registry::OpenMessageRouter>,
-) -> mpsc::Receiver<(PartyId, Vec<u8>)> {
-    let (tx, rx) = mpsc::channel::<(PartyId, Vec<u8>)>(65536);
+) -> mpsc::UnboundedReceiver<(PartyId, Vec<u8>)> {
+    // Unbounded so the socket readers never stall the QUIC receive path; see the
+    // rationale on `spawn_receive_loops_split`.
+    let (tx, rx) = mpsc::unbounded_channel::<(PartyId, Vec<u8>)>();
     let scan_tx = tx.clone();
     // Note: client messages also go through this channel. If you need
     // separate client handling, use spawn_receive_loops_split instead.
@@ -492,7 +494,7 @@ pub async fn spawn_receive_loops(
                                     Ok(false) => {}
                                 }
 
-                                if let Err(e) = txx.send((sender_id, data)).await {
+                                if let Err(e) = txx.send((sender_id, data)) {
                                     tracing::warn!(
                                         party_id = local_party_id,
                                         sender_id,
@@ -534,7 +536,7 @@ pub async fn spawn_receive_loops(
                     loop {
                         match connection.receive().await {
                             Ok(data) => {
-                                if let Err(e) = txx.send((client_id, data)).await {
+                                if let Err(e) = txx.send((client_id, data)) {
                                     tracing::warn!(
                                         party_id = local_party_id,
                                         client_id,
@@ -574,11 +576,16 @@ pub async fn spawn_receive_loops_split(
     n_parties: usize,
     open_message_router: Arc<crate::net::open_registry::OpenMessageRouter>,
 ) -> (
-    mpsc::Receiver<(PartyId, Vec<u8>)>,
-    mpsc::Receiver<(PartyId, Vec<u8>)>,
+    mpsc::UnboundedReceiver<(PartyId, Vec<u8>)>,
+    mpsc::UnboundedReceiver<(PartyId, Vec<u8>)>,
 ) {
-    let (server_tx, server_rx) = mpsc::channel::<(PartyId, Vec<u8>)>(65536);
-    let (client_tx, client_rx) = mpsc::channel::<(PartyId, Vec<u8>)>(4096);
+    // Unbounded so the per-connection socket readers never block forwarding into
+    // these channels. If they were bounded and the downstream message pump
+    // stalled, a full channel would stop the reader from draining the QUIC
+    // socket, closing the peer's flow-control window and cascading into a
+    // cross-party deadlock. Pairs with the per-peer outbound queues (Fix A).
+    let (server_tx, server_rx) = mpsc::unbounded_channel::<(PartyId, Vec<u8>)>();
+    let (client_tx, client_rx) = mpsc::unbounded_channel::<(PartyId, Vec<u8>)>();
     let scan_net = net.clone();
     tokio::spawn(async move {
         let mut spawned_server_ids = std::collections::HashSet::new();
@@ -618,7 +625,7 @@ pub async fn spawn_receive_loops_split(
                             Err(_) => continue,
                             Ok(false) => {}
                         }
-                        if let Err(e) = txx.send((sender_id, data)).await {
+                        if let Err(e) = txx.send((sender_id, data)) {
                             tracing::warn!(
                                 party_id = local_party_id,
                                 sender_id,
@@ -657,7 +664,7 @@ pub async fn spawn_receive_loops_split(
                     loop {
                         match connection.receive().await {
                             Ok(data) => {
-                                if let Err(e) = txx.send((cid, data)).await {
+                                if let Err(e) = txx.send((cid, data)) {
                                     tracing::warn!(
                                         party_id = local_party_id,
                                         client_id = cid,

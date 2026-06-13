@@ -142,6 +142,27 @@ pub trait AsyncMpcEngine: MpcEngine {
         ))
     }
 
+    /// Divide a secret fixed-point share by a public positive constant.
+    ///
+    /// `divisor_scaled` is the divisor already scaled into the share's
+    /// fixed-point representation (i.e. `round(divisor * 2^f)`). Backends that
+    /// support fixed-point division override this; the default reports the
+    /// multiplication capability as unavailable, since division reuses the same
+    /// preprocessing class (truncation randomness).
+    async fn divide_fixed_by_constant_async(
+        &self,
+        ty: ShareType,
+        share_bytes: &[u8],
+        divisor_scaled: i64,
+    ) -> MpcEngineResult<ShareData> {
+        let _ = (ty, share_bytes, divisor_scaled);
+        Err(self.async_capability_unavailable(
+            "async_divide_fixed_by_constant",
+            MpcCapability::Multiplication,
+            "divide_fixed_by_constant_async",
+        ))
+    }
+
     /// Perform secure multiplication for a batch of share pairs asynchronously.
     ///
     /// Backends with native batched multiplication should override this method.

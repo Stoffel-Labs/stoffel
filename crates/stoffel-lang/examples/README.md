@@ -82,6 +82,7 @@ Matrix operations (secret, client inputs):
 
 - `matrix/secret/matvec`: client-owned matrix rows times a public query.
 - `matrix/secret/average_fix64`: element-wise averaging of private matrices.
+- `matrix/secret/scaled_mean_fix64`: secure mean with division on shares (only the mean opens).
 - `matrix/secret/dot_similarity`: cross-client inner-product scoring.
 - `matrix/secret/linear_layer`: private features through public weights.
 - `matrix/secret/covariance`: covariance across split data ownership.

@@ -22,6 +22,26 @@ pub trait MpcEngineMultiplication: MpcEngine {
         left: &[u8],
         right: &[u8],
     ) -> MpcEngineResult<ShareData>;
+
+    /// Divide a secret fixed-point share by a public positive constant.
+    ///
+    /// `divisor_scaled` is the divisor already scaled into the share's
+    /// fixed-point representation (`round(divisor * 2^f)`). Division shares the
+    /// multiplication capability because it consumes the same class of
+    /// preprocessing (truncation randomness). Backends without fixed-point
+    /// division leave the default, which reports the operation unsupported.
+    fn divide_fixed_by_constant(
+        &self,
+        ty: ShareType,
+        share_bytes: &[u8],
+        divisor_scaled: i64,
+    ) -> MpcEngineResult<ShareData> {
+        let _ = (ty, share_bytes, divisor_scaled);
+        Err(MpcEngineError::operation_failed(
+            "divide_fixed_by_constant",
+            "this MPC backend does not support fixed-point division",
+        ))
+    }
 }
 
 /// Extended MPC engine trait for client input management.

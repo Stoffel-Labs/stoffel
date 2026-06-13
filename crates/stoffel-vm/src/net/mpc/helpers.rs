@@ -55,6 +55,8 @@ pub fn default_node_opts(
 }
 
 /// Build HoneyBadger node options, deriving ancillary preprocessing counts from existing inputs.
+/// Requests no random bits / integers (use [`honeybadger_node_opts_with_truncation`] for
+/// programs that need fixed-point truncation preprocessing).
 pub fn honeybadger_node_opts(
     n_parties: usize,
     threshold: usize,
@@ -62,8 +64,31 @@ pub fn honeybadger_node_opts(
     n_random_shares: usize,
     instance_id: u64,
 ) -> Result<HoneyBadgerMPCNodeOpts, String> {
-    let n_prandbit = 0;
-    let n_prandint = 0;
+    honeybadger_node_opts_with_truncation(
+        n_parties,
+        threshold,
+        n_triples,
+        n_random_shares,
+        0,
+        0,
+        instance_id,
+    )
+}
+
+/// Build HoneyBadger node options with explicit truncation-preprocessing counts
+/// (`n_prandbit` random bits, `n_prandint` random integers) for fixed-point
+/// division/multiplication. Note: prandbit generation consumes one beaver triple
+/// and one random share per bit, so callers should already have folded that cost
+/// into `n_triples`/`n_random_shares`.
+pub fn honeybadger_node_opts_with_truncation(
+    n_parties: usize,
+    threshold: usize,
+    n_triples: usize,
+    n_random_shares: usize,
+    n_prandbit: usize,
+    n_prandint: usize,
+    instance_id: u64,
+) -> Result<HoneyBadgerMPCNodeOpts, String> {
     let l = DEFAULT_FIXED_POINT_TOTAL_BITS;
     let k = DEFAULT_SECURITY_PARAMETER_K;
 

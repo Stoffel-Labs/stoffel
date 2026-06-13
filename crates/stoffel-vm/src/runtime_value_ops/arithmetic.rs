@@ -3,7 +3,7 @@ use super::error::{
     ValueOpResult,
 };
 use super::share_operands::{matching_share_pair, share_scalar_operands};
-use stoffel_vm_types::core_types::{Value, F64};
+use stoffel_vm_types::core_types::{ShareType, Value, F64};
 
 pub(crate) fn add(
     left: &Value,
@@ -103,12 +103,54 @@ pub(crate) fn div(
         return unsupported("Share/Share division is not supported on secret shares");
     }
 
+    // Secret fixed-point share divided by a public constant: run the
+    // interactive fixed-point division protocol (reciprocal + truncation) so
+    // the quotient stays secret-shared with correct fixed-point semantics.
+    if let Value::Share(share_type @ ShareType::SecretFixedPoint { .. }, share_data) = left {
+        if let Some(divisor_scaled) = fixed_point_divisor_scaled(*share_type, right) {
+            let data = share_runtime()?.div_fixed_by_const_data(
+                *share_type,
+                share_data,
+                divisor_scaled,
+            )?;
+            return Ok(Value::Share(*share_type, data));
+        }
+    }
+
     if let Some((share_type, share_data, scalar)) = share_scalar_operands(left, right)? {
         let data = share_runtime()?.div_scalar_data(share_type, share_data, scalar)?;
         return Ok(Value::Share(share_type, data));
     }
 
     type_error("DIV")
+}
+
+/// Scale a public divisor into the share's fixed-point representation
+/// (`round(divisor * 2^f)`), for a `secret fix64 / <constant>` division.
+/// Accepts a clear fixed-point (`Value::Float`) or integer divisor; returns
+/// `None` for anything else.
+fn fixed_point_divisor_scaled(share_type: ShareType, divisor: &Value) -> Option<i64> {
+    let ShareType::SecretFixedPoint { precision } = share_type else {
+        return None;
+    };
+    let divisor_f64 = match divisor {
+        Value::Float(value) => value.0,
+        Value::I64(v) => *v as f64,
+        Value::I32(v) => f64::from(*v),
+        Value::I16(v) => f64::from(*v),
+        Value::I8(v) => f64::from(*v),
+        Value::U8(v) => f64::from(*v),
+        Value::U16(v) => f64::from(*v),
+        Value::U32(v) => f64::from(*v),
+        Value::U64(v) => *v as f64,
+        _ => return None,
+    };
+    let scale = 2f64.powi(i32::try_from(precision.fractional_bits()).ok()?);
+    let scaled = (divisor_f64 * scale).round();
+    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled >= 9.223_372_036_854_776e18 {
+        return None;
+    }
+    Some(scaled as i64)
 }
 
 pub(crate) fn modulo(left: &Value, right: &Value) -> ValueOpResult<Value> {

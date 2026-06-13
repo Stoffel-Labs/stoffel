@@ -4,7 +4,7 @@ use crate::errors::{CompilerError, CompilerResult, SourceLocation};
 use crate::register_allocator::{self, AllocationError, PhysicalRegister, VirtualRegister};
 use crate::symbol_table::SymbolType;
 use stoffel_vm_types::compiled_binary::{
-    ClientIoManifest, ClientIoSchema, FunctionType, MpcBackend,
+    ClientIoManifest, ClientIoSchema, FunctionType, MpcBackend, PreprocessingDemand,
 };
 use stoffel_vm_types::core_types::{ShareType, DEFAULT_FIXED_POINT_FRACTIONAL_BITS};
 use stoffel_vm_types::registers::DEFAULT_SECRET_REGISTER_START;
@@ -182,6 +182,12 @@ struct CodeGenerator {
     active_loop_bounds: Vec<(String, u64)>,
     /// (continue_label, break_label) for each enclosing loop, innermost last
     loop_label_stack: Vec<(String, String)>,
+    /// Static estimate of MPC preprocessing material the program consumes,
+    /// emitted into the binary manifest so the runtime can pre-generate it.
+    preprocessing_demand: PreprocessingDemand,
+    /// Count of currently-open loops (while/for), used to detect ops nested in
+    /// loops whose iteration count is not a literal bound (→ demand is dynamic).
+    loop_depth: usize,
 }
 
 impl CodeGenerator {
@@ -210,6 +216,50 @@ impl CodeGenerator {
             clear_int_constants: HashMap::new(),
             active_loop_bounds: Vec::new(),
             loop_label_stack: Vec::new(),
+            preprocessing_demand: PreprocessingDemand::default(),
+            loop_depth: 0,
+        }
+    }
+
+    /// Record the preprocessing material one MPC operation consumes, weighted by
+    /// the product of enclosing *literal* loop bounds. If the op is nested in a
+    /// loop whose iteration count is not a literal bound, the static estimate
+    /// may undercount, so flag the demand dynamic (the runtime then keeps
+    /// headroom and can top up on the fly).
+    fn record_mpc_demand(&mut self, triples: u64, prandbits: u64, prandints: u64) {
+        let weight = u64::try_from(self.active_loop_iteration_count()).unwrap_or(u64::MAX);
+        self.preprocessing_demand.add(
+            triples.saturating_mul(weight),
+            0,
+            prandbits.saturating_mul(weight),
+            prandints.saturating_mul(weight),
+        );
+        if self.loop_depth > self.active_loop_bounds.len() {
+            self.preprocessing_demand.dynamic = true;
+        }
+    }
+
+    /// Record preprocessing demand for explicit MPC builtin calls.
+    fn record_mpc_builtin_demand(&mut self, function_name: &str) {
+        match function_name {
+            // Explicit secret multiplication: one beaver triple.
+            "Share.mul" => self.record_mpc_demand(1, 0, 0),
+            // Batched multiplication over a runtime-sized array: count one triple
+            // as a floor and mark the demand dynamic (true size is unknown until
+            // runtime, so the runtime keeps headroom and tops up on the fly).
+            "Share.batch_mul" => {
+                self.record_mpc_demand(1, 0, 0);
+                self.preprocessing_demand.dynamic = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Fractional bits of a node's secret fixed-point type, if it is one.
+    fn fixed_point_frac_bits(&self, node: &AstNode) -> Option<usize> {
+        match self.share_type_for_node(node) {
+            Some(ShareType::SecretFixedPoint { precision }) => Some(precision.fractional_bits()),
+            _ => None,
         }
     }
 
@@ -1025,6 +1075,7 @@ impl CodeGenerator {
                     }
                 })
                 .collect(),
+            preprocessing_demand: self.preprocessing_demand,
         }
     }
 
@@ -1046,6 +1097,14 @@ impl CodeGenerator {
                 .or_default()
                 .extend(outputs.iter().copied());
         }
+        let other_demand = other.preprocessing_demand;
+        self.preprocessing_demand.add(
+            other_demand.triples,
+            other_demand.randoms,
+            other_demand.prandbits,
+            other_demand.prandints,
+        );
+        self.preprocessing_demand.dynamic |= other_demand.dynamic;
     }
 
     /// Adds a label pointing to the *next* instruction index.
@@ -1467,6 +1526,28 @@ impl CodeGenerator {
                     return Ok((result_vr, false));
                 }
 
+                // Record MPC preprocessing demand for secret arithmetic that
+                // consumes preprocessing material at runtime.
+                match op.as_str() {
+                    // secret * secret consumes one beaver triple. (secret * public
+                    // is a local scaling and consumes nothing.) Secret-bool `and`
+                    // and `or` are also a multiplication (one triple); `xor` is
+                    // local addition and free.
+                    "*" | "and" | "or" if left_is_secret && right_is_secret => {
+                        self.record_mpc_demand(1, 0, 0);
+                    }
+                    // secret fix64 / public-constant runs the fixed-point division
+                    // protocol: `f` random bits + 1 random integer (truncation).
+                    "/" if left_is_secret => {
+                        let f = self
+                            .fixed_point_frac_bits(left)
+                            .unwrap_or(DEFAULT_FIXED_POINT_FRACTIONAL_BITS)
+                            as u64;
+                        self.record_mpc_demand(0, f, 1);
+                    }
+                    _ => {}
+                }
+
                 match op.as_str() {
                     "in" => {
                         // x in xs lowers to the builtin contains(xs, x).
@@ -1778,6 +1859,7 @@ impl CodeGenerator {
 
                 self.record_client_io_call(&function_name, arguments);
                 self.record_share_list_append_call(&function_name, arguments);
+                self.record_mpc_builtin_demand(&function_name);
 
                 // 3. Compile arguments first (do NOT emit PUSHARG yet) to keep PUSHARGs contiguous before CALL
                 let mut arg_vrs = Vec::with_capacity(arguments.len());
@@ -2007,6 +2089,7 @@ impl CodeGenerator {
                 // break exits the loop; continue re-checks the condition.
                 self.loop_label_stack
                     .push((loop_start_label.clone(), end_loop_label.clone()));
+                self.loop_depth += 1;
                 let body_result = if let Some((loop_var, bound)) = loop_bound {
                     self.active_loop_bounds.push((loop_var, bound));
                     let result = self.compile_node(body);
@@ -2015,6 +2098,7 @@ impl CodeGenerator {
                 } else {
                     self.compile_node(body)
                 };
+                self.loop_depth -= 1;
                 self.loop_label_stack.pop();
                 let (_body_vr, _body_is_secret) = body_result?;
                 // Result of body is discarded. Its live range ends.
@@ -2091,7 +2175,23 @@ impl CodeGenerator {
                         // Body. continue jumps to the increment, break to the end.
                         self.loop_label_stack
                             .push((loop_continue_label.clone(), loop_end_label.clone()));
+                        self.loop_depth += 1;
+                        // Weight preprocessing demand by the iteration count when
+                        // the range is a literal `a..b`; otherwise the op count is
+                        // dynamic (caught by loop_depth > literal bounds).
+                        let range_count = match (int_literal_u64(Some(left)), int_literal_u64(Some(right))) {
+                            (Some(a), Some(b)) if b > a => Some(b - a),
+                            _ => None,
+                        };
+                        let range_bounded = range_count.is_some();
+                        if let Some(count) = range_count {
+                            self.active_loop_bounds.push((var_name.clone(), count));
+                        }
                         let body_result = self.compile_node(body);
+                        if range_bounded {
+                            self.active_loop_bounds.pop();
+                        }
+                        self.loop_depth -= 1;
                         self.loop_label_stack.pop();
                         let (_body_vr, _body_is_secret) = body_result?;
 
@@ -2176,9 +2276,14 @@ impl CodeGenerator {
                             format!("for_continue_{}", self.current_instructions.len());
 
                         // Body. continue jumps to the increment, break to the end.
+                        // Iterating a collection: the length is not a literal, so
+                        // any MPC op inside is dynamic-demand (loop_depth exceeds
+                        // the literal-bound count).
                         self.loop_label_stack
                             .push((loop_continue_label.clone(), loop_end_label.clone()));
+                        self.loop_depth += 1;
                         let body_result = self.compile_node(body);
+                        self.loop_depth -= 1;
                         self.loop_label_stack.pop();
                         let (_body_vr, _body_is_secret) = body_result?;
 

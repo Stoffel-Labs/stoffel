@@ -143,7 +143,8 @@ pub use mpc_engine::{
 // Re-export MPC helpers (HB-specific helpers gated)
 pub use mpc::{
     avss_protocol_instance_id, default_node_opts, honeybadger_node_opts,
-    honeybadger_protocol_instance_id, honeybadger_protocol_timeout,
+    honeybadger_node_opts_with_truncation, honeybadger_protocol_instance_id,
+    honeybadger_protocol_timeout,
 };
 // Re-export HoneyBadger QUIC server
 pub use hb_server::{
