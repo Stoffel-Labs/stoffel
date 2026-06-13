@@ -24,7 +24,7 @@ opentelemetry-stdout = { version = "0.32.0", default-features = false, features 
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1.0", features = ["derive"] }
-stoffelnet = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-networking.git", branch = "feature/robust-identity-based-on-cert" }
+stoffelnet = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-networking.git", branch = "main" }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1.47.1", features = ["rt", "sync", "time"] }
