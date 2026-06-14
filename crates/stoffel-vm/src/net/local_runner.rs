@@ -343,24 +343,10 @@ impl LocalCoordinatorRunner {
         if self.binary.client_io_manifest.clients.is_empty() && self.client_inputs.is_empty() {
             return Ok(());
         }
-        // The reserved-index layout is uniform (client_store_index =
-        // reserved_index / client_input_count), so every input client must
-        // provide the same number of values. Catch mismatches here instead
-        // of deadlocking in wait_for_indices.
-        let counts: Vec<(u64, usize)> = self
-            .client_inputs
-            .iter()
-            .filter(|client| !client.values.is_empty())
-            .map(|client| (client.client_slot, client.values.len()))
-            .collect();
-        if let Some((_, first_count)) = counts.first() {
-            if counts.iter().any(|(_, count)| count != first_count) {
-                return Err(LocalCoordinatorRunnerError::Configuration(format!(
-                    "all clients must provide the same number of inputs (the reserved share-index layout is uniform); got {:?} as (client_slot, count) pairs — pad shorter clients with explicit values",
-                    counts
-                )));
-            }
-        }
+        // Clients may supply different numbers of inputs; `write_client_identities`
+        // pads each input client up to the max so the reserved-index layout stays
+        // uniform (the VM maps reserved_index -> client by dividing by that count)
+        // without the caller having to pad by hand.
         if !self.binary.client_io_manifest.clients.is_empty()
             && self.client_inputs.is_empty()
             && self
@@ -571,7 +557,9 @@ impl LocalCoordinatorRunner {
                         .join(","),
                 )
                 .arg("--client-input-count")
-                .arg(self.max_client_input_count().to_string());
+                .arg(self.max_client_input_count().to_string())
+                .arg("--client-input-total")
+                .arg(self.total_client_input_count().to_string());
             command.arg("--client-roster").arg(
                 context
                     .clients
@@ -623,6 +611,16 @@ impl LocalCoordinatorRunner {
             .map(|client| client.values.len())
             .max()
             .unwrap_or(0)
+    }
+
+    /// Total number of input values across all clients (sum of per-client
+    /// counts). Clients may supply different numbers of inputs, so the input
+    /// mask reservation/wait must use this actual total, not `num_clients * max`.
+    fn total_client_input_count(&self) -> usize {
+        self.client_inputs
+            .iter()
+            .map(|client| client.values.len())
+            .sum()
     }
 }
 
@@ -1151,6 +1149,9 @@ fn write_client_identities(
 ) -> LocalCoordinatorRunnerResult<Vec<LocalClientIdentity>> {
     let mut sorted_inputs = inputs.to_vec();
     sorted_inputs.sort_by_key(|input| input.client_slot);
+    // Reserve a contiguous block per client in slot order (clients may supply
+    // different numbers of inputs). The VM groups the returned shares per client
+    // (see `store_reserved_client_inputs`), so no uniform padding is required.
     let mut next_reserved_index = 0_u64;
     sorted_inputs
         .into_iter()

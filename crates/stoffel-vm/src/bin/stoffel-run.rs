@@ -110,7 +110,13 @@ fn plan_preprocessing(
     };
 
     // Dynamic programs may undercount, so give them an extra octave before banding.
-    let with_headroom = |n: u64| -> u64 { if demand.dynamic { n.saturating_mul(2) } else { n } };
+    let with_headroom = |n: u64| -> u64 {
+        if demand.dynamic {
+            n.saturating_mul(2)
+        } else {
+            n
+        }
+    };
 
     let prandbits = env_u64("STOFFEL_PREPROCESSING_PRANDBITS")
         .map(band_pow2)
@@ -315,8 +321,11 @@ fn store_reserved_client_inputs<F, I>(
     }
 
     let mut seen_reserved_indices = std::collections::HashSet::new();
-    let mut grouped_inputs: std::collections::BTreeMap<usize, Vec<Option<RobustShare<F>>>> =
-        std::collections::BTreeMap::new();
+    // Group each client's shares independently — clients may provide DIFFERENT
+    // numbers of inputs. The runner reserves a contiguous index block per client
+    // in slot order, so ordering clients by their lowest reserved index recovers
+    // the client-store ordinal (matching `client_input_slots` / the roster).
+    let mut per_client: Vec<(u64, Vec<RobustShare<F>>)> = Vec::new();
 
     for (client_id, shares) in client_inputs {
         if shares.is_empty() {
@@ -350,6 +359,11 @@ fn store_reserved_client_inputs<F, I>(
             reserved_indices.iter().copied().zip(shares).collect();
         indexed_shares.sort_by_key(|(reserved_index, _)| *reserved_index);
 
+        let min_reserved_index = indexed_shares
+            .first()
+            .map(|(reserved_index, _)| *reserved_index)
+            .unwrap_or(0);
+        let mut ordered_shares = Vec::with_capacity(indexed_shares.len());
         for (reserved_index, share) in indexed_shares {
             if reserved_index > usize::MAX as u64 {
                 eprintln!(
@@ -358,46 +372,22 @@ fn store_reserved_client_inputs<F, I>(
                 );
                 exit(13);
             }
-
-            let reserved_index = reserved_index as usize;
-            if !seen_reserved_indices.insert(reserved_index) {
+            if !seen_reserved_indices.insert(reserved_index as usize) {
                 eprintln!(
                     "Coordinator assigned duplicate reserved index {} while collecting inputs",
                     reserved_index
                 );
                 exit(13);
             }
-
-            let client_store_index = reserved_index / client_input_count;
-            let client_share_index = reserved_index % client_input_count;
-            let client_shares = grouped_inputs.entry(client_store_index).or_insert_with(|| {
-                std::iter::repeat_with(|| None)
-                    .take(client_input_count)
-                    .collect()
-            });
-            if client_shares[client_share_index].replace(share).is_some() {
-                eprintln!(
-                    "Coordinator assigned duplicate share index {} for client store index {}",
-                    client_share_index, client_store_index
-                );
-                exit(13);
-            }
+            ordered_shares.push(share);
         }
+        per_client.push((min_reserved_index, ordered_shares));
     }
 
-    for (client_store_index, client_shares) in grouped_inputs {
-        let mut shares = Vec::with_capacity(client_input_count);
-        for (share_index, share) in client_shares.into_iter().enumerate() {
-            let Some(share) = share else {
-                eprintln!(
-                    "Coordinator did not provide share index {} for client store index {}",
-                    share_index, client_store_index
-                );
-                exit(13);
-            };
-            shares.push(share);
-        }
+    // Slot order == reservation order == ascending min reserved index.
+    per_client.sort_by_key(|(min_reserved_index, _)| *min_reserved_index);
 
+    for (client_store_index, (_min_reserved_index, shares)) in per_client.into_iter().enumerate() {
         let client_slot = client_input_slots
             .get(client_store_index)
             .copied()
@@ -434,10 +424,11 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
     }
 
     let mut seen_reserved_indices = std::collections::HashSet::new();
-    let mut grouped_inputs: std::collections::BTreeMap<
-        usize,
-        Vec<Option<FeldmanShamirShare<F, G>>>,
-    > = std::collections::BTreeMap::new();
+    // Group each client's shares independently — clients may provide DIFFERENT
+    // numbers of inputs. The runner reserves a contiguous index block per client
+    // in slot order, so ordering clients by their lowest reserved index recovers
+    // the client-store ordinal (matching `client_input_slots` / the roster).
+    let mut per_client: Vec<(u64, Vec<FeldmanShamirShare<F, G>>)> = Vec::new();
 
     for (client_id, shares) in client_inputs {
         if shares.is_empty() {
@@ -471,6 +462,11 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
             reserved_indices.iter().copied().zip(shares).collect();
         indexed_shares.sort_by_key(|(reserved_index, _)| *reserved_index);
 
+        let min_reserved_index = indexed_shares
+            .first()
+            .map(|(reserved_index, _)| *reserved_index)
+            .unwrap_or(0);
+        let mut ordered_shares = Vec::with_capacity(indexed_shares.len());
         for (reserved_index, share) in indexed_shares {
             if reserved_index > usize::MAX as u64 {
                 eprintln!(
@@ -479,46 +475,22 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
                 );
                 exit(13);
             }
-
-            let reserved_index = reserved_index as usize;
-            if !seen_reserved_indices.insert(reserved_index) {
+            if !seen_reserved_indices.insert(reserved_index as usize) {
                 eprintln!(
                     "Coordinator assigned duplicate reserved index {} while collecting inputs",
                     reserved_index
                 );
                 exit(13);
             }
-
-            let client_store_index = reserved_index / client_input_count;
-            let client_share_index = reserved_index % client_input_count;
-            let client_shares = grouped_inputs.entry(client_store_index).or_insert_with(|| {
-                std::iter::repeat_with(|| None)
-                    .take(client_input_count)
-                    .collect()
-            });
-            if client_shares[client_share_index].replace(share).is_some() {
-                eprintln!(
-                    "Coordinator assigned duplicate share index {} for client store index {}",
-                    client_share_index, client_store_index
-                );
-                exit(13);
-            }
+            ordered_shares.push(share);
         }
+        per_client.push((min_reserved_index, ordered_shares));
     }
 
-    for (client_store_index, client_shares) in grouped_inputs {
-        let mut shares = Vec::with_capacity(client_input_count);
-        for (share_index, share) in client_shares.into_iter().enumerate() {
-            let Some(share) = share else {
-                eprintln!(
-                    "Coordinator did not provide share index {} for client store index {}",
-                    share_index, client_store_index
-                );
-                exit(13);
-            };
-            shares.push(share);
-        }
+    // Slot order == reservation order == ascending min reserved index.
+    per_client.sort_by_key(|(min_reserved_index, _)| *min_reserved_index);
 
+    for (client_store_index, (_min_reserved_index, shares)) in per_client.into_iter().enumerate() {
         let client_slot = client_input_slots
             .get(client_store_index)
             .copied()
@@ -2330,7 +2302,13 @@ where
         protocol_timeout.as_secs()
     );
     let mpc_opts = honeybadger_node_opts_with_truncation(
-        n, t, n_triples, n_random, n_prandbit, n_prandint, instance_id,
+        n,
+        t,
+        n_triples,
+        n_random,
+        n_prandbit,
+        n_prandint,
+        instance_id,
     )
     .unwrap_or_else(|e| {
         eprintln!("Failed to create MPC node options: {}", e);
@@ -3464,6 +3442,10 @@ async fn main() {
     let mut output_fixed_point_fractional_bits: Option<usize> = None;
     let mut expected_client_count: Option<usize> = None;
     let mut client_input_count: usize = 1;
+    // Actual TOTAL number of client input values across all clients (sum of each
+    // client's count). 0 = unset, in which case we fall back to the uniform
+    // `num_clients * client_input_count`. Lets clients provide different counts.
+    let mut client_input_total: usize = 0;
     let mut _enable_nat: bool = false;
     let mut _stun_servers: Vec<SocketAddr> = Vec::new();
     let mut server_addrs: Vec<SocketAddr> = Vec::new();
@@ -3514,6 +3496,7 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--output-fixed-point-fractional-bits") {
         } else if let Some(_rest) = arg.strip_prefix("--wait-for-clients") {
         } else if let Some(_rest) = arg.strip_prefix("--client-input-count") {
+        } else if let Some(_rest) = arg.strip_prefix("--client-input-total") {
         } else if let Some(_rest) = arg.strip_prefix("--stun-servers") {
         } else if let Some(_rest) = arg.strip_prefix("--servers") {
         } else if let Some(_rest) = arg.strip_prefix("--mpc-backend") {
@@ -3625,6 +3608,11 @@ async fn main() {
             "--client-input-count" => {
                 if let Some(v) = args_iter.next() {
                     client_input_count = v.parse().expect("Invalid --client-input-count");
+                }
+            }
+            "--client-input-total" => {
+                if let Some(v) = args_iter.next() {
+                    client_input_total = v.parse().expect("Invalid --client-input-total");
                 }
             }
             "--stun-servers" => {
@@ -4657,8 +4645,14 @@ async fn main() {
                             .expect("--rpc-bind required with coordinator");
 
                         if !input_ids.is_empty() {
-                            let total_input_count =
-                                input_ids.len().saturating_mul(client_input_count);
+                            // Actual total across clients (supports asymmetric
+                            // per-client input counts); fall back to the uniform
+                            // estimate only when the total wasn't supplied.
+                            let total_input_count = if client_input_total > 0 {
+                                client_input_total
+                            } else {
+                                input_ids.len().saturating_mul(client_input_count)
+                            };
                             let precomputed_mask_shares = Some(
                                 engine
                                     .node_handle()
@@ -4772,8 +4766,11 @@ async fn main() {
                             .expect("--rpc-bind required with on-chain coordinator");
 
                         if !on_chain_input_ids.is_empty() {
-                            let total_input_count =
-                                on_chain_input_ids.len().saturating_mul(client_input_count);
+                            let total_input_count = if client_input_total > 0 {
+                                client_input_total
+                            } else {
+                                on_chain_input_ids.len().saturating_mul(client_input_count)
+                            };
                             let precomputed_mask_shares = Some(
                                 engine
                                     .node_handle()
