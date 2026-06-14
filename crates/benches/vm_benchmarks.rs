@@ -31,6 +31,7 @@ impl ImmediateAsyncEngine {
     fn share_data_for_clear(clear: &ClearShareInput) -> ShareData {
         let byte = match clear.value() {
             ClearShareValue::Integer(value) => value.to_le_bytes()[0],
+            ClearShareValue::UnsignedInteger(value) => value.to_le_bytes()[0],
             ClearShareValue::FixedPoint(value) => (value.0 as i64).to_le_bytes()[0],
             ClearShareValue::Boolean(value) => u8::from(value),
         };
