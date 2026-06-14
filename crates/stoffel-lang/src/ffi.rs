@@ -451,6 +451,18 @@ unsafe fn instruction_to_c(
             operand2: *reg2,
             operand3: 0,
         },
+        stoffel_vm_types::instructions::Instruction::LDS(reg, slot) => CInstruction {
+            opcode: stoffel_vm_types::instructions::ReducedOpcode::LDS as u8,
+            operand1: *reg,
+            operand2: *slot,
+            operand3: 0,
+        },
+        stoffel_vm_types::instructions::Instruction::STS(slot, reg) => CInstruction {
+            opcode: stoffel_vm_types::instructions::ReducedOpcode::STS as u8,
+            operand1: *slot,
+            operand2: *reg,
+            operand3: 0,
+        },
     }
 }
 

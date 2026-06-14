@@ -133,7 +133,10 @@ pub fn analyze_liveness_cfg_with_liveins(
         return HashMap::new();
     }
 
-    // Collect all VRs seen
+    // Collect all VRs seen. Each VR gets a dense index so liveness can run over
+    // fixed-size bitsets (Vec<u64>) instead of cloning HashSets — the per-instruction
+    // HashSet clones were the O(n * live_set) blowup that made large functions
+    // (e.g. the vectorized AES circuit) take minutes to compile.
     let mut all_vrs: HashSet<VirtualRegister> = HashSet::new();
     for inst in instructions.iter() {
         for u in inst.uses() {
@@ -145,6 +148,35 @@ pub fn analyze_liveness_cfg_with_liveins(
     }
     for &vr in live_in {
         all_vrs.insert(vr);
+    }
+
+    // Dense, deterministic indexing (sorted so register allocation is reproducible).
+    let mut vrs: Vec<VirtualRegister> = all_vrs.into_iter().collect();
+    vrs.sort_unstable();
+    let num_vrs = vrs.len();
+    let mut vr_index: HashMap<VirtualRegister, u32> = HashMap::with_capacity(num_vrs);
+    for (i, &vr) in vrs.iter().enumerate() {
+        vr_index.insert(vr, i as u32);
+    }
+
+    // Precompute per-instruction use/def index lists once, so the hot loops below
+    // never re-call uses()/defs() (each allocates a Vec) or hash a VirtualRegister.
+    let mut inst_uses: Vec<Vec<u32>> = Vec::with_capacity(n);
+    let mut inst_defs: Vec<Vec<u32>> = Vec::with_capacity(n);
+    for inst in instructions.iter() {
+        inst_uses.push(inst.uses().iter().map(|u| vr_index[u]).collect());
+        inst_defs.push(inst.defs().iter().map(|d| vr_index[d]).collect());
+    }
+
+    // Bitset over `words` u64 lanes, one bit per dense VR index.
+    let words = (num_vrs + 63) / 64;
+    #[inline]
+    fn bit_set(bits: &mut [u64], i: u32) {
+        bits[(i >> 6) as usize] |= 1u64 << (i & 63);
+    }
+    #[inline]
+    fn bit_clear(bits: &mut [u64], i: u32) {
+        bits[(i >> 6) as usize] &= !(1u64 << (i & 63));
     }
 
     // 1) Determine basic block boundaries
@@ -182,13 +214,12 @@ pub fn analyze_liveness_cfg_with_liveins(
         }
     }
 
-    #[derive(Default, Clone)]
     struct BlockInfo {
         start: usize,
         end: usize, // exclusive
         succs: Vec<usize>,
-        use_set: HashSet<VirtualRegister>,
-        def_set: HashSet<VirtualRegister>,
+        use_bits: Vec<u64>, // used before any in-block def
+        def_bits: Vec<u64>, // defined anywhere in the block
     }
 
     let mut blocks: Vec<BlockInfo> = Vec::with_capacity(starts.len());
@@ -197,7 +228,9 @@ pub fn analyze_liveness_cfg_with_liveins(
         blocks.push(BlockInfo {
             start: s,
             end: e,
-            ..Default::default()
+            succs: Vec::new(),
+            use_bits: vec![0u64; words],
+            def_bits: vec![0u64; words],
         });
     }
 
@@ -246,127 +279,155 @@ pub fn analyze_liveness_cfg_with_liveins(
         block.succs.retain(|s| uniq.insert(*s));
     }
 
-    // 3) Compute use/def per block
+    // 3) Compute use/def per block (use = used before being defined within the block).
     for b in &mut blocks {
-        for inst in instructions.iter().take(b.end).skip(b.start) {
-            // uses
-            for u in inst.uses() {
-                if !b.def_set.contains(&u) {
-                    b.use_set.insert(u);
+        for i in b.start..b.end {
+            for &u in &inst_uses[i] {
+                if (b.def_bits[(u >> 6) as usize] >> (u & 63)) & 1 == 0 {
+                    bit_set(&mut b.use_bits, u);
                 }
             }
-            // defs
-            for d in inst.defs() {
-                b.def_set.insert(d);
+            for &d in &inst_defs[i] {
+                bit_set(&mut b.def_bits, d);
             }
         }
     }
 
-    // 4) Iterative dataflow for live_in/live_out
-    let mut live_in_b: Vec<HashSet<VirtualRegister>> = vec![HashSet::new(); blocks.len()];
-    let mut live_out_b: Vec<HashSet<VirtualRegister>> = vec![HashSet::new(); blocks.len()];
+    // 4) Iterative dataflow for live_in/live_out over bitsets (no per-block clones).
+    let mut live_in_b: Vec<Vec<u64>> = vec![vec![0u64; words]; blocks.len()];
+    let mut live_out_b: Vec<Vec<u64>> = vec![vec![0u64; words]; blocks.len()];
 
-    // Seed entry live-ins
+    // Seed entry live-ins.
     let entry_block = inst2block[0];
+    let mut entry_seed = vec![0u64; words];
     for &vr in live_in {
-        live_in_b[entry_block].insert(vr);
+        bit_set(&mut entry_seed, vr_index[&vr]);
     }
+    live_in_b[entry_block].copy_from_slice(&entry_seed);
 
+    let mut new_out = vec![0u64; words];
     let mut changed = true;
     while changed {
         changed = false;
         for bi in (0..blocks.len()).rev() {
-            // out[B] = union in[S]
-            let mut new_out: HashSet<VirtualRegister> = HashSet::new();
+            // out[B] = union of in[S] over successors
+            for w in &mut new_out {
+                *w = 0;
+            }
             for &s in &blocks[bi].succs {
-                new_out.extend(live_in_b[s].iter().copied());
-            }
-            // in[B] = use[B] ∪ (out[B] \ def[B])
-            let mut new_in = blocks[bi].use_set.clone();
-            for v in new_out.iter() {
-                if !blocks[bi].def_set.contains(v) {
-                    new_in.insert(*v);
+                let src = &live_in_b[s];
+                for w in 0..words {
+                    new_out[w] |= src[w];
                 }
             }
-            // Ensure seed live-ins at entry
-            if bi == entry_block {
-                for &vr in live_in {
-                    new_in.insert(vr);
-                }
-            }
-
-            if new_out != live_out_b[bi] {
-                live_out_b[bi] = new_out;
-                changed = true;
-            }
-            if new_in != live_in_b[bi] {
-                live_in_b[bi] = new_in;
-                changed = true;
-            }
-        }
-    }
-
-    // 5) Per-instruction liveness within each block (backwards)
-    let mut live_in_inst: Vec<HashSet<VirtualRegister>> = vec![HashSet::new(); n];
-    let mut live_out_inst: Vec<HashSet<VirtualRegister>> = vec![HashSet::new(); n];
-
-    for (bi, block) in blocks.iter().enumerate() {
-        let mut live: HashSet<VirtualRegister> = live_out_b[bi].clone();
-        // Walk backwards within block
-        for i in (block.start..block.end).rev() {
-            // out at i
-            live_out_inst[i] = live.clone();
-            // in at i = (out - defs) ∪ uses
-            let inst = &instructions[i];
-            // remove defs
-            for d in inst.defs() {
-                live.remove(&d);
-            }
-            // add uses
-            for u in inst.uses() {
-                live.insert(u);
-            }
-            live_in_inst[i] = live.clone();
-        }
-    }
-
-    // 6) Build intervals
-    let mut def_first: HashMap<VirtualRegister, usize> = HashMap::new();
-    for (i, instruction) in instructions.iter().enumerate() {
-        for d in instruction.defs() {
-            def_first
-                .entry(d)
-                .and_modify(|e| {
-                    if i < *e {
-                        *e = i;
+            {
+                let dst = &mut live_out_b[bi];
+                for w in 0..words {
+                    if dst[w] != new_out[w] {
+                        dst[w] = new_out[w];
+                        changed = true;
                     }
-                })
-                .or_insert(i);
+                }
+            }
+            // in[B] = use[B] ∪ (out[B] \ def[B]) (∪ seed at entry)
+            let block = &blocks[bi];
+            let out = &live_out_b[bi];
+            let dst = &mut live_in_b[bi];
+            for w in 0..words {
+                let mut v = block.use_bits[w] | (out[w] & !block.def_bits[w]);
+                if bi == entry_block {
+                    v |= entry_seed[w];
+                }
+                if dst[w] != v {
+                    dst[w] = v;
+                    changed = true;
+                }
+            }
         }
     }
 
-    let mut intervals: HashMap<VirtualRegister, LiveInterval> = HashMap::new();
-    for vr in all_vrs.into_iter() {
-        // start
-        let mut start = def_first.get(&vr).copied().unwrap_or(usize::MAX);
-        // If live before any instruction, find earliest index where live_in is true
-        if start == usize::MAX {
-            if let Some(i) = live_in_inst.iter().position(|live| live.contains(&vr)) {
-                start = i;
+    // 5) + 6) Extract one interval per VR from a single backward walk, without ever
+    // materializing per-instruction live sets (the previous O(n * live_set) cost):
+    //   def_first[v] = first instruction index defining v
+    //   end_idx[v]   = (last index where v is live-out) + 1, else 0
+    //   first_in[v]  = first index where v is live-in (only consulted for VRs with no def)
+    let mut def_first = vec![usize::MAX; num_vrs];
+    for (i, defs) in inst_defs.iter().enumerate() {
+        for &d in defs {
+            let di = d as usize;
+            if i < def_first[di] {
+                def_first[di] = i;
             }
         }
-        if start == usize::MAX {
-            start = 0;
+    }
+    // Only VRs with no def (function live-ins) need first_in for their start.
+    let mut undef_mask = vec![0u64; words];
+    for (vi, &df) in def_first.iter().enumerate() {
+        if df == usize::MAX {
+            bit_set(&mut undef_mask, vi as u32);
         }
-        // end = last i where live_out[i] contains vr => i+1
-        let mut end = 0usize;
-        for (i, live) in live_out_inst.iter().enumerate() {
-            if live.contains(&vr) {
-                end = i + 1;
+    }
+
+    let mut end_idx = vec![0usize; num_vrs];
+    let mut first_in = vec![usize::MAX; num_vrs];
+    let mut live = vec![0u64; words];
+    let mut seen_out = vec![0u64; words];
+    for (bi, block) in blocks.iter().enumerate() {
+        // live := live-out of the block (== live-out of its last instruction).
+        live.copy_from_slice(&live_out_b[bi]);
+        for w in &mut seen_out {
+            *w = 0;
+        }
+        for i in (block.start..block.end).rev() {
+            // `live` is live_out_inst[i]. The first (highest) index in this block where a
+            // VR appears live-out is its block-max; fold into the global max via end_idx.
+            for w in 0..words {
+                let fresh = live[w] & !seen_out[w];
+                if fresh != 0 {
+                    seen_out[w] |= fresh;
+                    let mut x = fresh;
+                    while x != 0 {
+                        let vi = w * 64 + x.trailing_zeros() as usize;
+                        x &= x - 1;
+                        if i + 1 > end_idx[vi] {
+                            end_idx[vi] = i + 1;
+                        }
+                    }
+                }
+            }
+            // Step back to live_in_inst[i] = (live - defs) ∪ uses.
+            for &d in &inst_defs[i] {
+                bit_clear(&mut live, d);
+            }
+            for &u in &inst_uses[i] {
+                bit_set(&mut live, u);
+            }
+            // Record first (lowest) live-in index, undefined VRs only.
+            for w in 0..words {
+                let mut x = live[w] & undef_mask[w];
+                while x != 0 {
+                    let vi = w * 64 + x.trailing_zeros() as usize;
+                    x &= x - 1;
+                    if i < first_in[vi] {
+                        first_in[vi] = i;
+                    }
+                }
             }
         }
-        // Ensure at least covers def-only
-        if let Some(&d) = def_first.get(&vr) {
+    }
+
+    let mut intervals: HashMap<VirtualRegister, LiveInterval> = HashMap::with_capacity(num_vrs);
+    for (vi, &vr) in vrs.iter().enumerate() {
+        let start = if def_first[vi] != usize::MAX {
+            def_first[vi]
+        } else if first_in[vi] != usize::MAX {
+            first_in[vi]
+        } else {
+            0
+        };
+        let mut end = end_idx[vi];
+        if def_first[vi] != usize::MAX {
+            let d = def_first[vi];
             if end < d + 1 {
                 end = d + 1;
             }
@@ -427,26 +488,30 @@ pub fn build_interference_graph(
     intervals: &HashMap<VirtualRegister, LiveInterval>,
 ) -> InterferenceGraph {
     let mut graph = InterferenceGraph::default();
-    let virtual_registers: Vec<VirtualRegister> = intervals.keys().cloned().collect();
 
-    // Ensure all registers are added as nodes initially
-    for &vr in &virtual_registers {
+    // Sweep line over intervals sorted by start point. Two intervals interfere iff they
+    // overlap; instead of checking all O(V^2) pairs, we keep an "active" set of intervals
+    // still live at the current start and connect each new interval only to those. This
+    // builds the exact same overlap graph in O(V log V + E) where E is the real edge count.
+    let mut items: Vec<(VirtualRegister, usize, usize)> = intervals
+        .iter()
+        .map(|(&vr, iv)| (vr, iv.start, iv.end))
+        .collect();
+    for &(vr, _, _) in &items {
         graph.add_node(vr);
     }
+    // Sort by start, then by VR for deterministic edge-insertion order.
+    items.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
 
-    // Compare every pair of intervals for overlap
-    for i in 0..virtual_registers.len() {
-        for j in (i + 1)..virtual_registers.len() {
-            let vr1 = virtual_registers[i];
-            let vr2 = virtual_registers[j];
-            let interval1 = intervals[&vr1];
-            let interval2 = intervals[&vr2];
-
-            // Check for overlap: !(interval1.end <= interval2.start || interval2.end <= interval1.start)
-            if interval1.start < interval2.end && interval2.start < interval1.end {
-                graph.add_edge(vr1, vr2);
-            }
+    // active holds (end, vr) for intervals that started earlier and have not yet expired.
+    let mut active: Vec<(usize, VirtualRegister)> = Vec::new();
+    for &(vr, start, end) in &items {
+        // Expire intervals that ended at or before this start (half-open [start, end)).
+        active.retain(|&(a_end, _)| a_end > start);
+        for &(_, other) in &active {
+            graph.add_edge(vr, other);
         }
+        active.push((end, vr));
     }
 
     graph
@@ -520,25 +585,88 @@ pub fn color_graph(
     }
     let mut stack: Vec<VirtualRegister> = Vec::new();
 
-    // --- Simplification Phase (pool-aware) ---
-    while !sg.nodes.is_empty() {
-        if let Some(v) = sg.nodes.iter().copied().find(|v| {
-            pool_degree(&sg, v, secrecy_map) < pool_capacity(v, k_clear, k_secret, secrecy_map)
-        }) {
-            stack.push(v);
-            sg.remove_node(&v);
-            continue;
-        }
+    // --- Simplification Phase (pool-aware, incremental) ---
+    // The naive version rescanned every remaining node and recomputed its pool-degree on
+    // each removal -> O(V^2), which dominated compilation of large functions. Instead we
+    // maintain each node's pool-degree incrementally: a worklist holds simplifiable
+    // (degree < capacity) nodes, and a lazy max-heap supplies the highest-degree spill
+    // candidate when nothing can be simplified. Same simplify/spill decisions, O((V+E) log V).
+    use std::collections::BinaryHeap;
 
-        // Else pick a spill candidate (max pool degree)
-        let spill = sg
-            .nodes
-            .iter()
-            .copied()
-            .max_by_key(|v| pool_degree(&sg, v, secrecy_map))
-            .expect("graph had nodes but none found");
-        stack.push(spill);
-        sg.remove_node(&spill);
+    // Deterministic node order (sg.nodes is a HashSet) so allocation is reproducible.
+    let mut active_nodes: Vec<VirtualRegister> = sg.nodes.iter().copied().collect();
+    active_nodes.sort_unstable();
+    let total = active_nodes.len();
+
+    let mut degree: HashMap<VirtualRegister, usize> = HashMap::with_capacity(total);
+    for &v in &active_nodes {
+        degree.insert(v, pool_degree(&sg, &v, secrecy_map));
+    }
+
+    let mut removed: HashSet<VirtualRegister> = HashSet::with_capacity(total);
+    let mut queued: HashSet<VirtualRegister> = HashSet::with_capacity(total);
+    let mut simplify: Vec<VirtualRegister> = Vec::new();
+    // Lazy max-heap of (degree, vr); stale entries are skipped at pop time.
+    let mut spill_heap: BinaryHeap<(usize, VirtualRegister)> = BinaryHeap::with_capacity(total);
+    for &v in &active_nodes {
+        let d = degree[&v];
+        spill_heap.push((d, v));
+        if d < pool_capacity(&v, k_clear, k_secret, secrecy_map) {
+            queued.insert(v);
+            simplify.push(v);
+        }
+    }
+
+    let mut simplified = 0usize;
+    while simplified < total {
+        // Prefer a simplifiable node; otherwise spill the highest-degree remaining node.
+        let victim = {
+            let mut chosen = None;
+            while let Some(cand) = simplify.pop() {
+                if !removed.contains(&cand) {
+                    chosen = Some(cand);
+                    break;
+                }
+            }
+            if chosen.is_none() {
+                while let Some((d, cand)) = spill_heap.pop() {
+                    if removed.contains(&cand) || degree[&cand] != d {
+                        continue; // stale entry
+                    }
+                    chosen = Some(cand);
+                    break;
+                }
+            }
+            match chosen {
+                Some(v) => v,
+                None => break,
+            }
+        };
+
+        stack.push(victim);
+        removed.insert(victim);
+        simplified += 1;
+
+        // Removing `victim` lowers the pool-degree of its same-pool, still-active neighbors.
+        let my_secret = secrecy_map[&victim];
+        if let Some(neighbors) = sg.neighbors(&victim) {
+            for &n in neighbors.iter() {
+                if removed.contains(&n) || secrecy_map[&n] != my_secret {
+                    continue;
+                }
+                let dn = degree.get_mut(&n).expect("active neighbor missing degree");
+                if *dn > 0 {
+                    *dn -= 1;
+                }
+                let new_d = *dn;
+                spill_heap.push((new_d, n));
+                if new_d < pool_capacity(&n, k_clear, k_secret, secrecy_map) && !queued.contains(&n)
+                {
+                    queued.insert(n);
+                    simplify.push(n);
+                }
+            }
+        }
     }
 
     // --- Assignment Phase ---
@@ -579,6 +707,170 @@ pub fn color_graph(
         Ok(allocation)
     } else {
         Err(AllocationError::NeedsSpilling(spilled_nodes))
+    }
+}
+
+// --- Linear-Scan Allocation ---
+
+/// Linear-scan register allocation over single live intervals.
+///
+/// This is a memory-light O(V log V) alternative to graph coloring. It never materializes
+/// an interference graph, which is essential for functions whose live-sets vastly exceed
+/// the register file (e.g. a fully-inlined vectorized AES circuit with thousands of live
+/// secret bits against 16 secret registers): there, the overlap graph is near-complete and
+/// building it alone exhausts memory.
+///
+/// Two features make the surrounding object-spill loop converge in a couple of rounds
+/// instead of growing without bound:
+/// * `reserve` registers per pool are withheld from *spillable* virtual registers, leaving
+///   headroom for the short-lived reload/store temporaries that spill lowering introduces.
+/// * VRs in `unspillable` (those reload/store temporaries and the spill-object pointer) are
+///   never chosen as spill victims and may use the reserved headroom, so once a value has
+///   been spilled it never needs to be spilled again.
+///
+/// Returns the same contract as `color_graph`: a complete allocation, or `NeedsSpilling`
+/// listing the virtual registers to spill.
+pub fn linear_scan_partition(
+    intervals: &HashMap<VirtualRegister, LiveInterval>,
+    k_clear: usize,
+    k_secret: usize,
+    reserve: usize,
+    secrecy_map: &HashMap<VirtualRegister, bool>,
+    precolored: &HashMap<VirtualRegister, PhysicalRegister>,
+    unspillable: &HashSet<VirtualRegister>,
+) -> Result<Allocation, AllocationError> {
+    use std::collections::BTreeSet;
+
+    let secret_end = k_clear + k_secret;
+    // Which allocatable pool a physical register belongs to, if any (physical R0 is the
+    // reserved ABI return register and belongs to neither pool).
+    let classify = |r: usize| -> Option<bool> {
+        if (1..k_clear).contains(&r) {
+            Some(false)
+        } else if (k_clear..secret_end).contains(&r) {
+            Some(true)
+        } else {
+            None
+        }
+    };
+
+    // Precolored physical registers are reserved for the whole function (parameters are few;
+    // this keeps the sweep provably interference-free without tracking fixed intervals).
+    let reserved: BTreeSet<usize> = precolored.values().map(|p| p.0).collect();
+    let mut free_clear: BTreeSet<usize> = (1..k_clear).filter(|r| !reserved.contains(r)).collect();
+    let mut free_secret: BTreeSet<usize> = (k_clear..secret_end)
+        .filter(|r| !reserved.contains(r))
+        .collect();
+
+    let mut order: Vec<(VirtualRegister, usize, usize)> = intervals
+        .iter()
+        .filter(|(vr, _)| !precolored.contains_key(vr))
+        .map(|(&vr, iv)| (vr, iv.start, iv.end))
+        .collect();
+    order.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+
+    let mut allocation: Allocation = precolored.clone();
+    let mut spilled: Vec<VirtualRegister> = Vec::new();
+    // Currently-assigned intervals: (end, reg, vr). Bounded by the register count, so the
+    // linear scans of it below are cheap.
+    let mut active: Vec<(usize, usize, VirtualRegister)> = Vec::new();
+
+    let take_lowest = |pool: &mut BTreeSet<usize>| -> usize {
+        let r = *pool.iter().next().expect("pool non-empty");
+        pool.remove(&r);
+        r
+    };
+
+    for &(vr, start, end) in &order {
+        // Expire intervals that ended at or before this start; reclaim their registers.
+        let mut i = 0;
+        while i < active.len() {
+            if active[i].0 <= start {
+                let reg = active[i].1;
+                match classify(reg) {
+                    Some(true) => {
+                        free_secret.insert(reg);
+                    }
+                    Some(false) => {
+                        free_clear.insert(reg);
+                    }
+                    None => {}
+                }
+                active.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+
+        let is_secret = *secrecy_map
+            .get(&vr)
+            .expect("missing secrecy_map entry for virtual register");
+        let is_unspillable = unspillable.contains(&vr);
+        let free_len = if is_secret {
+            free_secret.len()
+        } else {
+            free_clear.len()
+        };
+        // Spillable VRs must leave `reserve` registers free for unspillable spill temps.
+        let can_take = if is_unspillable {
+            free_len > 0
+        } else {
+            free_len > reserve
+        };
+
+        if can_take {
+            let reg = if is_secret {
+                take_lowest(&mut free_secret)
+            } else {
+                take_lowest(&mut free_clear)
+            };
+            allocation.insert(vr, PhysicalRegister(reg));
+            active.push((end, reg, vr));
+            continue;
+        }
+
+        // No register available within budget: reuse a spillable active's register.
+        let mut victim: Option<usize> = None;
+        for (idx, a) in active.iter().enumerate() {
+            if classify(a.1) == Some(is_secret) && !unspillable.contains(&a.2) {
+                if victim.map_or(true, |best: usize| a.0 > active[best].0) {
+                    victim = Some(idx);
+                }
+            }
+        }
+
+        if is_unspillable {
+            // An unspillable value must be placed; steal the furthest spillable register.
+            match victim {
+                Some(idx) => {
+                    let stolen_reg = active[idx].1;
+                    spilled.push(active[idx].2);
+                    allocation.remove(&active[idx].2);
+                    allocation.insert(vr, PhysicalRegister(stolen_reg));
+                    active[idx] = (end, stolen_reg, vr);
+                }
+                None => return Err(AllocationError::PoolExhausted(vr, is_secret)),
+            }
+        } else {
+            // Classic linear-scan heuristic: steal the furthest spillable register if it
+            // outlives the current interval, otherwise spill the current interval.
+            match victim {
+                Some(idx) if active[idx].0 > end => {
+                    let stolen_reg = active[idx].1;
+                    spilled.push(active[idx].2);
+                    allocation.remove(&active[idx].2);
+                    allocation.insert(vr, PhysicalRegister(stolen_reg));
+                    active[idx] = (end, stolen_reg, vr);
+                }
+                _ => spilled.push(vr),
+            }
+        }
+    }
+
+    if spilled.is_empty() {
+        Ok(allocation)
+    } else {
+        Err(AllocationError::NeedsSpilling(spilled))
     }
 }
 
@@ -648,11 +940,13 @@ impl InstructionRegisterAnalysis for Instruction {
             | Instruction::XOR(r, _, _)
             | Instruction::NOT(r, _)
             | Instruction::SHL(r, _, _)
-            | Instruction::SHR(r, _, _) => vec![VirtualRegister(*r)],
+            | Instruction::SHR(r, _, _)
+            | Instruction::LDS(r, _) => vec![VirtualRegister(*r)],
             // no defs here:
             Instruction::RET(_)
             | Instruction::PUSHARG(_)
             | Instruction::CMP(_, _)
+            | Instruction::STS(_, _)
             | Instruction::JMP(_)
             | Instruction::JMPEQ(_)
             | Instruction::JMPNEQ(_)
@@ -669,7 +963,8 @@ impl InstructionRegisterAnalysis for Instruction {
             Instruction::MOV(_, r_src)
             | Instruction::NOT(_, r_src)
             | Instruction::RET(r_src)
-            | Instruction::PUSHARG(r_src) => vec![VirtualRegister(*r_src)],
+            | Instruction::PUSHARG(r_src)
+            | Instruction::STS(_, r_src) => vec![VirtualRegister(*r_src)],
             Instruction::ADD(_, r1, r2)
             | Instruction::SUB(_, r1, r2)
             | Instruction::MUL(_, r1, r2)
@@ -683,6 +978,7 @@ impl InstructionRegisterAnalysis for Instruction {
             | Instruction::CMP(r1, r2) => vec![VirtualRegister(*r1), VirtualRegister(*r2)],
             Instruction::LD(_, _)
             | Instruction::LDI(_, _)
+            | Instruction::LDS(_, _)
             | Instruction::JMP(_)
             | Instruction::JMPEQ(_)
             | Instruction::JMPNEQ(_)
@@ -745,6 +1041,9 @@ impl InstructionRegisterAnalysis for Instruction {
             Instruction::CMP(vr1, vr2) => Instruction::CMP(map_reg(vr1), map_reg(vr2)),
             Instruction::RET(vr_src) => Instruction::RET(map_reg(vr_src)),
             Instruction::PUSHARG(vr_src) => Instruction::PUSHARG(map_reg(vr_src)),
+            // Spill-slot ops: remap the register operand, leave the slot index as-is.
+            Instruction::LDS(vr_dest, slot) => Instruction::LDS(map_reg(vr_dest), slot),
+            Instruction::STS(slot, vr_src) => Instruction::STS(slot, map_reg(vr_src)),
             // Instructions without registers remain the same
             Instruction::JMP(ref label) => Instruction::JMP(label.clone()),
             Instruction::JMPEQ(ref label) => Instruction::JMPEQ(label.clone()),

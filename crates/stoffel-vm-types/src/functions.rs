@@ -359,6 +359,12 @@ impl VMFunction {
                 Instruction::CMP(reg1, reg2) => {
                     resolved.push(ResolvedInstruction::CMP(*reg1, *reg2));
                 }
+                Instruction::LDS(reg, slot) => {
+                    resolved.push(ResolvedInstruction::LDS(*reg, *slot));
+                }
+                Instruction::STS(slot, reg) => {
+                    resolved.push(ResolvedInstruction::STS(*slot, *reg));
+                }
             }
         }
 
@@ -392,7 +398,11 @@ fn max_referenced_register(instruction: &Instruction) -> Option<usize> {
         Instruction::LD(reg, _)
         | Instruction::LDI(reg, _)
         | Instruction::RET(reg)
-        | Instruction::PUSHARG(reg) => Some(*reg),
+        | Instruction::PUSHARG(reg)
+        // For LDS/STS the slot is a spill-area index, not a register, so only the
+        // register operand contributes to the register count.
+        | Instruction::LDS(reg, _)
+        | Instruction::STS(_, reg) => Some(*reg),
         Instruction::MOV(dest, src) | Instruction::NOT(dest, src) | Instruction::CMP(dest, src) => {
             Some((*dest).max(*src))
         }
@@ -426,7 +436,9 @@ fn validate_instruction_registers(
         Instruction::LD(dest, _)
         | Instruction::LDI(dest, _)
         | Instruction::RET(dest)
-        | Instruction::PUSHARG(dest) => {
+        | Instruction::PUSHARG(dest)
+        | Instruction::LDS(dest, _)
+        | Instruction::STS(_, dest) => {
             validate_register(function_name, instruction_index, *dest, register_count)?;
         }
         Instruction::MOV(dest, src) | Instruction::NOT(dest, src) | Instruction::CMP(dest, src) => {

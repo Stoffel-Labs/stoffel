@@ -148,6 +148,9 @@ pub enum ResolvedInstruction {
     PUSHARG(usize), // PUSHARG r1
     // Comparison
     CMP(usize, usize), // CMP r1, r2
+    // Spill-slot access
+    LDS(usize, usize), // LDS r1, slot
+    STS(usize, usize), // STS slot, r1
 }
 
 #[derive(Debug, Clone, Default)]
@@ -305,6 +308,10 @@ impl BytecodeChunk {
                 Instruction::PUSHARG(reg) => ResolvedInstruction::PUSHARG(*reg),
 
                 Instruction::CMP(reg1, reg2) => ResolvedInstruction::CMP(*reg1, *reg2),
+
+                Instruction::LDS(reg, slot) => ResolvedInstruction::LDS(*reg, *slot),
+
+                Instruction::STS(slot, reg) => ResolvedInstruction::STS(*slot, *reg),
             };
 
             resolved.push(resolved_instruction);

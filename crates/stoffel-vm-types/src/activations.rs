@@ -289,6 +289,9 @@ pub struct ActivationRecord {
     upvalues: Vec<Upvalue>,
     /// Argument stack for function calls
     stack: SmallVec<[Value; 8]>,
+    /// Register-allocator spill area: a stable per-frame slot store, independent of
+    /// the volatile argument `stack`, written/read by the STS/LDS instructions.
+    spill: Vec<Value>,
     /// Comparison flag for conditional jumps
     compare_flag: CompareFlag,
     /// Current instruction pointer
@@ -334,6 +337,7 @@ impl ActivationRecord {
             registers: RegisterFile::new(layout, register_count),
             upvalues,
             stack: SmallVec::new(),
+            spill: Vec::new(),
             compare_flag: CompareFlag::default(),
             instruction_pointer: InstructionPointer::default(),
             closure,
@@ -353,6 +357,7 @@ impl ActivationRecord {
             registers,
             upvalues,
             stack: SmallVec::new(),
+            spill: Vec::new(),
             compare_flag: CompareFlag::default(),
             instruction_pointer: InstructionPointer::default(),
             closure,
@@ -552,6 +557,19 @@ impl ActivationRecord {
 
     pub fn clear_stack(&mut self) {
         self.stack.clear();
+    }
+
+    /// Store a value into spill slot `slot`, growing the spill area as needed.
+    pub fn spill_store(&mut self, slot: usize, value: Value) {
+        if slot >= self.spill.len() {
+            self.spill.resize(slot + 1, Value::Unit);
+        }
+        self.spill[slot] = value;
+    }
+
+    /// Load the value in spill slot `slot` (Unit if never written).
+    pub fn spill_load(&self, slot: usize) -> Value {
+        self.spill.get(slot).cloned().unwrap_or(Value::Unit)
     }
 
     pub fn take_stack(&mut self) -> SmallVec<[Value; 8]> {

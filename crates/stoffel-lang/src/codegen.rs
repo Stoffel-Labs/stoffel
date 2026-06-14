@@ -511,6 +511,8 @@ impl CodeGenerator {
             Instruction::RET(src) => Instruction::RET(map_use(*src)),
             Instruction::PUSHARG(src) => Instruction::PUSHARG(map_use(*src)),
             Instruction::CMP(a, b) => Instruction::CMP(map_use(*a), map_use(*b)),
+            Instruction::LDS(dest, slot) => Instruction::LDS(map_def(*dest), *slot),
+            Instruction::STS(slot, src) => Instruction::STS(*slot, map_use(*src)),
             Instruction::JMP(label) => Instruction::JMP(label.clone()),
             Instruction::JMPEQ(label) => Instruction::JMPEQ(label.clone()),
             Instruction::JMPNEQ(label) => Instruction::JMPNEQ(label.clone()),
@@ -521,158 +523,80 @@ impl CodeGenerator {
         }
     }
 
-    fn lower_spills_into_object(
+    /// Lower spilled virtual registers to stack-slot traffic (LDS/STS).
+    ///
+    /// Each spilled VR is given a stable spill slot. Every use is reloaded into a fresh
+    /// short-lived scratch register with `LDS` immediately before the instruction, and
+    /// every def is computed into a fresh scratch register and written back with `STS`
+    /// immediately after. Because `LDS`/`STS` are single instructions (not CALLs) they
+    /// can sit anywhere — including between the `PUSHARG`s of a call — so no operand needs
+    /// to be held live across a whole argument run. That keeps reload pressure bounded by
+    /// a couple of scratch registers and lets the spill loop converge in a couple of
+    /// rounds regardless of how large (e.g. inlined) the function is.
+    ///
+    /// `next_spill_slot` is the function-wide monotonic slot counter, so slots never
+    /// collide across spill rounds.
+    fn lower_spills_into_slots(
         instructions: Vec<Instruction>,
         labels: HashMap<String, usize>,
-        constants: &mut Vec<Constant>,
         next_virtual_reg: &mut usize,
         secrecy_map: &mut HashMap<VirtualRegister, bool>,
         spilled_vrs: &[VirtualRegister],
-        protected_prologue_len: usize,
+        next_spill_slot: &mut usize,
     ) -> (Vec<Instruction>, HashMap<String, usize>) {
         use crate::register_allocator::InstructionRegisterAnalysis;
 
         let spilled: HashSet<VirtualRegister> = spilled_vrs.iter().copied().collect();
-        let mut out = Vec::with_capacity(instructions.len() + spilled.len() * 8);
-        let spill_object_vr = Self::fresh_virtual_register(next_virtual_reg, secrecy_map, false);
-        let prologue_len = protected_prologue_len.min(instructions.len());
-        let mut pending_prologue_stores = Vec::new();
+
+        // Assign each spilled VR a fresh, stable spill slot.
+        let mut slot_of: HashMap<VirtualRegister, usize> = HashMap::new();
+        for &vr in spilled_vrs {
+            slot_of.entry(vr).or_insert_with(|| {
+                let s = *next_spill_slot;
+                *next_spill_slot += 1;
+                s
+            });
+        }
+
+        let mut out = Vec::with_capacity(instructions.len() + spilled.len() * 4);
         let mut old_to_new = vec![0usize; instructions.len() + 1];
 
-        for i in 0..prologue_len {
+        for (i, instruction) in instructions.iter().enumerate() {
             old_to_new[i] = out.len();
-            let instruction = &instructions[i];
-            let mut mapped_defs = HashMap::new();
 
+            // Reload each spilled use into a fresh scratch register just before the
+            // instruction.
+            let mut mapped_uses: HashMap<VirtualRegister, VirtualRegister> = HashMap::new();
+            for used_vr in instruction.uses() {
+                if spilled.contains(&used_vr) && !mapped_uses.contains_key(&used_vr) {
+                    let is_secret = *secrecy_map.get(&used_vr).unwrap_or(&false);
+                    let scratch =
+                        Self::fresh_virtual_register(next_virtual_reg, secrecy_map, is_secret);
+                    out.push(Instruction::LDS(scratch.0, slot_of[&used_vr]));
+                    mapped_uses.insert(used_vr, scratch);
+                }
+            }
+
+            // Spilled defs are computed into a fresh scratch register, then stored back.
+            let mut mapped_defs: HashMap<VirtualRegister, VirtualRegister> = HashMap::new();
             for def_vr in instruction.defs() {
                 if spilled.contains(&def_vr) {
-                    let value_is_secret = *secrecy_map.get(&def_vr).unwrap_or(&false);
-                    let scratch = Self::fresh_virtual_register(
-                        next_virtual_reg,
-                        secrecy_map,
-                        value_is_secret,
-                    );
+                    let is_secret = *secrecy_map.get(&def_vr).unwrap_or(&false);
+                    let scratch =
+                        Self::fresh_virtual_register(next_virtual_reg, secrecy_map, is_secret);
                     mapped_defs.insert(def_vr, scratch);
-                    pending_prologue_stores.push((def_vr, scratch));
                 }
             }
 
             out.push(Self::remap_instruction_registers(
                 instruction,
-                &HashMap::new(),
+                &mapped_uses,
                 &mapped_defs,
             ));
-        }
-        old_to_new[prologue_len] = out.len();
-
-        out.push(Instruction::CALL("create_object".to_string()));
-        out.push(Instruction::MOV(spill_object_vr.0, 0));
-
-        for (spilled_vr, scratch_vr) in pending_prologue_stores {
-            Self::emit_spill_store(
-                &mut out,
-                constants,
-                next_virtual_reg,
-                secrecy_map,
-                spill_object_vr,
-                spilled_vr,
-                scratch_vr,
-            );
-        }
-
-        let mut i = prologue_len;
-        while i < instructions.len() {
-            old_to_new[i] = out.len();
-
-            if matches!(instructions[i], Instruction::PUSHARG(_)) {
-                let start = i;
-                let mut end = i;
-                while end < instructions.len()
-                    && matches!(instructions[end], Instruction::PUSHARG(_))
-                {
-                    end += 1;
-                }
-
-                if end < instructions.len() && matches!(instructions[end], Instruction::CALL(_)) {
-                    let mut mapped_uses = HashMap::new();
-                    for instruction in &instructions[start..end] {
-                        for used_vr in instruction.uses() {
-                            if spilled.contains(&used_vr) && !mapped_uses.contains_key(&used_vr) {
-                                let loaded = Self::emit_spill_load(
-                                    &mut out,
-                                    constants,
-                                    next_virtual_reg,
-                                    secrecy_map,
-                                    spill_object_vr,
-                                    used_vr,
-                                );
-                                mapped_uses.insert(used_vr, loaded);
-                            }
-                        }
-                    }
-                    for (old_index, instruction) in
-                        instructions.iter().enumerate().take(end).skip(start)
-                    {
-                        old_to_new[old_index] = out.len();
-                        out.push(Self::remap_instruction_registers(
-                            instruction,
-                            &mapped_uses,
-                            &HashMap::new(),
-                        ));
-                    }
-                    old_to_new[end] = out.len();
-                    out.push(instructions[end].clone());
-                    i = end + 1;
-                    continue;
-                }
-            }
-
-            let instruction = &instructions[i];
-            let mut mapped_uses = HashMap::new();
-            for used_vr in instruction.uses() {
-                if spilled.contains(&used_vr) && !mapped_uses.contains_key(&used_vr) {
-                    let loaded = Self::emit_spill_load(
-                        &mut out,
-                        constants,
-                        next_virtual_reg,
-                        secrecy_map,
-                        spill_object_vr,
-                        used_vr,
-                    );
-                    mapped_uses.insert(used_vr, loaded);
-                }
-            }
-
-            let mut mapped_defs = HashMap::new();
-            for def_vr in instruction.defs() {
-                if spilled.contains(&def_vr) {
-                    let value_is_secret = *secrecy_map.get(&def_vr).unwrap_or(&false);
-                    let scratch = Self::fresh_virtual_register(
-                        next_virtual_reg,
-                        secrecy_map,
-                        value_is_secret,
-                    );
-                    mapped_defs.insert(def_vr, scratch);
-                }
-            }
-
-            let rewritten =
-                Self::remap_instruction_registers(instruction, &mapped_uses, &mapped_defs);
-            out.push(rewritten);
 
             for (spilled_vr, scratch_vr) in mapped_defs {
-                Self::emit_spill_store(
-                    &mut out,
-                    constants,
-                    next_virtual_reg,
-                    secrecy_map,
-                    spill_object_vr,
-                    spilled_vr,
-                    scratch_vr,
-                );
+                out.push(Instruction::STS(slot_of[&spilled_vr], scratch_vr.0));
             }
-
-            i += 1;
         }
         old_to_new[instructions.len()] = out.len();
 
@@ -702,6 +626,20 @@ impl CodeGenerator {
     ) -> CompilerResult<register_allocator::Allocation> {
         let k_clear = SECRET_REGISTER_START;
         let k_secret = MAX_REGISTERS - k_clear;
+        // Once spilling has started, hold back this many registers per pool so the reload
+        // and store temporaries that spill lowering introduces (which we mark unspillable)
+        // always have a home. This is what lets the loop converge in a couple of rounds:
+        // a value that has already been spilled never needs to be spilled again.
+        const SPILL_RESERVE: usize = 6;
+
+        // Virtual registers created by spill lowering (the short-lived reload/store
+        // scratch registers). They are never chosen as spill victims and may use the
+        // reserved headroom above.
+        let mut unspillable: std::collections::HashSet<register_allocator::VirtualRegister> =
+            std::collections::HashSet::new();
+        // Monotonic spill-slot counter so slots never collide across rounds.
+        let mut next_spill_slot: usize = 0;
+        let _ = protected_prologue_len; // spill traffic is position-independent now
 
         for _ in 0..64 {
             let intervals = register_allocator::analyze_liveness_cfg_with_liveins(
@@ -709,29 +647,42 @@ impl CodeGenerator {
                 labels,
                 &precolored.keys().copied().collect::<Vec<_>>(),
             );
-            let graph = register_allocator::build_interference_graph(&intervals);
-            match register_allocator::color_graph(
-                &graph,
+            // No headroom needed until the first spill introduces unspillable temporaries,
+            // so functions that fit get the full register file.
+            let reserve = if unspillable.is_empty() {
+                0
+            } else {
+                SPILL_RESERVE
+            };
+            match register_allocator::linear_scan_partition(
+                &intervals,
                 k_clear,
                 k_secret,
+                reserve,
                 secrecy_map,
                 precolored,
+                &unspillable,
             ) {
                 Ok(allocation) => return Ok(allocation),
                 Err(AllocationError::NeedsSpilling(spilled_vrs)) => {
+                    let first_new_vr = *next_virtual_reg;
                     let old_instructions = std::mem::take(instructions);
                     let old_labels = std::mem::take(labels);
-                    let (lowered_instructions, lowered_labels) = Self::lower_spills_into_object(
+                    let (lowered_instructions, lowered_labels) = Self::lower_spills_into_slots(
                         old_instructions,
                         old_labels,
-                        constants,
                         next_virtual_reg,
                         secrecy_map,
                         &spilled_vrs,
-                        protected_prologue_len,
+                        &mut next_spill_slot,
                     );
                     *instructions = lowered_instructions;
                     *labels = lowered_labels;
+                    // Every VR minted during lowering is spill machinery: keep it out of
+                    // future spill decisions.
+                    for vr in first_new_vr..*next_virtual_reg {
+                        unspillable.insert(register_allocator::VirtualRegister(vr));
+                    }
                 }
                 Err(AllocationError::PoolExhausted(_, _)) => {
                     return Err(CompilerError::internal_error(format!(
@@ -2179,10 +2130,11 @@ impl CodeGenerator {
                         // Weight preprocessing demand by the iteration count when
                         // the range is a literal `a..b`; otherwise the op count is
                         // dynamic (caught by loop_depth > literal bounds).
-                        let range_count = match (int_literal_u64(Some(left)), int_literal_u64(Some(right))) {
-                            (Some(a), Some(b)) if b > a => Some(b - a),
-                            _ => None,
-                        };
+                        let range_count =
+                            match (int_literal_u64(Some(left)), int_literal_u64(Some(right))) {
+                                (Some(a), Some(b)) if b > a => Some(b - a),
+                                _ => None,
+                            };
                         let range_bounded = range_count.is_some();
                         if let Some(count) = range_count {
                             self.active_loop_bounds.push((var_name.clone(), count));

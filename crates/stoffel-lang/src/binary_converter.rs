@@ -200,6 +200,10 @@ fn convert_chunk_to_function(
             Instruction::PUSHARG(reg) => CompiledInstruction::PUSHARG(*reg),
 
             Instruction::CMP(reg1, reg2) => CompiledInstruction::CMP(*reg1, *reg2),
+
+            Instruction::LDS(reg, slot) => CompiledInstruction::LDS(*reg, *slot),
+
+            Instruction::STS(slot, reg) => CompiledInstruction::STS(*slot, *reg),
         };
 
         instructions.push(compiled_instruction);
@@ -622,6 +626,8 @@ pub fn disassemble(binary: &CompiledBinary) -> String {
                     regs[*d] = t;
                 }
                 CompiledInstruction::LD(_, _)
+                | CompiledInstruction::LDS(_, _)
+                | CompiledInstruction::STS(_, _)
                 | CompiledInstruction::JMP(_)
                 | CompiledInstruction::JMPEQ(_)
                 | CompiledInstruction::JMPNEQ(_)

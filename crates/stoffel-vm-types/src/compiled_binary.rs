@@ -23,7 +23,8 @@ use std::io::{self, Read, Write};
 // Magic bytes that identify a StoffelVM bytecode file
 pub const MAGIC_BYTES: &[u8; 4] = b"STFL";
 // Current bytecode format version
-pub const FORMAT_VERSION: u16 = 8;
+// v9: added LDS/STS spill-slot instructions
+pub const FORMAT_VERSION: u16 = 9;
 pub const CLIENT_IO_MANIFEST_FORMAT_VERSION: u16 = 2;
 pub const MPC_BACKEND_MANIFEST_FORMAT_VERSION: u16 = 3;
 pub const MPC_CURVE_MANIFEST_FORMAT_VERSION: u16 = 4;
@@ -439,6 +440,9 @@ pub enum CompiledInstruction {
     PUSHARG(usize), // PUSHARG r1
     // Comparison
     CMP(usize, usize), // CMP r1, r2
+    // Spill-slot access
+    LDS(usize, usize), // LDS r1, slot
+    STS(usize, usize), // STS slot, r1
 }
 
 impl Default for CompiledBinary {
@@ -571,6 +575,8 @@ impl CompiledBinary {
                 Instruction::RET(reg) => CompiledInstruction::RET(*reg),
                 Instruction::PUSHARG(reg) => CompiledInstruction::PUSHARG(*reg),
                 Instruction::CMP(reg1, reg2) => CompiledInstruction::CMP(*reg1, *reg2),
+                Instruction::LDS(reg, slot) => CompiledInstruction::LDS(*reg, *slot),
+                Instruction::STS(slot, reg) => CompiledInstruction::STS(*slot, *reg),
             };
 
             compiled_instructions.push(compiled);
@@ -626,6 +632,8 @@ impl CompiledBinary {
             CompiledInstruction::RET(reg) => Instruction::RET(*reg),
             CompiledInstruction::PUSHARG(reg) => Instruction::PUSHARG(*reg),
             CompiledInstruction::CMP(reg1, reg2) => Instruction::CMP(*reg1, *reg2),
+            CompiledInstruction::LDS(reg, slot) => Instruction::LDS(*reg, *slot),
+            CompiledInstruction::STS(slot, reg) => Instruction::STS(*slot, *reg),
         })
     }
 
@@ -1168,6 +1176,16 @@ impl CompiledBinary {
                 writer.write_all(&[ReducedOpcode::CMP as u8])?;
                 write_usize_as_u32(writer, *reg1, "CMP left register")?;
                 write_usize_as_u32(writer, *reg2, "CMP right register")?;
+            }
+            CompiledInstruction::LDS(reg, slot) => {
+                writer.write_all(&[ReducedOpcode::LDS as u8])?;
+                write_usize_as_u32(writer, *reg, "LDS register")?;
+                write_usize_as_u32(writer, *slot, "LDS slot")?;
+            }
+            CompiledInstruction::STS(slot, reg) => {
+                writer.write_all(&[ReducedOpcode::STS as u8])?;
+                write_usize_as_u32(writer, *slot, "STS slot")?;
+                write_usize_as_u32(writer, *reg, "STS register")?;
             }
         }
 
@@ -1831,6 +1849,16 @@ impl CompiledBinary {
                 let reg2 = read_usize_u32(reader, "CMP right register")?;
 
                 Ok(CompiledInstruction::CMP(reg1, reg2))
+            }
+            x if x == ReducedOpcode::LDS as u8 => {
+                let reg = read_usize_u32(reader, "LDS register")?;
+                let slot = read_usize_u32(reader, "LDS slot")?;
+                Ok(CompiledInstruction::LDS(reg, slot))
+            }
+            x if x == ReducedOpcode::STS as u8 => {
+                let slot = read_usize_u32(reader, "STS slot")?;
+                let reg = read_usize_u32(reader, "STS register")?;
+                Ok(CompiledInstruction::STS(slot, reg))
             }
             _ => Err(BinaryError::InvalidData(format!(
                 "Unknown opcode: {}",

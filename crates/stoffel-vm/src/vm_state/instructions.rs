@@ -173,6 +173,12 @@ impl<'state, 'instruction, R: InstructionRuntime + ?Sized>
             RuntimeInstruction::Compare { lhs, rhs } => {
                 self.state.execute_cmp(*lhs, *rhs)?;
             }
+            RuntimeInstruction::SpillLoad { dest, slot } => {
+                self.state.execute_lds(*dest, *slot, hooks_enabled)?;
+            }
+            RuntimeInstruction::SpillStore { slot, src } => {
+                self.state.execute_sts(*slot, *src, hooks_enabled)?;
+            }
         }
 
         Ok(InstructionOutcome::Continue)
@@ -397,6 +403,12 @@ impl VMState {
             RuntimeInstruction::Compare { lhs, rhs } => {
                 self.execute_cmp(*lhs, *rhs)?;
             }
+            RuntimeInstruction::SpillLoad { dest, slot } => {
+                self.execute_lds(*dest, *slot, HOOKS_ENABLED)?;
+            }
+            RuntimeInstruction::SpillStore { slot, src } => {
+                self.execute_sts(*slot, *src, HOOKS_ENABLED)?;
+            }
         }
 
         Ok(InstructionOutcome::Continue)
@@ -510,6 +522,42 @@ impl VMState {
         hooks_enabled: bool,
     ) -> VmResult<()> {
         self.write_current_register(dest, value, hooks_enabled)?;
+        Ok(())
+    }
+
+    /// LDS: load a register from a spill slot.
+    ///
+    /// This is a raw, value-preserving restore: it writes the saved value straight into
+    /// the destination register slot without any clear<->secret conversion. The register
+    /// allocator can place an array/object handle (a clear value) in a register whose VR
+    /// is "secret"-typed because its *contents* are secret; routing the restore through the
+    /// normal clear/secret write path would corrupt that handle. Spilling must round-trip
+    /// the exact value, so we bypass conversion (mirroring STS below).
+    pub(super) fn execute_lds(
+        &mut self,
+        dest: RuntimeRegister,
+        slot: usize,
+        _hooks_enabled: bool,
+    ) -> VmResult<()> {
+        let value = self.current_frame()?.spill_load(slot);
+        let record = self.current_frame_mut()?;
+        Self::ensure_frame_contains_register(record, dest)?;
+        let count = record.register_count();
+        *record
+            .register_mut(dest.register_index())
+            .ok_or_else(|| Self::register_out_of_bounds(dest.index(), count))? = value;
+        Ok(())
+    }
+
+    /// STS: store a register into a spill slot (raw, value-preserving save).
+    pub(super) fn execute_sts(
+        &mut self,
+        slot: usize,
+        src: RuntimeRegister,
+        _hooks_enabled: bool,
+    ) -> VmResult<()> {
+        let value = self.current_register_value(src)?.into_value();
+        self.current_frame_mut()?.spill_store(slot, value);
         Ok(())
     }
 
