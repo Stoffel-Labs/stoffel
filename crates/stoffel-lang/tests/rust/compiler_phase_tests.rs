@@ -1053,13 +1053,148 @@ def main() -> fix64:
 #[test]
 fn test_fixed_point_annotation_context_refines_decimal_binary_literals() {
     let source = r#"
-def main():
+def take_fixed(x: fix64) -> fix64:
+  return x
+
+def main() -> fix64:
   var x: fix64 = 1-0.0001
+  var y: fix64 = 2 * (1-0.0001)
+  var z: fix64 = take_fixed(1-0.0001)
   print(1-0.0001)
+  return x + y + z
 "#;
 
-    compile(source, "test.stfl", &default_options())
+    let program = compile(source, "test.stfl", &default_options())
         .expect("fix64 initializer context should refine decimal literal arithmetic");
+    assert_eq!(program.main_chunk.return_type, FunctionType::fix64());
+}
+
+#[test]
+fn test_primitive_annotation_context_refines_integer_binary_literals() {
+    let cases = [
+        (
+            "int8",
+            FunctionType::Int {
+                signed: true,
+                bits: 8,
+            },
+        ),
+        (
+            "int16",
+            FunctionType::Int {
+                signed: true,
+                bits: 16,
+            },
+        ),
+        (
+            "int32",
+            FunctionType::Int {
+                signed: true,
+                bits: 32,
+            },
+        ),
+        (
+            "int64",
+            FunctionType::Int {
+                signed: true,
+                bits: 64,
+            },
+        ),
+        (
+            "uint8",
+            FunctionType::Int {
+                signed: false,
+                bits: 8,
+            },
+        ),
+        (
+            "uint16",
+            FunctionType::Int {
+                signed: false,
+                bits: 16,
+            },
+        ),
+        (
+            "uint32",
+            FunctionType::Int {
+                signed: false,
+                bits: 32,
+            },
+        ),
+        (
+            "uint64",
+            FunctionType::Int {
+                signed: false,
+                bits: 64,
+            },
+        ),
+    ];
+
+    for (ty, expected_return) in cases {
+        let source = format!(
+            r#"
+def take(value: {ty}) -> {ty}:
+  return value
+
+def main() -> {ty}:
+  var local: {ty} = 1 + 2
+  var nested: {ty} = 3 * (4 + 5)
+  return take(6 + 7) + local + nested
+"#
+        );
+
+        let program = compile(&source, "test.stfl", &default_options())
+            .unwrap_or_else(|errors| panic!("{ty} primitive context should compile: {errors:?}"));
+        assert_eq!(program.main_chunk.return_type, expected_return, "{ty}");
+    }
+}
+
+#[test]
+fn test_primitive_annotation_context_refines_real_binary_literals() {
+    let cases = [
+        ("float64", FunctionType::Float),
+        ("fix32", FunctionType::Fixed { bits: 32 }),
+        ("fix64", FunctionType::Fixed { bits: 64 }),
+    ];
+
+    for (ty, expected_return) in cases {
+        let source = format!(
+            r#"
+def take(value: {ty}) -> {ty}:
+  return value
+
+def main() -> {ty}:
+  var local: {ty} = 1 - 0.0001
+  var nested: {ty} = 2 * (1 - 0.0001)
+  return take(3 - 0.0001) + local + nested
+"#
+        );
+
+        let program = compile(&source, "test.stfl", &default_options())
+            .unwrap_or_else(|errors| panic!("{ty} primitive context should compile: {errors:?}"));
+        assert_eq!(program.main_chunk.return_type, expected_return, "{ty}");
+    }
+}
+
+#[test]
+fn test_primitive_annotation_context_refines_bool_and_string_expressions() {
+    let source = r#"
+def take_bool(value: bool) -> bool:
+  return value
+
+def take_string(value: string) -> string:
+  return value
+
+def main() -> string:
+  var flag: bool = 1 and not 0
+  var also_flag: bool = take_bool(1 xor 0)
+  var message: string = "sto" + "ffel"
+  return take_string(message + "vm")
+"#;
+
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("bool and string primitive expression contexts should compile");
+    assert_eq!(program.main_chunk.return_type, FunctionType::String);
 }
 
 #[test]
@@ -1280,6 +1415,51 @@ def main() -> secret int64:
     assert!(
         call_names.iter().any(|name| name == "Share.random_int"),
         "typed Share.random should lower to VM Share.random_int, got {call_names:?}"
+    );
+}
+
+#[test]
+fn test_compile_parenthesized_share_random_reveal_uses_int64_context() {
+    let source = r#"
+def main() -> int64:
+  var x: int64 = (Share.random().reveal())
+  return x
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.random_int"),
+        "reveal result context should refine nested Share.random, got {call_names:?}"
+    );
+    assert!(
+        call_names.iter().any(|name| name == "Share.open"),
+        "Share.random().reveal() should lower reveal to VM Share.open, got {call_names:?}"
+    );
+    assert!(
+        call_names.iter().all(|name| name != "Share.random"),
+        "contextualized nested Share.random must not leave raw Share.random calls, got {call_names:?}"
+    );
+}
+
+#[test]
+fn test_compile_context_refines_nested_generic_reveal_return() {
+    let source = r#"
+def identity_secret(value: secret int64) -> secret int64:
+  return value
+
+def main() -> int64:
+  var x: int64 = reveal(identity_secret(Share.random()))
+  return x
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let call_names = collect_call_names(&program.main_chunk.instructions);
+    assert!(
+        call_names.iter().any(|name| name == "Share.random_int"),
+        "generic reveal return context should refine nested Share.random, got {call_names:?}"
+    );
+    assert!(
+        call_names.iter().all(|name| name != "Share.random"),
+        "contextualized nested Share.random must not leave raw Share.random calls, got {call_names:?}"
     );
 }
 
