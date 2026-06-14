@@ -1,0 +1,36 @@
+object polynomial:
+  # degree
+  n: int64
+  # coefficients
+  # Assumes coefficients are sorted in ascending order by highest degree coefficient
+  coeffs: list[secret int64]
+
+def add_polynomials(p: polynomial, q: polynomial) -> polynomial:
+  #if p.n != q.n:
+  #  return None
+
+  var r: polynomial
+  r.n = p.n
+  for i in 0..r.n+1:
+    r.coeffs.append(p.coeffs[i] + q.coeffs[i])
+
+  return r
+
+def main(n: int64, coeffs_p: list[secret int64], coeffs_q: list[secret int64]) -> secret int64:
+  var p: polynomial
+  p.n = n
+  p.coeffs = coeffs_p
+
+  var q: polynomial
+  q.n = n
+  q.coeffs = coeffs_q
+
+  var r: polynomial
+  r = add_polynomials(p, q)
+
+  print("polynomial p")
+  print(p)
+  print("polynomial q")
+  print(q)
+  print(" p + q = r")
+  print(r)

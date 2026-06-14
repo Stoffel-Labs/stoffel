@@ -1,0 +1,98 @@
+object polynomial:
+  # degree
+  n: int64
+  # coefficients
+  # Assumes coefficients are sorted in ascending order by highest degree coefficient
+  coeffs: list[secret int64]
+
+def exp(base: int64, exponent: int64) -> int64:
+  var acc: int64 = 1
+  for i in 0..exponent:
+    acc *= base
+  return acc
+
+def polynomial_evaluation(p: polynomial, x: int64) -> secret int64:
+  var acc: secret int64
+  for i in 0..p.n+1:
+    acc += p.coeffs[i] * exp(x, i)
+
+  return acc
+
+def add_polynomials(p: polynomial, q: polynomial) -> polynomial:
+  #if p.n != q.n:
+  #  return None
+
+  var r: polynomial
+  r.n = p.n
+  for i in 0..r.n+1:
+    r.coeffs.append(p.coeffs[i] + q.coeffs[i])
+
+  return r
+
+def scalar_mul_polynomial(p: polynomial, a: int64) -> polynomial:
+  var r: polynomial
+  r.n = p.n
+
+  for i in 0..r.n+1:
+    r.coeffs[i] = p.coeffs[i] * a
+
+  return r
+
+def mul_polynomials(p: polynomial, q: polynomial) -> polynomial:
+  var r: polynomial
+  r.n = p.n + q.n
+
+  for i in 0..r.n+1:
+    r.coeffs.append(p.coeffs[i] * q.coeffs[i])
+
+  return r
+
+# assumes len(q.coeffs) = 1 and q.n = k for some fixed k
+def mul_monomial(p: polynomial, q: polynomial) -> polynomial:
+  return mul_polynomials(p, q)
+
+def rev_k(a: polynomial, k: int64) -> polynomial:
+  #var a_at_inv_x: secret int64 = polynomial_evaluation(a, 1/x)
+  var x_monomial: polynomial
+  x_monomial.n = k
+  x_monomial.coeffs = [Share.from_clear(1)]
+  var r: polynomial = mul_monomial(a, x_monomial)
+
+  return r
+
+def random_polynomial(degree: int64) -> polynomial:
+  var p: polynomial
+  p.n = degree
+
+  for i in 0..p.n+1:
+    p.coeffs[i] = Share.random()
+
+  return p
+
+def polynomial_inversion(p: polynomial) -> polynomial:
+  var s: polynomial
+
+def div_polynomials(p: polynomial, q: polynomial) -> polynomial:
+  if p.n <= q.n:
+    var r: polynomial
+
+    return r
+
+def main(n: int64, coeffs_p: list[secret int64], coeffs_q: list[secret int64]) -> secret int64:
+  var p: polynomial
+  p.n = n
+  p.coeffs = coeffs_p
+
+  var q: polynomial
+  q.n = n
+  q.coeffs = coeffs_q
+
+  var r: polynomial
+  r = add_polynomials(p, q)
+
+  print("polynomial p")
+  print(p)
+  print("polynomial q")
+  print(q)
+  print(" p + q = r")
+  print(r)
