@@ -59,6 +59,7 @@ fn instruction_registers(instruction: &Instruction) -> Vec<usize> {
         | Instruction::LDI(reg, _)
         | Instruction::RET(reg)
         | Instruction::PUSHARG(reg) => vec![*reg],
+        Instruction::LDS(reg, _) | Instruction::STS(_, reg) => vec![*reg],
         Instruction::MOV(dest, src) | Instruction::NOT(dest, src) | Instruction::CMP(dest, src) => {
             vec![*dest, *src]
         }

@@ -83,6 +83,18 @@ pub(super) trait InstructionRuntime {
     ) -> VmResult<InstructionOutcome>;
     fn execute_pusharg(&mut self, reg: RuntimeRegister, hooks_enabled: bool) -> VmResult<()>;
     fn execute_cmp(&mut self, lhs: RuntimeRegister, rhs: RuntimeRegister) -> VmResult<()>;
+    fn execute_lds(
+        &mut self,
+        dest: RuntimeRegister,
+        slot: usize,
+        hooks_enabled: bool,
+    ) -> VmResult<()>;
+    fn execute_sts(
+        &mut self,
+        slot: usize,
+        src: RuntimeRegister,
+        hooks_enabled: bool,
+    ) -> VmResult<()>;
 }
 
 #[cfg(test)]
@@ -286,6 +298,24 @@ impl InstructionRuntime for VMState {
 
     fn execute_cmp(&mut self, lhs: RuntimeRegister, rhs: RuntimeRegister) -> VmResult<()> {
         VMState::execute_cmp(self, lhs, rhs)
+    }
+
+    fn execute_lds(
+        &mut self,
+        dest: RuntimeRegister,
+        slot: usize,
+        hooks_enabled: bool,
+    ) -> VmResult<()> {
+        VMState::execute_lds(self, dest, slot, hooks_enabled)
+    }
+
+    fn execute_sts(
+        &mut self,
+        slot: usize,
+        src: RuntimeRegister,
+        hooks_enabled: bool,
+    ) -> VmResult<()> {
+        VMState::execute_sts(self, slot, src, hooks_enabled)
     }
 }
 
@@ -1408,6 +1438,24 @@ mod tests {
 
         fn execute_cmp(&mut self, _lhs: RuntimeRegister, _rhs: RuntimeRegister) -> VmResult<()> {
             Self::unexpected("execute_cmp")
+        }
+
+        fn execute_lds(
+            &mut self,
+            _dest: RuntimeRegister,
+            _slot: usize,
+            _hooks_enabled: bool,
+        ) -> VmResult<()> {
+            Self::unexpected("execute_lds")
+        }
+
+        fn execute_sts(
+            &mut self,
+            _slot: usize,
+            _src: RuntimeRegister,
+            _hooks_enabled: bool,
+        ) -> VmResult<()> {
+            Self::unexpected("execute_sts")
         }
     }
 
