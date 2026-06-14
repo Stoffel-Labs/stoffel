@@ -414,9 +414,7 @@ impl<'a> SemanticAnalyzer<'a> {
             } => Self::is_clear_real_type(expected_type),
             AstNode::BinaryOperation {
                 op, left, right, ..
-            } if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "mod")
-                && Self::is_clear_real_type(expected_type) =>
-            {
+            } if Self::binary_operand_context_type(op, expected_type).is_some() => {
                 Self::expression_can_refine_to_expected(left, expected_type)
                     && Self::expression_can_refine_to_expected(right, expected_type)
             }
@@ -462,8 +460,40 @@ impl<'a> SemanticAnalyzer<'a> {
         )
     }
 
+    fn is_arithmetic_op(op: &str) -> bool {
+        matches!(op, "+" | "-" | "*" | "/" | "%" | "mod")
+    }
+
+    fn is_boolean_logic_op(op: &str) -> bool {
+        matches!(op, "and" | "or" | "xor")
+    }
+
     fn is_clear_numeric_type(ty: &SymbolType) -> bool {
         ty.is_integer() || Self::is_clear_real_type(ty)
+    }
+
+    fn is_clear_primitive_type(ty: &SymbolType) -> bool {
+        matches!(
+            ty.underlying_type(),
+            SymbolType::String | SymbolType::Bool | SymbolType::Nil
+        ) || Self::is_clear_numeric_type(ty)
+    }
+
+    fn binary_operand_context_type<'b>(
+        op: &str,
+        expected_type: &'b SymbolType,
+    ) -> Option<&'b SymbolType> {
+        let expected_under = expected_type.underlying_type();
+        if Self::is_arithmetic_op(op) && Self::is_clear_numeric_type(expected_under) {
+            return Some(expected_type);
+        }
+        if op == "+" && expected_under == &SymbolType::String {
+            return Some(expected_type);
+        }
+        if Self::is_boolean_logic_op(op) && expected_under == &SymbolType::Bool {
+            return Some(expected_type);
+        }
+        None
     }
 
     /// Checks if two types are compatible, allowing Unknown to match any type.
@@ -622,6 +652,336 @@ impl<'a> SemanticAnalyzer<'a> {
                     .find(|parameter| parameter.is_variadic)
                     .map(|parameter| &parameter.ty)
             })
+    }
+
+    fn bind_type_vars_from_expected_return(
+        pattern: &SymbolType,
+        expected: &SymbolType,
+        bindings: &mut HashMap<String, SymbolType>,
+    ) {
+        match (pattern, expected) {
+            (SymbolType::TypeVar(name), expected) if *expected != SymbolType::Unknown => {
+                bindings
+                    .entry(name.clone())
+                    .or_insert_with(|| expected.clone());
+            }
+            (SymbolType::Secret(pattern_inner), SymbolType::Secret(expected_inner))
+            | (SymbolType::List(pattern_inner), SymbolType::List(expected_inner)) => {
+                Self::bind_type_vars_from_expected_return(pattern_inner, expected_inner, bindings);
+            }
+            (
+                SymbolType::Dict(pattern_key, pattern_value),
+                SymbolType::Dict(expected_key, expected_value),
+            ) => {
+                Self::bind_type_vars_from_expected_return(pattern_key, expected_key, bindings);
+                Self::bind_type_vars_from_expected_return(pattern_value, expected_value, bindings);
+            }
+            (
+                SymbolType::Generic(pattern_name, pattern_params),
+                SymbolType::Generic(expected_name, expected_params),
+            ) if pattern_name == expected_name && pattern_params.len() == expected_params.len() => {
+                for (pattern_param, expected_param) in pattern_params.iter().zip(expected_params) {
+                    Self::bind_type_vars_from_expected_return(
+                        pattern_param,
+                        expected_param,
+                        bindings,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn call_signature_and_return(
+        &self,
+        function: &AstNode,
+        arguments: &[AstNode],
+    ) -> Option<(String, Vec<CallParameterInfo>, SymbolType)> {
+        let (function_name, params, return_type, is_builtin) = match function {
+            AstNode::Identifier(name, _) => {
+                if let Some((object_name, method_name)) = name.split_once('.') {
+                    let method = self
+                        .symbol_table
+                        .lookup_builtin_method(object_name, method_name)?;
+                    let call_name = if crate::builtin_registry::builtin_registry()
+                        .is_receiver_bound_method(object_name, method_name)
+                    {
+                        method_name.to_string()
+                    } else {
+                        name.clone()
+                    };
+                    (
+                        call_name,
+                        method.parameters.clone(),
+                        method.return_type.clone(),
+                        true,
+                    )
+                } else if let Some(info) = self.symbol_table.lookup_symbol(name) {
+                    match &info.kind {
+                        SymbolKind::Function {
+                            parameters,
+                            return_type,
+                        } => (name.clone(), parameters.clone(), return_type.clone(), false),
+                        SymbolKind::BuiltinFunction {
+                            parameters,
+                            return_type,
+                        } => (name.clone(), parameters.clone(), return_type.clone(), true),
+                        _ => return None,
+                    }
+                } else if let Some(first_arg) = arguments.first() {
+                    let receiver_type = self.inference_expr_type(first_arg, &HashMap::new());
+                    let method = self
+                        .symbol_table
+                        .lookup_builtin_method_for_receiver(&receiver_type, name)?;
+                    (
+                        name.clone(),
+                        method.parameters.clone(),
+                        method.return_type.clone(),
+                        true,
+                    )
+                } else {
+                    return None;
+                }
+            }
+            AstNode::FieldAccess {
+                object, field_name, ..
+            } => {
+                let AstNode::Identifier(object_name, _) = object.as_ref() else {
+                    return None;
+                };
+                let qualified_name = format!("{}.{}", object_name, field_name);
+                let info = self.symbol_table.lookup_symbol(&qualified_name)?;
+                match &info.kind {
+                    SymbolKind::Function {
+                        parameters,
+                        return_type,
+                    } => (
+                        qualified_name,
+                        parameters.clone(),
+                        return_type.clone(),
+                        false,
+                    ),
+                    SymbolKind::BuiltinFunction {
+                        parameters,
+                        return_type,
+                    } => (
+                        qualified_name,
+                        parameters.clone(),
+                        return_type.clone(),
+                        true,
+                    ),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+
+        let call_parameters = self.builtin_call_parameters(&function_name, &params, is_builtin);
+        Some((function_name, call_parameters, return_type))
+    }
+
+    fn contextualize_expression_with_expected(
+        &self,
+        expr: AstNode,
+        expected_type: &SymbolType,
+    ) -> AstNode {
+        if *expected_type == SymbolType::Unknown {
+            return expr;
+        }
+
+        match expr {
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                location,
+                resolved_return_type,
+            } => {
+                let mut arguments = arguments;
+                if let Some((_function_name, call_parameters, return_type)) =
+                    self.call_signature_and_return(&function, &arguments)
+                {
+                    let mut bindings = HashMap::new();
+                    Self::bind_type_vars_from_expected_return(
+                        &return_type,
+                        expected_type,
+                        &mut bindings,
+                    );
+                    if !bindings.is_empty() {
+                        for (idx, argument) in arguments.iter_mut().enumerate() {
+                            if let Some(parameter_type) =
+                                Self::expected_argument_type_for_index(&call_parameters, idx)
+                            {
+                                let expected_argument_type =
+                                    Self::substitute_type_vars(parameter_type, &bindings);
+                                if !Self::contains_type_var(&expected_argument_type) {
+                                    let contextualized = self
+                                        .contextualize_expression_with_expected(
+                                            argument.clone(),
+                                            &expected_argument_type,
+                                        );
+                                    let (refined, _) = Self::refine_expression_type_with_expected(
+                                        contextualized,
+                                        &SymbolType::Unknown,
+                                        &expected_argument_type,
+                                    );
+                                    *argument = refined;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let (refined, _) = Self::refine_expression_type_with_expected(
+                    AstNode::FunctionCall {
+                        function,
+                        arguments,
+                        location,
+                        resolved_return_type,
+                    },
+                    &SymbolType::Unknown,
+                    expected_type,
+                );
+                refined
+            }
+            AstNode::CommandCall {
+                command,
+                arguments,
+                location,
+                resolved_return_type,
+            } => {
+                let mut arguments = arguments;
+                if let Some((_function_name, call_parameters, return_type)) =
+                    self.call_signature_and_return(&command, &arguments)
+                {
+                    let mut bindings = HashMap::new();
+                    Self::bind_type_vars_from_expected_return(
+                        &return_type,
+                        expected_type,
+                        &mut bindings,
+                    );
+                    if !bindings.is_empty() {
+                        for (idx, argument) in arguments.iter_mut().enumerate() {
+                            if let Some(parameter_type) =
+                                Self::expected_argument_type_for_index(&call_parameters, idx)
+                            {
+                                let expected_argument_type =
+                                    Self::substitute_type_vars(parameter_type, &bindings);
+                                if !Self::contains_type_var(&expected_argument_type) {
+                                    let contextualized = self
+                                        .contextualize_expression_with_expected(
+                                            argument.clone(),
+                                            &expected_argument_type,
+                                        );
+                                    let (refined, _) = Self::refine_expression_type_with_expected(
+                                        contextualized,
+                                        &SymbolType::Unknown,
+                                        &expected_argument_type,
+                                    );
+                                    *argument = refined;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let (refined, _) = Self::refine_expression_type_with_expected(
+                    AstNode::CommandCall {
+                        command,
+                        arguments,
+                        location,
+                        resolved_return_type,
+                    },
+                    &SymbolType::Unknown,
+                    expected_type,
+                );
+                refined
+            }
+            AstNode::ListLiteral { elements, location } => {
+                let elements = if let SymbolType::List(element_type) = expected_type {
+                    elements
+                        .into_iter()
+                        .map(|element| {
+                            self.contextualize_expression_with_expected(element, element_type)
+                        })
+                        .collect()
+                } else {
+                    elements
+                };
+                AstNode::ListLiteral { elements, location }
+            }
+            AstNode::DictLiteral { pairs, location } => {
+                let pairs = if let SymbolType::Dict(key_type, value_type) = expected_type {
+                    pairs
+                        .into_iter()
+                        .map(|(key, value)| {
+                            (
+                                self.contextualize_expression_with_expected(key, key_type),
+                                self.contextualize_expression_with_expected(value, value_type),
+                            )
+                        })
+                        .collect()
+                } else {
+                    pairs
+                };
+                AstNode::DictLiteral { pairs, location }
+            }
+            AstNode::UnaryOperation {
+                op,
+                operand,
+                location,
+            } if (op == "-"
+                && Self::is_clear_numeric_type(expected_type.underlying_type())
+                && !matches!(
+                    expected_type.underlying_type(),
+                    SymbolType::UInt8
+                        | SymbolType::UInt16
+                        | SymbolType::UInt32
+                        | SymbolType::UInt64
+                ))
+                || (op == "not" && Self::is_clear_primitive_type(expected_type)) =>
+            {
+                let operand = self.contextualize_expression_with_expected(*operand, expected_type);
+                let (operand, _) = Self::refine_expression_type_with_expected(
+                    operand,
+                    &SymbolType::Unknown,
+                    expected_type,
+                );
+                AstNode::UnaryOperation {
+                    op,
+                    operand: Box::new(operand),
+                    location,
+                }
+            }
+            AstNode::BinaryOperation {
+                op,
+                left,
+                right,
+                location,
+            } if Self::binary_operand_context_type(&op, expected_type).is_some() => {
+                let operand_expected =
+                    Self::binary_operand_context_type(&op, expected_type).unwrap_or(expected_type);
+                let left = self.contextualize_expression_with_expected(*left, operand_expected);
+                let right = self.contextualize_expression_with_expected(*right, operand_expected);
+                let (left, _) = Self::refine_expression_type_with_expected(
+                    left,
+                    &SymbolType::Unknown,
+                    operand_expected,
+                );
+                let (right, _) = Self::refine_expression_type_with_expected(
+                    right,
+                    &SymbolType::Unknown,
+                    operand_expected,
+                );
+
+                AstNode::BinaryOperation {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    location,
+                }
+            }
+            other => other,
+        }
     }
 
     fn is_typed_assignment_target(node: &AstNode) -> bool {
@@ -856,15 +1216,28 @@ impl<'a> SemanticAnalyzer<'a> {
             ) if Self::is_clear_real_type(expected) => expected.clone(),
             (AstNode::UnaryOperation { op, .. }, inferred, expected)
                 if op == "-"
-                    && Self::is_clear_real_type(inferred)
-                    && Self::is_clear_real_type(expected) =>
+                    && Self::is_clear_numeric_type(inferred)
+                    && Self::is_clear_numeric_type(expected)
+                    && !matches!(
+                        expected.underlying_type(),
+                        SymbolType::UInt8
+                            | SymbolType::UInt16
+                            | SymbolType::UInt32
+                            | SymbolType::UInt64
+                    ) =>
+            {
+                expected.clone()
+            }
+            (AstNode::UnaryOperation { op, .. }, inferred, expected)
+                if op == "not"
+                    && Self::is_clear_primitive_type(inferred)
+                    && Self::is_clear_primitive_type(expected) =>
             {
                 expected.clone()
             }
             (AstNode::BinaryOperation { op, .. }, inferred, expected)
-                if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "mod")
-                    && Self::is_clear_real_type(inferred)
-                    && Self::is_clear_real_type(expected) =>
+                if Self::binary_operand_context_type(op, expected).is_some()
+                    && Self::is_clear_primitive_type(inferred) =>
             {
                 expected.clone()
             }
@@ -989,7 +1362,17 @@ impl<'a> SemanticAnalyzer<'a> {
                 op,
                 operand,
                 location,
-            } if op == "-" && Self::is_clear_real_type(expected_type) => {
+            } if (op == "-"
+                && Self::is_clear_numeric_type(expected_type.underlying_type())
+                && !matches!(
+                    expected_type.underlying_type(),
+                    SymbolType::UInt8
+                        | SymbolType::UInt16
+                        | SymbolType::UInt32
+                        | SymbolType::UInt64
+                ))
+                || (op == "not" && Self::is_clear_primitive_type(expected_type)) =>
+            {
                 let operand_inferred =
                     Self::refine_type_with_expected(inferred_type, expected_type);
                 let (refined_operand, _) = Self::refine_expression_type_with_expected(
@@ -1008,18 +1391,18 @@ impl<'a> SemanticAnalyzer<'a> {
                 left,
                 right,
                 location,
-            } if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "mod")
-                && Self::is_clear_real_type(expected_type) =>
-            {
+            } if Self::binary_operand_context_type(&op, expected_type).is_some() => {
+                let operand_expected =
+                    Self::binary_operand_context_type(&op, expected_type).unwrap_or(expected_type);
                 let (refined_left, _) = Self::refine_expression_type_with_expected(
                     *left,
                     &SymbolType::Unknown,
-                    expected_type,
+                    operand_expected,
                 );
                 let (refined_right, _) = Self::refine_expression_type_with_expected(
                     *right,
                     &SymbolType::Unknown,
-                    expected_type,
+                    operand_expected,
                 );
                 AstNode::BinaryOperation {
                     op,
@@ -2929,9 +3312,16 @@ impl<'a> SemanticAnalyzer<'a> {
                 value,
                 location,
             } => {
-                // Analyze target and value to get types
+                // Analyze target first so its static type can contextualize the value.
                 let (checked_target, target_type) = self.analyze_node(*target)?;
-                let (checked_value, value_type) = self.analyze_node(*value)?;
+                let value = if Self::is_typed_assignment_target(&checked_target)
+                    && target_type != SymbolType::Unknown
+                {
+                    self.contextualize_expression_with_expected(*value, &target_type)
+                } else {
+                    *value
+                };
+                let (checked_value, value_type) = self.analyze_node(value)?;
                 let (checked_value, value_type) =
                     if Self::is_typed_assignment_target(&checked_target)
                         && target_type != SymbolType::Unknown
@@ -3021,7 +3411,13 @@ impl<'a> SemanticAnalyzer<'a> {
                 // 1. Analyze the value expression first (if it exists)
                 let mut checked_value_node = None;
                 let mut value_type = if let Some(val_expr) = value {
-                    let (checked_val, val_type) = self.analyze_node(*val_expr)?;
+                    let val_expr = if let Some(type_node) = type_annotation.as_ref() {
+                        let expected = self.resolve_type_aliases(&SymbolType::from_ast(type_node));
+                        self.contextualize_expression_with_expected(*val_expr, &expected)
+                    } else {
+                        *val_expr
+                    };
+                    let (checked_val, val_type) = self.analyze_node(val_expr)?;
 
                     checked_value_node = Some(Box::new(checked_val));
                     val_type
@@ -3774,15 +4170,20 @@ impl<'a> SemanticAnalyzer<'a> {
                 value: ref maybe_expr,
                 location: ref ret_loc,
             } => {
+                let expected_ret = self.current_function_return_type.clone();
                 let (mut checked_expr_node, mut return_value_type) = match maybe_expr {
                     Some(expr) => {
-                        let (checked_expr, expr_type) = self.analyze_node(*expr.clone())?;
+                        let expr = if let Some(expected) = expected_ret.as_ref() {
+                            self.contextualize_expression_with_expected(*expr.clone(), expected)
+                        } else {
+                            *expr.clone()
+                        };
+                        let (checked_expr, expr_type) = self.analyze_node(expr)?;
                         (Some(Box::new(checked_expr)), expr_type)
                     }
                     None => (None, SymbolType::Void),
                 };
 
-                let expected_ret = self.current_function_return_type.clone();
                 match expected_ret {
                     Some(expected) => {
                         if let Some(checked_expr) = checked_expr_node.take() {
@@ -3856,9 +4257,8 @@ impl<'a> SemanticAnalyzer<'a> {
                 function,
                 arguments,
                 location,
-                resolved_return_type: _,
+                resolved_return_type: contextual_return_type,
             } => {
-                // Ignore existing resolved_return_type
                 // 1. Preserve simple call targets for call resolution. Unqualified
                 // receiver-bound methods like `open(s)` cannot be validated until
                 // the arguments have been analyzed.
@@ -4364,6 +4764,15 @@ impl<'a> SemanticAnalyzer<'a> {
                 };
                 let resolved_return_type =
                     Self::substitute_type_vars(&return_type, &generic_bindings);
+                let resolved_return_type = if function_name == "Share.random"
+                    && contextual_return_type
+                        .as_ref()
+                        .is_some_and(Self::share_random_expected_type)
+                {
+                    contextual_return_type.unwrap()
+                } else {
+                    resolved_return_type
+                };
                 let reconstructed_node = AstNode::FunctionCall {
                     function: Box::new(resolved_function_node),
                     arguments: checked_arguments,
