@@ -304,6 +304,7 @@ fn local_runner_rejects_missing_clientstore_inputs_before_spawning_parties() {
             inputs: vec![ShareType::default_secret_int()],
             outputs: Vec::new(),
         }],
+        preprocessing_demand: stoffel_vm_types::compiled_binary::PreprocessingDemand::default(),
     };
 
     let err = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
@@ -335,6 +336,7 @@ fn local_runner_accepts_static_output_only_clients_without_inputs() {
             inputs: Vec::new(),
             outputs: vec![ShareType::default_secret_int()],
         }],
+        preprocessing_demand: stoffel_vm_types::compiled_binary::PreprocessingDemand::default(),
     };
 
     LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
@@ -361,6 +363,7 @@ fn local_runner_rejects_expected_output_clients_below_static_manifest_slots() {
             inputs: Vec::new(),
             outputs: vec![ShareType::default_secret_int()],
         }],
+        preprocessing_demand: stoffel_vm_types::compiled_binary::PreprocessingDemand::default(),
     };
 
     let err = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
@@ -393,6 +396,7 @@ fn local_runner_rejects_duplicate_client_input_slots() {
             inputs: vec![ShareType::default_secret_int()],
             outputs: Vec::new(),
         }],
+        preprocessing_demand: stoffel_vm_types::compiled_binary::PreprocessingDemand::default(),
     };
 
     let err = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)

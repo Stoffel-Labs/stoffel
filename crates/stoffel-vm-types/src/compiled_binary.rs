@@ -2007,6 +2007,7 @@ mod tests {
                     outputs: vec![ShareType::boolean()],
                 },
             ],
+            preprocessing_demand: PreprocessingDemand::default(),
         };
 
         let mut buffer = Vec::new();
