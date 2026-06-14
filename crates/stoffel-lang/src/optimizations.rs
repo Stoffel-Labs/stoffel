@@ -1759,11 +1759,1486 @@ pub fn reorder_for_reveal_batching(node: AstNode) -> AstNode {
 }
 
 /// Combined optimization: applies both Share.open() batching and instruction reordering
-pub fn optimize_all(node: AstNode) -> AstNode {
+pub fn optimize_all(node: AstNode, optimization_level: u8) -> AstNode {
+    // Passes compose forward: each one runs on the previous pass's output, so the
+    // pipeline refines the program incrementally rather than each pass re-reading
+    // the original AST. Order is deliberate — general function inlining runs first so
+    // cross-function redundancy (e.g. a key schedule recomputed once per block) is
+    // exposed as ordinary in-function code; then multiply/reveal batching settle the
+    // block shape; finally LICM+CSE (internally iterated to a fixpoint) hoist and
+    // deduplicate the now-visible pure computations.
+    //
+    // Inlining is an aggressive transform (it can grow a function past what the
+    // object-spill register allocator settles on within its round budget), so it is
+    // gated to -O3. At lower levels LICM/CSE still run; they only ever *reduce* work,
+    // so they are always safe.
+    let node = if optimization_level >= 3 {
+        inline_functions(node)
+    } else {
+        node
+    };
     let node = inline_multiply_wrappers(node);
     let node = optimize_reveals(node);
     let node = optimize_multiplies(node);
-    reorder_for_reveal_batching(node)
+    let node = reorder_for_reveal_batching(node);
+    optimize_licm_cse(node)
+}
+
+// ===========================================================================
+// Function inlining
+//
+// Replaces a call to a non-recursive, single-tail-return function with its body:
+// arguments are bound to fresh temporaries (evaluated once, in order) and the
+// callee's parameters and locals are alpha-renamed with a unique suffix so they
+// cannot capture caller names or collide across inline sites. This exposes
+// cross-function redundancy to the intraprocedural LICM/CSE passes that run
+// afterwards (e.g. a key schedule recomputed inside a per-block call becomes a
+// loop-invariant binding LICM can hoist). Inlining is bounded by a node budget so
+// it cannot explode code size, and recursive functions are never inlined.
+// ===========================================================================
+
+static INLINE_SUFFIX: AtomicUsize = AtomicUsize::new(0);
+
+/// Total number of AST nodes inlining may add before it stops (blowup guard).
+const INLINE_BUDGET: usize = 200_000;
+
+#[derive(Clone)]
+struct InlineInfo {
+    params: Vec<String>,
+    body: AstNode,
+    size: usize,
+}
+
+fn node_size(node: &AstNode) -> usize {
+    let mut n = 1usize;
+    for_each_child(node, &mut |c| n += node_size(c));
+    n
+}
+
+fn count_returns(node: &AstNode) -> usize {
+    let mut n = usize::from(matches!(node, AstNode::Return { .. }));
+    for_each_child(node, &mut |c| n += count_returns(c));
+    n
+}
+
+/// Names bound inside a function body (locals + loop variables), not descending
+/// into nested function definitions.
+fn collect_declared_names(node: &AstNode, out: &mut HashSet<String>) {
+    match node {
+        AstNode::VariableDeclaration { name, .. } => {
+            out.insert(name.clone());
+        }
+        AstNode::ForLoop { variables, .. } => {
+            for v in variables {
+                out.insert(v.clone());
+            }
+        }
+        AstNode::FunctionDefinition { .. } => return,
+        _ => {}
+    }
+    for_each_child(node, &mut |c| collect_declared_names(c, out));
+}
+
+/// Apply a name-substitution to identifier uses and binding sites. Type
+/// annotations are left untouched (they name types, not values).
+fn rename_in(node: AstNode, map: &HashMap<String, String>) -> AstNode {
+    let rb = |n: Box<AstNode>| -> Box<AstNode> { Box::new(rename_in(*n, map)) };
+    match node {
+        AstNode::Identifier(name, loc) => {
+            AstNode::Identifier(map.get(&name).cloned().unwrap_or(name), loc)
+        }
+        AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value,
+            is_mutable,
+            is_secret,
+            location,
+        } => AstNode::VariableDeclaration {
+            name: map.get(&name).cloned().unwrap_or(name),
+            type_annotation,
+            value: value.map(rb),
+            is_mutable,
+            is_secret,
+            location,
+        },
+        AstNode::Assignment {
+            target,
+            value,
+            location,
+        } => AstNode::Assignment {
+            target: rb(target),
+            value: rb(value),
+            location,
+        },
+        AstNode::BinaryOperation {
+            op,
+            left,
+            right,
+            location,
+        } => AstNode::BinaryOperation {
+            op,
+            left: rb(left),
+            right: rb(right),
+            location,
+        },
+        AstNode::UnaryOperation {
+            op,
+            operand,
+            location,
+        } => AstNode::UnaryOperation {
+            op,
+            operand: rb(operand),
+            location,
+        },
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            resolved_return_type,
+        } => AstNode::FunctionCall {
+            function: rb(function),
+            arguments: arguments.into_iter().map(|a| rename_in(a, map)).collect(),
+            location,
+            resolved_return_type,
+        },
+        AstNode::NamedArgument {
+            name,
+            value,
+            location,
+        } => AstNode::NamedArgument {
+            name,
+            value: rb(value),
+            location,
+        },
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => AstNode::IfExpression {
+            condition: rb(condition),
+            then_branch: rb(then_branch),
+            else_branch: else_branch.map(rb),
+        },
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => AstNode::WhileLoop {
+            condition: rb(condition),
+            body: rb(body),
+            location,
+        },
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => AstNode::ForLoop {
+            variables: variables
+                .into_iter()
+                .map(|v| map.get(&v).cloned().unwrap_or(v))
+                .collect(),
+            iterable: rb(iterable),
+            body: rb(body),
+            location,
+        },
+        AstNode::Block(stmts) => {
+            AstNode::Block(stmts.into_iter().map(|s| rename_in(s, map)).collect())
+        }
+        AstNode::Return { value, location } => AstNode::Return {
+            value: value.map(rb),
+            location,
+        },
+        AstNode::Yield(v) => AstNode::Yield(v.map(rb)),
+        AstNode::FieldAccess {
+            object,
+            field_name,
+            location,
+        } => AstNode::FieldAccess {
+            object: rb(object),
+            field_name,
+            location,
+        },
+        AstNode::IndexAccess {
+            base,
+            index,
+            location,
+        } => AstNode::IndexAccess {
+            base: rb(base),
+            index: rb(index),
+            location,
+        },
+        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
+            elements: elements.into_iter().map(|e| rename_in(e, map)).collect(),
+            location,
+        },
+        AstNode::TupleLiteral(e) => {
+            AstNode::TupleLiteral(e.into_iter().map(|x| rename_in(x, map)).collect())
+        }
+        AstNode::SetLiteral(e) => {
+            AstNode::SetLiteral(e.into_iter().map(|x| rename_in(x, map)).collect())
+        }
+        AstNode::DictLiteral { pairs, location } => AstNode::DictLiteral {
+            pairs: pairs
+                .into_iter()
+                .map(|(k, v)| (rename_in(k, map), rename_in(v, map)))
+                .collect(),
+            location,
+        },
+        AstNode::DiscardStatement {
+            expression,
+            location,
+        } => AstNode::DiscardStatement {
+            expression: rb(expression),
+            location,
+        },
+        // Literals, Break/Continue, type nodes, nested definitions: pass through.
+        other => other,
+    }
+}
+
+/// Produce the inlined statements and the result expression for a call. Callers
+/// must ensure the callee is inlinable and `args.len() == params.len()` with no
+/// named arguments.
+fn inline_call(info: &InlineInfo, args: Vec<AstNode>, loc: &SourceLocation) -> (Vec<AstNode>, AstNode) {
+    let suffix = INLINE_SUFFIX.fetch_add(1, Ordering::Relaxed);
+    let mut declared: HashSet<String> = info.params.iter().cloned().collect();
+    collect_declared_names(&info.body, &mut declared);
+    let map: HashMap<String, String> = declared
+        .iter()
+        .map(|n| (n.clone(), format!("{}__inl{}", n, suffix)))
+        .collect();
+
+    let mut prelude: Vec<AstNode> = Vec::new();
+    // Bind arguments to renamed parameters (single, ordered evaluation).
+    for (param, arg) in info.params.iter().zip(args.into_iter()) {
+        prelude.push(AstNode::VariableDeclaration {
+            name: map.get(param).cloned().unwrap(),
+            type_annotation: None,
+            value: Some(Box::new(arg)),
+            is_mutable: true,
+            is_secret: false,
+            location: loc.clone(),
+        });
+    }
+
+    let AstNode::Block(stmts) = &info.body else {
+        unreachable!("inlinable functions have a block body")
+    };
+    let mut return_expr = AstNode::Literal {
+        value: crate::ast::Value::Nil,
+        location: loc.clone(),
+    };
+    let last = stmts.len().saturating_sub(1);
+    for (idx, s) in stmts.iter().enumerate() {
+        if idx == last {
+            if let AstNode::Return { value: Some(v), .. } = s {
+                return_expr = rename_in((**v).clone(), &map);
+                break;
+            }
+        }
+        prelude.push(rename_in(s.clone(), &map));
+    }
+    (prelude, return_expr)
+}
+
+/// Try to inline a call sitting directly in a value position. On success returns
+/// the prelude statements plus the expression that replaces the call; on failure
+/// returns the (reconstructed) original expression.
+fn try_inline_value(
+    expr: AstNode,
+    fns: &HashMap<String, InlineInfo>,
+    budget: &mut usize,
+    loc: &SourceLocation,
+) -> Result<(Vec<AstNode>, AstNode), AstNode> {
+    if let AstNode::FunctionCall {
+        function,
+        arguments,
+        location,
+        resolved_return_type,
+    } = expr
+    {
+        if let AstNode::Identifier(fname, _) = function.as_ref() {
+            if let Some(info) = fns.get(fname) {
+                if info.size <= *budget
+                    && arguments.len() == info.params.len()
+                    && !arguments
+                        .iter()
+                        .any(|a| matches!(a, AstNode::NamedArgument { .. }))
+                {
+                    let info = info.clone();
+                    *budget = budget.saturating_sub(info.size);
+                    return Ok(inline_call(&info, arguments, loc));
+                }
+            }
+        }
+        Err(AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            resolved_return_type,
+        })
+    } else {
+        Err(expr)
+    }
+}
+
+/// Inline a top-level call in a statement, emitting the inlined statements into
+/// `out`. Statements with no inlinable call are pushed unchanged.
+fn inline_stmt_into(stmt: AstNode, fns: &HashMap<String, InlineInfo>, budget: &mut usize, out: &mut Vec<AstNode>) {
+    match stmt {
+        AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value: Some(value),
+            is_mutable,
+            is_secret,
+            location,
+        } => match try_inline_value(*value, fns, budget, &location) {
+            Ok((mut prelude, ret)) => {
+                prelude.push(AstNode::VariableDeclaration {
+                    name,
+                    type_annotation,
+                    value: Some(Box::new(ret)),
+                    is_mutable,
+                    is_secret,
+                    location,
+                });
+                out.extend(prelude);
+            }
+            Err(value) => out.push(AstNode::VariableDeclaration {
+                name,
+                type_annotation,
+                value: Some(Box::new(value)),
+                is_mutable,
+                is_secret,
+                location,
+            }),
+        },
+        AstNode::Assignment {
+            target,
+            value,
+            location,
+        } => match try_inline_value(*value, fns, budget, &location) {
+            Ok((mut prelude, ret)) => {
+                prelude.push(AstNode::Assignment {
+                    target,
+                    value: Box::new(ret),
+                    location,
+                });
+                out.extend(prelude);
+            }
+            Err(value) => out.push(AstNode::Assignment {
+                target,
+                value: Box::new(value),
+                location,
+            }),
+        },
+        AstNode::Return {
+            value: Some(value),
+            location,
+        } => match try_inline_value(*value, fns, budget, &location) {
+            Ok((mut prelude, ret)) => {
+                prelude.push(AstNode::Return {
+                    value: Some(Box::new(ret)),
+                    location,
+                });
+                out.extend(prelude);
+            }
+            Err(value) => out.push(AstNode::Return {
+                value: Some(Box::new(value)),
+                location,
+            }),
+        },
+        AstNode::DiscardStatement {
+            expression,
+            location,
+        } => match try_inline_value(*expression, fns, budget, &location) {
+            Ok((mut prelude, ret)) => {
+                // Keep the result expression so its effects (if any) still run.
+                prelude.push(AstNode::DiscardStatement {
+                    expression: Box::new(ret),
+                    location,
+                });
+                out.extend(prelude);
+            }
+            Err(expression) => out.push(AstNode::DiscardStatement {
+                expression: Box::new(expression),
+                location,
+            }),
+        },
+        call @ AstNode::FunctionCall { .. } => {
+            let loc = call.location();
+            match try_inline_value(call, fns, budget, &loc) {
+                Ok((mut prelude, ret)) => {
+                    prelude.push(AstNode::DiscardStatement {
+                        expression: Box::new(ret),
+                        location: loc,
+                    });
+                    out.extend(prelude);
+                }
+                Err(call) => out.push(call),
+            }
+        }
+        other => out.push(other),
+    }
+}
+
+/// Recurse through the program, inlining eligible calls. Nested blocks/loops/ifs
+/// are processed before the statement itself so inner calls surface too.
+fn inline_in_node(node: AstNode, fns: &HashMap<String, InlineInfo>, budget: &mut usize) -> AstNode {
+    match node {
+        AstNode::Block(stmts) => {
+            let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
+            for s in stmts {
+                let s = inline_in_node(s, fns, budget);
+                inline_stmt_into(s, fns, budget, &mut out);
+            }
+            AstNode::Block(out)
+        }
+        AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body,
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        } => AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body: Box::new(inline_in_node(*body, fns, budget)),
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        },
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => AstNode::ForLoop {
+            variables,
+            iterable,
+            body: Box::new(inline_in_node(*body, fns, budget)),
+            location,
+        },
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => AstNode::WhileLoop {
+            condition,
+            body: Box::new(inline_in_node(*body, fns, budget)),
+            location,
+        },
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => AstNode::IfExpression {
+            condition,
+            then_branch: Box::new(inline_in_node(*then_branch, fns, budget)),
+            else_branch: else_branch.map(|e| Box::new(inline_in_node(*e, fns, budget))),
+        },
+        other => other,
+    }
+}
+
+/// Collect the names a function body calls directly (for recursion detection).
+fn collect_called_names(node: &AstNode, out: &mut HashSet<String>) {
+    if let Some(name) = call_name(node) {
+        out.insert(name.to_string());
+    }
+    for_each_child(node, &mut |c| collect_called_names(c, out));
+}
+
+/// Build the set of inlinable functions: a block body with exactly one tail
+/// `return <expr>`, only plain positional parameters, and not (transitively)
+/// recursive.
+fn gather_inline_infos(root: &AstNode) -> HashMap<String, InlineInfo> {
+    // Collect every named function definition.
+    let mut defs: Vec<(String, Vec<crate::ast::Parameter>, AstNode)> = Vec::new();
+    fn gather(
+        node: &AstNode,
+        out: &mut Vec<(String, Vec<crate::ast::Parameter>, AstNode)>,
+    ) {
+        if let AstNode::FunctionDefinition {
+            name: Some(n),
+            parameters,
+            body,
+            ..
+        } = node
+        {
+            out.push((n.clone(), parameters.clone(), (**body).clone()));
+        }
+        for_each_child_def(node, &mut |c| gather(c, out));
+    }
+    gather(root, &mut defs);
+
+    // Direct-call graph for recursion detection.
+    let mut callees: HashMap<String, HashSet<String>> = HashMap::new();
+    for (name, _, body) in &defs {
+        let mut c = HashSet::new();
+        collect_called_names(body, &mut c);
+        callees.insert(name.clone(), c);
+    }
+    let is_recursive = |start: &str| -> bool {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut stack: Vec<String> = callees.get(start).into_iter().flatten().cloned().collect();
+        while let Some(n) = stack.pop() {
+            if n == start {
+                return true;
+            }
+            if seen.insert(n.clone()) {
+                if let Some(next) = callees.get(&n) {
+                    stack.extend(next.iter().cloned());
+                }
+            }
+        }
+        false
+    };
+
+    let mut infos = HashMap::new();
+    for (name, params, body) in defs {
+        if is_recursive(&name) {
+            continue;
+        }
+        if !function_is_inlinable(&params, &body) {
+            continue;
+        }
+        let size = node_size(&body);
+        infos.insert(
+            name,
+            InlineInfo {
+                params: params.into_iter().map(|p| p.name).collect(),
+                body,
+                size,
+            },
+        );
+    }
+    infos
+}
+
+/// Like `for_each_child` but also descends into nested function-definition bodies
+/// and top-level blocks (used only for *gathering* definitions, not transforming).
+fn for_each_child_def(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
+    match node {
+        AstNode::Block(stmts) => {
+            for s in stmts {
+                f(s);
+            }
+        }
+        AstNode::FunctionDefinition { body, .. } => f(body),
+        _ => for_each_child(node, f),
+    }
+}
+
+fn function_is_inlinable(params: &[crate::ast::Parameter], body: &AstNode) -> bool {
+    if params.iter().any(|p| p.is_variadic || p.default_value.is_some()) {
+        return false;
+    }
+    let AstNode::Block(stmts) = body else {
+        return false;
+    };
+    if count_returns(body) != 1 {
+        return false;
+    }
+    matches!(stmts.last(), Some(AstNode::Return { value: Some(_), .. }))
+}
+
+/// Entry point: inline non-recursive, single-return functions to a fixpoint
+/// (bounded by `INLINE_BUDGET`), so that nested calls are also inlined.
+pub fn inline_functions(node: AstNode) -> AstNode {
+    let infos = gather_inline_infos(&node);
+    if infos.is_empty() {
+        return node;
+    }
+    let mut node = node;
+    let mut budget = INLINE_BUDGET;
+    for _ in 0..12 {
+        let before = budget;
+        node = inline_in_node(node, &infos, &mut budget);
+        if budget == before {
+            break; // nothing inlined this pass
+        }
+    }
+    node
+}
+
+// ===========================================================================
+// Loop-Invariant Code Motion (LICM) + Common Subexpression Elimination (CSE)
+//
+// Both are classic, semantics-preserving optimizations. The only requirement is
+// that a moved/deduplicated computation is *pure* (no observable side effect,
+// deterministic) and that its inputs (and, for mutable results, the result
+// itself) are not mutated across the span over which we move/share it.
+//
+// In an MPC program "pure" is exactly value-determinism: re-running a secret
+// computation yields the same secret, and the only thing collapsing redundant
+// evaluations changes is consumed preprocessing / communication rounds, which
+// are costs, not observable outputs. The operations that are NOT pure are
+// declassification (`reveal`/`open`), I/O (`print`, client input/output),
+// randomness (`Share.random`), allocation with identity (`create_*`), and
+// mutation (`append`/`array_push`/`set_field`/assignment to an element).
+// ===========================================================================
+
+/// Call names that have an observable effect, nondeterminism, or declassification.
+/// (Mutators are handled separately so that mutation of a fresh local is allowed.)
+fn is_effectful_call_name(name: &str) -> bool {
+    matches!(
+        name,
+        "print"
+            | "reveal"
+            | "open"
+            | "Share.open"
+            | "Share.random"
+            | "random"
+            | "create_object"
+            | "create_array"
+            | "send_to_client"
+            | "set_upvalue"
+            | "get_upvalue"
+            | "assert"
+    ) || name.starts_with("ClientStore.")
+        || name.starts_with("MpcOutput.")
+        || name.contains("take_share")
+}
+
+/// In-place mutators: pure only when their target is a fresh local (not a parameter alias).
+fn is_mutator_call_name(name: &str) -> bool {
+    matches!(name, "append" | "array_push" | "set_field")
+}
+
+/// Builtins known to be pure value computations (no effects, deterministic).
+/// Conservative allow-list: anything not listed is assumed impure, so a missing
+/// entry only costs optimization opportunities, never correctness.
+const PURE_BUILTINS: &[&str] = &[
+    "Share.add",
+    "Share.sub",
+    "Share.mul",
+    "Share.batch_mul",
+    "Share.from_clear_int",
+    "Share.from_clear_uint",
+    "Share.from_clear_fixed",
+    "get_field",
+    "array_length",
+    "length",
+    "len",
+    "slice",
+    "contains",
+    "to_string",
+    "type",
+];
+
+fn call_name(node: &AstNode) -> Option<&str> {
+    if let AstNode::FunctionCall { function, .. } = node {
+        if let AstNode::Identifier(name, _) = function.as_ref() {
+            return Some(name.as_str());
+        }
+    }
+    None
+}
+
+/// The root variable an lvalue/reference is built from (`a`, `a[i]`, `a.f` -> `a`).
+fn base_var_of(node: &AstNode) -> Option<String> {
+    match node {
+        AstNode::Identifier(name, _) => Some(name.clone()),
+        AstNode::IndexAccess { base, .. } => base_var_of(base),
+        AstNode::FieldAccess { object, .. } => base_var_of(object),
+        _ => None,
+    }
+}
+
+/// Collect every variable written in a subtree: declarations, assignments
+/// (including element/field stores), and in-place mutator targets.
+fn collect_written_vars(node: &AstNode, out: &mut HashSet<String>) {
+    match node {
+        AstNode::VariableDeclaration { name, value, .. } => {
+            out.insert(name.clone());
+            if let Some(v) = value {
+                collect_written_vars(v, out);
+            }
+        }
+        AstNode::Assignment { target, value, .. } => {
+            if let Some(b) = base_var_of(target) {
+                out.insert(b);
+            }
+            collect_written_vars(value, out);
+        }
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            ..
+        } => {
+            if let Some(name) = call_name(node) {
+                if is_mutator_call_name(name) {
+                    if let Some(b) = arguments.first().and_then(base_var_of) {
+                        out.insert(b);
+                    }
+                }
+            }
+            collect_written_vars(function, out);
+            for a in arguments {
+                collect_written_vars(a, out);
+            }
+        }
+        AstNode::Block(stmts) => {
+            for s in stmts {
+                collect_written_vars(s, out);
+            }
+        }
+        AstNode::BinaryOperation { left, right, .. } => {
+            collect_written_vars(left, out);
+            collect_written_vars(right, out);
+        }
+        AstNode::UnaryOperation { operand, .. } => collect_written_vars(operand, out),
+        AstNode::IndexAccess { base, index, .. } => {
+            collect_written_vars(base, out);
+            collect_written_vars(index, out);
+        }
+        AstNode::FieldAccess { object, .. } => collect_written_vars(object, out),
+        AstNode::ListLiteral { elements, .. }
+        | AstNode::TupleLiteral(elements)
+        | AstNode::SetLiteral(elements) => {
+            for e in elements {
+                collect_written_vars(e, out);
+            }
+        }
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_written_vars(condition, out);
+            collect_written_vars(then_branch, out);
+            if let Some(e) = else_branch {
+                collect_written_vars(e, out);
+            }
+        }
+        AstNode::WhileLoop {
+            condition, body, ..
+        } => {
+            collect_written_vars(condition, out);
+            collect_written_vars(body, out);
+        }
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            ..
+        } => {
+            for v in variables {
+                out.insert(v.clone());
+            }
+            collect_written_vars(iterable, out);
+            collect_written_vars(body, out);
+        }
+        AstNode::Return {
+            value: Some(v), ..
+        }
+        | AstNode::Yield(Some(v)) => collect_written_vars(v, out),
+        AstNode::DiscardStatement { expression, .. } => collect_written_vars(expression, out),
+        _ => {}
+    }
+}
+
+/// True if `name` is written (reassigned or mutated) anywhere in the subtree.
+/// Variable *declarations* are not counted, so the introducing `var` is allowed.
+fn is_var_mutated(node: &AstNode, name: &str) -> bool {
+    fn walk(node: &AstNode, name: &str) -> bool {
+        match node {
+            AstNode::Assignment { target, value, .. } => {
+                base_var_of(target).as_deref() == Some(name) || walk(value, name)
+            }
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                ..
+            } => {
+                if let Some(cn) = call_name(node) {
+                    if is_mutator_call_name(cn)
+                        && arguments.first().and_then(base_var_of).as_deref() == Some(name)
+                    {
+                        return true;
+                    }
+                }
+                walk(function, name) || arguments.iter().any(|a| walk(a, name))
+            }
+            AstNode::VariableDeclaration {
+                value: Some(v), ..
+            } => walk(v, name),
+            AstNode::Block(stmts) => stmts.iter().any(|s| walk(s, name)),
+            AstNode::BinaryOperation { left, right, .. } => walk(left, name) || walk(right, name),
+            AstNode::UnaryOperation { operand, .. } => walk(operand, name),
+            AstNode::IndexAccess { base, index, .. } => walk(base, name) || walk(index, name),
+            AstNode::FieldAccess { object, .. } => walk(object, name),
+            AstNode::ListLiteral { elements, .. }
+            | AstNode::TupleLiteral(elements)
+            | AstNode::SetLiteral(elements) => elements.iter().any(|e| walk(e, name)),
+            AstNode::IfExpression {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                walk(condition, name)
+                    || walk(then_branch, name)
+                    || else_branch.as_ref().is_some_and(|e| walk(e, name))
+            }
+            AstNode::WhileLoop {
+                condition, body, ..
+            } => walk(condition, name) || walk(body, name),
+            AstNode::ForLoop {
+                iterable, body, ..
+            } => walk(iterable, name) || walk(body, name),
+            AstNode::Return {
+                value: Some(v), ..
+            }
+            | AstNode::Yield(Some(v)) => walk(v, name),
+            AstNode::DiscardStatement { expression, .. } => walk(expression, name),
+            _ => false,
+        }
+    }
+    walk(node, name)
+}
+
+/// Is `node` a pure expression that may be hoisted / deduplicated, given the set
+/// of functions already proven pure?
+fn expr_is_pure(node: &AstNode, pure_fns: &HashSet<String>) -> bool {
+    match node {
+        AstNode::Literal { .. } | AstNode::Identifier(_, _) => true,
+        AstNode::BinaryOperation { left, right, .. } => {
+            expr_is_pure(left, pure_fns) && expr_is_pure(right, pure_fns)
+        }
+        AstNode::UnaryOperation { operand, .. } => expr_is_pure(operand, pure_fns),
+        AstNode::IndexAccess { base, index, .. } => {
+            expr_is_pure(base, pure_fns) && expr_is_pure(index, pure_fns)
+        }
+        AstNode::FieldAccess { object, .. } => expr_is_pure(object, pure_fns),
+        AstNode::ListLiteral { elements, .. } | AstNode::TupleLiteral(elements) => {
+            elements.iter().all(|e| expr_is_pure(e, pure_fns))
+        }
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            expr_is_pure(condition, pure_fns)
+                && expr_is_pure(then_branch, pure_fns)
+                && else_branch
+                    .as_ref()
+                    .is_none_or(|e| expr_is_pure(e, pure_fns))
+        }
+        AstNode::FunctionCall { arguments, .. } => match call_name(node) {
+            Some(name)
+                if (pure_fns.contains(name) || PURE_BUILTINS.contains(&name))
+                    && !is_effectful_call_name(name)
+                    && !is_mutator_call_name(name) =>
+            {
+                arguments.iter().all(|a| expr_is_pure(a, pure_fns))
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Location-insensitive structural equality of two expressions, used by CSE.
+fn expr_equiv(a: &AstNode, b: &AstNode) -> bool {
+    match (a, b) {
+        (AstNode::Literal { value: x, .. }, AstNode::Literal { value: y, .. }) => x == y,
+        (AstNode::Identifier(x, _), AstNode::Identifier(y, _)) => x == y,
+        (
+            AstNode::BinaryOperation {
+                op: o1,
+                left: l1,
+                right: r1,
+                ..
+            },
+            AstNode::BinaryOperation {
+                op: o2,
+                left: l2,
+                right: r2,
+                ..
+            },
+        ) => o1 == o2 && expr_equiv(l1, l2) && expr_equiv(r1, r2),
+        (
+            AstNode::UnaryOperation {
+                op: o1,
+                operand: e1,
+                ..
+            },
+            AstNode::UnaryOperation {
+                op: o2,
+                operand: e2,
+                ..
+            },
+        ) => o1 == o2 && expr_equiv(e1, e2),
+        (
+            AstNode::IndexAccess {
+                base: b1,
+                index: i1,
+                ..
+            },
+            AstNode::IndexAccess {
+                base: b2,
+                index: i2,
+                ..
+            },
+        ) => expr_equiv(b1, b2) && expr_equiv(i1, i2),
+        (
+            AstNode::FieldAccess {
+                object: o1,
+                field_name: f1,
+                ..
+            },
+            AstNode::FieldAccess {
+                object: o2,
+                field_name: f2,
+                ..
+            },
+        ) => f1 == f2 && expr_equiv(o1, o2),
+        (
+            AstNode::ListLiteral { elements: e1, .. },
+            AstNode::ListLiteral { elements: e2, .. },
+        ) => e1.len() == e2.len() && e1.iter().zip(e2).all(|(x, y)| expr_equiv(x, y)),
+        (
+            AstNode::FunctionCall {
+                function: f1,
+                arguments: a1,
+                ..
+            },
+            AstNode::FunctionCall {
+                function: f2,
+                arguments: a2,
+                ..
+            },
+        ) => {
+            expr_equiv(f1, f2)
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2).all(|(x, y)| expr_equiv(x, y))
+        }
+        _ => false,
+    }
+}
+
+/// Does this statement potentially clobber CSE state (an effectful/mutating call)?
+fn stmt_has_effect(node: &AstNode, pure_fns: &HashSet<String>) -> bool {
+    fn walk(node: &AstNode, pure_fns: &HashSet<String>) -> bool {
+        if let AstNode::FunctionCall { arguments, .. } = node {
+            match call_name(node) {
+                Some(name)
+                    if (pure_fns.contains(name) || PURE_BUILTINS.contains(&name))
+                        && !is_effectful_call_name(name)
+                        && !is_mutator_call_name(name) => {}
+                _ => return true,
+            }
+            return arguments.iter().any(|a| walk(a, pure_fns));
+        }
+        let mut effect = false;
+        for_each_child(node, &mut |c| {
+            if walk(c, pure_fns) {
+                effect = true;
+            }
+        });
+        effect
+    }
+    walk(node, pure_fns)
+}
+
+/// Visit the immediate child nodes of `node`.
+fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
+    match node {
+        AstNode::Assignment { target, value, .. } => {
+            f(target);
+            f(value);
+        }
+        AstNode::VariableDeclaration {
+            value: Some(v), ..
+        } => f(v),
+        AstNode::BinaryOperation { left, right, .. } => {
+            f(left);
+            f(right);
+        }
+        AstNode::UnaryOperation { operand, .. } => f(operand),
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            ..
+        } => {
+            f(function);
+            for a in arguments {
+                f(a);
+            }
+        }
+        AstNode::IndexAccess { base, index, .. } => {
+            f(base);
+            f(index);
+        }
+        AstNode::FieldAccess { object, .. } => f(object),
+        AstNode::ListLiteral { elements, .. }
+        | AstNode::TupleLiteral(elements)
+        | AstNode::SetLiteral(elements) => {
+            for e in elements {
+                f(e);
+            }
+        }
+        AstNode::Block(stmts) => {
+            for s in stmts {
+                f(s);
+            }
+        }
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            f(condition);
+            f(then_branch);
+            if let Some(e) = else_branch {
+                f(e);
+            }
+        }
+        AstNode::WhileLoop {
+            condition, body, ..
+        } => {
+            f(condition);
+            f(body);
+        }
+        AstNode::ForLoop {
+            iterable, body, ..
+        } => {
+            f(iterable);
+            f(body);
+        }
+        AstNode::Return {
+            value: Some(v), ..
+        }
+        | AstNode::Yield(Some(v)) => f(v),
+        AstNode::DiscardStatement { expression, .. } => f(expression),
+        _ => {}
+    }
+}
+
+/// Compute the set of pure function names by fixpoint over the call graph.
+fn compute_pure_functions(root: &AstNode) -> HashSet<String> {
+    // Gather (name, params, body) for every named function definition.
+    let mut funcs: Vec<(String, HashSet<String>, &AstNode)> = Vec::new();
+    fn gather<'a>(node: &'a AstNode, out: &mut Vec<(String, HashSet<String>, &'a AstNode)>) {
+        match node {
+            AstNode::FunctionDefinition {
+                name: Some(n),
+                parameters,
+                body,
+                ..
+            } => {
+                let params = parameters.iter().map(|p| p.name.clone()).collect();
+                out.push((n.clone(), params, body));
+                gather(body, out);
+            }
+            AstNode::Block(stmts) => {
+                for s in stmts {
+                    gather(s, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    gather(root, &mut funcs);
+
+    let mut pure: HashSet<String> = HashSet::new();
+    loop {
+        let mut changed = false;
+        for (name, params, body) in &funcs {
+            if pure.contains(name) {
+                continue;
+            }
+            let tainted = compute_param_taint(body, params);
+            if !body_has_effect_for_purity(body, &tainted, &pure) {
+                pure.insert(name.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    pure
+}
+
+/// Locals that may alias parameter-owned data (so mutating them would mutate a
+/// parameter). Seeded with the parameters and grown to a fixpoint over
+/// `var x = <param-derived>` / `x = <param-derived>` aliasing edges.
+fn compute_param_taint(body: &AstNode, params: &HashSet<String>) -> HashSet<String> {
+    let mut edges: Vec<(String, Option<String>)> = Vec::new();
+    fn gather(node: &AstNode, edges: &mut Vec<(String, Option<String>)>) {
+        match node {
+            AstNode::VariableDeclaration {
+                name,
+                value: Some(v),
+                ..
+            } => edges.push((name.clone(), base_var_of(v))),
+            AstNode::Assignment { target, value, .. } => {
+                if let AstNode::Identifier(n, _) = target.as_ref() {
+                    edges.push((n.clone(), base_var_of(value)));
+                }
+            }
+            _ => {}
+        }
+        for_each_child(node, &mut |c| gather(c, edges));
+    }
+    gather(body, &mut edges);
+
+    let mut tainted = params.clone();
+    loop {
+        let mut changed = false;
+        for (lhs, rhs_base) in &edges {
+            if let Some(rb) = rhs_base {
+                if tainted.contains(rb) && tainted.insert(lhs.clone()) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    tainted
+}
+
+/// True if a function body contains anything that makes it impure: an effectful
+/// call, a call to a not-yet-pure function, mutation of a (possibly param-aliased)
+/// value, or an element/field store onto param-aliased data.
+fn body_has_effect_for_purity(
+    node: &AstNode,
+    tainted: &HashSet<String>,
+    pure_fns: &HashSet<String>,
+) -> bool {
+    match node {
+        AstNode::FunctionCall { arguments, .. } => {
+            if let Some(name) = call_name(node) {
+                if is_mutator_call_name(name) {
+                    // Mutating a fresh (non-param-aliased) local is fine; anything else is not.
+                    let target_ok = arguments
+                        .first()
+                        .and_then(base_var_of)
+                        .is_some_and(|b| !tainted.contains(&b));
+                    if !target_ok {
+                        return true;
+                    }
+                } else if is_effectful_call_name(name) {
+                    return true;
+                } else if !pure_fns.contains(name) && !PURE_BUILTINS.contains(&name) {
+                    return true;
+                }
+            } else {
+                return true; // indirect / computed callee
+            }
+            arguments
+                .iter()
+                .any(|a| body_has_effect_for_purity(a, tainted, pure_fns))
+        }
+        AstNode::Assignment { target, value, .. } => {
+            // Element/field stores onto param-aliased data mutate a parameter.
+            if matches!(
+                target.as_ref(),
+                AstNode::IndexAccess { .. } | AstNode::FieldAccess { .. }
+            ) && base_var_of(target).is_none_or(|b| tainted.contains(&b))
+            {
+                return true;
+            }
+            body_has_effect_for_purity(value, tainted, pure_fns)
+                || body_has_effect_for_purity(target, tainted, pure_fns)
+        }
+        AstNode::Identifier(_, _) | AstNode::Literal { .. } | AstNode::Break | AstNode::Continue => {
+            false
+        }
+        AstNode::FunctionDefinition { .. } => false,
+        // Generic recursion for the structural nodes.
+        AstNode::Block(_)
+        | AstNode::BinaryOperation { .. }
+        | AstNode::UnaryOperation { .. }
+        | AstNode::IndexAccess { .. }
+        | AstNode::FieldAccess { .. }
+        | AstNode::ListLiteral { .. }
+        | AstNode::TupleLiteral(_)
+        | AstNode::SetLiteral(_)
+        | AstNode::IfExpression { .. }
+        | AstNode::WhileLoop { .. }
+        | AstNode::ForLoop { .. }
+        | AstNode::VariableDeclaration { .. }
+        | AstNode::Return { .. }
+        | AstNode::Yield(_)
+        | AstNode::DiscardStatement { .. } => {
+            let mut effect = false;
+            for_each_child(node, &mut |c| {
+                if body_has_effect_for_purity(c, tainted, pure_fns) {
+                    effect = true;
+                }
+            });
+            effect
+        }
+        // Anything not explicitly modeled is treated as impure (sound default).
+        _ => true,
+    }
+}
+
+/// Rebuild a loop node with a new body block.
+fn loop_with_body(loop_node: AstNode, new_body: Vec<AstNode>) -> AstNode {
+    match loop_node {
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            location,
+            ..
+        } => AstNode::ForLoop {
+            variables,
+            iterable,
+            body: Box::new(AstNode::Block(new_body)),
+            location,
+        },
+        AstNode::WhileLoop {
+            condition,
+            location,
+            ..
+        } => AstNode::WhileLoop {
+            condition,
+            body: Box::new(AstNode::Block(new_body)),
+            location,
+        },
+        other => other,
+    }
+}
+
+/// LICM over one block: pull pure, loop-invariant, single-assignment, read-only
+/// `var x = E` declarations out of each loop in the block to just before it.
+fn block_licm(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
+    let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        let is_loop = matches!(
+            stmt,
+            AstNode::ForLoop { .. } | AstNode::WhileLoop { .. }
+        );
+        if !is_loop {
+            out.push(stmt);
+            continue;
+        }
+        let body = match &stmt {
+            AstNode::ForLoop { body, .. } | AstNode::WhileLoop { body, .. } => body.as_ref(),
+            _ => unreachable!(),
+        };
+        let AstNode::Block(body_stmts) = body else {
+            out.push(stmt);
+            continue;
+        };
+
+        // Everything written in the loop body (plus loop variables) is variant.
+        let mut variant: HashSet<String> = HashSet::new();
+        collect_written_vars(body, &mut variant);
+        if let AstNode::ForLoop { variables, .. } = &stmt {
+            for v in variables {
+                variant.insert(v.clone());
+            }
+        }
+
+        let mut hoisted: Vec<AstNode> = Vec::new();
+        let mut remaining: Vec<AstNode> = Vec::with_capacity(body_stmts.len());
+        for s in body_stmts {
+            if let AstNode::VariableDeclaration {
+                name,
+                value: Some(value),
+                ..
+            } = s
+            {
+                let mut refs = HashSet::new();
+                collect_referenced_vars(value, &mut refs);
+                let invariant = refs.iter().all(|r| !variant.contains(r));
+                let single_assignment = !is_var_mutated(body, name);
+                if invariant
+                    && single_assignment
+                    && expr_is_pure(value, pure_fns)
+                {
+                    hoisted.push(s.clone());
+                    continue;
+                }
+            }
+            remaining.push(s.clone());
+        }
+
+        if hoisted.is_empty() {
+            out.push(stmt);
+        } else {
+            out.extend(hoisted);
+            out.push(loop_with_body(stmt, remaining));
+        }
+    }
+    out
+}
+
+/// CSE over one block: replace a later `var b = E` with `var b = a` when an
+/// earlier `var a = E'` computed an equivalent pure value that is still valid
+/// (no intervening write to its inputs, no intervening effect) and both `a` and
+/// `b` are never mutated in the block.
+fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
+    // (var name, value expr, referenced vars) for still-valid available expressions.
+    let mut available: Vec<(String, AstNode, HashSet<String>)> = Vec::new();
+    let block = AstNode::Block(stmts.clone());
+    let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
+
+    for stmt in stmts {
+        // Invalidate availability based on this statement's writes / effects first
+        // is wrong order; we must read availability for THIS decl before invalidating
+        // with its own write. So: try to rewrite first, then invalidate.
+        let mut new_stmt = stmt.clone();
+        if let AstNode::VariableDeclaration {
+            name,
+            value: Some(value),
+            ..
+        } = &stmt
+        {
+            if expr_is_pure(value, pure_fns) && !is_var_mutated(&block, name) {
+                if let Some((src, _, _)) =
+                    available.iter().find(|(_, e, _)| expr_equiv(e, value))
+                {
+                    // Replace the redundant computation with an alias to the earlier result.
+                    if let AstNode::VariableDeclaration {
+                        name,
+                        type_annotation,
+                        is_mutable,
+                        is_secret,
+                        location,
+                        ..
+                    } = stmt.clone()
+                    {
+                        new_stmt = AstNode::VariableDeclaration {
+                            name,
+                            type_annotation,
+                            value: Some(Box::new(AstNode::Identifier(
+                                src.clone(),
+                                location.clone(),
+                            ))),
+                            is_mutable,
+                            is_secret,
+                            location,
+                        };
+                    }
+                } else {
+                    let mut refs = HashSet::new();
+                    collect_referenced_vars(value, &mut refs);
+                    available.push((name.clone(), value.as_ref().clone(), refs));
+                }
+            }
+        }
+
+        // Invalidate available entries clobbered by this statement.
+        let mut writes = HashSet::new();
+        collect_written_vars(&stmt, &mut writes);
+        if !writes.is_empty() {
+            available.retain(|(vn, _, refs)| {
+                !writes.contains(vn) && refs.iter().all(|r| !writes.contains(r))
+            });
+        }
+        if stmt_has_effect(&stmt, pure_fns) {
+            // An effect may change get_field reads etc.; drop everything conservatively.
+            available.clear();
+        }
+
+        out.push(new_stmt);
+    }
+    out
+}
+
+/// Recursively apply LICM + CSE to every block in the program.
+fn transform_licm_cse(node: AstNode, pure_fns: &HashSet<String>) -> AstNode {
+    match node {
+        AstNode::Block(stmts) => {
+            let stmts: Vec<AstNode> = stmts
+                .into_iter()
+                .map(|s| transform_licm_cse(s, pure_fns))
+                .collect();
+            let stmts = block_licm(stmts, pure_fns);
+            let stmts = block_cse(stmts, pure_fns);
+            AstNode::Block(stmts)
+        }
+        AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body,
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        } => AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body: Box::new(transform_licm_cse(*body, pure_fns)),
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        },
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => AstNode::ForLoop {
+            variables,
+            iterable,
+            body: Box::new(transform_licm_cse(*body, pure_fns)),
+            location,
+        },
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => AstNode::WhileLoop {
+            condition,
+            body: Box::new(transform_licm_cse(*body, pure_fns)),
+            location,
+        },
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => AstNode::IfExpression {
+            condition,
+            then_branch: Box::new(transform_licm_cse(*then_branch, pure_fns)),
+            else_branch: else_branch.map(|e| Box::new(transform_licm_cse(*e, pure_fns))),
+        },
+        other => other,
+    }
+}
+
+/// Entry point: loop-invariant code motion + common subexpression elimination.
+///
+/// LICM and CSE expose each other's opportunities (hoisting one invariant binding
+/// can make a dependent binding invariant; deduplicating a value can make a loop
+/// body smaller and another binding invariant), so the transform is applied
+/// repeatedly until it reaches a fixpoint. `transform_licm_cse` only moves and
+/// aliases existing nodes (it never mints fresh names), so structural equality is
+/// a sound convergence test.
+pub fn optimize_licm_cse(node: AstNode) -> AstNode {
+    let pure_fns = compute_pure_functions(&node);
+    let mut node = node;
+    for _ in 0..16 {
+        let next = transform_licm_cse(node.clone(), &pure_fns);
+        if next == node {
+            break;
+        }
+        node = next;
+    }
+    node
 }
 
 #[cfg(test)]
