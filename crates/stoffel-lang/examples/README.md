@@ -52,6 +52,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_is_zero`: zero test `[x==0]` with a single comparison.
 - `mpc_count_frequency`: count list elements equal to a secret target.
 - `mpc_linear_search`: secret found-flag + first matching index.
+- `mpc_popcount_secret`: population count of a secret int (decompose + sum bits).
 
 ## Algorithm gallery
 
