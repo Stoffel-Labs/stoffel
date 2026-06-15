@@ -46,6 +46,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_oblivious_read`: read `arr[secret i]` via equality + select.
 - `mpc_oblivious_write`: write `arr[secret i] = v` obliviously (select per cell).
 - `mpc_range_check`: secret bit `[lo ≤ x ≤ hi]` (two comparisons + AND).
+- `mpc_clamp`: clamp `x` to `[lo,hi]` = max(lo, min(x, hi)).
 
 ## Algorithm gallery
 
