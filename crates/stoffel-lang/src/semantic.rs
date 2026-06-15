@@ -330,9 +330,7 @@ impl<'a> SemanticAnalyzer<'a> {
         match node {
             AstNode::Break => true,
             AstNode::WhileLoop { .. } | AstNode::ForLoop { .. } => false,
-            AstNode::Block(statements) => {
-                statements.iter().any(Self::contains_escaping_break)
-            }
+            AstNode::Block(statements) => statements.iter().any(Self::contains_escaping_break),
             AstNode::IfExpression {
                 then_branch,
                 else_branch,
@@ -1634,8 +1632,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 // keeps the variable a share, with the MPC runtime handling the
                 // mixed-type scalar op. So a share/secret constraint wins over a
                 // clear-numeric one rather than conflicting (in either order).
-                let prev_share =
-                    Self::is_share_alias_type(&previous.ty) || previous.ty.is_secret();
+                let prev_share = Self::is_share_alias_type(&previous.ty) || previous.ty.is_secret();
                 let cur_share =
                     Self::is_share_alias_type(&constraint.ty) || constraint.ty.is_secret();
                 let prev_num = Self::is_clear_numeric_type(previous.ty.underlying_type());

@@ -1,8 +1,9 @@
-use super::{field_from_usize, AvssMpcEngine};
+use super::{field_from_usize, usize_seed, AvssMpcEngine};
 use ark_ec::CurveGroup;
-use ark_ff::{FftField, PrimeField};
+use ark_ff::{FftField, PrimeField, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::{Rng, SeedableRng};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ClearShareValue, ShareData, ShareType};
 use stoffelmpc_mpc::avss_mpc::AvssSessionId;
@@ -11,9 +12,27 @@ use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::common::{MPCProtocol, ProtocolSessionId, SecretSharingScheme};
 use tracing::info;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct AvssExpDleqProof {
+    base_nonce: Vec<u8>,
+    generator_nonce: Vec<u8>,
+    response: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct AvssExpContribution {
+    pub(super) partial_point: Vec<u8>,
+    pub(super) dleq_proof: AvssExpDleqProof,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct AvssG2ExpContribution {
+    pub(super) partial_point: Vec<u8>,
+}
+
 impl<F, G> AvssMpcEngine<F, G>
 where
-    F: FftField + PrimeField + Send + Sync + 'static,
+    F: FftField + PrimeField + UniformRand + Send + Sync + 'static,
     G: CurveGroup<ScalarField = F> + Send + Sync + 'static,
 {
     /// Generate a new random AVSS share and store it under the given key name.
@@ -269,6 +288,327 @@ where
     pub fn decode_feldman_share(bytes: &[u8]) -> Result<FeldmanShamirShare<F, G>, String> {
         FeldmanShamirShare::<F, G>::deserialize_compressed(bytes)
             .map_err(|e| format!("deserialize FeldmanShamirShare: {}", e))
+    }
+
+    fn serialize_group_point(point: G, context: &str) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        point
+            .into_affine()
+            .serialize_compressed(&mut bytes)
+            .map_err(|e| format!("{context}: {e}"))?;
+        Ok(bytes)
+    }
+
+    fn serialize_scalar(value: &F, context: &str) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        value
+            .serialize_compressed(&mut bytes)
+            .map_err(|e| format!("{context}: {e}"))?;
+        Ok(bytes)
+    }
+
+    fn deserialize_scalar(bytes: &[u8], context: &str) -> Result<F, String> {
+        F::deserialize_compressed(bytes).map_err(|e| format!("{context}: {e}"))
+    }
+
+    fn feldman_commitment_at(
+        commitments: &[G],
+        share_id: usize,
+        context: &str,
+    ) -> Result<G, String> {
+        if commitments.is_empty() {
+            return Err(format!("{context}: Feldman commitments are empty"));
+        }
+
+        let x = field_from_usize::<F>(share_id, "AVSS Feldman commitment evaluation point")?;
+        let mut power = F::from(1u64);
+        let mut expected = G::zero();
+        for commitment in commitments {
+            expected += *commitment * power;
+            power *= x;
+        }
+        Ok(expected)
+    }
+
+    fn exp_dleq_challenge(
+        share_id: usize,
+        feldman_commitment: G,
+        generator: G,
+        partial_point: G,
+        base_nonce: G,
+        generator_nonce: G,
+    ) -> Result<F, String> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"stoffel-avss-open-exp-dleq-v1");
+        hasher.update(
+            &usize_seed(share_id, "AVSS open-in-exponent DLEQ transcript share id")?.to_be_bytes(),
+        );
+        for (context, point) in [
+            ("feldman commitment", feldman_commitment),
+            ("opening generator", generator),
+            ("partial point", partial_point),
+            ("base nonce", base_nonce),
+            ("generator nonce", generator_nonce),
+        ] {
+            let bytes = Self::serialize_group_point(point, context)?;
+            hasher.update(&(bytes.len() as u64).to_be_bytes());
+            hasher.update(&bytes);
+        }
+        Ok(F::from_be_bytes_mod_order(hasher.finalize().as_bytes()))
+    }
+
+    pub(super) fn encode_verified_exp_contribution(
+        share: &FeldmanShamirShare<F, G>,
+        generator: G,
+        partial_point: G,
+    ) -> Result<Vec<u8>, String> {
+        if !verify_feldman(share.clone()) {
+            return Err(
+                "AVSS open-in-exponent local Feldman share failed commitment verification"
+                    .to_string(),
+            );
+        }
+
+        let feldman_commitment = Self::feldman_commitment_at(
+            &share.commitments,
+            share.feldmanshare.id,
+            "AVSS local Feldman commitment evaluation",
+        )?;
+        if feldman_commitment != G::generator() * share.feldmanshare.share[0] {
+            return Err(
+                "AVSS open-in-exponent local share does not match Feldman commitments".to_string(),
+            );
+        }
+        if partial_point != generator * share.feldmanshare.share[0] {
+            return Err(
+                "AVSS open-in-exponent local partial point does not match share value".to_string(),
+            );
+        }
+
+        let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
+        let nonce = F::rand(&mut rng);
+        let base_nonce = G::generator() * nonce;
+        let generator_nonce = generator * nonce;
+        let challenge = Self::exp_dleq_challenge(
+            share.feldmanshare.id,
+            feldman_commitment,
+            generator,
+            partial_point,
+            base_nonce,
+            generator_nonce,
+        )?;
+        let response = nonce + challenge * share.feldmanshare.share[0];
+
+        let contribution = AvssExpContribution {
+            partial_point: Self::serialize_group_point(partial_point, "serialize partial point")?,
+            dleq_proof: AvssExpDleqProof {
+                base_nonce: Self::serialize_group_point(base_nonce, "serialize DLEQ base nonce")?,
+                generator_nonce: Self::serialize_group_point(
+                    generator_nonce,
+                    "serialize DLEQ generator nonce",
+                )?,
+                response: Self::serialize_scalar(&response, "serialize DLEQ response")?,
+            },
+        };
+
+        bincode::serialize(&contribution)
+            .map_err(|e| format!("serialize AVSS open-in-exponent contribution: {e}"))
+    }
+
+    fn verify_exp_contribution(
+        commitments: &[G],
+        generator: G,
+        share_id: usize,
+        contribution_bytes: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let contribution: AvssExpContribution = bincode::deserialize(contribution_bytes)
+            .map_err(|e| format!("deserialize AVSS open-in-exponent contribution: {e}"))?;
+        let partial_point = G::deserialize_compressed(&contribution.partial_point[..])
+            .map_err(|e| format!("deserialize AVSS open-in-exponent partial point: {e}"))?;
+        let base_nonce = G::deserialize_compressed(&contribution.dleq_proof.base_nonce[..])
+            .map_err(|e| format!("deserialize AVSS open-in-exponent base nonce: {e}"))?;
+        let generator_nonce =
+            G::deserialize_compressed(&contribution.dleq_proof.generator_nonce[..])
+                .map_err(|e| format!("deserialize AVSS open-in-exponent generator nonce: {e}"))?;
+        let response = Self::deserialize_scalar(
+            &contribution.dleq_proof.response,
+            "deserialize AVSS open-in-exponent DLEQ response",
+        )?;
+        let feldman_commitment = Self::feldman_commitment_at(
+            commitments,
+            share_id,
+            "AVSS received Feldman commitment evaluation",
+        )?;
+        let challenge = Self::exp_dleq_challenge(
+            share_id,
+            feldman_commitment,
+            generator,
+            partial_point,
+            base_nonce,
+            generator_nonce,
+        )?;
+
+        let base_check = G::generator() * response == base_nonce + feldman_commitment * challenge;
+        let generator_check = generator * response == generator_nonce + partial_point * challenge;
+        if !base_check || !generator_check {
+            return Err("AVSS open-in-exponent DLEQ proof verification failed".to_string());
+        }
+
+        Ok(contribution.partial_point)
+    }
+
+    pub(super) fn filter_verified_exp_points(
+        expected_share_bytes: &[u8],
+        generator: G,
+        collected: &[(usize, Vec<u8>)],
+        required_valid: usize,
+        context: &str,
+    ) -> Result<Vec<(usize, Vec<u8>)>, String> {
+        let expected_share = Self::decode_feldman_share(expected_share_bytes)?;
+        if !verify_feldman(expected_share.clone()) {
+            return Err(format!(
+                "{context}: local Feldman share failed commitment verification"
+            ));
+        }
+
+        let mut verified = Vec::with_capacity(required_valid);
+        for (share_id, contribution) in collected {
+            let Ok(partial_point) = Self::verify_exp_contribution(
+                &expected_share.commitments,
+                generator,
+                *share_id,
+                contribution,
+            ) else {
+                continue;
+            };
+            verified.push((*share_id, partial_point));
+            if verified.len() == required_valid {
+                break;
+            }
+        }
+
+        if verified.len() < required_valid {
+            return Err(format!(
+                "{context}: collected {} contributions but only {} valid open-in-exponent proofs matched the local commitments; need {}",
+                collected.len(),
+                verified.len(),
+                required_valid
+            ));
+        }
+
+        Ok(verified)
+    }
+
+    pub(super) fn encode_verified_g2_exp_contribution(
+        partial_point: ark_bls12_381::G2Projective,
+    ) -> Result<Vec<u8>, String> {
+        let contribution = AvssG2ExpContribution {
+            partial_point: {
+                let mut bytes = Vec::new();
+                partial_point
+                    .into_affine()
+                    .serialize_compressed(&mut bytes)
+                    .map_err(|e| format!("serialize AVSS G2 partial point: {e}"))?;
+                bytes
+            },
+        };
+
+        bincode::serialize(&contribution)
+            .map_err(|e| format!("serialize AVSS G2 open-in-exponent contribution: {e}"))
+    }
+
+    fn bls12381_g1_feldman_commitment_at(
+        commitments: &[G],
+        share_id: usize,
+        context: &str,
+    ) -> Result<ark_bls12_381::G1Projective, String> {
+        use ark_bls12_381::{Fr, G1Projective};
+        use ark_ff::Zero;
+
+        if commitments.is_empty() {
+            return Err(format!("{context}: Feldman commitments are empty"));
+        }
+
+        let x = Fr::from(usize_seed(
+            share_id,
+            "AVSS G2 Feldman commitment evaluation point",
+        )?);
+        let mut power = Fr::from(1u64);
+        let mut expected = G1Projective::zero();
+        for commitment in commitments {
+            let commitment_bytes =
+                Self::serialize_group_point(*commitment, "serialize BLS12-381 G1 commitment")?;
+            let commitment_g1 = G1Projective::deserialize_compressed(&commitment_bytes[..])
+                .map_err(|e| format!("{context}: deserialize BLS12-381 G1 commitment: {e}"))?;
+            expected += commitment_g1 * power;
+            power *= x;
+        }
+        Ok(expected)
+    }
+
+    pub(super) fn filter_verified_bls12381_g2_exp_points(
+        expected_share_bytes: &[u8],
+        generator_g2: ark_bls12_381::G2Projective,
+        collected: &[(usize, Vec<u8>)],
+        required_valid: usize,
+        context: &str,
+    ) -> Result<Vec<(usize, Vec<u8>)>, String> {
+        use ark_bls12_381::{Bls12_381, G1Projective, G2Projective};
+        use ark_ec::{pairing::Pairing, PrimeGroup};
+
+        let expected_share = Self::decode_feldman_share(expected_share_bytes)?;
+        if !verify_feldman(expected_share.clone()) {
+            return Err(format!(
+                "{context}: local Feldman share failed commitment verification"
+            ));
+        }
+
+        let mut verified = Vec::with_capacity(required_valid);
+        for (share_id, contribution_bytes) in collected {
+            let Ok(contribution) =
+                bincode::deserialize::<AvssG2ExpContribution>(contribution_bytes)
+            else {
+                continue;
+            };
+            let Ok(partial_point) =
+                G2Projective::deserialize_compressed(&contribution.partial_point[..])
+            else {
+                continue;
+            };
+            let Ok(feldman_commitment) = Self::bls12381_g1_feldman_commitment_at(
+                &expected_share.commitments,
+                *share_id,
+                context,
+            ) else {
+                continue;
+            };
+
+            let left =
+                Bls12_381::pairing(feldman_commitment.into_affine(), generator_g2.into_affine());
+            let right = Bls12_381::pairing(
+                G1Projective::generator().into_affine(),
+                partial_point.into_affine(),
+            );
+            if left != right {
+                continue;
+            }
+
+            verified.push((*share_id, contribution.partial_point));
+            if verified.len() == required_valid {
+                break;
+            }
+        }
+
+        if verified.len() < required_valid {
+            return Err(format!(
+                "{context}: collected {} contributions but only {} valid BLS12-381 G2 partial points matched the local commitments; need {}",
+                collected.len(),
+                verified.len(),
+                required_valid
+            ));
+        }
+
+        Ok(verified)
     }
 
     /// Convert a FeldmanShamirShare into a `ShareData::Feldman` with extracted commitments.

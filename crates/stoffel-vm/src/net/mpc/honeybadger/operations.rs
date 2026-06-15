@@ -321,7 +321,7 @@ where
         )?;
         self.broadcast_open_registry_payload(wire_message).await?;
 
-        let required = 2 * self.topology.threshold() + 1;
+        let required = Self::robust_open_required_contributions(self.topology.threshold());
         let n = self.topology.n_parties();
         let t = self.topology.threshold();
 
@@ -350,7 +350,7 @@ where
     /// StoffelLang programs do public field arithmetic on opened values (e.g.
     /// the joint random-bit protocol opens `r^2` and takes its field sqrt).
     ///
-    /// Reconstruction is identical to `open_share` — collect `2t+1` robust
+    /// Reconstruction is identical to `open_share` — collect `3t+1` robust
     /// shares and recover the secret — but the result is the canonically
     /// serialized field element. A distinct `hb-field-*` type key keeps this
     /// opening's broadcast namespace separate from the integer `open` path.
@@ -375,7 +375,7 @@ where
         )?;
         self.broadcast_open_registry_payload(wire_message).await?;
 
-        let required = 2 * self.topology.threshold() + 1;
+        let required = Self::robust_open_required_contributions(self.topology.threshold());
         let n = self.topology.n_parties();
         let t = self.topology.threshold();
 
@@ -428,7 +428,7 @@ where
         )?;
         self.broadcast_open_registry_payload(wire_message).await?;
 
-        let required = 2 * self.topology.threshold() + 1;
+        let required = Self::robust_open_required_contributions(self.topology.threshold());
         let n = self.topology.n_parties();
         let t = self.topology.threshold();
 

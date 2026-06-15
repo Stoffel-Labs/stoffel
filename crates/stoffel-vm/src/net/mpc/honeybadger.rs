@@ -91,6 +91,10 @@ where
     F: SupportedMpcField,
     G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
 {
+    pub(super) const fn robust_open_required_contributions(threshold: usize) -> usize {
+        3 * threshold + 1
+    }
+
     pub fn open_message_router(&self) -> Arc<crate::net::open_registry::OpenMessageRouter> {
         self.open_message_router.clone()
     }

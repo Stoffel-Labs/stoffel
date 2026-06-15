@@ -1,8 +1,8 @@
 use super::*;
 use crate::net::curve::MpcFieldKind;
 use crate::net::mpc_engine::{
-    MpcCapabilities, MpcEngine, MpcEngineConsensus, MpcEngineResult, MpcPartyId, MpcSessionTopology,
-    RbcSessionId,
+    MpcCapabilities, MpcEngine, MpcEngineConsensus, MpcEngineResult, MpcPartyId,
+    MpcSessionTopology, RbcSessionId,
 };
 use crate::vm_state::VMState;
 use std::sync::Arc;

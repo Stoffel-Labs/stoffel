@@ -4,8 +4,8 @@ use super::error::{
 };
 use super::share_operands::{matching_share_pair, share_scalar_operands};
 use stoffel_vm_types::core_types::{
-    ClearShareInput, ClearShareValue, FixedPointPrecision, ShareType, Value, F64,
-    DEFAULT_FIXED_POINT_FRACTIONAL_BITS, DEFAULT_FIXED_POINT_TOTAL_BITS,
+    ClearShareInput, ClearShareValue, FixedPointPrecision, ShareType, Value,
+    DEFAULT_FIXED_POINT_FRACTIONAL_BITS, DEFAULT_FIXED_POINT_TOTAL_BITS, F64,
 };
 
 pub(crate) fn add(

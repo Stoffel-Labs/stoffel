@@ -40,10 +40,10 @@ mod field;
 mod info;
 mod share;
 
+pub use crate::mpc_values::{avss_fields, avss_object};
 pub use crate::mpc_values::{
     rbc_fields, share_fields, share_object, MpcValueError, MpcValueResult,
 };
-pub use crate::mpc_values::{avss_fields, avss_object};
 
 const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Share.from_clear",

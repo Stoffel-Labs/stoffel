@@ -1,9 +1,11 @@
 use super::*;
+use crate::net::curve::SupportedMpcField;
 use crate::net::mpc_engine::{DurableIdentityDigest, MpcEngine};
 use crate::storage::preproc::{self, LmdbPreprocStore, PreprocBlob, PreprocKeyScope, PreprocStore};
-use ark_bls12_381::{Fr, G1Projective as G1};
+use ark_bls12_381::{Fr, G1Projective as G1, G2Projective as G2};
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{FftField, PrimeField, UniformRand};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::test_rng;
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ClearShareValue, ShareType, F64};
@@ -188,6 +190,152 @@ fn generate_feldman_shares(secret: Fr, n: usize, t: usize) -> Vec<FeldmanShamirS
             FeldmanShamirShare::new(share_value, i, t, commitments.clone()).unwrap()
         })
         .collect()
+}
+
+fn compressed_g1(point: G1) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    point
+        .into_affine()
+        .serialize_compressed(&mut bytes)
+        .expect("serialize G1 point");
+    bytes
+}
+
+fn compressed_g2(point: G2) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    point
+        .into_affine()
+        .serialize_compressed(&mut bytes)
+        .expect("serialize G2 point");
+    bytes
+}
+
+fn compressed_group_point<G>(point: G) -> Vec<u8>
+where
+    G: CurveGroup,
+{
+    let mut bytes = Vec::new();
+    point
+        .into_affine()
+        .serialize_compressed(&mut bytes)
+        .expect("serialize group point");
+    bytes
+}
+
+fn generate_feldman_shares_for_curve<F, G>(
+    secret: F,
+    n: usize,
+    t: usize,
+) -> Vec<FeldmanShamirShare<F, G>>
+where
+    F: FftField + PrimeField + UniformRand,
+    G: CurveGroup<ScalarField = F> + PrimeGroup,
+{
+    use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
+
+    let mut rng = test_rng();
+    let mut poly = DensePolynomial::<F>::rand(t, &mut rng);
+    poly[0] = secret;
+    let generator = G::generator();
+    let commitments: Vec<G> = poly.coeffs.iter().map(|c| generator * c).collect();
+
+    (1..=n)
+        .map(|i| {
+            let x = F::from(i as u64);
+            let share_value = poly.evaluate(&x);
+            FeldmanShamirShare::<F, G>::new(share_value, i, t, commitments.clone()).unwrap()
+        })
+        .collect()
+}
+
+fn assert_open_in_exponent_filter_is_curve_agnostic<F, G>()
+where
+    F: SupportedMpcField + UniformRand,
+    G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
+{
+    let n = 4;
+    let t = 1;
+    let secret = F::from(12345u64);
+    let shares = generate_feldman_shares_for_curve::<F, G>(secret, n, t);
+    let generator = G::generator() * F::from(7u64);
+    let expected = generator * secret;
+
+    let honest_point_1 = generator * shares[0].feldmanshare.share[0];
+    let forged_point_2 = generator * F::from(99999u64);
+    let old_raw_points = vec![
+        (
+            shares[0].feldmanshare.id,
+            compressed_group_point(honest_point_1),
+        ),
+        (
+            shares[1].feldmanshare.id,
+            compressed_group_point(forged_point_2),
+        ),
+    ];
+
+    let poisoned = crate::net::group_interpolation::interpolate_compressed_group_points::<F, G, _>(
+        &old_raw_points,
+        |id| field_from_usize::<F>(id, "AVSS evaluation point"),
+        "deserialize partial point",
+        "zero denominator",
+        "serialize result",
+    )
+    .expect("raw interpolation should complete with forged input");
+    assert_ne!(
+        G::deserialize_compressed(&poisoned[..]).expect("deserialize poisoned"),
+        expected,
+        "raw open-in-exponent interpolation must be poisonable for this regression to reproduce"
+    );
+
+    let local_share =
+        AvssMpcEngine::<F, G>::encode_feldman_share(&shares[0]).expect("encode local share");
+    let valid_contribution_1 = AvssMpcEngine::<F, G>::encode_verified_exp_contribution(
+        &shares[0],
+        generator,
+        honest_point_1,
+    )
+    .expect("encode valid contribution 1");
+    let valid_contribution_3 = AvssMpcEngine::<F, G>::encode_verified_exp_contribution(
+        &shares[2],
+        generator,
+        generator * shares[2].feldmanshare.share[0],
+    )
+    .expect("encode valid contribution 3");
+    let collected = vec![
+        (shares[0].feldmanshare.id, valid_contribution_1),
+        (shares[1].feldmanshare.id, old_raw_points[1].1.clone()),
+        (shares[2].feldmanshare.id, valid_contribution_3),
+    ];
+
+    let verified = AvssMpcEngine::<F, G>::filter_verified_exp_points(
+        &local_share,
+        generator,
+        &collected,
+        t + 1,
+        "test curve-agnostic open-in-exp",
+    )
+    .expect("forged contribution should be ignored once enough valid proofs are present");
+    assert_eq!(
+        verified
+            .iter()
+            .map(|(share_id, _)| *share_id)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+
+    let reconstructed =
+        crate::net::group_interpolation::interpolate_compressed_group_points::<F, G, _>(
+            &verified,
+            |id| field_from_usize::<F>(id, "AVSS evaluation point"),
+            "deserialize partial point",
+            "zero denominator",
+            "serialize result",
+        )
+        .expect("verified interpolation should reconstruct");
+    assert_eq!(
+        G::deserialize_compressed(&reconstructed[..]).expect("deserialize reconstructed"),
+        expected
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -583,6 +731,186 @@ fn avss_open_reconstruction_rejects_non_verifiable_local_feldman_share() {
     assert!(
         err.contains("local Feldman share failed commitment verification"),
         "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn avss_open_in_exponent_filters_forged_partial_points() {
+    let n = 4;
+    let t = 1;
+    let secret = Fr::from(12345u64);
+    let shares = generate_feldman_shares(secret, n, t);
+    let generator = G1::generator() * Fr::from(7u64);
+    let expected = generator * secret;
+
+    let honest_point_1 = generator * shares[0].feldmanshare.share[0];
+    let forged_point_2 = generator * Fr::from(99999u64);
+    let old_raw_points = vec![
+        (shares[0].feldmanshare.id, compressed_g1(honest_point_1)),
+        (shares[1].feldmanshare.id, compressed_g1(forged_point_2)),
+    ];
+
+    let poisoned =
+        crate::net::group_interpolation::interpolate_compressed_group_points::<Fr, G1, _>(
+            &old_raw_points,
+            |id| field_from_usize::<Fr>(id, "AVSS evaluation point"),
+            "deserialize partial point",
+            "zero denominator",
+            "serialize result",
+        )
+        .expect("raw interpolation should complete with forged input");
+    assert_ne!(
+        G1::deserialize_compressed(&poisoned[..]).expect("deserialize poisoned"),
+        expected,
+        "raw open-in-exponent interpolation must be poisonable for this regression to reproduce"
+    );
+
+    let local_share =
+        Bls12381AvssMpcEngine::encode_feldman_share(&shares[0]).expect("encode local share");
+    let valid_contribution_1 = Bls12381AvssMpcEngine::encode_verified_exp_contribution(
+        &shares[0],
+        generator,
+        honest_point_1,
+    )
+    .expect("encode valid contribution 1");
+    let valid_contribution_3 = Bls12381AvssMpcEngine::encode_verified_exp_contribution(
+        &shares[2],
+        generator,
+        generator * shares[2].feldmanshare.share[0],
+    )
+    .expect("encode valid contribution 3");
+    let collected = vec![
+        (shares[0].feldmanshare.id, valid_contribution_1),
+        (shares[1].feldmanshare.id, old_raw_points[1].1.clone()),
+        (shares[2].feldmanshare.id, valid_contribution_3),
+    ];
+
+    let verified = Bls12381AvssMpcEngine::filter_verified_exp_points(
+        &local_share,
+        generator,
+        &collected,
+        t + 1,
+        "test open-in-exp",
+    )
+    .expect("forged contribution should be ignored once enough valid proofs are present");
+    assert_eq!(
+        verified
+            .iter()
+            .map(|(share_id, _)| *share_id)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+
+    let reconstructed =
+        crate::net::group_interpolation::interpolate_compressed_group_points::<Fr, G1, _>(
+            &verified,
+            |id| field_from_usize::<Fr>(id, "AVSS evaluation point"),
+            "deserialize partial point",
+            "zero denominator",
+            "serialize result",
+        )
+        .expect("verified interpolation should reconstruct");
+    assert_eq!(
+        G1::deserialize_compressed(&reconstructed[..]).expect("deserialize reconstructed"),
+        expected
+    );
+}
+
+#[test]
+fn avss_g2_open_in_exponent_filters_forged_partial_points() {
+    let n = 4;
+    let t = 1;
+    let secret = Fr::from(12345u64);
+    let shares = generate_feldman_shares(secret, n, t);
+    let generator = G2::generator() * Fr::from(11u64);
+    let expected = generator * secret;
+
+    let honest_point_1 = generator * shares[0].feldmanshare.share[0];
+    let forged_point_2 = generator * Fr::from(99999u64);
+    let old_raw_points = vec![
+        (shares[0].feldmanshare.id, compressed_g2(honest_point_1)),
+        (shares[1].feldmanshare.id, compressed_g2(forged_point_2)),
+    ];
+
+    let poisoned =
+        crate::net::group_interpolation::interpolate_compressed_group_points::<Fr, G2, _>(
+            &old_raw_points,
+            |id| usize_seed(id, "AVSS G2 evaluation point").map(Fr::from),
+            "deserialize G2 partial point",
+            "zero denominator",
+            "serialize result",
+        )
+        .expect("raw G2 interpolation should complete with forged input");
+    assert_ne!(
+        G2::deserialize_compressed(&poisoned[..]).expect("deserialize poisoned"),
+        expected,
+        "raw G2 open-in-exponent interpolation must be poisonable for this regression to reproduce"
+    );
+
+    let local_share =
+        Bls12381AvssMpcEngine::encode_feldman_share(&shares[0]).expect("encode local share");
+    let valid_contribution_1 =
+        Bls12381AvssMpcEngine::encode_verified_g2_exp_contribution(honest_point_1)
+            .expect("encode valid contribution 1");
+    let valid_contribution_3 = Bls12381AvssMpcEngine::encode_verified_g2_exp_contribution(
+        generator * shares[2].feldmanshare.share[0],
+    )
+    .expect("encode valid contribution 3");
+    let collected = vec![
+        (shares[0].feldmanshare.id, valid_contribution_1),
+        (shares[1].feldmanshare.id, old_raw_points[1].1.clone()),
+        (shares[2].feldmanshare.id, valid_contribution_3),
+    ];
+
+    let verified = Bls12381AvssMpcEngine::filter_verified_bls12381_g2_exp_points(
+        &local_share,
+        generator,
+        &collected,
+        t + 1,
+        "test G2 open-in-exp",
+    )
+    .expect("forged G2 contribution should be ignored once enough valid points are present");
+    assert_eq!(
+        verified
+            .iter()
+            .map(|(share_id, _)| *share_id)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+
+    let reconstructed =
+        crate::net::group_interpolation::interpolate_compressed_group_points::<Fr, G2, _>(
+            &verified,
+            |id| usize_seed(id, "AVSS G2 evaluation point").map(Fr::from),
+            "deserialize G2 partial point",
+            "zero denominator",
+            "serialize result",
+        )
+        .expect("verified G2 interpolation should reconstruct");
+    assert_eq!(
+        G2::deserialize_compressed(&reconstructed[..]).expect("deserialize reconstructed"),
+        expected
+    );
+}
+
+#[test]
+fn avss_open_in_exponent_filter_covers_configurable_native_curves() {
+    assert_open_in_exponent_filter_is_curve_agnostic::<
+        ark_bls12_381::Fr,
+        ark_bls12_381::G1Projective,
+    >();
+    assert_open_in_exponent_filter_is_curve_agnostic::<ark_bn254::Fr, ark_bn254::G1Projective>();
+    assert_open_in_exponent_filter_is_curve_agnostic::<
+        ark_curve25519::Fr,
+        ark_curve25519::EdwardsProjective,
+    >();
+    assert_open_in_exponent_filter_is_curve_agnostic::<
+        ark_ed25519::Fr,
+        ark_ed25519::EdwardsProjective,
+    >();
+    assert_open_in_exponent_filter_is_curve_agnostic::<ark_secp256k1::Fr, ark_secp256k1::Projective>(
+    );
+    assert_open_in_exponent_filter_is_curve_agnostic::<ark_secp256r1::Fr, ark_secp256r1::Projective>(
     );
 }
 

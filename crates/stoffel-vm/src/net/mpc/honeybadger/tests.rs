@@ -9,6 +9,7 @@ use ark_ff::UniformRand;
 use ark_std::rand::SeedableRng;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use stoffelmpc_mpc::common::SecretSharingScheme;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelnet::transports::quic::QuicNetworkManager;
 
@@ -51,6 +52,47 @@ fn open_exp_test_payload(
         &partial_point,
     )
     .expect("serialize test payload")
+}
+
+#[test]
+fn robust_open_requires_full_bft_quorum() {
+    type Engine = HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>;
+
+    assert_eq!(Engine::robust_open_required_contributions(0), 1);
+    assert_eq!(Engine::robust_open_required_contributions(1), 4);
+    assert_eq!(Engine::robust_open_required_contributions(2), 7);
+}
+
+#[test]
+fn robust_reconstruction_with_byzantine_share_rejects_two_t_plus_one_quorum() {
+    let n = 4;
+    let t = 1;
+    let secret = ark_bls12_381::Fr::from(42u64);
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(138);
+    let shares =
+        RobustShare::compute_shares(secret, n, t, None, &mut rng).expect("valid robust shares");
+
+    let mut insufficient = shares[..(2 * t + 1)].to_vec();
+    insufficient[0] = RobustShare::new(
+        insufficient[0].share[0] + ark_bls12_381::Fr::from(99u64),
+        insufficient[0].id,
+        insufficient[0].degree,
+    );
+
+    let insufficient_result = RobustShare::recover_secret(&insufficient, n, t);
+    assert!(
+        insufficient_result
+            .as_ref()
+            .map(|(_coeffs, recovered)| *recovered != secret)
+            .unwrap_or(true),
+        "2t + 1 shares must not be treated as enough to correct one Byzantine contribution"
+    );
+
+    let mut full_quorum = insufficient;
+    full_quorum.push(shares[3].clone());
+    let (_coeffs, recovered) =
+        RobustShare::recover_secret(&full_quorum, n, t).expect("3t + 1 shares recover");
+    assert_eq!(recovered, secret);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

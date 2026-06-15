@@ -89,6 +89,8 @@ pub fn honeybadger_node_opts_with_truncation(
     n_prandint: usize,
     instance_id: u64,
 ) -> Result<HoneyBadgerMPCNodeOpts, String> {
+    validate_honeybadger_topology(n_parties, threshold)?;
+
     let l = DEFAULT_FIXED_POINT_TOTAL_BITS;
     let k = DEFAULT_SECURITY_PARAMETER_K;
 
@@ -105,6 +107,19 @@ pub fn honeybadger_node_opts_with_truncation(
         honeybadger_protocol_timeout(),
     )
     .map_err(|e| format!("Failed to create HoneyBadger node options: {:?}", e))
+}
+
+fn validate_honeybadger_topology(n_parties: usize, threshold: usize) -> Result<(), String> {
+    let required = threshold
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| format!("HoneyBadger threshold {threshold} is too large"))?;
+    if n_parties < required {
+        return Err(format!(
+            "HoneyBadger requires n_parties ({n_parties}) >= 3 * threshold ({threshold}) + 1 ({required})"
+        ));
+    }
+    Ok(())
 }
 
 /// Network envelope used on QUIC to distinguish control messages (like handshakes)
@@ -138,6 +153,19 @@ mod tests {
     fn honeybadger_node_opts_accepts_full_width_vm_instance_ids() {
         honeybadger_node_opts(5, 1, 0, 0, u64::from(u32::MAX) + 1)
             .expect("full-width VM instance ids must be projected into the protocol domain");
+    }
+
+    #[test]
+    fn honeybadger_node_opts_requires_bft_topology() {
+        let err =
+            honeybadger_node_opts(3, 1, 0, 0, 1).expect_err("HoneyBadger must reject n < 3t + 1");
+        assert!(
+            err.contains("HoneyBadger requires n_parties (3) >= 3 * threshold (1) + 1 (4)"),
+            "unexpected error: {err}"
+        );
+
+        honeybadger_node_opts(4, 1, 0, 0, 1)
+            .expect("n = 3t + 1 should be accepted for HoneyBadger");
     }
 
     #[test]

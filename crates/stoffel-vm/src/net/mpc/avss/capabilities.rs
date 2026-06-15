@@ -12,7 +12,7 @@ use crate::net::mpc_engine::{
 use crate::net::open_registry::{ExpOpenRegistryKind, ExpOpenRequest};
 use crate::storage::preproc::PreprocStore;
 use ark_ec::CurveGroup;
-use ark_serialize::CanonicalSerialize;
+use ark_ff::UniformRand;
 use std::any::TypeId;
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType};
@@ -23,7 +23,7 @@ use stoffelnet::transports::quic::QuicNetworkManager;
 
 impl<F, G> AvssMpcEngine<F, G>
 where
-    F: SupportedMpcField,
+    F: SupportedMpcField + UniformRand,
     G: CurveGroup<ScalarField = F> + Send + Sync + 'static,
 {
     async fn broadcast_open_avss_exp_payload(&self, payload: Vec<u8>) -> Result<(), String> {
@@ -60,11 +60,8 @@ where
         let share_id = share.feldmanshare.id;
 
         let partial_point = generator * share_value;
-        let mut partial_bytes = Vec::new();
-        partial_point
-            .into_affine()
-            .serialize_compressed(&mut partial_bytes)
-            .map_err(|e| format!("serialize partial point: {}", e))?;
+        let partial_bytes =
+            Self::encode_verified_exp_contribution(&share, generator, partial_point)?;
 
         let wire_message = crate::net::open_registry::encode_avss_open_exp_wire_message(
             self.topology.instance_id(),
@@ -74,7 +71,11 @@ where
         )?;
         self.broadcast_open_avss_exp_payload_sync(wire_message)?;
 
-        let required = self.topology.threshold() + 1;
+        let required_valid = self.topology.threshold() + 1;
+        let required = Self::byzantine_open_contribution_count(
+            self.topology.n_parties(),
+            self.topology.threshold(),
+        )?;
         self.open_registry.exp_open_wait(
             ExpOpenRequest {
                 kind: ExpOpenRegistryKind::G1,
@@ -85,8 +86,15 @@ where
                 timeout_message: "Timeout waiting for AVSS open_share_in_exp contributions",
             },
             |partial_points| {
-                crate::net::group_interpolation::interpolate_compressed_group_points::<F, G, _>(
+                let verified_points = Self::filter_verified_exp_points(
+                    share_bytes,
+                    generator,
                     partial_points,
+                    required_valid,
+                    "AVSS open_share_in_exp",
+                )?;
+                crate::net::group_interpolation::interpolate_compressed_group_points::<F, G, _>(
+                    &verified_points,
                     |id| field_from_usize::<F>(id, "AVSS evaluation point"),
                     "deserialize partial point",
                     "zero denominator in AVSS Lagrange",
@@ -110,11 +118,8 @@ where
         let share_id = share.feldmanshare.id;
 
         let partial_point = generator * share_value;
-        let mut partial_bytes = Vec::new();
-        partial_point
-            .into_affine()
-            .serialize_compressed(&mut partial_bytes)
-            .map_err(|e| format!("serialize partial point: {}", e))?;
+        let partial_bytes =
+            Self::encode_verified_exp_contribution(&share, generator, partial_point)?;
 
         let wire_message = crate::net::open_registry::encode_avss_open_exp_wire_message(
             self.topology.instance_id(),
@@ -124,7 +129,11 @@ where
         )?;
         self.broadcast_open_avss_exp_payload(wire_message).await?;
 
-        let required = self.topology.threshold() + 1;
+        let required_valid = self.topology.threshold() + 1;
+        let required = Self::byzantine_open_contribution_count(
+            self.topology.n_parties(),
+            self.topology.threshold(),
+        )?;
         self.open_registry
             .exp_open_async(
                 ExpOpenRequest {
@@ -136,8 +145,15 @@ where
                     timeout_message: "Timeout waiting for AVSS open_share_in_exp contributions",
                 },
                 |partial_points| {
-                    crate::net::group_interpolation::interpolate_compressed_group_points::<F, G, _>(
+                    let verified_points = Self::filter_verified_exp_points(
+                        share_bytes,
+                        generator,
                         partial_points,
+                        required_valid,
+                        "AVSS async_open_share_in_exp",
+                    )?;
+                    crate::net::group_interpolation::interpolate_compressed_group_points::<F, G, _>(
+                        &verified_points,
                         |id| field_from_usize::<F>(id, "AVSS evaluation point"),
                         "deserialize partial point",
                         "zero denominator in AVSS Lagrange",
@@ -154,8 +170,7 @@ where
         generator_g2_bytes: &[u8],
     ) -> Result<Vec<u8>, String> {
         use ark_bls12_381::{Fr, G2Projective};
-        use ark_ec::CurveGroup as _;
-        use ark_serialize::{CanonicalDeserialize as _, CanonicalSerialize as _};
+        use ark_serialize::CanonicalDeserialize as _;
 
         if F::CURVE_CONFIG != MpcCurveConfig::Bls12_381 {
             return Err(format!(
@@ -178,11 +193,7 @@ where
         let share_id: usize = share.feldmanshare.id;
 
         let partial_point: G2Projective = generator_g2 * share_value;
-        let mut partial_bytes = Vec::new();
-        partial_point
-            .into_affine()
-            .serialize_compressed(&mut partial_bytes)
-            .map_err(|e| format!("serialize G2 partial point: {}", e))?;
+        let partial_bytes = Self::encode_verified_g2_exp_contribution(partial_point)?;
 
         let wire_payload = crate::net::open_registry::encode_avss_g2_open_exp_wire_message(
             self.topology.instance_id(),
@@ -199,7 +210,11 @@ where
             "broadcast avss g2 open-exp to",
         ))?;
 
-        let required = self.topology.threshold() + 1;
+        let required_valid = self.topology.threshold() + 1;
+        let required = Self::byzantine_open_contribution_count(
+            self.topology.n_parties(),
+            self.topology.threshold(),
+        )?;
         self.open_registry.exp_open_wait(
             ExpOpenRequest {
                 kind: ExpOpenRegistryKind::G2,
@@ -210,12 +225,19 @@ where
                 timeout_message: "Timeout waiting for AVSS G2 open_share_in_exp contributions",
             },
             |partial_points| {
+                let verified_points = Self::filter_verified_bls12381_g2_exp_points(
+                    share_bytes,
+                    generator_g2,
+                    partial_points,
+                    required_valid,
+                    "AVSS G2 open_share_in_exp",
+                )?;
                 crate::net::group_interpolation::interpolate_compressed_group_points::<
                     Fr,
                     G2Projective,
                     _,
                 >(
-                    partial_points,
+                    &verified_points,
                     |id| usize_seed(id, "AVSS G2 evaluation point").map(Fr::from),
                     "deserialize G2 partial point",
                     "zero denominator in AVSS G2 Lagrange",
@@ -231,8 +253,7 @@ where
         generator_g2_bytes: &[u8],
     ) -> Result<Vec<u8>, String> {
         use ark_bls12_381::{Fr, G2Projective};
-        use ark_ec::CurveGroup as _;
-        use ark_serialize::{CanonicalDeserialize as _, CanonicalSerialize as _};
+        use ark_serialize::CanonicalDeserialize as _;
 
         if F::CURVE_CONFIG != MpcCurveConfig::Bls12_381 {
             return Err(format!(
@@ -255,11 +276,7 @@ where
         let share_id: usize = share.feldmanshare.id;
 
         let partial_point: G2Projective = generator_g2 * share_value;
-        let mut partial_bytes = Vec::new();
-        partial_point
-            .into_affine()
-            .serialize_compressed(&mut partial_bytes)
-            .map_err(|e| format!("serialize G2 partial point: {}", e))?;
+        let partial_bytes = Self::encode_verified_g2_exp_contribution(partial_point)?;
 
         let wire_payload = crate::net::open_registry::encode_avss_g2_open_exp_wire_message(
             self.topology.instance_id(),
@@ -277,7 +294,11 @@ where
         )
         .await?;
 
-        let required = self.topology.threshold() + 1;
+        let required_valid = self.topology.threshold() + 1;
+        let required = Self::byzantine_open_contribution_count(
+            self.topology.n_parties(),
+            self.topology.threshold(),
+        )?;
         self.open_registry
             .exp_open_async(
                 ExpOpenRequest {
@@ -289,12 +310,19 @@ where
                     timeout_message: "Timeout waiting for AVSS G2 open_share_in_exp contributions",
                 },
                 |partial_points| {
+                    let verified_points = Self::filter_verified_bls12381_g2_exp_points(
+                        share_bytes,
+                        generator_g2,
+                        partial_points,
+                        required_valid,
+                        "AVSS G2 async_open_share_in_exp",
+                    )?;
                     crate::net::group_interpolation::interpolate_compressed_group_points::<
                         Fr,
                         G2Projective,
                         _,
                     >(
-                        partial_points,
+                        &verified_points,
                         |id| usize_seed(id, "AVSS G2 evaluation point").map(Fr::from),
                         "deserialize G2 partial point",
                         "zero denominator in AVSS G2 Lagrange",

@@ -752,9 +752,8 @@ impl VMState {
         })?;
         let left = self.unwrap_share_value_for_arith(left)?;
         let right = self.unwrap_share_value_for_arith(right)?;
-        let result_value = runtime_value_ops::add(&left, &right, &|| {
-            self.share_runtime().map_err(Into::into)
-        })?;
+        let result_value =
+            runtime_value_ops::add(&left, &right, &|| self.share_runtime().map_err(Into::into))?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
         Ok(())
@@ -935,9 +934,8 @@ impl VMState {
         })?;
         let left = self.unwrap_share_value_for_arith(left)?;
         let right = self.unwrap_share_value_for_arith(right)?;
-        let result_value = runtime_value_ops::sub(&left, &right, &|| {
-            self.share_runtime().map_err(Into::into)
-        })?;
+        let result_value =
+            runtime_value_ops::sub(&left, &right, &|| self.share_runtime().map_err(Into::into))?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
         Ok(())
@@ -966,9 +964,8 @@ impl VMState {
         })?;
         let left = self.unwrap_share_value_for_arith(left)?;
         let right = self.unwrap_share_value_for_arith(right)?;
-        let computed = runtime_value_ops::mul(&left, &right, &|| {
-            self.share_runtime().map_err(Into::into)
-        })?;
+        let computed =
+            runtime_value_ops::mul(&left, &right, &|| self.share_runtime().map_err(Into::into))?;
 
         self.write_current_register(dest, computed, hooks_enabled)?;
         Ok(())
@@ -997,9 +994,8 @@ impl VMState {
         })?;
         let left = self.unwrap_share_value_for_arith(left)?;
         let right = self.unwrap_share_value_for_arith(right)?;
-        let result_value = runtime_value_ops::div(&left, &right, &|| {
-            self.share_runtime().map_err(Into::into)
-        })?;
+        let result_value =
+            runtime_value_ops::div(&left, &right, &|| self.share_runtime().map_err(Into::into))?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
         Ok(())

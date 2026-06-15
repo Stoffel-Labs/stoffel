@@ -118,7 +118,7 @@ where
             )?;
             self.broadcast_open_registry_payload_sync(wire_message)?;
 
-            let required = 2 * self.topology.threshold() + 1;
+            let required = Self::robust_open_required_contributions(self.topology.threshold());
             let n = self.topology.n_parties();
             let t = self.topology.threshold();
 
@@ -171,7 +171,7 @@ where
             )?;
             self.broadcast_open_registry_payload_sync(wire_message)?;
 
-            let required = 2 * self.topology.threshold() + 1;
+            let required = Self::robust_open_required_contributions(self.topology.threshold());
             let n = self.topology.n_parties();
             let t = self.topology.threshold();
 

@@ -6,8 +6,8 @@ use crate::foreign_functions::{
 use crate::value_conversions::value_to_i64;
 use crate::VirtualMachineResult;
 use stoffel_vm_types::core_types::{
-    ClearShareInput, ClearShareValue, FixedPointPrecision, ShareType, Value, F64,
-    DEFAULT_FIXED_POINT_FRACTIONAL_BITS, DEFAULT_FIXED_POINT_TOTAL_BITS,
+    ClearShareInput, ClearShareValue, FixedPointPrecision, ShareType, Value,
+    DEFAULT_FIXED_POINT_FRACTIONAL_BITS, DEFAULT_FIXED_POINT_TOTAL_BITS, F64,
 };
 
 pub(super) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
@@ -43,7 +43,10 @@ fn share_retag(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult
     let (share_value, bit_length) = {
         let args = ctx.named_args("Share.retag");
         args.require_exact(2, "2 arguments: share, bit_length")?;
-        (args.cloned(0)?, value_to_i64(&args.cloned(1)?, "bit_length")?)
+        (
+            args.cloned(0)?,
+            value_to_i64(&args.cloned(1)?, "bit_length")?,
+        )
     };
     let bit_length = usize::try_from(bit_length).map_err(|_| {
         ForeignFunctionCallbackError::Message("bit_length must be non-negative".to_string())
@@ -169,7 +172,10 @@ fn share_mul_scalar(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackR
 }
 
 /// `round(value * 2^fractional_bits)` as `i64`, erroring on overflow/non-finite.
-fn scale_fixed_scalar(value: f64, fractional_bits: usize) -> Result<i64, ForeignFunctionCallbackError> {
+fn scale_fixed_scalar(
+    value: f64,
+    fractional_bits: usize,
+) -> Result<i64, ForeignFunctionCallbackError> {
     let exp = i32::try_from(fractional_bits).map_err(|_| {
         ForeignFunctionCallbackError::Message("fixed-point precision too large".to_string())
     })?;

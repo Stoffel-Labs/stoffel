@@ -2001,7 +2001,11 @@ fn rename_in(node: AstNode, map: &HashMap<String, String>) -> AstNode {
 /// Produce the inlined statements and the result expression for a call. Callers
 /// must ensure the callee is inlinable and `args.len() == params.len()` with no
 /// named arguments.
-fn inline_call(info: &InlineInfo, args: Vec<AstNode>, loc: &SourceLocation) -> (Vec<AstNode>, AstNode) {
+fn inline_call(
+    info: &InlineInfo,
+    args: Vec<AstNode>,
+    loc: &SourceLocation,
+) -> (Vec<AstNode>, AstNode) {
     let suffix = INLINE_SUFFIX.fetch_add(1, Ordering::Relaxed);
     let mut declared: HashSet<String> = info.params.iter().cloned().collect();
     collect_declared_names(&info.body, &mut declared);
@@ -2086,7 +2090,12 @@ fn try_inline_value(
 
 /// Inline a top-level call in a statement, emitting the inlined statements into
 /// `out`. Statements with no inlinable call are pushed unchanged.
-fn inline_stmt_into(stmt: AstNode, fns: &HashMap<String, InlineInfo>, budget: &mut usize, out: &mut Vec<AstNode>) {
+fn inline_stmt_into(
+    stmt: AstNode,
+    fns: &HashMap<String, InlineInfo>,
+    budget: &mut usize,
+    out: &mut Vec<AstNode>,
+) {
     match stmt {
         AstNode::VariableDeclaration {
             name,
@@ -2265,10 +2274,7 @@ fn collect_called_names(node: &AstNode, out: &mut HashSet<String>) {
 fn gather_inline_infos(root: &AstNode) -> HashMap<String, InlineInfo> {
     // Collect every named function definition.
     let mut defs: Vec<(String, Vec<crate::ast::Parameter>, AstNode)> = Vec::new();
-    fn gather(
-        node: &AstNode,
-        out: &mut Vec<(String, Vec<crate::ast::Parameter>, AstNode)>,
-    ) {
+    fn gather(node: &AstNode, out: &mut Vec<(String, Vec<crate::ast::Parameter>, AstNode)>) {
         if let AstNode::FunctionDefinition {
             name: Some(n),
             parameters,
@@ -2341,7 +2347,10 @@ fn for_each_child_def(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
 }
 
 fn function_is_inlinable(params: &[crate::ast::Parameter], body: &AstNode) -> bool {
-    if params.iter().any(|p| p.is_variadic || p.default_value.is_some()) {
+    if params
+        .iter()
+        .any(|p| p.is_variadic || p.default_value.is_some())
+    {
         return false;
     }
     let AstNode::Block(stmts) = body else {
@@ -2540,10 +2549,9 @@ fn collect_written_vars(node: &AstNode, out: &mut HashSet<String>) {
             collect_written_vars(iterable, out);
             collect_written_vars(body, out);
         }
-        AstNode::Return {
-            value: Some(v), ..
+        AstNode::Return { value: Some(v), .. } | AstNode::Yield(Some(v)) => {
+            collect_written_vars(v, out)
         }
-        | AstNode::Yield(Some(v)) => collect_written_vars(v, out),
         AstNode::DiscardStatement { expression, .. } => collect_written_vars(expression, out),
         _ => {}
     }
@@ -2571,9 +2579,7 @@ fn is_var_mutated(node: &AstNode, name: &str) -> bool {
                 }
                 walk(function, name) || arguments.iter().any(|a| walk(a, name))
             }
-            AstNode::VariableDeclaration {
-                value: Some(v), ..
-            } => walk(v, name),
+            AstNode::VariableDeclaration { value: Some(v), .. } => walk(v, name),
             AstNode::Block(stmts) => stmts.iter().any(|s| walk(s, name)),
             AstNode::BinaryOperation { left, right, .. } => walk(left, name) || walk(right, name),
             AstNode::UnaryOperation { operand, .. } => walk(operand, name),
@@ -2594,13 +2600,8 @@ fn is_var_mutated(node: &AstNode, name: &str) -> bool {
             AstNode::WhileLoop {
                 condition, body, ..
             } => walk(condition, name) || walk(body, name),
-            AstNode::ForLoop {
-                iterable, body, ..
-            } => walk(iterable, name) || walk(body, name),
-            AstNode::Return {
-                value: Some(v), ..
-            }
-            | AstNode::Yield(Some(v)) => walk(v, name),
+            AstNode::ForLoop { iterable, body, .. } => walk(iterable, name) || walk(body, name),
+            AstNode::Return { value: Some(v), .. } | AstNode::Yield(Some(v)) => walk(v, name),
             AstNode::DiscardStatement { expression, .. } => walk(expression, name),
             _ => false,
         }
@@ -2704,10 +2705,9 @@ fn expr_equiv(a: &AstNode, b: &AstNode) -> bool {
                 ..
             },
         ) => f1 == f2 && expr_equiv(o1, o2),
-        (
-            AstNode::ListLiteral { elements: e1, .. },
-            AstNode::ListLiteral { elements: e2, .. },
-        ) => e1.len() == e2.len() && e1.iter().zip(e2).all(|(x, y)| expr_equiv(x, y)),
+        (AstNode::ListLiteral { elements: e1, .. }, AstNode::ListLiteral { elements: e2, .. }) => {
+            e1.len() == e2.len() && e1.iter().zip(e2).all(|(x, y)| expr_equiv(x, y))
+        }
         (
             AstNode::FunctionCall {
                 function: f1,
@@ -2759,9 +2759,7 @@ fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
             f(target);
             f(value);
         }
-        AstNode::VariableDeclaration {
-            value: Some(v), ..
-        } => f(v),
+        AstNode::VariableDeclaration { value: Some(v), .. } => f(v),
         AstNode::BinaryOperation { left, right, .. } => {
             f(left);
             f(right);
@@ -2811,16 +2809,11 @@ fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
             f(condition);
             f(body);
         }
-        AstNode::ForLoop {
-            iterable, body, ..
-        } => {
+        AstNode::ForLoop { iterable, body, .. } => {
             f(iterable);
             f(body);
         }
-        AstNode::Return {
-            value: Some(v), ..
-        }
-        | AstNode::Yield(Some(v)) => f(v),
+        AstNode::Return { value: Some(v), .. } | AstNode::Yield(Some(v)) => f(v),
         AstNode::DiscardStatement { expression, .. } => f(expression),
         _ => {}
     }
@@ -2956,9 +2949,10 @@ fn body_has_effect_for_purity(
             body_has_effect_for_purity(value, tainted, pure_fns)
                 || body_has_effect_for_purity(target, tainted, pure_fns)
         }
-        AstNode::Identifier(_, _) | AstNode::Literal { .. } | AstNode::Break | AstNode::Continue => {
-            false
-        }
+        AstNode::Identifier(_, _)
+        | AstNode::Literal { .. }
+        | AstNode::Break
+        | AstNode::Continue => false,
         AstNode::FunctionDefinition { .. } => false,
         // Generic recursion for the structural nodes.
         AstNode::Block(_)
@@ -3021,10 +3015,7 @@ fn loop_with_body(loop_node: AstNode, new_body: Vec<AstNode>) -> AstNode {
 fn block_licm(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
     let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
     for stmt in stmts {
-        let is_loop = matches!(
-            stmt,
-            AstNode::ForLoop { .. } | AstNode::WhileLoop { .. }
-        );
+        let is_loop = matches!(stmt, AstNode::ForLoop { .. } | AstNode::WhileLoop { .. });
         if !is_loop {
             out.push(stmt);
             continue;
@@ -3060,10 +3051,7 @@ fn block_licm(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
                 collect_referenced_vars(value, &mut refs);
                 let invariant = refs.iter().all(|r| !variant.contains(r));
                 let single_assignment = !is_var_mutated(body, name);
-                if invariant
-                    && single_assignment
-                    && expr_is_pure(value, pure_fns)
-                {
+                if invariant && single_assignment && expr_is_pure(value, pure_fns) {
                     hoisted.push(s.clone());
                     continue;
                 }
@@ -3103,9 +3091,7 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
         } = &stmt
         {
             if expr_is_pure(value, pure_fns) && !is_var_mutated(&block, name) {
-                if let Some((src, _, _)) =
-                    available.iter().find(|(_, e, _)| expr_equiv(e, value))
-                {
+                if let Some((src, _, _)) = available.iter().find(|(_, e, _)| expr_equiv(e, value)) {
                     // Replace the redundant computation with an alias to the earlier result.
                     if let AstNode::VariableDeclaration {
                         name,

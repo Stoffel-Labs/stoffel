@@ -85,40 +85,45 @@ pub(crate) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     vm.try_register_typed_foreign_function("Field.is_zero", |mut ctx| {
         let bytes = read_one("Field.is_zero", &mut ctx)?;
         let curve = ctx.require_mpc_runtime_info()?.curve_config();
-        let is_zero = dispatch_field!(curve, |F| Ok::<_, String>(deserialize::<F>(&bytes)?
-            == F::ZERO))?;
+        let is_zero = dispatch_field!(curve, |F| Ok::<_, String>(
+            deserialize::<F>(&bytes)? == F::ZERO
+        ))?;
         Ok(Value::Bool(is_zero))
     })?;
 
     vm.try_register_typed_foreign_function("Field.eq", |mut ctx| {
         let (a, b) = read_two("Field.eq", &mut ctx)?;
         let curve = ctx.require_mpc_runtime_info()?.curve_config();
-        let eq = dispatch_field!(curve, |F| Ok::<_, String>(deserialize::<F>(&a)?
-            == deserialize::<F>(&b)?))?;
+        let eq = dispatch_field!(curve, |F| Ok::<_, String>(
+            deserialize::<F>(&a)? == deserialize::<F>(&b)?
+        ))?;
         Ok(Value::Bool(eq))
     })?;
 
     vm.try_register_typed_foreign_function("Field.add", |mut ctx| {
         let (a, b) = read_two("Field.add", &mut ctx)?;
         let curve = ctx.require_mpc_runtime_info()?.curve_config();
-        let out = dispatch_field!(curve, |F| serialize::<F>(deserialize::<F>(&a)?
-            + deserialize::<F>(&b)?))?;
+        let out = dispatch_field!(curve, |F| serialize::<F>(
+            deserialize::<F>(&a)? + deserialize::<F>(&b)?
+        ))?;
         ctx.create_byte_array(&out)
     })?;
 
     vm.try_register_typed_foreign_function("Field.sub", |mut ctx| {
         let (a, b) = read_two("Field.sub", &mut ctx)?;
         let curve = ctx.require_mpc_runtime_info()?.curve_config();
-        let out = dispatch_field!(curve, |F| serialize::<F>(deserialize::<F>(&a)?
-            - deserialize::<F>(&b)?))?;
+        let out = dispatch_field!(curve, |F| serialize::<F>(
+            deserialize::<F>(&a)? - deserialize::<F>(&b)?
+        ))?;
         ctx.create_byte_array(&out)
     })?;
 
     vm.try_register_typed_foreign_function("Field.mul", |mut ctx| {
         let (a, b) = read_two("Field.mul", &mut ctx)?;
         let curve = ctx.require_mpc_runtime_info()?.curve_config();
-        let out = dispatch_field!(curve, |F| serialize::<F>(deserialize::<F>(&a)?
-            * deserialize::<F>(&b)?))?;
+        let out = dispatch_field!(curve, |F| serialize::<F>(
+            deserialize::<F>(&a)? * deserialize::<F>(&b)?
+        ))?;
         ctx.create_byte_array(&out)
     })?;
 
@@ -234,8 +239,8 @@ mod tests {
     #[test]
     fn inverse_round_trips() {
         let value = Fr::from(7u64);
-        let inv = deserialize::<Fr>(&inverse_impl::<Fr>(&serialize(value).unwrap()).unwrap())
-            .unwrap();
+        let inv =
+            deserialize::<Fr>(&inverse_impl::<Fr>(&serialize(value).unwrap()).unwrap()).unwrap();
         assert_eq!(value * inv, Fr::ONE);
     }
 

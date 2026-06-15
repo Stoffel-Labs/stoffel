@@ -2,10 +2,10 @@ use super::*;
 use crate::foreign_functions::ForeignFunctionCallbackError;
 use crate::net::client_store::{ClientOutputShareCount, ClientShare, ClientShareIndex};
 use crate::net::mpc_engine::{
-    AsyncMpcEngine, AsyncMpcEngineConsensus, MpcCapabilities, MpcEngine,
-    MpcEngineClientOutput, MpcEngineConsensus, MpcEngineError, MpcEngineFieldOpen,
-    MpcEngineMultiplication, MpcEngineOpenInExponent, MpcEngineRandomness, MpcEngineResult,
-    MpcExponentGroup, MpcPartyId, MpcSessionTopology, RbcSessionId,
+    AsyncMpcEngine, AsyncMpcEngineConsensus, MpcCapabilities, MpcEngine, MpcEngineClientOutput,
+    MpcEngineConsensus, MpcEngineError, MpcEngineFieldOpen, MpcEngineMultiplication,
+    MpcEngineOpenInExponent, MpcEngineRandomness, MpcEngineResult, MpcExponentGroup, MpcPartyId,
+    MpcSessionTopology, RbcSessionId,
 };
 use crate::runtime_hooks::{HookCallbackError, HookEvent, HookId};
 use crate::VirtualMachineError;
@@ -3658,11 +3658,7 @@ fn turmoil_execute_many_async_runs_mixed_programs_under_randomized_network_order
 
         let result = vm
             .execute_many_async(
-                [
-                    "mixed_open",
-                    "mixed_rbc",
-                    "mixed_secret_math",
-                ],
+                ["mixed_open", "mixed_rbc", "mixed_secret_math"],
                 engine.as_ref(),
             )
             .await?;
