@@ -36,6 +36,7 @@ mod avss;
 mod bytes;
 mod consensus;
 mod crypto;
+mod field;
 mod info;
 mod share;
 
@@ -63,12 +64,14 @@ const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Share.get_party_id",
     "Share.open_exp",
     "Share.random",
+    "Share.random_field",
     "Share.random_int",
     "Share.get_commitment",
     "Share.commitment_count",
     "Share.has_commitments",
     "Share.mul_field",
     "Share.add_field",
+    "Share.retag",
     "Share.open_field",
     "Share.open_exp_custom",
     "Bytes.concat",
@@ -81,6 +84,17 @@ const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Crypto.field_to_scalar_bytes",
     "Crypto.point_to_sec1",
     "Crypto.hash_to_g1",
+    "Field.from_int",
+    "Field.zero",
+    "Field.one",
+    "Field.is_zero",
+    "Field.eq",
+    "Field.add",
+    "Field.sub",
+    "Field.mul",
+    "Field.neg",
+    "Field.inverse",
+    "Field.sqrt",
     "Mpc.party_id",
     "Mpc.n_parties",
     "Mpc.threshold",
@@ -127,6 +141,7 @@ fn register_mpc_builtins_unchecked(vm: &mut VirtualMachine) -> VirtualMachineRes
     consensus::register_rbc(vm)?;
     consensus::register_aba(vm)?;
     crypto::register(vm)?;
+    field::register(vm)?;
     bytes::register(vm)?;
     avss::register(vm)?;
     Ok(())

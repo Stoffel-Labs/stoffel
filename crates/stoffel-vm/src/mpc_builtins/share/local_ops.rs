@@ -27,9 +27,37 @@ pub(super) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         share_mul_scalar,
     )?;
     vm.try_register_typed_foreign_method("Share", "mul_field", "Share.mul_field", share_mul_field)?;
-    vm.try_register_typed_foreign_function("Share.add_field", share_add_field)?;
+    vm.try_register_typed_foreign_method("Share", "add_field", "Share.add_field", share_add_field)?;
+    vm.try_register_typed_foreign_method("Share", "retag", "Share.retag", share_retag)?;
     vm.try_register_typed_foreign_function("Share.interpolate_local", share_interpolate_local)?;
     Ok(())
+}
+
+/// Reinterpret an integer share's declared bit-length — a local type-tag change
+/// only, with NO interactive reduction of the underlying secret. The caller is
+/// responsible for ensuring the value already fits the new width (e.g. tagging a
+/// share known to hold 0/1 as a 1-bit `secret bool`). This is a reinterpret, not
+/// a cast: narrowing a value that does not fit will leave it out of range.
+/// Use `bit_length = 1` for booleans.
+fn share_retag(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
+    let (share_value, bit_length) = {
+        let args = ctx.named_args("Share.retag");
+        args.require_exact(2, "2 arguments: share, bit_length")?;
+        (args.cloned(0)?, value_to_i64(&args.cloned(1)?, "bit_length")?)
+    };
+    let bit_length = usize::try_from(bit_length).map_err(|_| {
+        ForeignFunctionCallbackError::Message("bit_length must be non-negative".to_string())
+    })?;
+
+    let (ty, data) = ctx.extract_share_data(&share_value)?;
+    if !matches!(
+        ty,
+        ShareType::SecretInt { .. } | ShareType::SecretUInt { .. }
+    ) {
+        return Err("Share.retag requires an integer share".into());
+    }
+
+    create_result_share_object(&mut ctx, ShareType::try_secret_int(bit_length)?, data)
 }
 
 fn share_add(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {

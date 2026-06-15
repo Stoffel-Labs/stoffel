@@ -739,9 +739,11 @@ impl VMState {
                     generator_bytes,
                 })
             }
-            MpcOnlineBuiltin::Random => Ok(PendingMpcBuiltinOperation::Random {
-                share_type: ShareType::default_secret_int(),
-            }),
+            MpcOnlineBuiltin::Random | MpcOnlineBuiltin::RandomField => {
+                Ok(PendingMpcBuiltinOperation::Random {
+                    share_type: ShareType::default_secret_int(),
+                })
+            }
             MpcOnlineBuiltin::RandomInt => {
                 args.require_exact(1, "1 argument: bit_length")?;
                 let bit_length = args.usize(0, "bit_length")?;
