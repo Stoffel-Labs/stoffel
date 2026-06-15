@@ -1,0 +1,54 @@
+# run-args: --client-input 0=10 --client-input 0=20 --client-input 0=30 --client-input 1=20 --client-input 1=30 --client-input 1=40 --expected-output-clients 2
+# Diffie-Hellman private set intersection (DH-PSI), built on the OPRF.
+#
+# Two clients each contribute a set. Every element is mapped through the same
+# threshold-shared-key OPRF tag  H(e)^k  (see mpc_oprf). Equal elements map to
+# equal tags, so the intersection is found by comparing tags -- and because the
+# tags are pseudorandom, comparing them reveals nothing but the matches.
+#
+# Here the cardinality of the intersection is returned to both clients.
+#
+# (As with mpc_oprf, a production deployment blinds elements client-side so the
+# servers never see them; this example shows the tag-and-match mechanism.)
+
+def oprf_tag(x: bytes, key: Share) -> bytes:
+  return key.open_exp_custom(Crypto.hash_to_g1(x))
+
+def main() -> int64:
+  var na = 3
+  var nb = 3
+  var key: secret int64 = Share.random()
+
+  # Tag client 0's set (literal slot so the client-IO manifest can resolve it).
+  var tags_a: list[bytes] = []
+  var i = 0
+  while i < na:
+    var ea: secret int64 = ClientStore.take_share(0, i)
+    tags_a.append(oprf_tag(ea.open_field(), key))
+    i = i + 1
+
+  # Tag client 1's set.
+  var tags_b: list[bytes] = []
+  i = 0
+  while i < nb:
+    var eb: secret int64 = ClientStore.take_share(1, i)
+    tags_b.append(oprf_tag(eb.open_field(), key))
+    i = i + 1
+
+  # |A intersect B| = number of client-0 tags that also appear in client 1's set.
+  var count = 0
+  i = 0
+  while i < na:
+    var j = 0
+    while j < nb:
+      if tags_a[i] == tags_b[j]:
+        count = count + 1
+      j = j + 1
+    i = i + 1
+
+  if Mpc.has_capability("client-output"):
+    Share.from_clear(count).send_to_client(0)
+    Share.from_clear(count).send_to_client(1)
+
+  assert count == 2, "{10,20,30} intersect {20,30,40} has cardinality 2"
+  return count
