@@ -1,4 +1,4 @@
-# run-args: --client-input 0=2 --client-input 0=1 --expected-output-clients 1
+# run-args: --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -119,16 +119,17 @@ def affine(w: list[int64], x: list[Share], prior: int64) -> Share:
 def main() -> int64:
   var l = 12
   var kappa = 8
-  var x0: secret int64 = ClientStore.take_share(0, 0)
-  var x1: secret int64 = ClientStore.take_share(0, 1)
+  # 32 secret feature counts; per-class log-probability tables are public, so
+  # each class score is free local scaling and only the argmax (one comparison)
+  # costs MPC work.
   var x: list[Share] = []
-  x.append(x0)
-  x.append(x1)
-  var s0 = affine([1, 1], x, 0)
-  var s1 = affine([2, 0], x, 0)
-  var cls = less_than(s0, s1, l, kappa)
+  for xi in 0..32:
+    x.append(ClientStore.take_share(0, xi))
+  var s0 = affine([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], x, 0)   # class 0 score
+  var s1 = affine([2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2], x, 0)   # class 1 score
+  var cls = less_than(s0, s1, l, kappa)   # 1 iff class 1 scores higher
   if Mpc.has_capability("client-output"):
     cls.send_to_client(0)
   var rv = Share.open(Share.retag(cls, 64))
-  assert rv == 1, "predicted class 1"
+  assert rv == 1, "s0=32 < s1=64 -> argmax is class 1"
   return rv
