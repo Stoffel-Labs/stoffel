@@ -29,6 +29,7 @@ example folder has a `main.stfl` source file and a short README.
 - `mpc_argmax`: secret-shared argmax/argmin index over a list (comparison tournament + select).
 - `mpc_bitwise_int`: bitwise AND/OR/XOR and right shift on secret integers via bit-decomposition.
 - `mpc_set_membership`: secret bit for `x ∈ S` over a public set (OR of equalities).
+- `mpc_inner_product`: secure dot product via `batch_mul` + sum, and a small linear layer.
 - `mpc_aes128_circuit`: AES-128 block encryption built from `secret bool` circuit gates.
 - `mpc_client_federated_average`: client-provided secret inputs via `ClientStore`.
 - `mpc_protocol_coordination`: RBC/ABA coordination for distributed protocol phases.
