@@ -1,3 +1,4 @@
+# run-args: --client-input 0=1 --client-input 0=2 --client-input 0=3 --client-input 0=2 --client-input 0=3 --client-input 1=2 --client-input 1=3 --expected-output-clients 2
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -126,18 +127,22 @@ def count_matches(text: list[Share], pat: list[Share], l: int64, kappa: int64) -
 def main() -> int64:
   var l = 8
   var kappa = 6
-  var tr = [1, 2, 3, 2, 3]
-  var pr = [2, 3]
   var text: list[Share] = []
   var pat: list[Share] = []
   var i = 0
-  while i < len(tr):
-    text.append(Share.from_clear_int(tr[i], l))
+  while i < 5:
+    var tv: secret int64 = ClientStore.take_share(0, i)
+    text.append(tv)
     i = i + 1
   i = 0
-  while i < len(pr):
-    pat.append(Share.from_clear_int(pr[i], l))
+  while i < 2:
+    var pv: secret int64 = ClientStore.take_share(1, i)
+    pat.append(pv)
     i = i + 1
-  var n = Share.open(Share.retag(count_matches(text, pat, l, kappa), 64))   # matches at offsets 1 and 3 -> 2
-  assert n == 2, "pattern occurs twice"
-  return n
+  var cnt = count_matches(text, pat, l, kappa)
+  if Mpc.has_capability("client-output"):
+    cnt.send_to_client(0)
+    cnt.send_to_client(1)
+  var rv = Share.open(Share.retag(cnt, 64))
+  assert rv == 2, "pattern occurs twice"
+  return rv

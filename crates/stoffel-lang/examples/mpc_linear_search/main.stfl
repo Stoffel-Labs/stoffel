@@ -1,3 +1,4 @@
+# run-args: --client-input 0=7 --client-input 0=3 --client-input 0=9 --client-input 0=3 --client-input 0=9 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -126,15 +127,20 @@ def search(arr: list[Share], target: Share, l: int64, kappa: int64) -> list[Shar
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var raw = [7, 3, 9, 3]
+  var n = 4
   var arr: list[Share] = []
   var i = 0
-  while i < len(raw):
-    arr.append(Share.from_clear_int(raw[i], l))
+  while i < n:
+    var v: secret int64 = ClientStore.take_share(0, i)
+    arr.append(v)
     i = i + 1
-  var res = search(arr, Share.from_clear_int(9, l), l, kappa)
+  var target: secret int64 = ClientStore.take_share(0, 4)
+  var res = search(arr, target, l, kappa)
+  if Mpc.has_capability("client-output"):
+    res[0].send_to_client(0)
+    res[1].send_to_client(0)
   var found = Share.open(Share.retag(res[0], 64))
   var idx = Share.open(Share.retag(res[1], 64))
-  assert found == 1, "9 is present"
-  assert idx == 2, "first index of 9 is 2"
+  assert found == 1, "found"
+  assert idx == 2, "first index 2"
   return idx

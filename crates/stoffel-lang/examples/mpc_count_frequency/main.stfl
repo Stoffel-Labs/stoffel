@@ -1,3 +1,4 @@
+# run-args: --client-input 0=5 --client-input 0=3 --client-input 0=5 --client-input 0=7 --client-input 0=5 --client-input 0=5 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -117,12 +118,17 @@ def count_equal(arr: list[Share], target: Share, l: int64, kappa: int64) -> Shar
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var raw = [5, 3, 5, 7, 5]
+  var n = 5
   var arr: list[Share] = []
   var i = 0
-  while i < len(raw):
-    arr.append(Share.from_clear_int(raw[i], l))
+  while i < n:
+    var v: secret int64 = ClientStore.take_share(0, i)
+    arr.append(v)
     i = i + 1
-  var n = Share.open(Share.retag(count_equal(arr, Share.from_clear_int(5, l), l, kappa), 64))
-  assert n == 3, "5 occurs 3 times"
-  return n
+  var target: secret int64 = ClientStore.take_share(0, 5)
+  var cnt = count_equal(arr, target, l, kappa)
+  if Mpc.has_capability("client-output"):
+    cnt.send_to_client(0)
+  var rv = Share.open(Share.retag(cnt, 64))
+  assert rv == 3, "5 occurs 3 times"
+  return rv
