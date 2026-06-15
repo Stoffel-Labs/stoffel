@@ -64,6 +64,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_reciprocal`: fixed-point `1/d` = ⌊2^F/d⌋ via long division.
 - `mpc_sqrt`: integer `⌊√n⌋` as a count of `k²≤n` comparisons.
 - `mpc_horner_eval`: polynomial eval at a secret point via Horner.
+- `mpc_abs_diff`: `|a-b|` via select on `[a<b]`.
 
 ## Algorithm gallery
 
