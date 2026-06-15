@@ -90,6 +90,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_set_cardinality`: intersection and union sizes of two secret sets.
 - `mpc_pattern_match`: count occurrences of a secret pattern in secret text.
 - `mpc_lookup_table`: oblivious key→value lookup for a secret key.
+- `mpc_secure_shuffle`: oblivious permutation by sorting (value, random-tag) pairs.
 
 ## Algorithm gallery
 
