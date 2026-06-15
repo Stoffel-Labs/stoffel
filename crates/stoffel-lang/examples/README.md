@@ -59,6 +59,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_parity`: parity (XOR-fold of bits) of a secret int.
 - `mpc_bit_reverse_rotate`: reverse / rotate the bits of a secret word.
 - `mpc_sign_extend`: reinterpret a secret unsigned value as signed two's complement.
+- `mpc_modulo_secret`: remainder `a mod d` for a secret divisor (long division).
 
 ## Algorithm gallery
 
