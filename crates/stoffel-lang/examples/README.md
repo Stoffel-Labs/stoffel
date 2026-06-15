@@ -65,6 +65,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_sqrt`: integer `⌊√n⌋` as a count of `k²≤n` comparisons.
 - `mpc_horner_eval`: polynomial eval at a secret point via Horner.
 - `mpc_abs_diff`: `|a-b|` via select on `[a<b]`.
+- `mpc_secret_base_power`: `base^e` with secret base, public exponent.
 
 ## Algorithm gallery
 
