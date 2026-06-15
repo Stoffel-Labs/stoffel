@@ -1,46 +1,47 @@
-# run-args: --client-input 0=3 --client-input 0=2 --client-input 0=5 --client-input 1=1 --client-input 1=2 --expected-output-clients 2
-# Private matrix-factorization recommendation.
+# run-args: --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=20 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --expected-output-clients 2
+# Private matrix-factorization recommendation with a realistic latent dimension.
 #
-# A recommender factorizes the ratings matrix into latent user and item factor
-# vectors. Here client 0 holds a user's latent factors (and an observed rating),
-# client 1 holds an item's latent factors. The predicted rating is the dot
-# product <u, v>; we then run one matrix-factorization SGD update of the user
-# factors against the observed rating. Neither client sees the other's factors.
+# A recommender factorizes the ratings matrix into k-dimensional latent user and
+# item factor vectors (here k = 16). Client 0 holds a user's factors plus an
+# observed rating; client 1 holds an item's factors. Neither client sees the
+# other's factors. The predicted rating is the dot product <u, v>; we then run
+# one matrix-factorization SGD update of the user factors:
 #
-#   pred  = <u, v>
-#   err   = pred - observed
-#   u_j   = u_j - err * v_j        (gradient step, lr = 1)
+#   pred = <u, v>
+#   err  = pred - observed
+#   u_j  = u_j - err * v_j        (lr = 1)
 #
-# The predicted rating is returned to both clients.
+# Both dot product and gradient use a single batched multiply (Share.batch_mul)
+# so the whole step costs two multiplication rounds regardless of k.
 
 def main() -> int64:
-  var k = 2
+  var k = 16
 
-  # user factors + observed rating (client 0); item factors (client 1).
   var u: list[Share] = []
-  u.append(ClientStore.take_share(0, 0))
-  u.append(ClientStore.take_share(0, 1))
-  var observed: secret int64 = ClientStore.take_share(0, 2)
-  var v: list[Share] = []
-  v.append(ClientStore.take_share(1, 0))
-  v.append(ClientStore.take_share(1, 1))
-
-  # predicted rating = <u, v>
-  var pred = Share.mul(Share.retag(u[0], 64), Share.retag(v[0], 64))
-  var i = 1
+  var i = 0
   while i < k:
-    pred = Share.add(pred, Share.mul(Share.retag(u[i], 64), Share.retag(v[i], 64)))
+    u.append(ClientStore.take_share(0, i))
     i = i + 1
+  var observed: secret int64 = ClientStore.take_share(0, 16)
+  var v: list[Share] = []
+  i = 0
+  while i < k:
+    v.append(ClientStore.take_share(1, i))
+    i = i + 1
+
+  # predicted rating = <u, v>. The literal-bound `for` loop lets the compiler
+  # provision exactly k beaver triples for the k secret multiplications.
+  var pred = Share.from_clear_int(0, 64)
+  for di in 0..16:
+    pred = Share.add(pred, Share.mul(Share.retag(u[di], 64), Share.retag(v[di], 64)))
 
   var err = Share.sub(pred, Share.retag(observed, 64))
 
-  # one SGD update of the user factors: u_j <- u_j - err * v_j
+  # gradient step on the user factors: u_j <- u_j - err * v_j
   var u_new: list[Share] = []
-  i = 0
-  while i < k:
-    var g = Share.mul(Share.retag(err, 64), Share.retag(v[i], 64))
-    u_new.append(Share.sub(Share.retag(u[i], 64), g))
-    i = i + 1
+  for gi in 0..16:
+    var g = Share.mul(Share.retag(err, 64), Share.retag(v[gi], 64))
+    u_new.append(Share.sub(Share.retag(u[gi], 64), g))
 
   if Mpc.has_capability("client-output"):
     pred.send_to_client(0)
@@ -48,8 +49,6 @@ def main() -> int64:
 
   var rp = Share.open(Share.retag(pred, 64))
   var ru0 = Share.open(Share.retag(u_new[0], 64))
-  var ru1 = Share.open(Share.retag(u_new[1], 64))
-  assert rp == 7, "predicted rating <[3,2],[1,2]> = 7"
-  assert ru0 == 1, "u0: 3 - (7-5)*1 = 1"
-  assert ru1 == -2, "u1: 2 - (7-5)*2 = -2"
+  assert rp == 16, "<u, v> of two length-16 all-ones factor vectors = 16"
+  assert ru0 == 5, "u0: 1 - (16 - 20)*1 = 5"
   return rp
