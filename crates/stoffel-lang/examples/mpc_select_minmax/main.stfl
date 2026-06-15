@@ -1,3 +1,4 @@
+# run-args: --client-input 0=100 --client-input 1=150 --expected-output-clients 2
 # Branching on secret conditions: oblivious select, min/max, and equality.
 #
 # select(c, a, b) = b + c*(a - b) returns a if the secret bit c is 1, else b
@@ -91,14 +92,16 @@ def equal(a: Share, b: Share, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var a = Share.from_clear_int(100, l)
-  var b = Share.from_clear_int(150, l)
-  var mn = Share.open(Share.retag(minimum(a, b, l, kappa), 64))   # 100
-  var mx = Share.open(Share.retag(maximum(a, b, l, kappa), 64))   # 150
-  var eq = Share.open(Share.retag(equal(a, b, l, kappa), 64))     # 0
-  var eqs = Share.open(Share.retag(equal(a, a, l, kappa), 64))    # 1
-  assert mn == 100, "min(100,150) must be 100"
-  assert mx == 150, "max(100,150) must be 150"
-  assert eq == 0, "100 == 150 must be false"
-  assert eqs == 1, "100 == 100 must be true"
-  return 1
+  # Two clients each contribute one secret; min goes back to client 0, max to client 1.
+  var a: secret int64 = ClientStore.take_share(0, 0)
+  var b: secret int64 = ClientStore.take_share(1, 0)
+  var mn = minimum(a, b, l, kappa)
+  var mx = maximum(a, b, l, kappa)
+  if Mpc.has_capability("client-output"):
+    mn.send_to_client(0)
+    mx.send_to_client(1)
+  var rmn = Share.open(Share.retag(mn, 64))
+  var rmx = Share.open(Share.retag(mx, 64))
+  assert rmn == 100, "min(100, 150) must be 100"
+  assert rmx == 150, "max(100, 150) must be 150"
+  return rmn

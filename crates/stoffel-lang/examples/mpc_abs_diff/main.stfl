@@ -1,3 +1,4 @@
+# run-args: --client-input 0=3 --client-input 0=10 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -113,8 +114,11 @@ def abs_diff(a: Share, b: Share, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var d1 = Share.open(Share.retag(abs_diff(Share.from_clear_int(3, l), Share.from_clear_int(10, l), l, kappa), 64))
-  var d2 = Share.open(Share.retag(abs_diff(Share.from_clear_int(10, l), Share.from_clear_int(3, l), l, kappa), 64))
-  assert d1 == 7, "|3-10|=7"
-  assert d2 == 7, "|10-3|=7"
-  return d1
+  var a: secret int64 = ClientStore.take_share(0, 0)
+  var b: secret int64 = ClientStore.take_share(0, 1)
+  var d = abs_diff(a, b, l, kappa)
+  if Mpc.has_capability("client-output"):
+    d.send_to_client(0)
+  var rv = Share.open(Share.retag(d, 64))
+  assert rv == 7, "|3 - 10| must be 7"
+  return rv

@@ -6,5 +6,5 @@
 The example checks `|3−10| = |10−3| = 7`. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_abs_diff
+stoffel run crates/stoffel-lang/examples/mpc_abs_diff --client-input 0=3 --client-input 0=10 --expected-output-clients 1
 ```

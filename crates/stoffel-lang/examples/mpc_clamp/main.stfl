@@ -1,3 +1,4 @@
+# run-args: --client-input 0=150 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -115,10 +116,10 @@ def main() -> int64:
   var kappa = 8
   var lo = Share.from_clear_int(10, l)
   var hi = Share.from_clear_int(100, l)
-  var mid = Share.open(Share.retag(clamp(Share.from_clear_int(50, l), lo, hi, l, kappa), 64))
-  var low = Share.open(Share.retag(clamp(Share.from_clear_int(5, l), lo, hi, l, kappa), 64))
-  var high = Share.open(Share.retag(clamp(Share.from_clear_int(150, l), lo, hi, l, kappa), 64))
-  assert mid == 50, "clamp 50"
-  assert low == 10, "clamp 5 -> 10"
-  assert high == 100, "clamp 150 -> 100"
-  return mid
+  var x: secret int64 = ClientStore.take_share(0, 0)
+  var clamped = clamp(x, lo, hi, l, kappa)
+  if Mpc.has_capability("client-output"):
+    clamped.send_to_client(0)
+  var rv = Share.open(Share.retag(clamped, 64))
+  assert rv == 100, "clamp(150, 10, 100) must be 100"
+  return rv

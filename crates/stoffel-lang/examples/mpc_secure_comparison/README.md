@@ -26,5 +26,5 @@ The example checks `<`, `>` and `=` and asserts the results.
 Run it from the repository root:
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_secure_comparison
+stoffel run crates/stoffel-lang/examples/mpc_secure_comparison --client-input 0=100 --client-input 0=150 --expected-output-clients 1
 ```

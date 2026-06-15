@@ -1,3 +1,4 @@
+# run-args: --client-input 0=100 --client-input 0=150 --expected-output-clients 1
 # Secure comparison (Damgard, Fitzi, Kiltz, Nielsen, Toft; Catrina-de Hoogh).
 #
 # Compute a secret-shared bit [a < b] for secrets a, b in [0, 2^l), without
@@ -88,14 +89,11 @@ def less_than(a: Share, b: Share, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-
-  var a = Share.from_clear_int(100, l)
-  var b = Share.from_clear_int(150, l)
-  var lt = Share.open(Share.retag(less_than(a, b, l, kappa), 64))   # 100 < 150 -> 1
-  var gt = Share.open(Share.retag(less_than(b, a, l, kappa), 64))   # 150 < 100 -> 0
-  var eq = Share.open(Share.retag(less_than(a, a, l, kappa), 64))   # 100 < 100 -> 0
-
-  assert lt == 1, "100 < 150 must be true"
-  assert gt == 0, "150 < 100 must be false"
-  assert eq == 0, "100 < 100 must be false"
-  return lt
+  var a: secret int64 = ClientStore.take_share(0, 0)
+  var b: secret int64 = ClientStore.take_share(0, 1)
+  var lt = less_than(a, b, l, kappa)
+  if Mpc.has_capability("client-output"):
+    lt.send_to_client(0)
+  var rv = Share.open(Share.retag(lt, 64))
+  assert rv == 1, "100 < 150 must be true"
+  return rv

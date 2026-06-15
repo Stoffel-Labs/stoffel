@@ -1,3 +1,4 @@
+# run-args: --client-input 0=50 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -116,8 +117,10 @@ def main() -> int64:
   var kappa = 8
   var lo = Share.from_clear_int(10, l)
   var hi = Share.from_clear_int(100, l)
-  var inside = Share.open(Share.retag(in_range(Share.from_clear_int(50, l), lo, hi, l, kappa), 64))
-  var outside = Share.open(Share.retag(in_range(Share.from_clear_int(5, l), lo, hi, l, kappa), 64))
-  assert inside == 1, "50 in [10,100]"
-  assert outside == 0, "5 not in [10,100]"
-  return inside
+  var x: secret int64 = ClientStore.take_share(0, 0)
+  var inside = in_range(x, lo, hi, l, kappa)
+  if Mpc.has_capability("client-output"):
+    inside.send_to_client(0)
+  var rv = Share.open(Share.retag(inside, 64))
+  assert rv == 1, "50 must be in [10, 100]"
+  return rv

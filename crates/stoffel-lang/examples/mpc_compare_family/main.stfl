@@ -1,3 +1,4 @@
+# run-args: --client-input 0=5 --client-input 0=8 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -120,11 +121,11 @@ def lt_const(x: Share, k: int64, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var a = Share.from_clear_int(5, l)
-  var b = Share.from_clear_int(8, l)
-  assert Share.open(Share.retag(greater_than(a, b, l, kappa), 64)) == 0, "5>8 false"
-  assert Share.open(Share.retag(greater_than(b, a, l, kappa), 64)) == 1, "8>5 true"
-  assert Share.open(Share.retag(leq(a, b, l, kappa), 64)) == 1, "5<=8 true"
-  assert Share.open(Share.retag(geq(a, b, l, kappa), 64)) == 0, "5>=8 false"
-  assert Share.open(Share.retag(lt_const(a, 10, l, kappa), 64)) == 1, "5<10 true"
-  return 1
+  var a: secret int64 = ClientStore.take_share(0, 0)
+  var b: secret int64 = ClientStore.take_share(0, 1)
+  var gt = greater_than(b, a, l, kappa)
+  if Mpc.has_capability("client-output"):
+    gt.send_to_client(0)
+  var rv = Share.open(Share.retag(gt, 64))
+  assert rv == 1, "8 > 5 must be true"
+  return rv

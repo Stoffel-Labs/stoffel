@@ -16,5 +16,5 @@ results. `κ` is small for speed; production uses `κ ≈ 40`.
 Run it from the repository root:
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_select_minmax
+stoffel run crates/stoffel-lang/examples/mpc_select_minmax --client-input 0=100 --client-input 1=150 --expected-output-clients 2
 ```

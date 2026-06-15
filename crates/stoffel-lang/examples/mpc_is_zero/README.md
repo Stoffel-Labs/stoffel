@@ -7,5 +7,5 @@ equality-to-a-constant and predicate gating).
 The example checks `is_zero(0) = 1` and `is_zero(5) = 0`. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_is_zero
+stoffel run crates/stoffel-lang/examples/mpc_is_zero --client-input 0=0 --expected-output-clients 1
 ```

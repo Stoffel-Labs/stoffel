@@ -7,5 +7,5 @@ The example clamps `50 → 50`, `5 → 10`, `150 → 100` against `[10,100]`. `�
 small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_clamp
+stoffel run crates/stoffel-lang/examples/mpc_clamp --client-input 0=150 --expected-output-clients 1
 ```

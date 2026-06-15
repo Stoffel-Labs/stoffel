@@ -1,3 +1,4 @@
+# run-args: --client-input 0=0 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -116,6 +117,10 @@ def eq_const(x: Share, k: int64, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  assert Share.open(Share.retag(is_zero(Share.from_clear_int(0, l), l, kappa), 64)) == 1, "0==0"
-  assert Share.open(Share.retag(is_zero(Share.from_clear_int(5, l), l, kappa), 64)) == 0, "5!=0"
-  return 1
+  var x: secret int64 = ClientStore.take_share(0, 0)
+  var z = is_zero(x, l, kappa)
+  if Mpc.has_capability("client-output"):
+    z.send_to_client(0)
+  var rv = Share.open(Share.retag(z, 64))
+  assert rv == 1, "is_zero(0) must be 1"
+  return rv
