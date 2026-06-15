@@ -9,5 +9,5 @@ The example runs bids `[30,70,50]` → winner index 1, clearing price 50. `κ` i
 small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_second_price_auction
+stoffel run crates/stoffel-lang/examples/mpc_second_price_auction --client-input 0=30 --client-input 1=70 --client-input 2=50 --expected-output-clients 3
 ```

@@ -7,5 +7,5 @@ secret shares; reveal only what the mechanism requires).
 The example runs bids `[30,70,50]` → winner index 1, price 70. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_first_price_auction
+stoffel run crates/stoffel-lang/examples/mpc_first_price_auction --client-input 0=30 --client-input 1=70 --client-input 2=50 --expected-output-clients 3
 ```

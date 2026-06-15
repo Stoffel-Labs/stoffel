@@ -1,3 +1,4 @@
+# run-args: --client-input 0=30 --client-input 1=70 --client-input 2=50 --expected-output-clients 3
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -123,13 +124,19 @@ def first_price(bids: list[Share], l: int64, kappa: int64) -> list[Share]:
 def main() -> int64:
   var l = 10
   var kappa = 8
-  var br = [30, 70, 50]
+  var n = 3
   var bids: list[Share] = []
   var i = 0
-  while i < len(br):
-    bids.append(Share.from_clear_int(br[i], l))
+  while i < n:
+    var b: secret int64 = ClientStore.take_share(i, 0)   # each bidder's sealed bid
+    bids.append(b)
     i = i + 1
-  var res = first_price(bids, l, kappa)
+  var res = first_price(bids, l, kappa)                   # [winner_idx, winning_bid]
+  if Mpc.has_capability("client-output"):
+    i = 0
+    while i < n:
+      res[0].send_to_client(i)                            # announce winner index to bidders
+      i = i + 1
   var widx = Share.open(Share.retag(res[0], 64))
   var price = Share.open(Share.retag(res[1], 64))
   assert widx == 1, "winner index 1"

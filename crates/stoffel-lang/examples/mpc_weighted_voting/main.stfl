@@ -1,3 +1,4 @@
+# run-args: --client-input 0=1 --client-input 1=0 --client-input 2=1 --expected-output-clients 3
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -118,17 +119,22 @@ def weighted_passes(votes: list[Share], weights: list[Share], tau: int64, l: int
 def main() -> int64:
   var l = 10
   var kappa = 8
-  var vr = [1, 0, 1]
-  var wr = [2, 3, 1]
+  var n = 3
   var votes: list[Share] = []
   var weights: list[Share] = []
+  var wpub = [2, 3, 1]
   var i = 0
-  while i < len(vr):
-    votes.append(Share.from_clear_int(vr[i], l))
-    weights.append(Share.from_clear_int(wr[i], l))
+  while i < n:
+    var v: secret int64 = ClientStore.take_share(i, 0)        # each voter's private yes/no
+    votes.append(v)
+    weights.append(Share.from_clear_int(wpub[i], 64))          # public per-voter weights
     i = i + 1
-  var pass3 = Share.open(Share.retag(weighted_passes(votes, weights, 3, l, kappa), 64))   # 2+0+1=3 >=3 -> 1
-  var pass4 = Share.open(Share.retag(weighted_passes(votes, weights, 4, l, kappa), 64))   # 3 >=4 -> 0
-  assert pass3 == 1, "weight 3 passes 3"
-  assert pass4 == 0, "weight 3 fails 4"
-  return pass3
+  var decided = weighted_passes(votes, weights, 3, l, kappa)
+  if Mpc.has_capability("client-output"):
+    i = 0
+    while i < n:
+      decided.send_to_client(i)
+      i = i + 1
+  var rv = Share.open(Share.retag(decided, 64))
+  assert rv == 1, "weighted tally 3 passes threshold 3"
+  return rv

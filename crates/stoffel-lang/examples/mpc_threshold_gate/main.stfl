@@ -1,3 +1,4 @@
+# run-args: --client-input 0=1 --client-input 1=1 --client-input 2=0 --client-input 3=1 --client-input 4=0 --expected-output-clients 5
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -117,14 +118,19 @@ def k_of_n(bits: list[Share], k: int64, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var br = [1, 1, 0, 1, 0]
+  var n = 5
   var bits: list[Share] = []
   var i = 0
-  while i < len(br):
-    bits.append(Share.from_clear_int(br[i], 1))
+  while i < n:
+    var v: secret int64 = ClientStore.take_share(i, 0)
+    bits.append(v)
     i = i + 1
-  var maj = Share.open(Share.retag(k_of_n(bits, 3, l, kappa), 64))   # 3 of 5 >= 3 -> majority 1
-  var k4 = Share.open(Share.retag(k_of_n(bits, 4, l, kappa), 64))    # 3 >= 4 -> 0
-  assert maj == 1, "majority holds"
-  assert k4 == 0, "4-of-5 fails"
-  return maj
+  var maj = k_of_n(bits, 3, l, kappa)
+  if Mpc.has_capability("client-output"):
+    i = 0
+    while i < n:
+      maj.send_to_client(i)
+      i = i + 1
+  var rv = Share.open(Share.retag(maj, 64))
+  assert rv == 1, "majority of 3-of-5 holds"
+  return rv

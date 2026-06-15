@@ -1,3 +1,4 @@
+# run-args: --client-input 0=30 --client-input 1=70 --client-input 2=50 --expected-output-clients 3
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -118,29 +119,35 @@ def cas(arr: list[Share], i: int64, j: int64, l: int64, kappa: int64) -> int64:
 def main() -> int64:
   var l = 10
   var kappa = 8
-  var br = [30, 70, 50]
+  var n = 3
   var bids: list[Share] = []
   var sorted: list[Share] = []
   var i = 0
-  while i < len(br):
-    bids.append(Share.from_clear_int(br[i], l))
-    sorted.append(Share.from_clear_int(br[i], l))
+  while i < n:
+    var b: secret int64 = ClientStore.take_share(i, 0)
+    bids.append(b)
+    sorted.append(b)
     i = i + 1
-  # winner index via argmax over bids
   var best_v = bids[0]
   var best_i = Share.from_clear_int(0, 64)
   i = 1
-  while i < len(bids):
+  while i < n:
     var gt = less_than(best_v, bids[i], l, kappa)
     best_v = select(gt, bids[i], best_v)
     best_i = select(gt, Share.from_clear_int(i, 64), best_i)
     i = i + 1
-  # clearing price = second-highest = sorted[n-2] (3-element network)
   var d0 = cas(sorted, 0, 1, l, kappa)
   var d1 = cas(sorted, 1, 2, l, kappa)
   var d2 = cas(sorted, 0, 1, l, kappa)
+  var price = sorted[n - 2]
+  if Mpc.has_capability("client-output"):
+    i = 0
+    while i < n:
+      best_i.send_to_client(i)
+      price.send_to_client(i)
+      i = i + 1
   var widx = Share.open(Share.retag(best_i, 64))
-  var price = Share.open(Share.retag(sorted[len(br) - 2], 64))
+  var pr = Share.open(Share.retag(price, 64))
   assert widx == 1, "winner index 1"
-  assert price == 50, "second price 50"
-  return price
+  assert pr == 50, "second price 50"
+  return pr
