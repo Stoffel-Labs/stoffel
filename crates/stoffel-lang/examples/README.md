@@ -25,6 +25,7 @@ example folder has a `main.stfl` source file and a short README.
 - `mpc_bit_decomposition`: decompose a secret into shared bits via a random mask, reveal, and a borrow-chain subtractor.
 - `mpc_secure_comparison`: secret-shared `[a < b]` extracting only the comparison bit (masked reveal + carry chain, no full decomposition).
 - `mpc_select_minmax`: oblivious `select`/mux, `min`/`max`, and equality built on secure comparison.
+- `mpc_relu_sign`: sign extraction, `abs`, and ReLU (`x·[x≥0]`) on signed shares for private ML.
 - `mpc_aes128_circuit`: AES-128 block encryption built from `secret bool` circuit gates.
 - `mpc_client_federated_average`: client-provided secret inputs via `ClientStore`.
 - `mpc_protocol_coordination`: RBC/ABA coordination for distributed protocol phases.
