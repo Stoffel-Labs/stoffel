@@ -701,7 +701,9 @@ impl CodeGenerator {
     fn record_client_io_call(&mut self, function_name: &str, arguments: &[AstNode]) {
         match function_name {
             "ClientStore.take_share" | "ClientStore.take_share_fixed" => {
-                let Some(client_slot) = int_literal_u64(arguments.first()) else {
+                // The client slot may be a literal, a loop variable (records every
+                // client in the loop range), or a clear-int constant.
+                let Some(client_slots) = self.input_ordinals_for_node(arguments.first()) else {
                     return;
                 };
                 let Some(input_ordinals) = self.input_ordinals_for_node(arguments.get(1)) else {
@@ -712,39 +714,45 @@ impl CodeGenerator {
                 } else {
                     ShareType::default_secret_int()
                 };
-                let inputs = self.client_inputs.entry(client_slot).or_default();
-                for input_ordinal in input_ordinals {
-                    let ordinal = input_ordinal as usize;
-                    if inputs.len() <= ordinal {
-                        inputs.resize(ordinal + 1, None);
+                for client_slot in client_slots {
+                    let inputs = self.client_inputs.entry(client_slot).or_default();
+                    for input_ordinal in &input_ordinals {
+                        let ordinal = *input_ordinal as usize;
+                        if inputs.len() <= ordinal {
+                            inputs.resize(ordinal + 1, None);
+                        }
+                        inputs[ordinal] = Some(share_type);
                     }
-                    inputs[ordinal] = Some(share_type);
                 }
             }
             "MpcOutput.send_to_client" => {
-                let Some(client_slot) = int_literal_u64(arguments.first()) else {
+                let Some(client_slots) = self.input_ordinals_for_node(arguments.first()) else {
                     return;
                 };
                 if let Some(value) = arguments.get(1) {
                     let outputs = self.output_share_types_for_node(value);
-                    self.client_outputs
-                        .entry(client_slot)
-                        .or_default()
-                        .extend(outputs);
+                    for client_slot in client_slots {
+                        self.client_outputs
+                            .entry(client_slot)
+                            .or_default()
+                            .extend(outputs.clone());
+                    }
                 }
             }
             "send_to_client" => {
-                let Some(client_slot) = int_literal_u64(arguments.get(1)) else {
+                let Some(client_slots) = self.input_ordinals_for_node(arguments.get(1)) else {
                     return;
                 };
                 let share_type = arguments
                     .first()
                     .and_then(|argument| self.share_type_for_node(argument))
                     .unwrap_or_else(ShareType::default_secret_int);
-                self.client_outputs
-                    .entry(client_slot)
-                    .or_default()
-                    .push(share_type);
+                for client_slot in client_slots {
+                    self.client_outputs
+                        .entry(client_slot)
+                        .or_default()
+                        .push(share_type);
+                }
             }
             _ => {}
         }
@@ -821,14 +829,14 @@ impl CodeGenerator {
     fn input_ordinals_for_node(&self, node: Option<&AstNode>) -> Option<Vec<u64>> {
         match node? {
             AstNode::Literal { .. } => int_literal_u64(node).map(|ordinal| vec![ordinal]),
-            AstNode::Identifier(name, _) => {
-                self.active_loop_bounds
-                    .iter()
-                    .rev()
-                    .find_map(|(loop_var, bound)| {
-                        (loop_var == name).then(|| (0..*bound).collect::<Vec<_>>())
-                    })
-            }
+            AstNode::Identifier(name, _) => self
+                .active_loop_bounds
+                .iter()
+                .rev()
+                .find_map(|(loop_var, bound)| {
+                    (loop_var == name).then(|| (0..*bound).collect::<Vec<_>>())
+                })
+                .or_else(|| self.clear_int_constants.get(name).map(|value| vec![*value])),
             _ => None,
         }
     }
