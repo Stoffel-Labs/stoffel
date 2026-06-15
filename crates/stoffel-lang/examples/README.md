@@ -44,6 +44,7 @@ example folder has a `main.stfl` source file and a short README.
 MPC subprotocol library (built on the random-bit / comparison primitives):
 
 - `mpc_oblivious_read`: read `arr[secret i]` via equality + select.
+- `mpc_oblivious_write`: write `arr[secret i] = v` obliviously (select per cell).
 
 ## Algorithm gallery
 
