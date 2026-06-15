@@ -11,5 +11,5 @@ multiply batch per dot product.
 The example checks `dot([1,2,3],[4,5,6]) = 32` and a 2×3 layer `W·x = [19, 25]`.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_inner_product
+stoffel run crates/stoffel-lang/examples/mpc_inner_product --client-input 0=1 --client-input 0=2 --client-input 0=3 --client-input 1=4 --client-input 1=5 --client-input 1=6 --expected-output-clients 2
 ```

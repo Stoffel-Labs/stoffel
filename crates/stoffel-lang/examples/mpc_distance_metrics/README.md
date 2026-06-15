@@ -8,5 +8,5 @@ clustering.
 The example computes `L1([1,5,3],[4,1,3]) = 7` and `L2² = 25`. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_distance_metrics
+stoffel run crates/stoffel-lang/examples/mpc_distance_metrics --client-input 0=1 --client-input 0=5 --client-input 0=3 --client-input 1=4 --client-input 1=1 --client-input 1=3 --expected-output-clients 2
 ```
