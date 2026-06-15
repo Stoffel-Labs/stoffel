@@ -94,6 +94,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_top_k`: k-th smallest (order statistic) via sorting network.
 - `mpc_rank_order`: rank of each element = count of smaller.
 - `mpc_bitonic_sort`: Batcher bitonic network for power-of-two lists.
+- `mpc_modexp`: `base^e mod m` with a secret exponent (square-and-multiply + reduce).
 
 ## Algorithm gallery
 
