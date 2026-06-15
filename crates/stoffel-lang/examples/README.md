@@ -92,6 +92,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_lookup_table`: oblivious key→value lookup for a secret key.
 - `mpc_secure_shuffle`: oblivious permutation by sorting (value, random-tag) pairs.
 - `mpc_top_k`: k-th smallest (order statistic) via sorting network.
+- `mpc_rank_order`: rank of each element = count of smaller.
 
 ## Algorithm gallery
 
