@@ -606,6 +606,13 @@ fn client_transport_recipient(
     }
 }
 
+fn client_transport_targets(
+    recipient: stoffelnet::network_utils::PartyId,
+    local_position: usize,
+) -> Option<[stoffelnet::network_utils::PartyId; 1]> {
+    Some([client_transport_recipient(recipient, local_position)?])
+}
+
 #[async_trait::async_trait]
 impl Network for ClientNetworkAdapter {
     type NodeType = <QuicNetworkManager as Network>::NodeType;
@@ -616,7 +623,7 @@ impl Network for ClientNetworkAdapter {
         recipient: stoffelnet::network_utils::PartyId,
         message: &[u8],
     ) -> Result<usize, stoffelnet::network_utils::NetworkError> {
-        let mapped = client_transport_recipient(recipient, self.local_position).ok_or(
+        let [mapped] = client_transport_targets(recipient, self.local_position).ok_or(
             stoffelnet::network_utils::NetworkError::PartyNotFound(recipient),
         )?;
         let Some(connection) = self.inner.get_connection_by_party_id(mapped) else {
@@ -5300,9 +5307,9 @@ Examples:
 #[cfg(test)]
 mod tests {
     use super::{
-        band_pow2, client_transport_recipient, field_outputs_to_hex, format_coordinator_outputs,
-        input_client_ids_from_output_ids, plan_preprocessing, render_fixed_point_i64,
-        CoordinatorOutputFormat,
+        band_pow2, client_transport_recipient, client_transport_targets, field_outputs_to_hex,
+        format_coordinator_outputs, input_client_ids_from_output_ids, plan_preprocessing,
+        render_fixed_point_i64, CoordinatorOutputFormat,
     };
     use stoffel_vm::net::MpcCurveConfig;
     use stoffel_vm_types::compiled_binary::PreprocessingDemand;
@@ -5335,6 +5342,8 @@ mod tests {
     fn client_transport_routing_shifts_past_local_position_without_leaking() {
         assert_eq!(client_transport_recipient(3, 3), Some(4));
         assert_eq!(client_transport_recipient(4, 3), Some(5));
+        assert_eq!(client_transport_targets(3, 3), Some([4]));
+        assert!(!client_transport_targets(3, 3).unwrap().contains(&3));
     }
 
     #[test]
