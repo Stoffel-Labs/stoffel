@@ -1,0 +1,117 @@
+# run-args: --client-input 0=100 --client-input 0=10 --client-input 1=90 --client-input 1=7 --expected-output-clients 2
+# Dark-pool order matching: a buyer and a seller submit secret limit orders and
+# learn only their own fill -- never each other's price or quantity, and the
+# "book" (here a single crossing pair) is never revealed.
+#
+# Client 0 (buyer)  submits (bid_price, bid_qty).
+# Client 1 (seller) submits (ask_price, ask_qty).
+# The orders cross iff ask_price <= bid_price; the matched quantity is then
+# min(bid_qty, ask_qty), else 0. Comparison and min use the carry-based secure
+# comparison (mpc_secure_comparison); the fill is delivered to both clients.
+
+def random_bit() -> Share:
+  while True:
+    var r = Share.random_field()
+    var r_squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(r_squared):
+      continue
+    var r_prime_inv = Field.inverse(Field.sqrt(r_squared))
+    var two_inv = Field.inverse(Field.from_int(2))
+    var c = Share.mul_field(r, r_prime_inv)
+    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
+    return Share.retag(a, 1)
+
+def pow2(i: int64) -> int64:
+  var p = 1
+  var k = 0
+  while k < i:
+    p = p * 2
+    k = k + 1
+  return p
+
+def combine_bits(bits: list[Share], n: int64) -> Share:
+  var acc = Share.mul_scalar(bits[0], 1)
+  var i = 1
+  while i < n:
+    acc = Share.add(acc, Share.mul_scalar(bits[i], pow2(i)))
+    i = i + 1
+  return Share.retag(acc, 64)
+
+# Secret-shared [a < b] for a, b in [0, 2^l): masked reveal + carry chain.
+def less_than(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  var z = Share.add_scalar(Share.sub(a, b), pow2(l))
+  var rbits: list[Share] = []
+  var i = 0
+  while i < (l + 1):
+    rbits.append(random_bit())
+    i = i + 1
+  var r_low = combine_bits(rbits, l + 1)
+  var r_high = Share.retag(Share.random_int(kappa), 64)
+  var r = Share.add(r_low, Share.mul_scalar(r_high, pow2(l + 1)))
+  var c = Share.open(Share.retag(Share.add(Share.retag(z, 64), r), 64))
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < l:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    if ci == 0:
+      borrow = Share.retag(Share.sub(Share.add(ri, borrow), rb), 1)
+    else:
+      borrow = Share.retag(rb, 1)
+    i = i + 1
+  var cl = (c shr l) and 1
+  var rl = rbits[l]
+  var rlb = Share.mul(rl, borrow)
+  var zl = Share.sub(Share.add(rl, borrow), Share.mul_scalar(rlb, 2))
+  if cl == 1:
+    zl = Share.sub(Share.from_clear_int(1, 1), zl)
+  return Share.sub(Share.from_clear_int(1, 1), Share.retag(zl, 1))
+
+# Oblivious select: returns a if cond==1 else b.  b + cond*(a-b), one multiply.
+def select(cond: Share, a: Share, b: Share) -> Share:
+  # cond in {0,1}; a, b arbitrary integer shares. Retag to a common width so
+  # Share.mul accepts the (1-bit cond) x (wide diff) product.
+  var d = Share.retag(Share.sub(a, b), 64)
+  var c = Share.retag(cond, 64)
+  return Share.add(Share.retag(b, 64), Share.mul(c, d))
+
+def minimum(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  return select(less_than(a, b, l, kappa), a, b)
+
+def maximum(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  return select(less_than(a, b, l, kappa), b, a)
+
+# [a == b] = NOT(a<b) AND NOT(b<a)
+def equal(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  var lt = less_than(a, b, l, kappa)
+  var gt = less_than(b, a, l, kappa)
+  var nlt = Share.sub(Share.from_clear_int(1, 1), lt)
+  var ngt = Share.sub(Share.from_clear_int(1, 1), gt)
+  return Share.mul(nlt, ngt)
+
+
+# [ask <= bid] = 1 - [bid < ask]
+def crosses(bid: Share, ask: Share, l: int64, kappa: int64) -> Share:
+  return Share.sub(Share.from_clear_int(1, 1), less_than(bid, ask, l, kappa))
+
+def main() -> int64:
+  var l = 16
+  var kappa = 8
+
+  var bid: secret int64 = ClientStore.take_share(0, 0)
+  var bid_qty: secret int64 = ClientStore.take_share(0, 1)
+  var ask: secret int64 = ClientStore.take_share(1, 0)
+  var ask_qty: secret int64 = ClientStore.take_share(1, 1)
+
+  var c = crosses(bid, ask, l, kappa)              # 1 if the orders cross
+  var matched = minimum(bid_qty, ask_qty, l, kappa) # tradeable quantity
+  var fill = Share.mul(Share.retag(c, 64), Share.retag(matched, 64))
+
+  if Mpc.has_capability("client-output"):
+    fill.send_to_client(0)
+    fill.send_to_client(1)
+
+  var rv = Share.open(Share.retag(fill, 64))
+  assert rv == 7, "bid 100 >= ask 90 crosses; fill = min(10, 7) = 7"
+  return rv
