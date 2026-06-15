@@ -1,12 +1,21 @@
 # MPC MLP Inference
 
-A small multilayer-perceptron forward pass on secret inputs: `linear → ReLU →
-linear → argmax`, composing affine layers (public weights via `mul_scalar`), the
-ReLU nonlinearity, and an argmax over the output logits. End-to-end private ML
-classification — only the predicted class is revealed.
+Private inference through a realistic feed-forward neural network:
+`32 -> 16 -> 8 -> 2` with ReLU activations and an argmax over the two output
+logits. The client's 32-dimensional input is secret-shared; the weight matrices
+are public.
 
-The example runs a 2-2-2 network and predicts class 0. `κ` is small for speed.
+Because the weights are public, every affine layer is free local scaling
+(`mul_scalar`, no beaver triples). The MPC cost is the activations and the
+output decision: `16 + 8 = 24` ReLU comparisons plus the final argmax. (A wider
+or deeper net simply adds more ReLU comparisons.)
+
+With all-ones weights and all-ones input the pre-activations are
+`32 -> 512`, the output logits are `o0 = 4096` and `o1 = 8192`, so the argmax
+is class `1`.
+
+Run it from the repository root (32 secret inputs for client 0):
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_mlp_inference --client-input 0=2 --client-input 0=3 --expected-output-clients 1
+stoffel run crates/stoffel-lang/examples/mpc_mlp_inference --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --expected-output-clients 1
 ```

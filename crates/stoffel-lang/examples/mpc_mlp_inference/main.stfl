@@ -1,4 +1,4 @@
-# run-args: --client-input 0=2 --client-input 0=3 --expected-output-clients 1
+# run-args: --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -123,22 +123,47 @@ def affine(w: list[int64], v: list[Share], b: int64) -> Share:
   return s
 
 # 2-2-2 MLP: linear -> ReLU -> linear -> argmax (2 classes).
+# Sum of a vector with all-ones weights (free: add + retag, no triples).
+def sum_all(v: list[Share]) -> Share:
+  var s = Share.from_clear_int(0, 64)
+  var i = 0
+  while i < len(v):
+    s = Share.add(s, Share.retag(v[i], 64))
+    i = i + 1
+  return s
+
+# A realistic feed-forward net: 32 -> 16 -> 8 -> 2 with ReLU activations and an
+# argmax over the 2 output logits. All weight matrices are public (here all
+# ones, so each pre-activation is just the sum of its inputs), which keeps the
+# affine layers free; the MPC cost is the 16 + 8 = 24 ReLU comparisons plus the
+# final argmax. (Larger nets simply add more ReLU comparisons.)
 def main() -> int64:
-  var l = 12
+  var l = 16
   var kappa = 8
-  var x0: secret int64 = ClientStore.take_share(0, 0)
-  var x1: secret int64 = ClientStore.take_share(0, 1)
+
   var x: list[Share] = []
-  x.append(x0)
-  x.append(x1)
-  var h: list[Share] = []
-  h.append(relu(affine([1, 1], x, 0), l, kappa))
-  h.append(relu(affine([1, -1], x, 0), l, kappa))
-  var o0 = affine([1, 0], h, 0)
-  var o1 = affine([0, 1], h, 0)
-  var cls = less_than(o0, o1, l, kappa)
+  for xi in 0..32:
+    x.append(ClientStore.take_share(0, xi))
+
+  # layer 1: 32 -> 16, ReLU.  each pre-activation = sum(x) = 32
+  var h1: list[Share] = []
+  for n1 in 0..16:
+    h1.append(relu(sum_all(x), l, kappa))
+
+  # layer 2: 16 -> 8, ReLU.  each pre-activation = sum(h1) = 16*32 = 512
+  var h2: list[Share] = []
+  for n2 in 0..8:
+    h2.append(relu(sum_all(h1), l, kappa))
+
+  # output: 8 -> 2 logits.  o0 (all-ones) = 8*512 = 4096;  o1 (all-twos) = 8192
+  var o0 = sum_all(h2)
+  var o1 = Share.from_clear_int(0, 64)
+  for oi in 0..8:
+    o1 = Share.add(o1, Share.mul_scalar(Share.retag(h2[oi], 64), 2))
+
+  var cls = less_than(o0, o1, l, kappa)   # argmax: 1 iff logit 1 is larger
   if Mpc.has_capability("client-output"):
     cls.send_to_client(0)
   var rv = Share.open(Share.retag(cls, 64))
-  assert rv == 0, "argmax class 0"
+  assert rv == 1, "o0=4096 < o1=8192 -> argmax class 1"
   return rv
