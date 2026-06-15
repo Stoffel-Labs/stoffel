@@ -1,3 +1,4 @@
+# run-args: --client-input 0=256 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -129,7 +130,10 @@ def main() -> int64:
   var l = 20
   var kappa = 8
   var f = 8
-  var x = Share.from_clear_int(pow2(8), l)   # x = 1.0 in Q8
-  var r = Share.open(Share.retag(exp_q(x, f, l, kappa), 64))  # 1 + 1 + 0.5 = 2.5 -> 640 in Q8
-  assert r == 640, "exp_q(1.0) deg-2 Taylor = 2.5 = 640 in Q8"
-  return r
+  var x: secret int64 = ClientStore.take_share(0, 0)   # x in Q8 (1.0 = 256)
+  var r = exp_q(x, f, l, kappa)
+  if Mpc.has_capability("client-output"):
+    r.send_to_client(0)
+  var rv = Share.open(Share.retag(r, 64))
+  assert rv == 640, "exp_q(1.0) deg-2 Taylor = 2.5 = 640 in Q8"
+  return rv

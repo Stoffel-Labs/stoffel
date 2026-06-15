@@ -1,3 +1,4 @@
+# run-args: --client-input 0=5 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -130,6 +131,10 @@ def reciprocal(d: Share, f: int64, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 12
   var kappa = 8
-  var r = Share.open(Share.retag(reciprocal(Share.from_clear_int(5, l), 8, l, kappa), 64))  # floor(256/5)=51
-  assert r == 51, "1/5 in Q8 must be 51"
-  return r
+  var x: secret int64 = ClientStore.take_share(0, 0)
+  var r = reciprocal(x, 8, l, kappa)   # floor(256/x) in Q8
+  if Mpc.has_capability("client-output"):
+    r.send_to_client(0)
+  var rv = Share.open(Share.retag(r, 64))
+  assert rv == 51, "1/5 in Q8 must be 51"
+  return rv

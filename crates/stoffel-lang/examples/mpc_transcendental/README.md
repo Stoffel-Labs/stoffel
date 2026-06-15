@@ -11,5 +11,5 @@ giving `2.5 = 640` (the real `exp(1) ≈ 2.718`; degree-2 truncates to 2.5). `κ
 small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_transcendental
+stoffel run crates/stoffel-lang/examples/mpc_transcendental --client-input 0=256 --expected-output-clients 1
 ```

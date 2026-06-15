@@ -8,5 +8,5 @@ approximation (`mpc_transcendental`).
 The example evaluates `2x² + 3x + 1` at `x = 5` (→ 66).
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_horner_eval
+stoffel run crates/stoffel-lang/examples/mpc_horner_eval --client-input 0=5 --expected-output-clients 1
 ```

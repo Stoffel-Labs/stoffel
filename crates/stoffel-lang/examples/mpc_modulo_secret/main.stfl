@@ -1,3 +1,4 @@
+# run-args: --client-input 0=47 --client-input 0=5 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -120,6 +121,11 @@ def modulo(a: Share, d: Share, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var r = Share.open(Share.retag(modulo(Share.from_clear_int(47, l), Share.from_clear_int(5, l), l, kappa), 64))
-  assert r == 2, "47 mod 5 must be 2"
-  return r
+  var a: secret int64 = ClientStore.take_share(0, 0)
+  var b: secret int64 = ClientStore.take_share(0, 1)
+  var r = modulo(a, b, l, kappa)
+  if Mpc.has_capability("client-output"):
+    r.send_to_client(0)
+  var rv = Share.open(Share.retag(r, 64))
+  assert rv == 2, "47 mod 5 must be 2"
+  return rv

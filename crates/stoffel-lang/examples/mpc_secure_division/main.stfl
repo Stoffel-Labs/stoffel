@@ -1,3 +1,4 @@
+# run-args: --client-input 0=47 --client-input 0=5 --expected-output-clients 1
 # Integer division a / d by a SECRET divisor via comparison-based long division.
 #
 # Classic restoring division, data-oblivious: bit-decompose a, then for each
@@ -127,8 +128,11 @@ def divide(a: Share, d: Share, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var a = Share.from_clear_int(47, l)
-  var d = Share.from_clear_int(5, l)
-  var q = Share.open(Share.retag(divide(a, d, l, kappa), 64))   # 47 / 5 = 9
-  assert q == 9, "47 / 5 must be 9"
-  return q
+  var a: secret int64 = ClientStore.take_share(0, 0)
+  var d: secret int64 = ClientStore.take_share(0, 1)
+  var q = divide(a, d, l, kappa)   # 47 / 5 = 9
+  if Mpc.has_capability("client-output"):
+    q.send_to_client(0)
+  var rv = Share.open(Share.retag(q, 64))
+  assert rv == 9, "47 / 5 must be 9"
+  return rv

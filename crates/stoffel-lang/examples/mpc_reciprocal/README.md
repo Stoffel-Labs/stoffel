@@ -8,5 +8,5 @@ convergence tuning needed.
 The example computes `1/5` in Q8 = `⌊256/5⌋ = 51` (≈ 0.199). `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_reciprocal
+stoffel run crates/stoffel-lang/examples/mpc_reciprocal --client-input 0=5 --expected-output-clients 1
 ```

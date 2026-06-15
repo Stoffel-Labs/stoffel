@@ -16,5 +16,5 @@ Goldschmidt on shares; long division is the simplest exact route for integers.)
 The example computes `47 / 5 = 9`. `κ` is small for speed; production uses `κ ≈ 40`.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_secure_division
+stoffel run crates/stoffel-lang/examples/mpc_secure_division --client-input 0=47 --client-input 0=5 --expected-output-clients 1
 ```

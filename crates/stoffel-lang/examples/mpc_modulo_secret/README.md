@@ -7,5 +7,5 @@ instead of the quotient. Exact, data-oblivious.
 The example computes `47 mod 5 = 2`. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_modulo_secret
+stoffel run crates/stoffel-lang/examples/mpc_modulo_secret --client-input 0=47 --client-input 0=5 --expected-output-clients 1
 ```

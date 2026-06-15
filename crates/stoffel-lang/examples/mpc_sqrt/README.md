@@ -7,5 +7,5 @@ the result is their sum — no division or Newton iteration.
 The example checks `isqrt(49)=7` and `isqrt(50)=7`. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_sqrt
+stoffel run crates/stoffel-lang/examples/mpc_sqrt --client-input 0=49 --expected-output-clients 1
 ```
