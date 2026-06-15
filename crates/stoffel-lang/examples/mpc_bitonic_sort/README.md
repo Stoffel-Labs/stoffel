@@ -8,5 +8,5 @@ data-oblivious, and scales better than the naive O(n²) network.
 The example sorts 8 values and asserts the result is ascending. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_bitonic_sort
+stoffel run crates/stoffel-lang/examples/mpc_bitonic_sort --client-input 0=7 --client-input 0=3 --client-input 0=5 --client-input 0=1 --client-input 0=8 --client-input 0=2 --client-input 0=6 --client-input 0=4 --expected-output-clients 1
 ```

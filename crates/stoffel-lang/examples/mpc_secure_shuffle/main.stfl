@@ -1,3 +1,4 @@
+# run-args: --client-input 0=10 --client-input 0=20 --client-input 0=30 --client-input 0=40 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -122,12 +123,13 @@ def cas2(vals: list[Share], tags: list[Share], i: int64, j: int64, l: int64, kap
 def main() -> int64:
   var l = 16
   var kappa = 8
-  var raw = [10, 20, 30, 40]
+  var n = 4
   var vals: list[Share] = []
   var tags: list[Share] = []
   var i = 0
-  while i < len(raw):
-    vals.append(Share.from_clear_int(raw[i], l))
+  while i < n:
+    var v: secret int64 = ClientStore.take_share(0, i)
+    vals.append(v)
     tags.append(Share.random_int(l))
     i = i + 1
   var pairs = [0, 1, 2, 3, 0, 2, 1, 3, 1, 2]   # 4-element sorting network
@@ -135,7 +137,12 @@ def main() -> int64:
   while k < len(pairs):
     var d = cas2(vals, tags, pairs[k], pairs[k + 1], l, kappa)
     k = k + 2
-  # reveal shuffled values and verify the multiset is preserved (a permutation)
+  # hand the shuffled values back to the client, then verify the multiset.
+  if Mpc.has_capability("client-output"):
+    i = 0
+    while i < len(vals):
+      vals[i].send_to_client(0)
+      i = i + 1
   var r: list[int64] = []
   i = 0
   while i < len(vals):

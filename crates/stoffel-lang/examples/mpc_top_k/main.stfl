@@ -1,3 +1,4 @@
+# run-args: --client-input 0=50 --client-input 0=20 --client-input 0=40 --client-input 0=10 --client-input 0=30 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -125,12 +126,16 @@ def kth_smallest(arr: list[Share], k: int64, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var raw = [50, 20, 40, 10, 30]
+  var n = 5
   var arr: list[Share] = []
   var i = 0
-  while i < len(raw):
-    arr.append(Share.from_clear_int(raw[i], l))
+  while i < n:
+    var v: secret int64 = ClientStore.take_share(0, i)
+    arr.append(v)
     i = i + 1
-  var second = Share.open(Share.retag(kth_smallest(arr, 2, l, kappa), 64))   # 2nd smallest = 20
-  assert second == 20, "2nd smallest must be 20"
-  return second
+  var second = kth_smallest(arr, 2, l, kappa)   # 2nd smallest
+  if Mpc.has_capability("client-output"):
+    second.send_to_client(0)
+  var rv = Share.open(Share.retag(second, 64))
+  assert rv == 20, "2nd smallest must be 20"
+  return rv

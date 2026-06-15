@@ -1,3 +1,4 @@
+# run-args: --client-input 0=30 --client-input 0=10 --client-input 0=20 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -117,13 +118,17 @@ def rank_of(arr: list[Share], idx: int64, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var raw = [30, 10, 20]
+  var n = 3
   var arr: list[Share] = []
   var i = 0
-  while i < len(raw):
-    arr.append(Share.from_clear_int(raw[i], l))
+  while i < n:
+    var inp: secret int64 = ClientStore.take_share(0, i)
+    arr.append(inp)
     i = i + 1
-  assert Share.open(Share.retag(rank_of(arr, 0, l, kappa), 64)) == 2, "rank(30)=2"
-  assert Share.open(Share.retag(rank_of(arr, 1, l, kappa), 64)) == 0, "rank(10)=0"
-  assert Share.open(Share.retag(rank_of(arr, 2, l, kappa), 64)) == 1, "rank(20)=1"
+  var r0 = rank_of(arr, 0, l, kappa)   # rank of arr[0] = 30 -> 2
+  if Mpc.has_capability("client-output"):
+    r0.send_to_client(0)
+  assert Share.open(Share.retag(r0, 64)) == 2, "rank(30) must be 2"
+  assert Share.open(Share.retag(rank_of(arr, 1, l, kappa), 64)) == 0, "rank(10) must be 0"
+  assert Share.open(Share.retag(rank_of(arr, 2, l, kappa), 64)) == 1, "rank(20) must be 1"
   return 1

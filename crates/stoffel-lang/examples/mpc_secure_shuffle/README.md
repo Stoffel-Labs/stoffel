@@ -9,5 +9,5 @@ The example shuffles `[10,20,30,40]` and asserts the output is a permutation of 
 input (multiset preserved). `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_secure_shuffle
+stoffel run crates/stoffel-lang/examples/mpc_secure_shuffle --client-input 0=10 --client-input 0=20 --client-input 0=30 --client-input 0=40 --expected-output-clients 1
 ```
