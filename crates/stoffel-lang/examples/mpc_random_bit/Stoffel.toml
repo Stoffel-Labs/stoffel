@@ -1,5 +1,5 @@
 [package]
-name = "tmp-bit-sharing"
+name = "mpc-random-bit"
 version = "0.1.0"
 
 [mpc]
@@ -8,5 +8,5 @@ parties = 5
 threshold = 1
 
 [build]
-source = "src/main.stfl"
+source = "main.stfl"
 target_dir = "target"

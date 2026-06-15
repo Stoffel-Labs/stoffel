@@ -21,6 +21,7 @@ example folder has a `main.stfl` source file and a short README.
 - `mpc_boolean_circuit`: `secret bool` random bits and boolean gates built from share arithmetic.
 - `mpc_bitwise_share`: `secret bool` list inputs and native bitwise share operators.
 - `mpc_polynomial_unbounded_or`: unbounded OR over `secret bool` lists as `1 - product(1 - bit)`.
+- `mpc_random_bit`: joint random bit sharing via `Share.random_field()` and `Field.*` math (`a = 2⁻¹(r'⁻¹r + 1)`).
 - `mpc_aes128_circuit`: AES-128 block encryption built from `secret bool` circuit gates.
 - `mpc_client_federated_average`: client-provided secret inputs via `ClientStore`.
 - `mpc_protocol_coordination`: RBC/ABA coordination for distributed protocol phases.
