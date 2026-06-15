@@ -1,8 +1,8 @@
 //! MPC Builtin Functions for StoffelVM
 //!
 //! This module provides object-oriented MPC operations as foreign functions.
-//! It exposes secret sharing, RBC (Reliable Broadcast), and ABA (Asynchronous
-//! Binary Agreement) primitives as builtins.
+//! It exposes secret sharing and RBC (Reliable Broadcast) primitives as
+//! builtins.
 //!
 //! # API Pattern
 //!
@@ -41,7 +41,7 @@ mod info;
 mod share;
 
 pub use crate::mpc_values::{
-    aba_fields, rbc_fields, share_fields, share_object, MpcValueError, MpcValueResult,
+    rbc_fields, share_fields, share_object, MpcValueError, MpcValueResult,
 };
 pub use crate::mpc_values::{avss_fields, avss_object};
 
@@ -110,9 +110,6 @@ const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Rbc.broadcast",
     "Rbc.receive",
     "Rbc.receive_any",
-    "Aba.propose",
-    "Aba.result",
-    "Aba.propose_and_wait",
 ];
 
 const AVSS_BUILTIN_FUNCTIONS: &[&str] = &[
@@ -139,7 +136,6 @@ fn register_mpc_builtins_unchecked(vm: &mut VirtualMachine) -> VirtualMachineRes
     share::register(vm)?;
     info::register(vm)?;
     consensus::register_rbc(vm)?;
-    consensus::register_aba(vm)?;
     crypto::register(vm)?;
     field::register(vm)?;
     bytes::register(vm)?;

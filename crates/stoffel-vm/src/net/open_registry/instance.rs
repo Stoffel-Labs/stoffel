@@ -6,7 +6,7 @@ use tokio::sync::Notify;
 use stoffel_vm_types::core_types::ClearShareValue;
 
 use super::accumulators::{
-    AbaState, BatchKey, BatchOpenAccumulator, ExpKey, ExpOpenAccumulator, ExpOpenProgress,
+    BatchKey, BatchOpenAccumulator, ExpKey, ExpOpenAccumulator, ExpOpenProgress,
     ExpOpenRegistryKind, ExpOpenRequest, OpenAccumulator, OpenResult, RbcState, SingleKey,
 };
 
@@ -36,8 +36,6 @@ pub struct InstanceRegistry {
     // HB consensus
     pub rbc: Mutex<RbcState>,
     pub rbc_notify: Notify,
-    pub aba: Mutex<AbaState>,
-    pub aba_notify: Notify,
 }
 
 impl InstanceRegistry {
@@ -54,8 +52,6 @@ impl InstanceRegistry {
             exp_g2_notify: Notify::new(),
             rbc: Mutex::new(RbcState::default()),
             rbc_notify: Notify::new(),
-            aba: Mutex::new(AbaState::default()),
-            aba_notify: Notify::new(),
         }
     }
 

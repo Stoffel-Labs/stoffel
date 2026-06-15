@@ -31,9 +31,6 @@ pub(crate) enum MpcOnlineBuiltin {
     RbcBroadcast,
     RbcReceive,
     RbcReceiveAny,
-    AbaPropose,
-    AbaResult,
-    AbaProposeAndWait,
 }
 
 impl MpcOnlineBuiltin {
@@ -58,9 +55,6 @@ impl MpcOnlineBuiltin {
             Self::RbcBroadcast => "Rbc.broadcast",
             Self::RbcReceive => "Rbc.receive",
             Self::RbcReceiveAny => "Rbc.receive_any",
-            Self::AbaPropose => "Aba.propose",
-            Self::AbaResult => "Aba.result",
-            Self::AbaProposeAndWait => "Aba.propose_and_wait",
         }
     }
 }

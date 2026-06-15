@@ -1,8 +1,6 @@
 use crate::error::VmResult;
 use crate::net::client_store::{ClientInputIndex, ClientOutputShareCount, ClientShareIndex};
-use crate::net::mpc_engine::{
-    AbaSessionId, MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
-};
+use crate::net::mpc_engine::{MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId};
 use crate::output::VmOutputResult;
 use crate::runtime_hooks::HookEvent;
 use crate::vm_state::VMState;
@@ -315,12 +313,6 @@ pub(crate) trait ForeignMpcServices {
 
     fn rbc_receive_any(&self, timeout_ms: u64) -> VmResult<(MpcPartyId, Vec<u8>)>;
 
-    fn aba_propose(&self, value: bool) -> VmResult<AbaSessionId>;
-
-    fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> VmResult<bool>;
-
-    fn aba_propose_and_wait(&self, value: bool, timeout_ms: u64) -> VmResult<bool>;
-
     fn input_share_data(&self, clear: ClearShareInput) -> VmResult<ShareData>;
 
     fn open_share_data(&self, ty: ShareType, share_data: &ShareData) -> VmResult<ClearShareValue>;
@@ -467,18 +459,6 @@ impl ForeignMpcServices for VMState {
 
     fn rbc_receive_any(&self, timeout_ms: u64) -> VmResult<(MpcPartyId, Vec<u8>)> {
         VMState::rbc_receive_any(self, timeout_ms)
-    }
-
-    fn aba_propose(&self, value: bool) -> VmResult<AbaSessionId> {
-        VMState::aba_propose(self, value)
-    }
-
-    fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> VmResult<bool> {
-        VMState::aba_result(self, session_id, timeout_ms)
-    }
-
-    fn aba_propose_and_wait(&self, value: bool, timeout_ms: u64) -> VmResult<bool> {
-        VMState::aba_propose_and_wait(self, value, timeout_ms)
     }
 
     fn input_share_data(&self, clear: ClearShareInput) -> VmResult<ShareData> {

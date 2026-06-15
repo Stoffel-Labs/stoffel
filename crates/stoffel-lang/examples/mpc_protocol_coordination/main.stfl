@@ -6,20 +6,18 @@ def main() -> int64:
     direct_message = Rbc.receive(0, 5000)
   var any_message = Rbc.receive_any(5000)
 
-  var proposal = direct_message == "phase:preprocessing-complete"
+  var accepted = direct_message == "phase:preprocessing-complete"
 
   if client_count > 0:
     var operator_vote = ClientStore.take_share(0, 0)
-    proposal = proposal and operator_vote.open() > 0
+    accepted = accepted and operator_vote.open() > 0
 
-  var aba_session = Aba.propose(proposal)
-  var accepted = Aba.result(aba_session, 5000)
-
-  if accepted and Aba.propose_and_wait(True, 5000):
+  if accepted:
     if client_count > 0 and Mpc.has_capability("client-output"):
       var session_share = Share.from_clear(session_id + 1)
       var output_shares: list[Share] = [session_share]
       MpcOutput.send_to_client(0, output_shares)
+    discard any_message
     return session_id + 1
 
   discard any_message

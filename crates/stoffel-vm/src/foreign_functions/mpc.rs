@@ -1,9 +1,7 @@
 use super::ForeignFunctionContext;
 use crate::error::{VmError, VmResult};
 use crate::net::client_store::{ClientInputIndex, ClientOutputShareCount, ClientShareIndex};
-use crate::net::mpc_engine::{
-    AbaSessionId, MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
-};
+use crate::net::mpc_engine::{MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId};
 use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType, Value};
 use stoffelnet::network_utils::ClientId;
 
@@ -75,18 +73,6 @@ impl<'a> ForeignFunctionContext<'a> {
 
     pub(crate) fn rbc_receive_any(&self, timeout_ms: u64) -> VmResult<(MpcPartyId, Vec<u8>)> {
         self.services.rbc_receive_any(timeout_ms)
-    }
-
-    pub(crate) fn aba_propose(&self, value: bool) -> VmResult<AbaSessionId> {
-        self.services.aba_propose(value)
-    }
-
-    pub(crate) fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> VmResult<bool> {
-        self.services.aba_result(session_id, timeout_ms)
-    }
-
-    pub(crate) fn aba_propose_and_wait(&self, value: bool, timeout_ms: u64) -> VmResult<bool> {
-        self.services.aba_propose_and_wait(value, timeout_ms)
     }
 
     pub(crate) fn input_share_data(&self, clear: ClearShareInput) -> VmResult<ShareData> {

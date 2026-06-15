@@ -28,10 +28,12 @@ exercises.
 | Compound assignment `+=`, `-=`, `*=`, `/=`, `%=` | `language_policy_engine` |
 | Field-access method syntax and object builtin syntax | `local_collections`, `mpc_runtime_info`, `mpc_share_toolkit` |
 | Closures exposed by the language stdlib | `local_dynamic_workflow`, `local_closure_counter` |
+| `break` and `continue` loop control | `continue` in the `random_bit` rejection-sampling helper used across the `mpc_*` gallery; `break` for early loop exit |
 
-`enum`, `break`, `continue`, `yield`, and `try/catch` have AST or lexer traces
-but are not implemented parser/runtime syntax today, so they are not represented
-as supported language examples.
+`break` and `continue` are fully supported in `while`/`for` loops. `enum`
+declarations parse (the parser expects `enum Name:` declaration syntax). `yield`
+and `try/catch` are explicitly rejected by the compiler today (StoffelLang has no
+generators or exception handling).
 
 ## Core Builtins
 
@@ -55,4 +57,4 @@ as supported language examples.
 | `Bytes.concat`, `Bytes.from_string` | threshold signature examples, `mpc_share_toolkit` |
 | `Crypto.sha256`, `sha512`, `hash_to_field`, `field_inv`, `point_x_to_field`, `field_to_scalar_bytes`, `point_to_sec1`, `hash_to_g1` | threshold signature examples, `avss_certificate/keygen`, `avss_share_auditor` |
 | `Avss.get_commitment`, `get_key_name`, `commitment_count`, `is_avss_share` | `avss_share_auditor` |
-| `Rbc.broadcast`, `receive`, `receive_any`; `Aba.propose`, `result`, `propose_and_wait` | `mpc_protocol_coordination` |
+| `Rbc.broadcast`, `receive`, `receive_any` | `mpc_protocol_coordination` |

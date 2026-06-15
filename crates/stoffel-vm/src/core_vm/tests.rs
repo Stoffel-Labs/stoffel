@@ -2,7 +2,7 @@ use super::*;
 use crate::foreign_functions::ForeignFunctionCallbackError;
 use crate::net::client_store::{ClientOutputShareCount, ClientShare, ClientShareIndex};
 use crate::net::mpc_engine::{
-    AbaSessionId, AsyncMpcEngine, AsyncMpcEngineConsensus, MpcCapabilities, MpcEngine,
+    AsyncMpcEngine, AsyncMpcEngineConsensus, MpcCapabilities, MpcEngine,
     MpcEngineClientOutput, MpcEngineConsensus, MpcEngineError, MpcEngineFieldOpen,
     MpcEngineMultiplication, MpcEngineOpenInExponent, MpcEngineRandomness, MpcEngineResult,
     MpcExponentGroup, MpcPartyId, MpcSessionTopology, RbcSessionId,
@@ -688,7 +688,6 @@ struct BarrierConsensusEngine {
     barrier: Arc<tokio::sync::Barrier>,
     rbc_receive_started: AtomicUsize,
     rbc_receive_finished: AtomicUsize,
-    aba_result_calls: AtomicUsize,
 }
 
 impl BarrierConsensusEngine {
@@ -697,7 +696,6 @@ impl BarrierConsensusEngine {
             barrier: Arc::new(tokio::sync::Barrier::new(expected_concurrent_receives)),
             rbc_receive_started: AtomicUsize::new(0),
             rbc_receive_finished: AtomicUsize::new(0),
-            aba_result_calls: AtomicUsize::new(0),
         }
     }
 }
@@ -760,20 +758,6 @@ impl MpcEngineConsensus for BarrierConsensusEngine {
             "sync rbc_receive_any should not be used by async builtin calls",
         ))
     }
-
-    fn aba_propose(&self, _value: bool) -> MpcEngineResult<AbaSessionId> {
-        Err(crate::net::mpc_engine::MpcEngineError::operation_failed(
-            "aba_propose",
-            "sync aba_propose should not be used by async builtin calls",
-        ))
-    }
-
-    fn aba_result(&self, _session_id: AbaSessionId, _timeout_ms: u64) -> MpcEngineResult<bool> {
-        Err(crate::net::mpc_engine::MpcEngineError::operation_failed(
-            "aba_result",
-            "sync aba_result should not be used by async builtin calls",
-        ))
-    }
 }
 
 #[async_trait::async_trait]
@@ -816,19 +800,6 @@ impl AsyncMpcEngineConsensus for BarrierConsensusEngine {
         _timeout_ms: u64,
     ) -> MpcEngineResult<(MpcPartyId, Vec<u8>)> {
         Ok((MpcPartyId::new(2), b"any".to_vec()))
-    }
-
-    async fn aba_propose_async(&self, _value: bool) -> MpcEngineResult<AbaSessionId> {
-        Ok(AbaSessionId::new(3))
-    }
-
-    async fn aba_result_async(
-        &self,
-        _session_id: AbaSessionId,
-        _timeout_ms: u64,
-    ) -> MpcEngineResult<bool> {
-        self.aba_result_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(true)
     }
 }
 
@@ -922,20 +893,6 @@ impl MpcEngineConsensus for TurmoilConsensusEngine {
             "sync rbc_receive_any should not be used by async VM execution",
         ))
     }
-
-    fn aba_propose(&self, _value: bool) -> MpcEngineResult<AbaSessionId> {
-        Err(MpcEngineError::operation_failed(
-            "aba_propose",
-            "sync aba_propose should not be used by async VM execution",
-        ))
-    }
-
-    fn aba_result(&self, _session_id: AbaSessionId, _timeout_ms: u64) -> MpcEngineResult<bool> {
-        Err(MpcEngineError::operation_failed(
-            "aba_result",
-            "sync aba_result should not be used by async VM execution",
-        ))
-    }
 }
 
 #[async_trait::async_trait]
@@ -1023,24 +980,6 @@ impl AsyncMpcEngineConsensus for TurmoilConsensusEngine {
             "not used by network consensus tests",
         ))
     }
-
-    async fn aba_propose_async(&self, _value: bool) -> MpcEngineResult<AbaSessionId> {
-        Err(MpcEngineError::operation_failed(
-            "async_aba_propose",
-            "not used by network consensus tests",
-        ))
-    }
-
-    async fn aba_result_async(
-        &self,
-        _session_id: AbaSessionId,
-        _timeout_ms: u64,
-    ) -> MpcEngineResult<bool> {
-        Err(MpcEngineError::operation_failed(
-            "async_aba_result",
-            "not used by network consensus tests",
-        ))
-    }
 }
 
 async fn run_turmoil_rbc_peer(
@@ -1092,7 +1031,7 @@ async fn serve_turmoil_rbc_connection(
     Ok(())
 }
 
-const TURMOIL_ASYNC_OP_COUNT: usize = 15;
+const TURMOIL_ASYNC_OP_COUNT: usize = 12;
 const TURMOIL_RPC_TIMEOUT_MS: u64 = 1_000;
 
 #[repr(u8)]
@@ -1110,9 +1049,6 @@ enum TurmoilAsyncOperation {
     RbcBroadcast = 10,
     RbcReceive = 11,
     RbcReceiveAny = 12,
-    AbaPropose = 13,
-    AbaResult = 14,
-    AbaProposeAndWait = 15,
 }
 
 impl TurmoilAsyncOperation {
@@ -1138,9 +1074,6 @@ impl TurmoilAsyncOperation {
             10 => Some(Self::RbcBroadcast),
             11 => Some(Self::RbcReceive),
             12 => Some(Self::RbcReceiveAny),
-            13 => Some(Self::AbaPropose),
-            14 => Some(Self::AbaResult),
-            15 => Some(Self::AbaProposeAndWait),
             _ => None,
         }
     }
@@ -1415,20 +1348,6 @@ impl MpcEngineConsensus for TurmoilAllOpsEngine {
             "sync rbc_receive_any should not be used by async VM execution",
         ))
     }
-
-    fn aba_propose(&self, _value: bool) -> MpcEngineResult<AbaSessionId> {
-        Err(MpcEngineError::operation_failed(
-            "aba_propose",
-            "sync aba_propose should not be used by async VM execution",
-        ))
-    }
-
-    fn aba_result(&self, _session_id: AbaSessionId, _timeout_ms: u64) -> MpcEngineResult<bool> {
-        Err(MpcEngineError::operation_failed(
-            "aba_result",
-            "sync aba_result should not be used by async VM execution",
-        ))
-    }
 }
 
 #[async_trait::async_trait]
@@ -1620,47 +1539,6 @@ impl AsyncMpcEngineConsensus for TurmoilAllOpsEngine {
             message.to_vec(),
         ))
     }
-
-    async fn aba_propose_async(&self, value: bool) -> MpcEngineResult<AbaSessionId> {
-        let response = self
-            .rpc(
-                TurmoilAsyncOperation::AbaPropose,
-                vec![u8::from(value)],
-                TURMOIL_RPC_TIMEOUT_MS,
-            )
-            .await?;
-        Ok(AbaSessionId::new(bytes_to_u64(&response)))
-    }
-
-    async fn aba_result_async(
-        &self,
-        session_id: AbaSessionId,
-        timeout_ms: u64,
-    ) -> MpcEngineResult<bool> {
-        let response = self
-            .rpc(
-                TurmoilAsyncOperation::AbaResult,
-                session_id.id().to_be_bytes().to_vec(),
-                timeout_ms,
-            )
-            .await?;
-        Ok(response.first().copied().unwrap_or_default() != 0)
-    }
-
-    async fn aba_propose_and_wait_async(
-        &self,
-        value: bool,
-        timeout_ms: u64,
-    ) -> MpcEngineResult<bool> {
-        let response = self
-            .rpc(
-                TurmoilAsyncOperation::AbaProposeAndWait,
-                vec![u8::from(value)],
-                timeout_ms,
-            )
-            .await?;
-        Ok(response.first().copied().unwrap_or_default() != 0)
-    }
 }
 
 async fn run_turmoil_all_ops_peer(
@@ -1757,14 +1635,6 @@ fn turmoil_all_ops_response(
             let mut response = party_id.to_be_bytes().to_vec();
             response.extend_from_slice(b"any-3");
             response
-        }
-        TurmoilAsyncOperation::AbaPropose => {
-            let session_id = 800 + u64::from(payload.first().copied().unwrap_or_default() != 0);
-            session_id.to_be_bytes().to_vec()
-        }
-        TurmoilAsyncOperation::AbaResult => vec![1],
-        TurmoilAsyncOperation::AbaProposeAndWait => {
-            vec![u8::from(payload.first().copied().unwrap_or_default() != 0)]
         }
     }
 }
@@ -3486,52 +3356,6 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
             ],
             HashMap::new(),
         ));
-        vm.register_function(VMFunction::new(
-            "turmoil_aba_propose".to_string(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            2,
-            vec![
-                Instruction::LDI(1, Value::Bool(true)),
-                Instruction::PUSHARG(1),
-                Instruction::CALL("Aba.propose".to_string()),
-                Instruction::RET(0),
-            ],
-            HashMap::new(),
-        ));
-        vm.register_function(VMFunction::new(
-            "turmoil_aba_result".to_string(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            3,
-            vec![
-                Instruction::LDI(1, Value::I64(801)),
-                Instruction::PUSHARG(1),
-                Instruction::LDI(2, Value::I64(1_000)),
-                Instruction::PUSHARG(2),
-                Instruction::CALL("Aba.result".to_string()),
-                Instruction::RET(0),
-            ],
-            HashMap::new(),
-        ));
-        vm.register_function(VMFunction::new(
-            "turmoil_aba_propose_and_wait".to_string(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            3,
-            vec![
-                Instruction::LDI(1, Value::Bool(true)),
-                Instruction::PUSHARG(1),
-                Instruction::LDI(2, Value::I64(1_000)),
-                Instruction::PUSHARG(2),
-                Instruction::CALL("Aba.propose_and_wait".to_string()),
-                Instruction::RET(0),
-            ],
-            HashMap::new(),
-        ));
 
         let from_clear = vm
             .execute_async("turmoil_from_clear", engine.as_ref())
@@ -3685,22 +3509,6 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
             Some(Value::String("any-3".to_string()))
         );
 
-        assert_eq!(
-            vm.execute_async("turmoil_aba_propose", engine.as_ref())
-                .await?,
-            Value::I64(801)
-        );
-        assert_eq!(
-            vm.execute_async("turmoil_aba_result", engine.as_ref())
-                .await?,
-            Value::Bool(true)
-        );
-        assert_eq!(
-            vm.execute_async("turmoil_aba_propose_and_wait", engine.as_ref())
-                .await?,
-            Value::Bool(true)
-        );
-
         assert_eq!(engine.started(TurmoilAsyncOperation::InputShare), 1);
         assert_eq!(engine.finished(TurmoilAsyncOperation::InputShare), 1);
         assert_eq!(engine.started(TurmoilAsyncOperation::Multiply), 1);
@@ -3725,12 +3533,6 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
         assert_eq!(engine.finished(TurmoilAsyncOperation::RbcReceive), 1);
         assert_eq!(engine.started(TurmoilAsyncOperation::RbcReceiveAny), 1);
         assert_eq!(engine.finished(TurmoilAsyncOperation::RbcReceiveAny), 1);
-        assert_eq!(engine.started(TurmoilAsyncOperation::AbaPropose), 1);
-        assert_eq!(engine.finished(TurmoilAsyncOperation::AbaPropose), 1);
-        assert_eq!(engine.started(TurmoilAsyncOperation::AbaResult), 1);
-        assert_eq!(engine.finished(TurmoilAsyncOperation::AbaResult), 1);
-        assert_eq!(engine.started(TurmoilAsyncOperation::AbaProposeAndWait), 1);
-        assert_eq!(engine.finished(TurmoilAsyncOperation::AbaProposeAndWait), 1);
         Ok(())
     });
 
@@ -3837,22 +3639,6 @@ fn turmoil_execute_many_async_runs_mixed_programs_under_randomized_network_order
         ));
         vm.register_function(async_rbc_receive_call_function("mixed_rbc", 4));
         vm.register_function(VMFunction::new(
-            "mixed_aba_wait".to_string(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            3,
-            vec![
-                Instruction::LDI(1, Value::Bool(true)),
-                Instruction::PUSHARG(1),
-                Instruction::LDI(2, Value::I64(1_000)),
-                Instruction::PUSHARG(2),
-                Instruction::CALL("Aba.propose_and_wait".to_string()),
-                Instruction::RET(0),
-            ],
-            HashMap::new(),
-        ));
-        vm.register_function(VMFunction::new(
             "mixed_secret_math".to_string(),
             Vec::new(),
             Vec::new(),
@@ -3875,7 +3661,6 @@ fn turmoil_execute_many_async_runs_mixed_programs_under_randomized_network_order
                 [
                     "mixed_open",
                     "mixed_rbc",
-                    "mixed_aba_wait",
                     "mixed_secret_math",
                 ],
                 engine.as_ref(),
@@ -3886,7 +3671,6 @@ fn turmoil_execute_many_async_runs_mixed_programs_under_randomized_network_order
             vec![
                 Value::I64(21),
                 Value::String("from-4".to_string()),
-                Value::Bool(true),
                 Value::I64(32),
             ]
         );
@@ -3894,7 +3678,6 @@ fn turmoil_execute_many_async_runs_mixed_programs_under_randomized_network_order
         assert_eq!(engine.started(TurmoilAsyncOperation::Multiply), 1);
         assert_eq!(engine.started(TurmoilAsyncOperation::Open), 2);
         assert_eq!(engine.started(TurmoilAsyncOperation::RbcReceive), 1);
-        assert_eq!(engine.started(TurmoilAsyncOperation::AbaProposeAndWait), 1);
         Ok(())
     });
 
@@ -4131,40 +3914,6 @@ fn turmoil_malicious_receive_any_party_id_is_rejected_without_poisoning_vm() -> 
     });
 
     sim.run()
-}
-
-#[tokio::test]
-async fn aba_result_builtin_uses_async_consensus_ops() {
-    let engine = Arc::new(BarrierConsensusEngine::new(1));
-    let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
-    let mut vm = VirtualMachine::builder()
-        .with_standard_library(false)
-        .with_mpc_engine(runtime_engine)
-        .build();
-    vm.register_function(VMFunction::new(
-        "aba_result_async".to_string(),
-        Vec::new(),
-        Vec::new(),
-        None,
-        3,
-        vec![
-            Instruction::LDI(1, Value::I64(3)),
-            Instruction::PUSHARG(1),
-            Instruction::LDI(2, Value::I64(1_000)),
-            Instruction::PUSHARG(2),
-            Instruction::CALL("Aba.result".to_string()),
-            Instruction::RET(0),
-        ],
-        HashMap::new(),
-    ));
-
-    let result = vm
-        .execute_async("aba_result_async", engine.as_ref())
-        .await
-        .expect("Aba.result should execute through async consensus ops");
-
-    assert_eq!(result, Value::Bool(true));
-    assert_eq!(engine.aba_result_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

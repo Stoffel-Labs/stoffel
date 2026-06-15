@@ -4,9 +4,7 @@ use crate::foreign_functions::ForeignFunctionError;
 use crate::mpc_values::clear_share_input;
 use crate::net::client_store::ClientOutputShareCount;
 use crate::net::curve::clear_share_value_to_vm_value;
-use crate::net::mpc_engine::{
-    AbaSessionId, AsyncMpcEngine, MpcEngine, MpcExponentGroup, MpcPartyId,
-};
+use crate::net::mpc_engine::{AsyncMpcEngine, MpcEngine, MpcExponentGroup, MpcPartyId};
 use crate::net::share_runtime::ensure_matching_share_data_format;
 use crate::runtime_hooks::{HookCallTarget, HookEvent};
 use crate::runtime_instruction::{RuntimeBinaryOp, RuntimeInstruction, RuntimeRegister};
@@ -174,17 +172,6 @@ pub(crate) enum PendingMpcBuiltinOperation {
         timeout_ms: u64,
     },
     RbcReceiveAny {
-        timeout_ms: u64,
-    },
-    AbaPropose {
-        value: bool,
-    },
-    AbaResult {
-        session_id: AbaSessionId,
-        timeout_ms: u64,
-    },
-    AbaProposeAndWait {
-        value: bool,
         timeout_ms: u64,
     },
 }
@@ -634,36 +621,6 @@ impl PendingMpcBuiltinCall {
                     .map_mpc_backend_err("async_rbc_receive_any")?;
                 CompletedMpcBuiltinResult::RbcReceiveAny { party_id, message }
             }
-            PendingMpcBuiltinOperation::AbaPropose { value } => {
-                let session_id = engine
-                    .async_consensus_ops()
-                    .map_mpc_backend_err("async_consensus_ops")?
-                    .aba_propose_async(value)
-                    .await
-                    .map_mpc_backend_err("async_aba_propose")?;
-                CompletedMpcBuiltinResult::Value(session_id_value(session_id.id())?)
-            }
-            PendingMpcBuiltinOperation::AbaResult {
-                session_id,
-                timeout_ms,
-            } => {
-                let result = engine
-                    .async_consensus_ops()
-                    .map_mpc_backend_err("async_consensus_ops")?
-                    .aba_result_async(session_id, timeout_ms)
-                    .await
-                    .map_mpc_backend_err("async_aba_result")?;
-                CompletedMpcBuiltinResult::Value(Value::Bool(result))
-            }
-            PendingMpcBuiltinOperation::AbaProposeAndWait { value, timeout_ms } => {
-                let result = engine
-                    .async_consensus_ops()
-                    .map_mpc_backend_err("async_consensus_ops")?
-                    .aba_propose_and_wait_async(value, timeout_ms)
-                    .await
-                    .map_mpc_backend_err("async_aba_propose_and_wait")?;
-                CompletedMpcBuiltinResult::Value(Value::Bool(result))
-            }
         };
 
         Ok(CompletedMpcBuiltinCall {
@@ -720,10 +677,7 @@ impl PendingMpcBuiltinCall {
             }
             PendingMpcBuiltinOperation::RbcBroadcast { .. }
             | PendingMpcBuiltinOperation::RbcReceive { .. }
-            | PendingMpcBuiltinOperation::RbcReceiveAny { .. }
-            | PendingMpcBuiltinOperation::AbaPropose { .. }
-            | PendingMpcBuiltinOperation::AbaResult { .. }
-            | PendingMpcBuiltinOperation::AbaProposeAndWait { .. } => {
+            | PendingMpcBuiltinOperation::RbcReceiveAny { .. } => {
                 engine
                     .async_consensus_ops()
                     .map_mpc_backend_err("async_consensus_ops")?;

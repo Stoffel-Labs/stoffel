@@ -296,26 +296,6 @@ impl fmt::Display for RbcSessionId {
     }
 }
 
-/// Session handle returned by asynchronous binary agreement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AbaSessionId(u64);
-
-impl AbaSessionId {
-    pub const fn new(id: u64) -> Self {
-        Self(id)
-    }
-
-    pub const fn id(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for AbaSessionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
 /// Stable runtime identity for an MPC engine attached to a VM.
 ///
 /// Async execution receives an engine reference separately from the VM state.

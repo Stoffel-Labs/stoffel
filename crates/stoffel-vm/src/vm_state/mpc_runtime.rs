@@ -4,7 +4,7 @@ use crate::net::client_store::{
     ClientShare, ClientShareIndex,
 };
 use crate::net::mpc_engine::{
-    AbaSessionId, MpcEngine, MpcEngineConsensus, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
+    MpcEngine, MpcEngineConsensus, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
 };
 use crate::net::reveal_batcher::{RevealBatcher, RevealedRegister};
 use crate::net::share_runtime::MpcShareRuntime;
@@ -128,24 +128,6 @@ impl MpcRuntimeState {
         self.consensus_ops()?
             .rbc_receive_any(timeout_ms)
             .map_mpc_backend_err("rbc_receive_any")
-    }
-
-    pub(super) fn aba_propose(&self, value: bool) -> VmResult<AbaSessionId> {
-        self.consensus_ops()?
-            .aba_propose(value)
-            .map_mpc_backend_err("aba_propose")
-    }
-
-    pub(super) fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> VmResult<bool> {
-        self.consensus_ops()?
-            .aba_result(session_id, timeout_ms)
-            .map_mpc_backend_err("aba_result")
-    }
-
-    pub(super) fn aba_propose_and_wait(&self, value: bool, timeout_ms: u64) -> VmResult<bool> {
-        self.consensus_ops()?
-            .aba_propose_and_wait(value, timeout_ms)
-            .map_mpc_backend_err("aba_propose_and_wait")
     }
 
     pub(super) fn hydrate_client_inputs(&self) -> VmResult<ClientInputHydrationCount> {

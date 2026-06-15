@@ -6,7 +6,7 @@ use crate::net::client_store::{
     ClientShareIndex,
 };
 use crate::net::mpc_engine::{
-    AbaSessionId, MpcEngine, MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
+    MpcEngine, MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
 };
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType, Value};
@@ -54,18 +54,6 @@ impl VMState {
 
     pub(crate) fn rbc_receive_any(&self, timeout_ms: u64) -> VmResult<(MpcPartyId, Vec<u8>)> {
         self.mpc_runtime.rbc_receive_any(timeout_ms)
-    }
-
-    pub(crate) fn aba_propose(&self, value: bool) -> VmResult<AbaSessionId> {
-        self.mpc_runtime.aba_propose(value)
-    }
-
-    pub(crate) fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> VmResult<bool> {
-        self.mpc_runtime.aba_result(session_id, timeout_ms)
-    }
-
-    pub(crate) fn aba_propose_and_wait(&self, value: bool, timeout_ms: u64) -> VmResult<bool> {
-        self.mpc_runtime.aba_propose_and_wait(value, timeout_ms)
     }
 
     /// Get the number of clients that have provided inputs.

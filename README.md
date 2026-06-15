@@ -112,7 +112,6 @@ The VM also registers MPC-focused module-style builtins:
 - `Share.*`: clear-to-share conversion, arithmetic on shares, opening, random share generation, client output, local interpolation, and commitment inspection
 - `Mpc.*`: runtime MPC metadata such as party id, threshold, instance id, readiness, and randomness helpers
 - `Rbc.*`: reliable broadcast helpers
-- `Aba.*`: asynchronous binary agreement helpers
 - `Crypto.*`: hashing and curve/field conversion helpers
 - `Bytes.*`: byte-array helpers
 - `Avss.*`: AVSS-specific helper functions

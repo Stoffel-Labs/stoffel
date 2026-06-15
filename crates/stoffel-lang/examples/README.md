@@ -35,7 +35,7 @@ example folder has a `main.stfl` source file and a short README.
 - `mpc_secure_division`: integer division by a secret divisor via comparison-based long division.
 - `mpc_aes128_circuit`: AES-128 block encryption built from `secret bool` circuit gates.
 - `mpc_client_federated_average`: client-provided secret inputs via `ClientStore`.
-- `mpc_protocol_coordination`: RBC/ABA coordination for distributed protocol phases.
+- `mpc_protocol_coordination`: RBC coordination for distributed protocol phases.
 - `mpc_share_toolkit`: broad Share builtin coverage for MPC service programs.
 - `avss_share_auditor`: AVSS share metadata inspection helpers.
 - `threshold_signatures/*`: threshold signature programs based on the VM fixtures.

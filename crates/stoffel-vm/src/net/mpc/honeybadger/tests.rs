@@ -311,34 +311,6 @@ async fn consume_masked_inputs_evicts_fully_used_persistent_masks() {
 }
 
 #[test]
-fn aba_same_round_uses_shared_session_and_converges() {
-    let instance_id = next_instance_id();
-    let n = 4;
-    let t = 1;
-    let router = Arc::new(crate::net::open_registry::OpenMessageRouter::new());
-    let e0 = test_engine(router.clone(), instance_id, 0, n, t);
-    let e1 = test_engine(router.clone(), instance_id, 1, n, t);
-    let e2 = test_engine(router.clone(), instance_id, 2, n, t);
-    let e3 = test_engine(router, instance_id, 3, n, t);
-
-    let s0 = e0.aba_propose(true).expect("party 0 propose");
-    let s1 = e1.aba_propose(true).expect("party 1 propose");
-    let s2 = e2.aba_propose(true).expect("party 2 propose");
-    let s3 = e3.aba_propose(true).expect("party 3 propose");
-
-    assert_eq!(s0, s1, "same ABA round must share one session id");
-    assert_eq!(s1, s2, "same ABA round must share one session id");
-    assert_eq!(s2, s3, "same ABA round must share one session id");
-
-    let r0 = e0.aba_result(s0, 50).expect("party 0 agreement");
-    let r1 = e1.aba_result(s1, 50).expect("party 1 agreement");
-    let r2 = e2.aba_result(s2, 50).expect("party 2 agreement");
-    let r3 = e3.aba_result(s3, 50).expect("party 3 agreement");
-
-    assert!(r0 && r1 && r2 && r3, "all parties should decide true");
-}
-
-#[test]
 fn rbc_receive_delivers_new_broadcast_each_call_in_order() {
     let instance_id = next_instance_id();
     let n = 4;

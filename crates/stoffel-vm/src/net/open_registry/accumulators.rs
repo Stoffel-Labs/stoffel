@@ -82,7 +82,7 @@ pub enum ExpOpenProgress {
 }
 
 // ---------------------------------------------------------------------------
-// RBC / ABA state (HB consensus)
+// RBC state (HB consensus)
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -91,12 +91,4 @@ pub struct RbcState {
     pub messages: HashMap<(u64, usize), Vec<u8>>,
     /// Tracks deliveries: (receiver_party, from_party, session_id)
     pub delivered: HashSet<(usize, usize, u64)>,
-}
-
-#[derive(Default)]
-pub struct AbaState {
-    /// Maps (session_id, party_id) → proposed value
-    pub proposals: HashMap<(u64, usize), bool>,
-    /// Maps session_id → agreed result once consensus is reached
-    pub results: HashMap<u64, bool>,
 }

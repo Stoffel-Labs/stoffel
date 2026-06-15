@@ -17,9 +17,8 @@ pub(crate) use error::MpcEngineOperationResultExt;
 pub use error::{MpcEngineError, MpcEngineResult};
 pub use exponent::{MpcExponentError, MpcExponentGenerator, MpcExponentGroup, MpcExponentResult};
 pub use identity::{
-    AbaSessionId, DurableIdentityDigest, MpcEngineIdentity, MpcInstanceId, MpcPartyCount,
-    MpcPartyId, MpcRuntimeInfo, MpcSessionTopology, MpcSessionTopologyError, MpcThreshold,
-    RbcSessionId,
+    DurableIdentityDigest, MpcEngineIdentity, MpcInstanceId, MpcPartyCount, MpcPartyId,
+    MpcRuntimeInfo, MpcSessionTopology, MpcSessionTopologyError, MpcThreshold, RbcSessionId,
 };
 pub use traits::{
     AsyncMpcEngine, AsyncMpcEngineClientOps, AsyncMpcEngineConsensus, MpcEngine,

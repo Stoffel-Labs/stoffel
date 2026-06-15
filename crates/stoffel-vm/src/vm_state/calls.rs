@@ -7,7 +7,7 @@ use crate::foreign_functions::{
 use crate::mpc_values::clear_share_input;
 use crate::mpc_values::share_object::{self, ShareOrScalar};
 use crate::net::client_store::ClientOutputShareCount;
-use crate::net::mpc_engine::{AbaSessionId, MpcExponentGenerator, MpcPartyId};
+use crate::net::mpc_engine::{MpcExponentGenerator, MpcPartyId};
 use crate::net::share_runtime::ensure_matching_share_data_format;
 use crate::program::{CallTarget, VmCallTarget};
 use crate::runtime_hooks::{HookCallTarget, HookEvent};
@@ -790,26 +790,6 @@ impl VMState {
                 args.require_exact(1, "1 argument: timeout_ms")?;
                 let timeout_ms = args.u64(0, "timeout_ms")?;
                 Ok(PendingMpcBuiltinOperation::RbcReceiveAny { timeout_ms })
-            }
-            MpcOnlineBuiltin::AbaPropose => {
-                args.require_exact(1, "1 argument: value (bool)")?;
-                let value = args.bool(0, "value")?;
-                Ok(PendingMpcBuiltinOperation::AbaPropose { value })
-            }
-            MpcOnlineBuiltin::AbaResult => {
-                args.require_min(2, "2 arguments: session_id, timeout_ms")?;
-                let session_id = args.u64(0, "session_id")?;
-                let timeout_ms = args.u64(1, "timeout_ms")?;
-                Ok(PendingMpcBuiltinOperation::AbaResult {
-                    session_id: AbaSessionId::new(session_id),
-                    timeout_ms,
-                })
-            }
-            MpcOnlineBuiltin::AbaProposeAndWait => {
-                args.require_min(2, "2 arguments: value (bool), timeout_ms")?;
-                let value = args.bool(0, "value")?;
-                let timeout_ms = args.u64(1, "timeout_ms")?;
-                Ok(PendingMpcBuiltinOperation::AbaProposeAndWait { value, timeout_ms })
             }
         }
     }

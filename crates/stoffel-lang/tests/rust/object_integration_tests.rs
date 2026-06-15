@@ -4,7 +4,7 @@
 //! for object-related features in Stoffel-Lang.
 //!
 //! Current focus areas:
-//! - Builtin singleton objects (ClientStore, Share, Mpc, MpcOutput, Rbc, Aba, Bytes, Crypto, Avss)
+//! - Builtin singleton objects (ClientStore, Share, Mpc, MpcOutput, Rbc, Bytes, Crypto, Avss)
 //! - Method call syntax (obj.method(args))
 //! - UFCS transformation
 //! - Field access
@@ -443,34 +443,6 @@ var received = Rbc.receive(1, 0)
 }
 
 // ===========================================
-// Aba Object Tests - Full Pipeline
-// ===========================================
-
-#[test]
-fn test_aba_propose() {
-    let source = r#"
-Aba.propose(True)
-"#;
-    assert!(compile_source(source).is_ok());
-}
-
-#[test]
-fn test_aba_result() {
-    let source = r#"
-var outcome = Aba.result(0, 1)
-"#;
-    assert!(compile_source(source).is_ok());
-}
-
-#[test]
-fn test_aba_propose_and_wait() {
-    let source = r#"
-var result = Aba.propose_and_wait(True, 1000)
-"#;
-    assert!(compile_source(source).is_ok());
-}
-
-// ===========================================
 // Bytes/Crypto Object Tests - Full Pipeline
 // ===========================================
 
@@ -657,7 +629,6 @@ def main() -> None:
   for client in 0..n_clients:
     var s = ClientStore.take_share(client, 0)
   Rbc.broadcast("shares collected")
-  Aba.propose(True)
   print("Protocol complete")
 "#;
     assert!(compile_source(source).is_ok());

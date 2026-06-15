@@ -4,8 +4,3 @@ builtin object Rbc:
   def broadcast(message: string) -> int64 {.builtin.}:
   def receive(from_party: int64, timeout_ms: int64) -> string {.builtin.}:
   def receive_any(timeout_ms: int64) -> RbcResult {.builtin.}:
-
-builtin object Aba:
-  def propose(value: bool) -> int64 {.builtin.}:
-  def result(session_id: int64, timeout_ms: int64) -> bool {.builtin.}:
-  def propose_and_wait(value: bool, timeout_ms: int64) -> bool {.builtin.}:

@@ -136,9 +136,6 @@ def main() -> None:
   # Test Rbc methods
   Rbc.broadcast("hello world")
 
-  # Test Aba methods
-  Aba.propose(True)
-
   # Test byte and crypto helpers
   var msg_bytes = Bytes.from_string("hello")
   var digest = Crypto.sha256(msg_bytes)

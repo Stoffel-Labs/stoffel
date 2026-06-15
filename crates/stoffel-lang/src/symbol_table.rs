@@ -879,7 +879,6 @@ mod tests {
         assert!(table.builtin_objects.contains_key("Mpc"));
         assert!(table.builtin_objects.contains_key("MpcOutput"));
         assert!(table.builtin_objects.contains_key("Rbc"));
-        assert!(table.builtin_objects.contains_key("Aba"));
         assert!(table.builtin_objects.contains_key("Bytes"));
         assert!(table.builtin_objects.contains_key("Crypto"));
         assert!(table.builtin_objects.contains_key("Avss"));
@@ -1056,29 +1055,6 @@ mod tests {
         let method = receive.unwrap();
         assert_eq!(method.parameters.len(), 2);
         assert_eq!(method.return_type, SymbolType::String);
-    }
-
-    #[test]
-    fn test_lookup_builtin_method_aba() {
-        let table = SymbolTable::new();
-
-        // Test propose method
-        let propose = table.lookup_builtin_method("Aba", "propose");
-        assert!(propose.is_some());
-        let method = propose.unwrap();
-        assert_eq!(method.parameters.len(), 1);
-        assert_eq!(method.parameters[0], SymbolType::Bool);
-        assert_eq!(method.return_type, SymbolType::Int64);
-
-        // Test result method
-        let result = table.lookup_builtin_method("Aba", "result");
-        assert!(result.is_some());
-        let method = result.unwrap();
-        assert_eq!(method.return_type, SymbolType::Bool);
-
-        // Test propose_and_wait method
-        let propose_and_wait = table.lookup_builtin_method("Aba", "propose_and_wait");
-        assert!(propose_and_wait.is_some());
     }
 
     #[test]

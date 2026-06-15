@@ -21,13 +21,6 @@ pub mod rbc_fields {
     pub const TYPE_VALUE: &str = "RbcSession";
 }
 
-/// Field name constants for ABA session objects.
-pub mod aba_fields {
-    pub const TYPE: &str = "__type";
-    pub const SESSION_ID: &str = "__session_id";
-    pub const TYPE_VALUE: &str = "AbaSession";
-}
-
 /// Field name constants for AVSS share objects.
 pub mod avss_fields {
     pub const TYPE: &str = "__type";
