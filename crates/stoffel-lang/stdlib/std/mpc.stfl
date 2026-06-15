@@ -34,13 +34,29 @@ builtin object Share:
   def batch_open_fixed[T](shares: list[Share]) -> list[T] {.builtin: "Share.batch_open".}:
   def open_exp(share: Share, curve_name: string) -> bytes {.builtin.}:
   def random() -> Share {.builtin.}:
+  def random_field() -> Share {.builtin.}:
   def random_int(bit_length: int64) -> Share {.builtin.}:
   def get_commitment(share: Share, index: int64) -> bytes {.builtin.}:
   def commitment_count(share: Share) -> int64 {.builtin.}:
   def has_commitments(share: Share) -> bool {.builtin.}:
   def mul_field(share: Share, field_bytes: bytes) -> Share {.builtin.}:
+  def add_field(share: Share, field_bytes: bytes) -> Share {.builtin.}:
+  def retag(share: Share, bit_length: int64) -> Share {.builtin.}:
   def open_field(share: Share) -> bytes {.builtin.}:
   def open_exp_custom(share: Share, generator_bytes: bytes) -> bytes {.builtin.}:
+
+builtin object Field:
+  def from_int(value: int64) -> bytes {.builtin.}:
+  def zero() -> bytes {.builtin.}:
+  def one() -> bytes {.builtin.}:
+  def is_zero(field_bytes: bytes) -> bool {.builtin.}:
+  def eq(a: bytes, b: bytes) -> bool {.builtin.}:
+  def add(a: bytes, b: bytes) -> bytes {.builtin.}:
+  def sub(a: bytes, b: bytes) -> bytes {.builtin.}:
+  def mul(a: bytes, b: bytes) -> bytes {.builtin.}:
+  def neg(a: bytes) -> bytes {.builtin.}:
+  def inverse(a: bytes) -> bytes {.builtin.}:
+  def sqrt(a: bytes) -> bytes {.builtin.}:
 
 builtin object Mpc:
   def party_id() -> int64 {.builtin.}:

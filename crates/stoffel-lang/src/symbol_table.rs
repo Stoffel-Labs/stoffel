@@ -1219,6 +1219,8 @@ mod tests {
             "commitment_count",
             "has_commitments",
             "mul_field",
+            "add_field",
+            "retag",
             "open_field",
             "open_exp_custom",
         ];
@@ -1233,12 +1235,33 @@ mod tests {
     }
 
     #[test]
+    fn test_field_has_all_methods() {
+        let table = SymbolTable::new();
+        let field = table.lookup_builtin_object("Field").unwrap();
+
+        let expected_methods = [
+            "from_int", "zero", "one", "is_zero", "eq", "add", "sub", "mul", "neg", "inverse",
+            "sqrt",
+        ];
+
+        for method_name in expected_methods {
+            assert!(
+                field.methods.contains_key(method_name),
+                "Field should have method '{}'",
+                method_name
+            );
+        }
+        assert_eq!(field.methods.len(), expected_methods.len());
+    }
+
+    #[test]
     fn test_client_store_has_all_methods() {
         let table = SymbolTable::new();
         let client_store = table.lookup_builtin_object("ClientStore").unwrap();
 
         let expected_methods = [
             "take_share",
+            "take_share_bool",
             "take_share_fixed",
             "get_number_clients",
             "get_number_input_clients",
@@ -1252,7 +1275,7 @@ mod tests {
                 method_name
             );
         }
-        assert_eq!(client_store.methods.len(), 5);
+        assert_eq!(client_store.methods.len(), expected_methods.len());
     }
 
     #[test]
