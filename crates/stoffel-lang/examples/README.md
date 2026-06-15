@@ -87,6 +87,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_threshold_gate`: k-of-n / majority gate on secret bits.
 - `mpc_weighted_voting`: weighted tally vs threshold (batched multiply).
 - `mpc_set_intersection`: `|A ∩ B|` of two secret sets (OR-of-equalities membership).
+- `mpc_set_cardinality`: intersection and union sizes of two secret sets.
 
 ## Algorithm gallery
 
