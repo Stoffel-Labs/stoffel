@@ -84,6 +84,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_voting_tally`: tally secret votes, reveal only [tally ≥ τ].
 - `mpc_first_price_auction`: winning bid + winner index (argmax).
 - `mpc_second_price_auction`: Vickrey winner + second-highest clearing price.
+- `mpc_threshold_gate`: k-of-n / majority gate on secret bits.
 
 ## Algorithm gallery
 
