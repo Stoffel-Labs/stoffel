@@ -345,6 +345,64 @@ where
             .await
     }
 
+    /// Reveal a share as its raw field element (rather than decoding it back to
+    /// an integer/fixed-point clear value). Backs `Share.open_field`, which lets
+    /// StoffelLang programs do public field arithmetic on opened values (e.g.
+    /// the joint random-bit protocol opens `r^2` and takes its field sqrt).
+    ///
+    /// Reconstruction is identical to `open_share` — collect `2t+1` robust
+    /// shares and recover the secret — but the result is the canonically
+    /// serialized field element. A distinct `hb-field-*` type key keeps this
+    /// opening's broadcast namespace separate from the integer `open` path.
+    pub async fn open_share_as_field_async_impl(
+        &self,
+        ty: ShareType,
+        share_bytes: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let type_key = match ty {
+            ShareType::SecretInt { bit_length } => format!("hb-field-int-{bit_length}"),
+            ShareType::SecretUInt { bit_length } => format!("hb-field-uint-{bit_length}"),
+            ShareType::SecretFixedPoint { precision } => {
+                format!("hb-field-fixed-{}-{}", precision.k(), precision.f())
+            }
+        };
+
+        let wire_message = crate::net::open_registry::encode_single_share_wire_message(
+            self.topology.instance_id(),
+            &type_key,
+            self.topology.party_id(),
+            share_bytes,
+        )?;
+        self.broadcast_open_registry_payload(wire_message).await?;
+
+        let required = 2 * self.topology.threshold() + 1;
+        let n = self.topology.n_parties();
+        let t = self.topology.threshold();
+
+        self.open_registry
+            .open_bytes_async(
+                self.topology.party_id(),
+                type_key,
+                share_bytes.to_vec(),
+                required,
+                |collected| {
+                    let mut shares: Vec<RobustShare<F>> = Vec::with_capacity(collected.len());
+                    for bytes in collected {
+                        shares.push(Self::decode_share(bytes)?);
+                    }
+
+                    let (_deg, secret) = RobustShare::recover_secret(&shares, n, t)
+                        .map_err(|e| format!("recover_secret: {:?}", e))?;
+                    let mut out = Vec::new();
+                    secret
+                        .serialize_compressed(&mut out)
+                        .map_err(|e| format!("serialize field element: {}", e))?;
+                    Ok(out)
+                },
+            )
+            .await
+    }
+
     pub async fn batch_open_shares_async_impl(
         &self,
         ty: ShareType,

@@ -226,6 +226,7 @@ where
             | MpcCapabilities::CONSENSUS
             | MpcCapabilities::RESERVATION
             | MpcCapabilities::RANDOMNESS
+            | MpcCapabilities::FIELD_OPEN
             | MpcCapabilities::PREPROC_PERSISTENCE
     }
 
@@ -250,6 +251,10 @@ where
     }
 
     fn as_randomness(&self) -> Option<&dyn MpcEngineRandomness> {
+        Some(self)
+    }
+
+    fn as_field_open(&self) -> Option<&dyn crate::net::mpc_engine::MpcEngineFieldOpen> {
         Some(self)
     }
 

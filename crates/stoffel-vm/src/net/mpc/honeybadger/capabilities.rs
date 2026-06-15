@@ -5,8 +5,9 @@ use crate::net::client_store::{
 use crate::net::curve::SupportedMpcField;
 use crate::net::mpc_engine::{
     AsyncMpcEngine, AsyncMpcEngineClientOps, MpcEngine, MpcEngineClientOps, MpcEngineClientOutput,
-    MpcEngineError, MpcEngineMultiplication, MpcEngineOpenInExponent, MpcEngineOperationResultExt,
-    MpcEnginePreprocPersistence, MpcEngineRandomness, MpcEngineResult, MpcExponentGroup,
+    MpcEngineError, MpcEngineFieldOpen, MpcEngineMultiplication, MpcEngineOpenInExponent,
+    MpcEngineOperationResultExt, MpcEnginePreprocPersistence, MpcEngineRandomness, MpcEngineResult,
+    MpcExponentGroup,
 };
 use crate::storage::preproc::PreprocStore;
 use ark_ec::{CurveGroup, PrimeGroup};
@@ -127,6 +128,17 @@ where
     }
 }
 
+impl<F, G> MpcEngineFieldOpen for HoneyBadgerMpcEngine<F, G>
+where
+    F: SupportedMpcField,
+    G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
+{
+    fn open_share_as_field(&self, ty: ShareType, share_bytes: &[u8]) -> MpcEngineResult<Vec<u8>> {
+        crate::net::try_block_on_current(self.open_share_as_field_async_impl(ty, share_bytes))
+            .map_mpc_engine_operation("open_share_as_field")
+    }
+}
+
 impl<F, G> MpcEngineClientOutput for HoneyBadgerMpcEngine<F, G>
 where
     F: SupportedMpcField,
@@ -240,6 +252,16 @@ where
         self.random_integer_share_async_impl(ty)
             .await
             .map_mpc_engine_operation("async_random_integer_share")
+    }
+
+    async fn open_share_as_field_async(
+        &self,
+        ty: ShareType,
+        share_bytes: &[u8],
+    ) -> MpcEngineResult<Vec<u8>> {
+        self.open_share_as_field_async_impl(ty, share_bytes)
+            .await
+            .map_mpc_engine_operation("async_open_share_as_field")
     }
 
     async fn open_share_in_exp_async(
