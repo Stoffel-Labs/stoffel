@@ -12,5 +12,5 @@ The example computes `3^5 = 243` with a secret exponent. Keep `base`/`e` small s
 `base^e` fits the integer width; `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_secret_exponentiation
+stoffel run crates/stoffel-lang/examples/mpc_secret_exponentiation --client-input 0=5 --expected-output-clients 1
 ```

@@ -1,3 +1,4 @@
+# run-args: --client-input 0=1 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -130,8 +131,13 @@ def rotate_left(x: Share, r: int64, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var rev = Share.open(Share.retag(reverse_bits(Share.from_clear_int(1, l), l, kappa), 64))   # 1 -> 128
-  var rot = Share.open(Share.retag(rotate_left(Share.from_clear_int(1, l), 1, l, kappa), 64))  # 1 -> 2
-  assert rev == 128, "reverse(1) must be 128"
-  assert rot == 2, "rotl(1,1) must be 2"
-  return rev
+  var x: secret int64 = ClientStore.take_share(0, 0)
+  var rev = reverse_bits(x, l, kappa)   # 1 -> 128
+  var rot = rotate_left(x, 1, l, kappa) # 1 -> 2
+  if Mpc.has_capability("client-output"):
+    rev.send_to_client(0)
+  var rrev = Share.open(Share.retag(rev, 64))
+  var rrot = Share.open(Share.retag(rot, 64))
+  assert rrev == 128, "reverse(1) must be 128"
+  assert rrot == 2, "rotl(1, 1) must be 2"
+  return rrev

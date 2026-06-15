@@ -7,5 +7,5 @@ exponent instead.)
 The example computes `3^4 = 81`.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_secret_base_power
+stoffel run crates/stoffel-lang/examples/mpc_secret_base_power --client-input 0=3 --expected-output-clients 1
 ```

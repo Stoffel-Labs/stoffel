@@ -7,5 +7,5 @@ positions before the first set bit is `Σ (1 − s_i)`. Returns a secret value.
 The example computes `tz_count(40) = 3` (`0b101000`). `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_lowest_set_bit
+stoffel run crates/stoffel-lang/examples/mpc_lowest_set_bit --client-input 0=40 --expected-output-clients 1
 ```

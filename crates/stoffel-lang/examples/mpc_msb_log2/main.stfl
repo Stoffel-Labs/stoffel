@@ -1,3 +1,4 @@
+# run-args: --client-input 0=42 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -122,6 +123,10 @@ def floor_log2(x: Share, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var r = Share.open(Share.retag(floor_log2(Share.from_clear_int(42, l), l, kappa), 64))  # msb of 42 is bit 5
-  assert r == 5, "floor_log2(42) must be 5"
-  return r
+  var x: secret int64 = ClientStore.take_share(0, 0)
+  var r = floor_log2(x, l, kappa)
+  if Mpc.has_capability("client-output"):
+    r.send_to_client(0)
+  var rv = Share.open(Share.retag(r, 64))
+  assert rv == 5, "floor_log2(42) must be 5"
+  return rv

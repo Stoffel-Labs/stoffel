@@ -8,5 +8,5 @@ The example reverses `1 → 128` and rotates `rotl(1,1) → 2` over 8 bits. `κ`
 small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_bit_reverse_rotate
+stoffel run crates/stoffel-lang/examples/mpc_bit_reverse_rotate --client-input 0=1 --expected-output-clients 1
 ```

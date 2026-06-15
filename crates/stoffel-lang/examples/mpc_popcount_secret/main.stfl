@@ -1,3 +1,4 @@
+# run-args: --client-input 0=181 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -118,6 +119,10 @@ def popcount(x: Share, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var p = Share.open(Share.retag(popcount(Share.from_clear_int(181, l), l, kappa), 64))  # 0b10110101 -> 5
-  assert p == 5, "popcount(181) must be 5"
-  return p
+  var x: secret int64 = ClientStore.take_share(0, 0)
+  var p = popcount(x, l, kappa)
+  if Mpc.has_capability("client-output"):
+    p.send_to_client(0)
+  var rv = Share.open(Share.retag(p, 64))
+  assert rv == 5, "popcount(181) must be 5"
+  return rv

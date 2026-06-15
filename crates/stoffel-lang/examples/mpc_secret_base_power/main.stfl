@@ -1,3 +1,4 @@
+# run-args: --client-input 0=3 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -116,6 +117,10 @@ def pow_pub(base: Share, e: int64) -> Share:
   return acc
 
 def main() -> int64:
-  var r = Share.open(Share.retag(pow_pub(Share.from_clear_int(3, 16), 4), 64))  # 3^4 = 81
-  assert r == 81, "3^4 must be 81"
-  return r
+  var b: secret int64 = ClientStore.take_share(0, 0)
+  var r = pow_pub(b, 4)   # b^4
+  if Mpc.has_capability("client-output"):
+    r.send_to_client(0)
+  var rv = Share.open(Share.retag(r, 64))
+  assert rv == 81, "3^4 must be 81"
+  return rv

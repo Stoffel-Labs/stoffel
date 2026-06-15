@@ -7,5 +7,5 @@ ones equals `msb + 1`, so the answer is `(Σ q_i) − 1`. Result is a secret val
 The example computes `floor_log2(42) = 5`. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_msb_log2
+stoffel run crates/stoffel-lang/examples/mpc_msb_log2 --client-input 0=42 --expected-output-clients 1
 ```

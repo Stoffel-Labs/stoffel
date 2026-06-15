@@ -1,3 +1,4 @@
+# run-args: --client-input 0=181 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -119,6 +120,10 @@ def mod_pow2(x: Share, k: int64, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var r = Share.open(Share.retag(mod_pow2(Share.from_clear_int(181, l), 4, l, kappa), 64))  # 181 mod 16 = 5
-  assert r == 5, "181 mod 16 must be 5"
-  return r
+  var x: secret int64 = ClientStore.take_share(0, 0)
+  var r = mod_pow2(x, 4, l, kappa)   # x mod 16
+  if Mpc.has_capability("client-output"):
+    r.send_to_client(0)
+  var rv = Share.open(Share.retag(r, 64))
+  assert rv == 5, "181 mod 16 must be 5"
+  return rv

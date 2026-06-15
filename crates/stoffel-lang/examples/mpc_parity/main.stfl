@@ -1,3 +1,4 @@
+# run-args: --client-input 0=7 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -120,8 +121,10 @@ def parity(x: Share, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var p7 = Share.open(Share.retag(parity(Share.from_clear_int(7, l), l, kappa), 64))   # 3 ones -> 1
-  var p5 = Share.open(Share.retag(parity(Share.from_clear_int(5, l), l, kappa), 64))   # 2 ones -> 0
-  assert p7 == 1, "parity(7) must be 1"
-  assert p5 == 0, "parity(5) must be 0"
-  return p7
+  var x: secret int64 = ClientStore.take_share(0, 0)
+  var p = parity(x, l, kappa)
+  if Mpc.has_capability("client-output"):
+    p.send_to_client(0)
+  var rv = Share.open(Share.retag(p, 64))
+  assert rv == 1, "parity(7) must be 1"
+  return rv

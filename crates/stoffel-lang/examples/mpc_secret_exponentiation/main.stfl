@@ -1,3 +1,4 @@
+# run-args: --client-input 0=5 --expected-output-clients 1
 # Exponentiation base^e with a SECRET exponent, via square-and-multiply.
 #
 # Bit-decompose the secret exponent e; acc starts at 1, and for each bit we
@@ -93,7 +94,10 @@ def pow_secret(base: int64, e: Share, le: int64, kappa: int64) -> Share:
 def main() -> int64:
   var le = 3
   var kappa = 8
-  var e = Share.from_clear_int(5, le)
-  var r = Share.open(Share.retag(pow_secret(3, e, le, kappa), 64))   # 3^5 = 243
-  assert r == 243, "3^5 must be 243"
-  return r
+  var e: secret int64 = ClientStore.take_share(0, 0)
+  var r = pow_secret(3, e, le, kappa)   # 3^e
+  if Mpc.has_capability("client-output"):
+    r.send_to_client(0)
+  var rv = Share.open(Share.retag(r, 64))
+  assert rv == 243, "3^5 must be 243"
+  return rv

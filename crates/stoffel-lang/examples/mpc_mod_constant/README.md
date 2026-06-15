@@ -8,5 +8,5 @@ Modulo by a general public constant instead needs division — see
 The example computes `181 mod 16 = 5`. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_mod_constant
+stoffel run crates/stoffel-lang/examples/mpc_mod_constant --client-input 0=181 --expected-output-clients 1
 ```
