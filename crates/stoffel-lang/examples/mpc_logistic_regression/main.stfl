@@ -1,4 +1,4 @@
-# run-args: --client-input 0=3 --client-input 0=5 --expected-output-clients 1
+# run-args: --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -124,16 +124,17 @@ def classify(w: list[int64], x: list[Share], b: int64, l: int64, kappa: int64) -
   return is_nonneg(score, l, kappa)
 
 def main() -> int64:
-  var l = 10
+  var l = 12
   var kappa = 8
-  var x0: secret int64 = ClientStore.take_share(0, 0)   # client 0's private features
-  var x1: secret int64 = ClientStore.take_share(0, 1)
+  # Client's 32 private features (public model weights, so the dot product is
+  # free local scaling; only the final sign test costs a secure comparison).
   var x: list[Share] = []
-  x.append(x0)
-  x.append(x1)
-  var c = classify([2, -1], x, 0, l, kappa)             # public model -> class bit
+  for xi in 0..32:
+    x.append(ClientStore.take_share(0, xi))
+  var w = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]   # public weight vector (all ones)
+  var c = classify(w, x, 0, l, kappa)
   if Mpc.has_capability("client-output"):
     c.send_to_client(0)
   var rv = Share.open(Share.retag(c, 64))
-  assert rv == 1, "predicted class 1"
+  assert rv == 1, "w.x = 32 >= 0 -> class 1"
   return rv

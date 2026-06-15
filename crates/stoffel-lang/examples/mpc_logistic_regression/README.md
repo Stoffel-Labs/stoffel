@@ -1,14 +1,20 @@
-# MPC Logistic Regression (private inference)
+# MPC Logistic Regression (classification)
 
-Binary logistic-regression classification on secret features with public weights
-and bias: the predicted class is `[w·x + b ≥ 0]` (since `sigmoid(s) ≥ 0.5` iff
-`s ≥ 0`, the class is the sign bit of the score). The score is a public-weighted
-sum (cheap `mul_scalar`); the sign is one secure comparison. For the actual
-probability you would apply `mpc_transcendental`'s sigmoid.
+Logistic-regression classification over a realistic feature dimension
+(`d = 32`). The model weights and bias are public; the client's feature vector
+is secret-shared. The class is the sign of the score:
+`class = [w·x + b >= 0]` (since `sigmoid(score) >= 0.5` iff `score >= 0`).
 
-The example classifies a feature vector under two weight sets (→ 1 and 0). `κ` is
-small for speed.
+Because the weights are public, the dot product `w·x` is free local scaling
+(`mul_scalar`, no beaver triples); the only MPC cost is the single secure
+comparison for the sign test. So scaling the feature dimension is essentially
+free.
+
+With an all-ones weight vector and all-ones features, `w·x = 32 >= 0`, so the
+predicted class is `1`.
+
+Run it from the repository root (32 secret features for client 0):
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_logistic_regression --client-input 0=3 --client-input 0=5 --expected-output-clients 1
+stoffel run crates/stoffel-lang/examples/mpc_logistic_regression --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --expected-output-clients 1
 ```
