@@ -1,4 +1,4 @@
-# run-args: --client-input 0=3 --client-input 0=8 --expected-output-clients 1
+# run-args: --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -109,23 +109,41 @@ def equal(a: Share, b: Share, l: int64, kappa: int64) -> Share:
 # Evaluate a depth-2 decision tree on secret features. Each node compares a
 # feature to a public threshold; oblivious select routes to one of four secret
 # leaves. Both comparisons are always evaluated (data-oblivious).
-def tree(x0: Share, x1: Share, t0: int64, t1: int64,
-         l00: int64, l01: int64, l10: int64, l11: int64,
-         l: int64, kappa: int64) -> Share:
-  var b0 = less_than(x0, Share.from_clear_int(t0, l), l, kappa)   # x0 < t0
-  var b1 = less_than(x1, Share.from_clear_int(t1, l), l, kappa)   # x1 < t1
-  var left = select(b1, Share.from_clear_int(l00, 64), Share.from_clear_int(l01, 64))   # b0=1 branch
-  var right = select(b1, Share.from_clear_int(l10, 64), Share.from_clear_int(l11, 64))  # b0=0 branch
-  return select(b0, left, right)
-
+# A complete depth-4 decision tree (15 internal nodes, 16 leaves) over a
+# 32-feature input. Because the routing path is secret, every internal node is
+# evaluated: each computes a bit [x[feat] < threshold] with the carry-based
+# secure comparison, and the tree is collapsed bottom-up with oblivious select.
+# Cost = 15 comparisons (a deeper tree simply doubles the node count per level).
 def main() -> int64:
-  var l = 8
+  var l = 12
   var kappa = 8
-  var x0: secret int64 = ClientStore.take_share(0, 0)
-  var x1: secret int64 = ClientStore.take_share(0, 1)
-  var r = tree(x0, x1, 5, 5, 100, 200, 300, 400, l, kappa)
+
+  var x: list[Share] = []
+  for xi in 0..32:
+    x.append(ClientStore.take_share(0, xi))
+
+  # 16 leaf values 100..115.
+  var cur: list[Share] = []
+  for li in 0..16:
+    cur.append(Share.from_clear_int(100 + li, 64))
+
+  # Collapse 16 -> 8 -> 4 -> 2 -> 1, one node bit per combine.
+  var feat = 0
+  var width = 16
+  while width > 1:
+    var nxt: list[Share] = []
+    var j = 0
+    while j < width / 2:
+      var b = less_than(Share.retag(x[feat], 64), Share.from_clear_int(5, l), l, kappa)
+      nxt.append(select(b, cur[2 * j], cur[2 * j + 1]))   # b=1 -> left child
+      feat = feat + 1
+      j = j + 1
+    cur = nxt
+    width = width / 2
+
+  var r = cur[0]
   if Mpc.has_capability("client-output"):
     r.send_to_client(0)
   var rv = Share.open(Share.retag(r, 64))
-  assert rv == 200, "routes to leaf 200"
+  assert rv == 100, "all features 1 < threshold 5 -> always-left -> leaf 0 = 100"
   return rv
