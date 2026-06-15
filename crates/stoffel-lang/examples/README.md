@@ -75,6 +75,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_covariance`: covariance via `n·Σxy − Σx·Σy` (no division).
 - `mpc_mode`: most frequent value over a public candidate domain (counts + argmax).
 - `mpc_histogram`: counts per public bucket via range checks.
+- `mpc_distance_metrics`: L1 and squared-L2 distances between secret vectors.
 
 ## Algorithm gallery
 
