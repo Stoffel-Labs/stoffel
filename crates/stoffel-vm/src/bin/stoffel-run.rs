@@ -594,6 +594,18 @@ struct ClientNetworkAdapter {
     inner: QuicNetworkManager,
     local_position: usize,
 }
+
+fn client_transport_recipient(
+    recipient: stoffelnet::network_utils::PartyId,
+    local_position: usize,
+) -> Option<stoffelnet::network_utils::PartyId> {
+    if recipient >= local_position {
+        recipient.checked_add(1)
+    } else {
+        Some(recipient)
+    }
+}
+
 #[async_trait::async_trait]
 impl Network for ClientNetworkAdapter {
     type NodeType = <QuicNetworkManager as Network>::NodeType;
@@ -604,33 +616,20 @@ impl Network for ClientNetworkAdapter {
         recipient: stoffelnet::network_utils::PartyId,
         message: &[u8],
     ) -> Result<usize, stoffelnet::network_utils::NetworkError> {
-        let mapped = if recipient >= self.local_position {
-            recipient + 1
-        } else {
-            recipient
-        };
-        let mut connections = Vec::new();
-        if let Some(connection) = self.inner.get_connection_by_party_id(mapped) {
-            connections.push(connection);
-        }
-        if mapped != recipient {
-            if let Some(connection) = self.inner.get_connection_by_party_id(recipient) {
-                connections.push(connection);
-            }
-        }
-        if connections.is_empty() {
+        let mapped = client_transport_recipient(recipient, self.local_position).ok_or(
+            stoffelnet::network_utils::NetworkError::PartyNotFound(recipient),
+        )?;
+        let Some(connection) = self.inner.get_connection_by_party_id(mapped) else {
             return Err(stoffelnet::network_utils::NetworkError::PartyNotFound(
                 recipient,
             ));
-        }
-        for connection in connections {
-            let bytes = message.to_vec();
-            tokio::spawn(async move {
-                if let Err(error) = connection.send(&bytes).await {
-                    eprintln!("[client] Failed to send MPC message to party {recipient}: {error}");
-                }
-            });
-        }
+        };
+        let bytes = message.to_vec();
+        tokio::spawn(async move {
+            if let Err(error) = connection.send(&bytes).await {
+                eprintln!("[client] Failed to send MPC message to party {recipient}: {error}");
+            }
+        });
         Ok(message.len())
     }
 
@@ -5301,7 +5300,7 @@ Examples:
 #[cfg(test)]
 mod tests {
     use super::{
-        band_pow2, field_outputs_to_hex, format_coordinator_outputs,
+        band_pow2, client_transport_recipient, field_outputs_to_hex, format_coordinator_outputs,
         input_client_ids_from_output_ids, plan_preprocessing, render_fixed_point_i64,
         CoordinatorOutputFormat,
     };
@@ -5325,6 +5324,22 @@ mod tests {
         assert_eq!(band_pow2(3), 4);
         assert_eq!(band_pow2(16), 16);
         assert_eq!(band_pow2(50), 64);
+    }
+
+    #[test]
+    fn client_transport_routing_keeps_lower_recipient_unchanged() {
+        assert_eq!(client_transport_recipient(1, 3), Some(1));
+    }
+
+    #[test]
+    fn client_transport_routing_shifts_past_local_position_without_leaking() {
+        assert_eq!(client_transport_recipient(3, 3), Some(4));
+        assert_eq!(client_transport_recipient(4, 3), Some(5));
+    }
+
+    #[test]
+    fn client_transport_routing_rejects_shift_overflow() {
+        assert_eq!(client_transport_recipient(usize::MAX, 0), None);
     }
 
     #[test]
