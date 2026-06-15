@@ -1,3 +1,4 @@
+# run-args: --client-input 0=3 --client-input 0=5 --client-input 0=8 --client-input 1=5 --client-input 1=8 --client-input 1=9 --expected-output-clients 2
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -127,15 +128,20 @@ def intersection_size(a: list[Share], b: list[Share], l: int64, kappa: int64) ->
 def main() -> int64:
   var l = 8
   var kappa = 6
-  var ar = [3, 5, 8]
-  var br = [5, 8, 9]
+  var n = 3
   var a: list[Share] = []
   var b: list[Share] = []
   var i = 0
-  while i < len(ar):
-    a.append(Share.from_clear_int(ar[i], l))
-    b.append(Share.from_clear_int(br[i], l))
+  while i < n:
+    var av: secret int64 = ClientStore.take_share(0, i)   # client 0's private set
+    var bv: secret int64 = ClientStore.take_share(1, i)   # client 1's private set
+    a.append(av)
+    b.append(bv)
     i = i + 1
-  var n = Share.open(Share.retag(intersection_size(a, b, l, kappa), 64))   # {5,8} -> 2
-  assert n == 2, "intersection size must be 2"
-  return n
+  var sz = intersection_size(a, b, l, kappa)
+  if Mpc.has_capability("client-output"):
+    sz.send_to_client(0)
+    sz.send_to_client(1)
+  var rv = Share.open(Share.retag(sz, 64))
+  assert rv == 2, "intersection size 2"
+  return rv

@@ -10,5 +10,5 @@ The example checks `30 ∈ {10,30,50}` (→ 1) and `25 ∈ {10,30,50}` (→ 0). 
 small for speed; production uses `κ ≈ 40`.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_set_membership
+stoffel run crates/stoffel-lang/examples/mpc_set_membership --client-input 0=30 --expected-output-clients 1
 ```

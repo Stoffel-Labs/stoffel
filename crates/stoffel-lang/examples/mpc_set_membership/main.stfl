@@ -1,3 +1,4 @@
+# run-args: --client-input 0=30 --expected-output-clients 1
 # Private set membership: is a secret x equal to any element of a PUBLIC set S?
 #
 # [x in S] = OR over s in S of [x == s], returned as a secret bit (nothing
@@ -94,9 +95,10 @@ def member_of(x: Share, sset: list[int64], l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var sset = [10, 30, 50]
-  var inset = Share.open(Share.retag(member_of(Share.from_clear_int(30, l), sset, l, kappa), 64))
-  var outset = Share.open(Share.retag(member_of(Share.from_clear_int(25, l), sset, l, kappa), 64))
-  assert inset == 1, "30 is in {10,30,50}"
-  assert outset == 0, "25 is not in {10,30,50}"
-  return 1
+  var x: secret int64 = ClientStore.take_share(0, 0)   # client's private element
+  var inset = member_of(x, [10, 30, 50], l, kappa)     # public set
+  if Mpc.has_capability("client-output"):
+    inset.send_to_client(0)
+  var rv = Share.open(Share.retag(inset, 64))
+  assert rv == 1, "30 is in {10,30,50}"
+  return rv

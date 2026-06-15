@@ -1,3 +1,4 @@
+# run-args: --client-input 0=3 --client-input 0=5 --client-input 0=8 --client-input 1=5 --client-input 1=8 --client-input 1=9 --expected-output-clients 2
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -118,23 +119,27 @@ def in_set(x: Share, b: list[Share], l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 6
-  var ar = [3, 5, 8]
-  var br = [5, 8, 9]
+  var n = 3
   var a: list[Share] = []
   var b: list[Share] = []
   var i = 0
-  while i < len(ar):
-    a.append(Share.from_clear_int(ar[i], l))
-    b.append(Share.from_clear_int(br[i], l))
+  while i < n:
+    var av: secret int64 = ClientStore.take_share(0, i)
+    var bv: secret int64 = ClientStore.take_share(1, i)
+    a.append(av)
+    b.append(bv)
     i = i + 1
   var inter = Share.from_clear_int(0, 64)
   i = 0
   while i < len(a):
     inter = Share.add(inter, Share.retag(in_set(a[i], b, l, kappa), 64))
     i = i + 1
-  var union = Share.sub(Share.from_clear_int(len(ar) + len(br), 64), inter)
-  var ci = Share.open(Share.retag(inter, 64))
-  var cu = Share.open(Share.retag(union, 64))
-  assert ci == 2, "intersection 2"
-  assert cu == 4, "union 4"
-  return cu
+  var union = Share.sub(Share.from_clear_int(2 * n, 64), inter)
+  if Mpc.has_capability("client-output"):
+    inter.send_to_client(0)
+    union.send_to_client(0)
+    inter.send_to_client(1)
+    union.send_to_client(1)
+  assert Share.open(Share.retag(inter, 64)) == 2, "intersection 2"
+  assert Share.open(Share.retag(union, 64)) == 4, "union 4"
+  return 1
