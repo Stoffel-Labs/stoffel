@@ -71,6 +71,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_variance`: variance via `n·Σx² − (Σx)²` (no division).
 - `mpc_minmax_range`: min / max / range by select-fold over comparisons.
 - `mpc_median`: median/percentile via sorting network + index.
+- `mpc_weighted_average`: `Σwx / Σw` (batched multiply + division).
 
 ## Algorithm gallery
 
