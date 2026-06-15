@@ -1,4 +1,4 @@
-# run-args: --client-input 0=1 --client-input 0=1 --expected-output-clients 1
+# run-args: --client-input 0=0 --client-input 0=0 --client-input 0=0 --client-input 0=0 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -141,22 +141,23 @@ def nn_label(q: list[Share], pts: list[Share], dim: int64, labels: list[int64], 
   return best_lbl
 
 def main() -> int64:
-  var l = 12
+  var l = 16
   var kappa = 8
-  var q0: secret int64 = ClientStore.take_share(0, 0)
-  var q1: secret int64 = ClientStore.take_share(0, 1)
+  var dim = 4
+  # Client query (4 secret features). Reference set is public.
   var q: list[Share] = []
-  q.append(q0)
-  q.append(q1)
-  var raw = [0, 0, 10, 10, 5, 5]
+  for qi in 0..4:
+    q.append(ClientStore.take_share(0, qi))
+  # 40 public reference points: point i = [i,i,i,i], label i.
+  var raw = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 8, 8, 8, 8, 9, 9, 9, 9, 10, 10, 10, 10, 11, 11, 11, 11, 12, 12, 12, 12, 13, 13, 13, 13, 14, 14, 14, 14, 15, 15, 15, 15, 16, 16, 16, 16, 17, 17, 17, 17, 18, 18, 18, 18, 19, 19, 19, 19, 20, 20, 20, 20, 21, 21, 21, 21, 22, 22, 22, 22, 23, 23, 23, 23, 24, 24, 24, 24, 25, 25, 25, 25, 26, 26, 26, 26, 27, 27, 27, 27, 28, 28, 28, 28, 29, 29, 29, 29, 30, 30, 30, 30, 31, 31, 31, 31, 32, 32, 32, 32, 33, 33, 33, 33, 34, 34, 34, 34, 35, 35, 35, 35, 36, 36, 36, 36, 37, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39, 39]
   var pts: list[Share] = []
   var i = 0
   while i < len(raw):
     pts.append(Share.from_clear_int(raw[i], l))
     i = i + 1
-  var lbl = nn_label(q, pts, 2, [0, 1, 2], l, kappa)
+  var lbl = nn_label(q, pts, dim, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39], l, kappa)
   if Mpc.has_capability("client-output"):
     lbl.send_to_client(0)
   var rv = Share.open(Share.retag(lbl, 64))
-  assert rv == 0, "nearest label 0"
+  assert rv == 0, "query [0,0,0,0] nearest to point 0 -> label 0"
   return rv
