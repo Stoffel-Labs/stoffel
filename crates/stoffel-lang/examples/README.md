@@ -74,6 +74,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_weighted_average`: `Σwx / Σw` (batched multiply + division).
 - `mpc_covariance`: covariance via `n·Σxy − Σx·Σy` (no division).
 - `mpc_mode`: most frequent value over a public candidate domain (counts + argmax).
+- `mpc_histogram`: counts per public bucket via range checks.
 
 ## Algorithm gallery
 
