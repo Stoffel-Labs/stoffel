@@ -13,7 +13,7 @@
 //! This module is designed to be portable and can be copied directly to the compiler
 //! codebase without modification.
 
-use crate::core_types::{F64, FixedPointPrecision, ShareType, Value};
+use crate::core_types::{FixedPointPrecision, ShareType, Value, F64};
 use crate::functions::{FunctionError, VMFunction};
 use crate::instructions::{Instruction, ReducedOpcode};
 use serde::{Deserialize, Serialize};
@@ -1247,12 +1247,60 @@ impl CompiledBinary {
             ClientIoManifest::default()
         };
 
-        Ok(CompiledBinary {
+        let binary = CompiledBinary {
             version,
             constants,
             functions,
             client_io_manifest,
-        })
+        };
+        if version >= PREPROCESSING_DEMAND_MANIFEST_FORMAT_VERSION {
+            binary.validate_preprocessing_demand_manifest()?;
+        }
+        Ok(binary)
+    }
+
+    fn validate_preprocessing_demand_manifest(&self) -> BinaryResult<()> {
+        let actual = self.infer_bytecode_preprocessing_demand_floor();
+        let declared = &self.client_io_manifest.preprocessing_demand;
+        if declared.triples < actual.triples
+            || declared.prandbits < actual.prandbits
+            || declared.prandints < actual.prandints
+        {
+            return Err(invalid_data(format!(
+                "preprocessing demand undercounts material-consuming instructions: declared triples={}, prandbits={}, prandints={}; bytecode requires at least triples={}, prandbits={}, prandints={}",
+                declared.triples,
+                declared.prandbits,
+                declared.prandints,
+                actual.triples,
+                actual.prandbits,
+                actual.prandints
+            )));
+        }
+        if actual.dynamic && !declared.dynamic {
+            return Err(invalid_data(
+                "preprocessing demand marks dynamic=false but bytecode contains runtime-sized material-consuming operations",
+            ));
+        }
+        Ok(())
+    }
+
+    fn infer_bytecode_preprocessing_demand_floor(&self) -> PreprocessingDemand {
+        let mut demand = PreprocessingDemand::default();
+        for function in &self.functions {
+            for instruction in &function.instructions {
+                match instruction {
+                    CompiledInstruction::CALL(name) if name == "Share.mul" => {
+                        demand.add(1, 0, 0, 0);
+                    }
+                    CompiledInstruction::CALL(name) if name == "Share.batch_mul" => {
+                        demand.add(1, 0, 0, 0);
+                        demand.dynamic = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        demand
     }
 
     fn deserialize_client_io_manifest<R: Read>(
@@ -1980,6 +2028,74 @@ mod tests {
         bytes.extend_from_slice(&0u16.to_le_bytes()); // upvalues
         bytes.push(0); // no parent
         bytes.extend_from_slice(&0u16.to_le_bytes()); // labels
+    }
+
+    fn share_mul_binary_with_declared_triples(
+        declared_triples: u64,
+        mul_count: usize,
+    ) -> CompiledBinary {
+        let mut instructions = Vec::new();
+        instructions.push(Instruction::LDI(0, Value::I64(7)));
+        instructions.push(Instruction::LDI(1, Value::I64(64)));
+        instructions.push(Instruction::PUSHARG(0));
+        instructions.push(Instruction::PUSHARG(1));
+        instructions.push(Instruction::CALL("Share.from_clear_int".to_string()));
+        instructions.push(Instruction::MOV(2, 0));
+        for _ in 0..mul_count {
+            instructions.push(Instruction::PUSHARG(2));
+            instructions.push(Instruction::PUSHARG(2));
+            instructions.push(Instruction::CALL("Share.mul".to_string()));
+            instructions.push(Instruction::MOV(2, 0));
+        }
+        instructions.push(Instruction::RET(2));
+
+        let function = VMFunction::new(
+            "main".to_string(),
+            vec![],
+            vec![],
+            None,
+            8,
+            instructions,
+            HashMap::new(),
+        );
+        let mut binary = CompiledBinary::from_vm_functions(&[function]);
+        binary.client_io_manifest.preprocessing_demand = PreprocessingDemand {
+            triples: declared_triples,
+            randoms: 0,
+            prandbits: 0,
+            prandints: 0,
+            dynamic: false,
+        };
+        binary
+    }
+
+    #[test]
+    fn bytecode_admission_rejects_preprocessing_manifest_that_undercounts_ops() {
+        let binary = share_mul_binary_with_declared_triples(0, 9);
+
+        let mut bytes = Vec::new();
+        binary
+            .serialize(&mut bytes)
+            .expect("serialize forged binary");
+        let admitted = CompiledBinary::deserialize(&mut Cursor::new(bytes));
+
+        assert_invalid_data(
+            admitted,
+            "preprocessing demand undercounts material-consuming instructions",
+        );
+    }
+
+    #[test]
+    fn bytecode_admission_accepts_preprocessing_manifest_that_covers_ops() {
+        let binary = share_mul_binary_with_declared_triples(9, 9);
+
+        let mut bytes = Vec::new();
+        binary
+            .serialize(&mut bytes)
+            .expect("serialize covered binary");
+        let admitted = CompiledBinary::deserialize(&mut Cursor::new(bytes)).unwrap();
+
+        assert_eq!(admitted.client_io_manifest.preprocessing_demand.triples, 9);
     }
 
     #[test]

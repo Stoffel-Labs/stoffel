@@ -89,43 +89,75 @@ fn band_pow2(n: u64) -> u64 {
     }
 }
 
+/// Read a positive u64 override from the process environment.
+fn env_positive_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+}
+
+fn dynamic_preprocessing_overrides_error(
+    demand: &stoffel_vm_types::compiled_binary::PreprocessingDemand,
+) -> Option<String> {
+    dynamic_preprocessing_overrides_error_with(demand, env_positive_u64)
+}
+
+fn dynamic_preprocessing_overrides_error_with<F>(
+    demand: &stoffel_vm_types::compiled_binary::PreprocessingDemand,
+    mut env: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> Option<u64>,
+{
+    if !demand.dynamic {
+        return None;
+    }
+
+    let mut missing = Vec::new();
+    if demand.triples > 0 && env("STOFFEL_PREPROCESSING_TRIPLES").is_none() {
+        missing.push("STOFFEL_PREPROCESSING_TRIPLES");
+    }
+    if demand.prandbits > 0 && env("STOFFEL_PREPROCESSING_PRANDBITS").is_none() {
+        missing.push("STOFFEL_PREPROCESSING_PRANDBITS");
+    }
+    if demand.prandints > 0 && env("STOFFEL_PREPROCESSING_PRANDINTS").is_none() {
+        missing.push("STOFFEL_PREPROCESSING_PRANDINTS");
+    }
+
+    if missing.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Dynamic preprocessing demand requires explicit public preprocessing bounds before online execution; set {} or rebuild with a static worst-case manifest",
+            missing.join(", ")
+        ))
+    }
+}
+
 /// Turn the compiler's static preprocessing-demand estimate into concrete
 /// material counts to generate up front. Each count is rounded up to a power of
-/// two for privacy (see `band_pow2`); `dynamic` programs (data-dependent loops,
-/// recursion, runtime-sized batches) get an extra octave of headroom because the
-/// static estimate may undercount them. The triple/random counts absorb the
-/// dependency that prandbit generation itself consumes a triple + random per bit.
-/// `STOFFEL_PREPROCESSING_TRIPLES` / `STOFFEL_PREPROCESSING_PRANDBITS` override
-/// the estimate for unusually loop-heavy programs.
+/// two for privacy (see `band_pow2`). Programs marked `dynamic` must provide
+/// explicit public environment bounds before this plan is used for online MPC;
+/// see `dynamic_preprocessing_overrides_error`. The triple/random counts absorb
+/// the dependency that prandbit generation itself consumes a triple + random per bit.
+/// `STOFFEL_PREPROCESSING_TRIPLES` / `STOFFEL_PREPROCESSING_PRANDBITS` /
+/// `STOFFEL_PREPROCESSING_PRANDINTS` override the compiler estimate.
 fn plan_preprocessing(
     demand: &stoffel_vm_types::compiled_binary::PreprocessingDemand,
     threshold: usize,
     n_client_random: usize,
 ) -> PlannedPreprocessing {
-    let env_u64 = |name: &str| {
-        std::env::var(name)
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .filter(|v| *v > 0)
-    };
-
-    // Dynamic programs may undercount, so give them an extra octave before banding.
-    let with_headroom = |n: u64| -> u64 {
-        if demand.dynamic {
-            n.saturating_mul(2)
-        } else {
-            n
-        }
-    };
-
-    let prandbits = env_u64("STOFFEL_PREPROCESSING_PRANDBITS")
+    let prandbits = env_positive_u64("STOFFEL_PREPROCESSING_PRANDBITS")
         .map(band_pow2)
-        .unwrap_or_else(|| band_pow2(with_headroom(demand.prandbits)));
-    let prandints = band_pow2(with_headroom(demand.prandints));
-
-    let direct_triples = env_u64("STOFFEL_PREPROCESSING_TRIPLES")
+        .unwrap_or_else(|| band_pow2(demand.prandbits));
+    let prandints = env_positive_u64("STOFFEL_PREPROCESSING_PRANDINTS")
         .map(band_pow2)
-        .unwrap_or_else(|| band_pow2(with_headroom(demand.triples)));
+        .unwrap_or_else(|| band_pow2(demand.prandints));
+
+    let direct_triples = env_positive_u64("STOFFEL_PREPROCESSING_TRIPLES")
+        .map(band_pow2)
+        .unwrap_or_else(|| band_pow2(demand.triples));
 
     // prandbit generation consumes one triple + one random per bit.
     let mut triple_target = direct_triples.saturating_add(prandbits);
@@ -2285,6 +2317,9 @@ where
     // a triple + random per bit, and a baseline so light programs still run.
     let client_random_count = input_ids.len().max(coordinator_client_count_hint);
     let n_client_random = client_random_count.saturating_mul(client_input_count);
+    if let Some(error) = dynamic_preprocessing_overrides_error(&preprocessing_demand) {
+        return Err(error);
+    }
     let plan = plan_preprocessing(&preprocessing_demand, t, n_client_random);
     let n_triples = plan.n_triples;
     let n_random = plan.n_random;
@@ -5301,9 +5336,9 @@ Examples:
 #[cfg(test)]
 mod tests {
     use super::{
-        band_pow2, field_outputs_to_hex, format_coordinator_outputs,
-        input_client_ids_from_output_ids, plan_preprocessing, render_fixed_point_i64,
-        CoordinatorOutputFormat,
+        band_pow2, dynamic_preprocessing_overrides_error_with, field_outputs_to_hex,
+        format_coordinator_outputs, input_client_ids_from_output_ids, plan_preprocessing,
+        render_fixed_point_i64, CoordinatorOutputFormat,
     };
     use stoffel_vm::net::MpcCurveConfig;
     use stoffel_vm_types::compiled_binary::PreprocessingDemand;
@@ -5359,14 +5394,29 @@ mod tests {
     }
 
     #[test]
-    fn plan_gives_dynamic_programs_an_extra_octave_of_headroom() {
-        let stat = plan_preprocessing(&demand(0, 16, 1, false), 1, 0);
-        let dyn_ = plan_preprocessing(&demand(0, 16, 1, true), 1, 0);
-        // The dynamic flag doubles the estimate before banding, so the prandbit
-        // pool is one octave larger than the static plan's.
-        assert_eq!(stat.n_prandbit, 16);
-        assert_eq!(dyn_.n_prandbit, 32);
-        assert!(dyn_.n_triples >= stat.n_triples);
+    fn plan_rejects_dynamic_programs_without_explicit_public_bounds() {
+        let error = dynamic_preprocessing_overrides_error_with(&demand(4, 16, 1, true), |_| None)
+            .expect("dynamic demand without overrides should fail closed");
+
+        assert!(error.contains("STOFFEL_PREPROCESSING_TRIPLES"));
+        assert!(error.contains("STOFFEL_PREPROCESSING_PRANDBITS"));
+        assert!(error.contains("STOFFEL_PREPROCESSING_PRANDINTS"));
+    }
+
+    #[test]
+    fn plan_accepts_dynamic_programs_with_explicit_public_bounds() {
+        let error =
+            dynamic_preprocessing_overrides_error_with(
+                &demand(4, 16, 1, true),
+                |name| match name {
+                    "STOFFEL_PREPROCESSING_TRIPLES" => Some(16),
+                    "STOFFEL_PREPROCESSING_PRANDBITS" => Some(32),
+                    "STOFFEL_PREPROCESSING_PRANDINTS" => Some(2),
+                    _ => None,
+                },
+            );
+
+        assert!(error.is_none());
     }
 
     #[test]
