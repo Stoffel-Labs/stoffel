@@ -79,6 +79,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_logistic_regression`: class = [w.x + b >= 0] on secret features.
 - `mpc_decision_tree`: depth-2 tree on secret features (compare + select routing).
 - `mpc_mlp_inference`: linear→ReLU→linear→argmax private inference.
+- `mpc_knn`: nearest-neighbour classification (L2² + argmin).
 
 ## Algorithm gallery
 
