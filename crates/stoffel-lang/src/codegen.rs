@@ -240,18 +240,39 @@ impl CodeGenerator {
     }
 
     /// Record preprocessing demand for explicit MPC builtin calls.
-    fn record_mpc_builtin_demand(&mut self, function_name: &str) {
+    fn record_mpc_builtin_demand(&mut self, function_name: &str, arguments: &[AstNode]) {
         match function_name {
             // Explicit secret multiplication: one beaver triple.
             "Share.mul" => self.record_mpc_demand(1, 0, 0),
-            // Batched multiplication over a runtime-sized array: count one triple
-            // as a floor and mark the demand dynamic (true size is unknown until
-            // runtime, so the runtime keeps headroom and tops up on the fly).
-            "Share.batch_mul" => {
-                self.record_mpc_demand(1, 0, 0);
-                self.preprocessing_demand.dynamic = true;
-            }
+            // Batched multiplication consumes one beaver triple per element. When
+            // the batch length is statically known -- a list literal, or a list
+            // variable whose secret-share appends the compiler has tracked -- we
+            // provision exactly that many. Only when the size is genuinely
+            // runtime-determined do we fall back to a one-triple floor plus the
+            // dynamic flag (the runtime then keeps headroom and tops up on the
+            // fly).
+            "Share.batch_mul" => match self.batch_mul_static_len(arguments) {
+                Some(len) => self.record_mpc_demand(len as u64, 0, 0),
+                None => {
+                    self.record_mpc_demand(1, 0, 0);
+                    self.preprocessing_demand.dynamic = true;
+                }
+            },
             _ => {}
+        }
+    }
+
+    /// Statically known element count of a `Share.batch_mul` operand, when the
+    /// compiler can determine it: a list literal, or a list variable whose
+    /// secret-share appends were tracked (e.g. built in a literal-bound loop).
+    /// Returns `None` when the batch size is only known at runtime.
+    fn batch_mul_static_len(&self, arguments: &[AstNode]) -> Option<usize> {
+        match arguments.first()? {
+            AstNode::ListLiteral { elements, .. } => Some(elements.len()),
+            AstNode::Identifier(name, _) => {
+                self.variable_share_lists.get(name).map(|types| types.len())
+            }
+            _ => None,
         }
     }
 
@@ -1489,10 +1510,11 @@ impl CodeGenerator {
                 // consumes preprocessing material at runtime.
                 match op.as_str() {
                     // secret * secret consumes one beaver triple. (secret * public
-                    // is a local scaling and consumes nothing.) Secret-bool `and`
-                    // and `or` are also a multiplication (one triple); `xor` is
-                    // local addition and free.
-                    "*" | "and" | "or" if left_is_secret && right_is_secret => {
+                    // is a local scaling and consumes nothing.) Secret-bool `and`,
+                    // `or`, and `xor` are all a multiplication (one triple): over a
+                    // prime field the VM evaluates `a xor b` as `a + b - 2ab`, so it
+                    // consumes preprocessing exactly like `and`/`or`.
+                    "*" | "and" | "or" | "xor" if left_is_secret && right_is_secret => {
                         self.record_mpc_demand(1, 0, 0);
                     }
                     // secret fix64 / public-constant runs the fixed-point division
@@ -1818,7 +1840,7 @@ impl CodeGenerator {
 
                 self.record_client_io_call(&function_name, arguments);
                 self.record_share_list_append_call(&function_name, arguments);
-                self.record_mpc_builtin_demand(&function_name);
+                self.record_mpc_builtin_demand(&function_name, arguments);
 
                 // 3. Compile arguments first (do NOT emit PUSHARG yet) to keep PUSHARGs contiguous before CALL
                 let mut arg_vrs = Vec::with_capacity(arguments.len());
