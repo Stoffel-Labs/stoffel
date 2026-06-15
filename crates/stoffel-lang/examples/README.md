@@ -41,6 +41,10 @@ example folder has a `main.stfl` source file and a short README.
 - `threshold_signatures/*`: threshold signature programs based on the VM fixtures.
 - `avss_certificate/*`: AVSS certificate keygen/signing flows based on the VM fixtures.
 
+MPC subprotocol library (built on the random-bit / comparison primitives):
+
+- `mpc_oblivious_read`: read `arr[secret i]` via equality + select.
+
 ## Algorithm gallery
 
 Eighty self-checking programs organised as
