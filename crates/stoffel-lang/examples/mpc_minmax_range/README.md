@@ -6,5 +6,5 @@ oblivious `select` over secure comparisons. Returns secret values.
 The example reduces `[50,20,40,10,30]` → min 10, max 50, range 40. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_minmax_range
+stoffel run crates/stoffel-lang/examples/mpc_minmax_range --client-input 0=50 --client-input 1=20 --client-input 2=40 --client-input 3=10 --client-input 4=30 --expected-output-clients 5
 ```

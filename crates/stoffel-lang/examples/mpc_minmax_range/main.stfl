@@ -1,3 +1,4 @@
+# run-args: --client-input 0=50 --client-input 1=20 --client-input 2=40 --client-input 3=10 --client-input 4=30 --expected-output-clients 5
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -124,14 +125,23 @@ def reduce_max(arr: list[Share], l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var raw = [50, 20, 40, 10, 30]
+  var n = 5
   var arr: list[Share] = []
   var i = 0
-  while i < len(raw):
-    arr.append(Share.from_clear_int(raw[i], l))
+  while i < n:
+    var v: secret int64 = ClientStore.take_share(i, 0)
+    arr.append(v)
     i = i + 1
-  var mn = Share.open(Share.retag(reduce_min(arr, l, kappa), 64))   # 10
-  var mx = Share.open(Share.retag(reduce_max(arr, l, kappa), 64))   # 50
-  assert mn == 10, "min 10"
-  assert mx == 50, "max 50"
-  return mx - mn   # range 40
+  var mn = reduce_min(arr, l, kappa)
+  var mx = reduce_max(arr, l, kappa)
+  if Mpc.has_capability("client-output"):
+    i = 0
+    while i < n:
+      mn.send_to_client(i)
+      mx.send_to_client(i)
+      i = i + 1
+  var rmn = Share.open(Share.retag(mn, 64))
+  var rmx = Share.open(Share.retag(mx, 64))
+  assert rmn == 10, "min 10"
+  assert rmx == 50, "max 50"
+  return rmx - rmn

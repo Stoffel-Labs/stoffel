@@ -1,3 +1,4 @@
+# run-args: --client-input 0=2 --client-input 1=4 --client-input 2=6 --client-input 3=8 --expected-output-clients 4
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -118,12 +119,19 @@ def variance_n2(arr: list[Share], n: int64) -> Share:
   return Share.sub(Share.mul_scalar(sxx, n), Share.mul(sx, sx))
 
 def main() -> int64:
-  var raw = [2, 4, 6, 8]
+  var n = 4
   var arr: list[Share] = []
   var i = 0
-  while i < len(raw):
-    arr.append(Share.from_clear_int(raw[i], 16))
+  while i < n:
+    var v: secret int64 = ClientStore.take_share(i, 0)
+    arr.append(v)
     i = i + 1
-  var v = Share.open(Share.retag(variance_n2(arr, len(raw)), 64))   # var=5, n^2=16 -> 80
-  assert v == 80, "variance*n^2 must be 80"
-  return v
+  var vn2 = variance_n2(arr, n)
+  if Mpc.has_capability("client-output"):
+    i = 0
+    while i < n:
+      vn2.send_to_client(i)
+      i = i + 1
+  var rv = Share.open(Share.retag(vn2, 64))
+  assert rv == 80, "variance*n^2 of 2,4,6,8 is 80"
+  return rv
