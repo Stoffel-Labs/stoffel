@@ -76,6 +76,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_mode`: most frequent value over a public candidate domain (counts + argmax).
 - `mpc_histogram`: counts per public bucket via range checks.
 - `mpc_distance_metrics`: L1 and squared-L2 distances between secret vectors.
+- `mpc_logistic_regression`: class = [w.x + b >= 0] on secret features.
 
 ## Algorithm gallery
 
