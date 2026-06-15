@@ -70,6 +70,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_mean`: mean = sum / n (division by public count).
 - `mpc_variance`: variance via `n·Σx² − (Σx)²` (no division).
 - `mpc_minmax_range`: min / max / range by select-fold over comparisons.
+- `mpc_median`: median/percentile via sorting network + index.
 
 ## Algorithm gallery
 
