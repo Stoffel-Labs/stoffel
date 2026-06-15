@@ -82,6 +82,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_knn`: nearest-neighbour classification (L2² + argmin).
 - `mpc_naive_bayes`: multinomial NB scoring + argmax.
 - `mpc_voting_tally`: tally secret votes, reveal only [tally ≥ τ].
+- `mpc_first_price_auction`: winning bid + winner index (argmax).
 
 ## Algorithm gallery
 
