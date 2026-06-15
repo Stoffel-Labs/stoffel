@@ -1,0 +1,127 @@
+def random_bit() -> Share:
+  while True:
+    var r = Share.random_field()
+    var r_squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(r_squared):
+      continue
+    var r_prime_inv = Field.inverse(Field.sqrt(r_squared))
+    var two_inv = Field.inverse(Field.from_int(2))
+    var c = Share.mul_field(r, r_prime_inv)
+    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
+    return Share.retag(a, 1)
+
+def pow2(i: int64) -> int64:
+  var p = 1
+  var k = 0
+  while k < i:
+    p = p * 2
+    k = k + 1
+  return p
+
+def combine_bits(bits: list[Share], n: int64) -> Share:
+  var acc = Share.mul_scalar(bits[0], 1)
+  var i = 1
+  while i < n:
+    acc = Share.add(acc, Share.mul_scalar(bits[i], pow2(i)))
+    i = i + 1
+  return Share.retag(acc, 64)
+
+# Shares of the bits of a in [0, 2^l) (low l usable).
+def bit_decompose(a: Share, l: int64, kappa: int64) -> list[Share]:
+  var m = l + kappa
+  var n = m + 1
+  var rbits: list[Share] = []
+  var i = 0
+  while i < m:
+    rbits.append(random_bit())
+    i = i + 1
+  while i < n:
+    rbits.append(Share.from_clear_int(0, 1))
+    i = i + 1
+  var r = combine_bits(rbits, n)
+  var c = Share.open(Share.retag(Share.add(Share.retag(a, 64), r), 64))
+  var abits: list[Share] = []
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < n:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    var xorrb = Share.sub(Share.add(ri, borrow), Share.mul_scalar(rb, 2))
+    var ai = borrow
+    var nb = borrow
+    if ci == 0:
+      ai = xorrb
+      nb = Share.sub(Share.add(ri, borrow), rb)
+    else:
+      ai = Share.sub(Share.from_clear_int(1, 1), xorrb)
+      nb = rb
+    abits.append(Share.retag(ai, 1))
+    borrow = Share.retag(nb, 1)
+    i = i + 1
+  return abits
+
+# Secret-shared [a < b] for a, b in [0, 2^l): masked reveal + carry chain.
+def less_than(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  var z = Share.add_scalar(Share.sub(Share.retag(a, 64), Share.retag(b, 64)), pow2(l))
+  var rbits: list[Share] = []
+  var i = 0
+  while i < (l + 1):
+    rbits.append(random_bit())
+    i = i + 1
+  var r_low = combine_bits(rbits, l + 1)
+  var r_high = Share.retag(Share.random_int(kappa), 64)
+  var r = Share.add(r_low, Share.mul_scalar(r_high, pow2(l + 1)))
+  var c = Share.open(Share.retag(Share.add(Share.retag(z, 64), r), 64))
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < l:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    if ci == 0:
+      borrow = Share.retag(Share.sub(Share.add(ri, borrow), rb), 1)
+    else:
+      borrow = Share.retag(rb, 1)
+    i = i + 1
+  var cl = (c shr l) and 1
+  var rl = rbits[l]
+  var rlb = Share.mul(rl, borrow)
+  var zl = Share.sub(Share.add(rl, borrow), Share.mul_scalar(rlb, 2))
+  if cl == 1:
+    zl = Share.sub(Share.from_clear_int(1, 1), zl)
+  return Share.sub(Share.from_clear_int(1, 1), Share.retag(zl, 1))
+
+# Oblivious select: a if cond==1 else b (inputs retagged to a common width).
+def select(cond: Share, a: Share, b: Share) -> Share:
+  var aa = Share.retag(a, 64)
+  var bb = Share.retag(b, 64)
+  var c = Share.retag(cond, 64)
+  return Share.add(bb, Share.mul(c, Share.sub(aa, bb)))
+
+# [a == b] = NOT(a<b) AND NOT(b<a)
+def equal(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  var nlt = Share.sub(Share.from_clear_int(1, 1), less_than(a, b, l, kappa))
+  var ngt = Share.sub(Share.from_clear_int(1, 1), less_than(b, a, l, kappa))
+  return Share.mul(nlt, ngt)
+
+# Evaluate a depth-2 decision tree on secret features. Each node compares a
+# feature to a public threshold; oblivious select routes to one of four secret
+# leaves. Both comparisons are always evaluated (data-oblivious).
+def tree(x0: Share, x1: Share, t0: int64, t1: int64,
+         l00: int64, l01: int64, l10: int64, l11: int64,
+         l: int64, kappa: int64) -> Share:
+  var b0 = less_than(x0, Share.from_clear_int(t0, l), l, kappa)   # x0 < t0
+  var b1 = less_than(x1, Share.from_clear_int(t1, l), l, kappa)   # x1 < t1
+  var left = select(b1, Share.from_clear_int(l00, 64), Share.from_clear_int(l01, 64))   # b0=1 branch
+  var right = select(b1, Share.from_clear_int(l10, 64), Share.from_clear_int(l11, 64))  # b0=0 branch
+  return select(b0, left, right)
+
+def main() -> int64:
+  var l = 8
+  var kappa = 8
+  # thresholds 5,5; leaves keyed (b0,b1): (1,1)=100 (1,0)=200 (0,1)=300 (0,0)=400
+  # x0=3 (<5 -> b0=1), x1=8 (>=5 -> b1=0) -> leaf 200
+  var r = Share.open(Share.retag(tree(Share.from_clear_int(3, l), Share.from_clear_int(8, l), 5, 5, 100, 200, 300, 400, l, kappa), 64))
+  assert r == 200, "tree must route to leaf 200"
+  return r
