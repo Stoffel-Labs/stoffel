@@ -1,8 +1,0 @@
-[package]
-name = "tmp-bitwise-share-working"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-stoffel = { package = "stoffel-rust-sdk", git = "https://github.com/Stoffel-Labs/StoffelVM" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
