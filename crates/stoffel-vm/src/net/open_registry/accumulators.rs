@@ -61,6 +61,7 @@ pub enum ExpOpenRegistryKind {
 #[derive(Debug, Clone, Copy)]
 pub struct ExpOpenRequest<'a> {
     pub kind: ExpOpenRegistryKind,
+    pub sequence: Option<usize>,
     pub party_id: usize,
     pub share_id: usize,
     pub partial_point: &'a [u8],

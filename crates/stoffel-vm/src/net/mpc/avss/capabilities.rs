@@ -63,8 +63,15 @@ where
         let partial_bytes =
             Self::encode_verified_exp_contribution(&share, generator, partial_point)?;
 
+        let seq = self.open_registry.insert_exp_next(
+            ExpOpenRegistryKind::G1,
+            self.topology.party_id(),
+            share_id,
+            partial_bytes.clone(),
+        )?;
         let wire_message = crate::net::open_registry::encode_avss_open_exp_wire_message(
             self.topology.instance_id(),
+            seq,
             self.topology.party_id(),
             share_id,
             &partial_bytes,
@@ -79,6 +86,7 @@ where
         self.open_registry.exp_open_wait(
             ExpOpenRequest {
                 kind: ExpOpenRegistryKind::G1,
+                sequence: Some(seq),
                 party_id: self.topology.party_id(),
                 share_id,
                 partial_point: &partial_bytes,
@@ -121,8 +129,15 @@ where
         let partial_bytes =
             Self::encode_verified_exp_contribution(&share, generator, partial_point)?;
 
+        let seq = self.open_registry.insert_exp_next(
+            ExpOpenRegistryKind::G1,
+            self.topology.party_id(),
+            share_id,
+            partial_bytes.clone(),
+        )?;
         let wire_message = crate::net::open_registry::encode_avss_open_exp_wire_message(
             self.topology.instance_id(),
+            seq,
             self.topology.party_id(),
             share_id,
             &partial_bytes,
@@ -138,6 +153,7 @@ where
             .exp_open_async(
                 ExpOpenRequest {
                     kind: ExpOpenRegistryKind::G1,
+                    sequence: Some(seq),
                     party_id: self.topology.party_id(),
                     share_id,
                     partial_point: &partial_bytes,
@@ -195,8 +211,15 @@ where
         let partial_point: G2Projective = generator_g2 * share_value;
         let partial_bytes = Self::encode_verified_g2_exp_contribution(partial_point)?;
 
+        let seq = self.open_registry.insert_exp_next(
+            ExpOpenRegistryKind::G2,
+            self.topology.party_id(),
+            share_id,
+            partial_bytes.clone(),
+        )?;
         let wire_payload = crate::net::open_registry::encode_avss_g2_open_exp_wire_message(
             self.topology.instance_id(),
+            seq,
             self.topology.party_id(),
             share_id,
             &partial_bytes,
@@ -218,6 +241,7 @@ where
         self.open_registry.exp_open_wait(
             ExpOpenRequest {
                 kind: ExpOpenRegistryKind::G2,
+                sequence: Some(seq),
                 party_id: self.topology.party_id(),
                 share_id,
                 partial_point: &partial_bytes,
@@ -278,8 +302,15 @@ where
         let partial_point: G2Projective = generator_g2 * share_value;
         let partial_bytes = Self::encode_verified_g2_exp_contribution(partial_point)?;
 
+        let seq = self.open_registry.insert_exp_next(
+            ExpOpenRegistryKind::G2,
+            self.topology.party_id(),
+            share_id,
+            partial_bytes.clone(),
+        )?;
         let wire_payload = crate::net::open_registry::encode_avss_g2_open_exp_wire_message(
             self.topology.instance_id(),
+            seq,
             self.topology.party_id(),
             share_id,
             &partial_bytes,
@@ -303,6 +334,7 @@ where
             .exp_open_async(
                 ExpOpenRequest {
                     kind: ExpOpenRegistryKind::G2,
+                    sequence: Some(seq),
                     party_id: self.topology.party_id(),
                     share_id,
                     partial_point: &partial_bytes,
@@ -423,8 +455,14 @@ where
                 }
             };
 
+            let seq = self.open_registry.insert_single_next(
+                &type_key,
+                self.topology.party_id(),
+                share_bytes.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_single_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 share_bytes,
@@ -435,9 +473,10 @@ where
             let t = self.topology.threshold();
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
-            self.open_registry.open_bytes_wait(
+            self.open_registry.open_bytes_at_wait(
                 self.topology.party_id(),
                 &type_key,
+                seq,
                 share_bytes,
                 required,
                 |collected| {
@@ -696,8 +735,14 @@ where
                 }
             };
 
+            let seq = self.open_registry.insert_single_next(
+                &type_key,
+                self.topology.party_id(),
+                share_bytes.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_single_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 share_bytes,
@@ -709,9 +754,10 @@ where
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
             self.open_registry
-                .open_share_async(
+                .open_share_at_async(
                     self.topology.party_id(),
                     type_key,
+                    seq,
                     share_bytes.to_vec(),
                     required,
                     |collected| {
@@ -745,8 +791,14 @@ where
                 }
             };
 
+            let seq = self.open_registry.insert_batch_next(
+                &type_key,
+                self.topology.party_id(),
+                shares.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_batch_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 shares,
@@ -758,9 +810,10 @@ where
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
             self.open_registry
-                .batch_open_async(
+                .batch_open_at_async(
                     self.topology.party_id(),
                     type_key,
+                    Some(seq),
                     shares.to_vec(),
                     required,
                     |collected, pos| {
@@ -814,8 +867,14 @@ where
                 }
             };
 
+            let seq = self.open_registry.insert_single_next(
+                &type_key,
+                self.topology.party_id(),
+                share_bytes.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_single_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 share_bytes,
@@ -827,9 +886,10 @@ where
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
             self.open_registry
-                .open_bytes_async(
+                .open_bytes_at_async(
                     self.topology.party_id(),
                     type_key,
+                    seq,
                     share_bytes.to_vec(),
                     required,
                     |collected| {

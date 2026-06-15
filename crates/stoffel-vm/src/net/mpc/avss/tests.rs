@@ -939,9 +939,10 @@ async fn avss_open_registry_waits_for_n_minus_t_and_tolerates_one_bad_share() {
     let expected_share = local_share.clone();
     let waiter = tokio::spawn(async move {
         registry
-            .open_share_async(
+            .open_share_at_async(
                 0,
                 type_key.to_string(),
+                0,
                 expected_share.clone(),
                 required,
                 move |collected| {
@@ -963,6 +964,7 @@ async fn avss_open_registry_waits_for_n_minus_t_and_tolerates_one_bad_share() {
 
     let bad_message = crate::net::open_registry::encode_single_share_wire_message(
         instance_id,
+        0,
         type_key,
         1,
         &bad_share,
@@ -980,6 +982,7 @@ async fn avss_open_registry_waits_for_n_minus_t_and_tolerates_one_bad_share() {
 
     let valid_message = crate::net::open_registry::encode_single_share_wire_message(
         instance_id,
+        0,
         type_key,
         2,
         &valid_share,

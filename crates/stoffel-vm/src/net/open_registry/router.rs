@@ -124,22 +124,33 @@ impl OpenMessageRouter {
 
         match decoded {
             OpenRegistryWireMessage::Single {
+                seq,
                 type_key,
                 sender_party_id,
                 share,
                 ..
-            } => registry.insert_single(&type_key, sender_party_id, share),
+            } => {
+                let seq = usize::try_from(seq)
+                    .map_err(|_| format!("open_share sequence {seq} exceeds local usize"))?;
+                registry.insert_single(seq, &type_key, sender_party_id, share)?
+            }
             OpenRegistryWireMessage::Batch {
+                seq,
                 type_key,
                 sender_party_id,
                 shares,
                 ..
-            } => registry.insert_batch(&type_key, sender_party_id, shares),
+            } => {
+                let seq = usize::try_from(seq)
+                    .map_err(|_| format!("batch_open_shares sequence {seq} exceeds local usize"))?;
+                registry.insert_batch(seq, &type_key, sender_party_id, shares)?
+            }
             OpenRegistryWireMessage::Rbc {
+                session_id,
                 sender_party_id,
                 message,
                 ..
-            } => registry.insert_rbc_broadcast(sender_party_id, message),
+            } => registry.insert_rbc_broadcast(session_id, sender_party_id, message)?,
         }
         Ok(true)
     }
@@ -191,11 +202,14 @@ impl OpenMessageRouter {
             Some(registry) => registry,
             None => return Ok(false),
         };
+        let seq = usize::try_from(message.seq)
+            .map_err(|_| format!("open-exp sequence {} exceeds local usize", message.seq))?;
         registry.insert_exp(
+            seq,
             message.sender_party_id,
             message.share_id,
             message.partial_point,
-        );
+        )?;
         Ok(true)
     }
 
@@ -303,18 +317,30 @@ impl OpenMessageRouter {
             Some(registry) => registry,
             None => return Ok(false),
         };
+        let seq = usize::try_from(message.seq).map_err(|_| {
+            if use_g2_registry {
+                format!(
+                    "avss g2 open-exp sequence {} exceeds local usize",
+                    message.seq
+                )
+            } else {
+                format!("avss open-exp sequence {} exceeds local usize", message.seq)
+            }
+        })?;
         if use_g2_registry {
             registry.insert_exp_g2(
+                seq,
                 message.sender_party_id,
                 message.share_id,
                 message.partial_point,
-            );
+            )?;
         } else {
             registry.insert_exp(
+                seq,
                 message.sender_party_id,
                 message.share_id,
                 message.partial_point,
-            );
+            )?;
         }
         Ok(true)
     }

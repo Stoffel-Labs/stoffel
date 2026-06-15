@@ -22,6 +22,7 @@ where
             .map_mpc_engine_operation("rbc_broadcast")?;
         let wire_message = crate::net::open_registry::encode_rbc_wire_message(
             self.topology.instance_id(),
+            session_id,
             self.topology.party_id(),
             message,
         )
@@ -61,6 +62,7 @@ where
             .map_mpc_engine_operation("async_rbc_broadcast")?;
         let wire_message = crate::net::open_registry::encode_rbc_wire_message(
             self.topology.instance_id(),
+            session_id,
             self.topology.party_id(),
             message,
         )

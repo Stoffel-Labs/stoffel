@@ -11,7 +11,7 @@ use super::*;
 #[test]
 fn unknown_sender_single_is_rejected() {
     let router = OpenMessageRouter::new();
-    let msg = encode_single_share_wire_message(1, "test-key", 0, b"share0").unwrap();
+    let msg = encode_single_share_wire_message(1, 0, "test-key", 0, b"share0").unwrap();
     let result = router.try_handle_wire_message(UNKNOWN_SENDER_ID, &msg);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("not authenticated"));
@@ -20,8 +20,9 @@ fn unknown_sender_single_is_rejected() {
 #[test]
 fn unknown_sender_batch_is_rejected() {
     let router = OpenMessageRouter::new();
-    let msg = encode_batch_share_wire_message(1, "test-key", 0, &[b"s0".to_vec(), b"s1".to_vec()])
-        .unwrap();
+    let msg =
+        encode_batch_share_wire_message(1, 0, "test-key", 0, &[b"s0".to_vec(), b"s1".to_vec()])
+            .unwrap();
     let result = router.try_handle_wire_message(UNKNOWN_SENDER_ID, &msg);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("not authenticated"));
@@ -30,7 +31,7 @@ fn unknown_sender_batch_is_rejected() {
 #[test]
 fn sender_mismatch_single_is_rejected() {
     let router = OpenMessageRouter::new();
-    let msg = encode_single_share_wire_message(1, "test-key", 0, b"share0").unwrap();
+    let msg = encode_single_share_wire_message(1, 0, "test-key", 0, b"share0").unwrap();
     let result = router.try_handle_wire_message(1, &msg);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("sender mismatch"));
@@ -39,7 +40,7 @@ fn sender_mismatch_single_is_rejected() {
 #[test]
 fn sender_mismatch_batch_is_rejected() {
     let router = OpenMessageRouter::new();
-    let msg = encode_batch_share_wire_message(1, "test-key", 0, &[b"s0".to_vec()]).unwrap();
+    let msg = encode_batch_share_wire_message(1, 0, "test-key", 0, &[b"s0".to_vec()]).unwrap();
     let result = router.try_handle_wire_message(1, &msg);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("sender mismatch"));
@@ -49,7 +50,7 @@ fn sender_mismatch_batch_is_rejected() {
 fn valid_single_contribution_is_accepted() {
     let router = OpenMessageRouter::new();
     let _reg = router.register_instance(10001);
-    let msg = encode_single_share_wire_message(10001, "test-key", 3, b"share3").unwrap();
+    let msg = encode_single_share_wire_message(10001, 0, "test-key", 3, b"share3").unwrap();
     let result = router.try_handle_wire_message(3, &msg);
     assert!(result.unwrap());
 }
@@ -59,7 +60,7 @@ fn valid_batch_contribution_is_accepted() {
     let router = OpenMessageRouter::new();
     let _reg = router.register_instance(10002);
     let shares = vec![b"s0".to_vec(), b"s1".to_vec()];
-    let msg = encode_batch_share_wire_message(10002, "test-batch", 5, &shares).unwrap();
+    let msg = encode_batch_share_wire_message(10002, 0, "test-batch", 5, &shares).unwrap();
     let result = router.try_handle_wire_message(5, &msg);
     assert!(result.unwrap());
 }
@@ -67,7 +68,7 @@ fn valid_batch_contribution_is_accepted() {
 #[test]
 fn unregistered_instance_returns_false() {
     let router = OpenMessageRouter::new();
-    let msg = encode_single_share_wire_message(99999999, "test-key", 0, b"share").unwrap();
+    let msg = encode_single_share_wire_message(99999999, 0, "test-key", 0, b"share").unwrap();
     let result = router.try_handle_wire_message(0, &msg);
     assert!(!result.unwrap());
 }
@@ -132,7 +133,7 @@ fn oversized_exp_payloads_are_rejected_before_deserialize() {
 fn avss_exp_wire_rejects_share_id_mismatch_without_inserting() {
     let router = OpenMessageRouter::new();
     let registry = router.register_instance(20011);
-    let payload = encode_avss_open_exp_wire_message(20011, 1, 1, b"point")
+    let payload = encode_avss_open_exp_wire_message(20011, 0, 1, 1, b"point")
         .expect("serialize AVSS open-exp payload");
 
     let err = router
@@ -149,7 +150,7 @@ fn avss_exp_wire_rejects_share_id_mismatch_without_inserting() {
 fn avss_g2_exp_wire_rejects_share_id_mismatch_without_inserting() {
     let router = OpenMessageRouter::new();
     let registry = router.register_instance(20012);
-    let payload = encode_avss_g2_open_exp_wire_message(20012, 1, 1, b"point")
+    let payload = encode_avss_g2_open_exp_wire_message(20012, 0, 1, 1, b"point")
         .expect("serialize AVSS G2 open-exp payload");
 
     let err = router
@@ -164,7 +165,7 @@ fn avss_g2_exp_wire_rejects_share_id_mismatch_without_inserting() {
 
 #[test]
 fn wire_message_roundtrip_single() {
-    let encoded = encode_single_share_wire_message(42, "rt-key", 7, b"test_share").unwrap();
+    let encoded = encode_single_share_wire_message(42, 11, "rt-key", 7, b"test_share").unwrap();
     assert!(encoded.starts_with(OPEN_REGISTRY_WIRE_PREFIX));
     assert!(encoded.len() < MAX_WIRE_MESSAGE_LEN + OPEN_REGISTRY_WIRE_PREFIX.len());
 }
@@ -172,8 +173,136 @@ fn wire_message_roundtrip_single() {
 #[test]
 fn wire_message_roundtrip_batch() {
     let shares = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
-    let encoded = encode_batch_share_wire_message(99, "batch-rt", 2, &shares).unwrap();
+    let encoded = encode_batch_share_wire_message(99, 12, "batch-rt", 2, &shares).unwrap();
     assert!(encoded.starts_with(OPEN_REGISTRY_WIRE_PREFIX));
+}
+
+#[test]
+fn explicit_single_sequence_prevents_reordered_share_mixing() {
+    let router = OpenMessageRouter::new();
+    let reg = router.register_instance(21001);
+
+    let seq1_first = encode_single_share_wire_message(21001, 1, "same-type", 1, b"remote-seq1")
+        .expect("encode reordered seq1 share");
+    assert!(router.try_handle_wire_message(1, &seq1_first).unwrap());
+    let seq0_second = encode_single_share_wire_message(21001, 0, "same-type", 1, b"remote-seq0")
+        .expect("encode reordered seq0 share");
+    assert!(router.try_handle_wire_message(1, &seq0_second).unwrap());
+
+    let opened = reg
+        .open_bytes_at_wait(0, "same-type", 0, b"local-seq0", 2, |shares| {
+            Ok(shares.concat())
+        })
+        .expect("seq0 should open with seq0 shares only");
+
+    assert_eq!(opened, b"remote-seq0local-seq0".to_vec());
+    assert_eq!(
+        reg.single
+            .lock()
+            .get(&(1, "same-type".to_string()))
+            .expect("seq1 bucket should remain separate")
+            .shares,
+        vec![b"remote-seq1".to_vec()]
+    );
+}
+
+#[test]
+fn duplicate_single_sequence_from_same_sender_must_match_payload() {
+    let router = OpenMessageRouter::new();
+    let _reg = router.register_instance(21002);
+
+    let first = encode_single_share_wire_message(21002, 0, "dup-type", 1, b"first").unwrap();
+    assert!(router.try_handle_wire_message(1, &first).unwrap());
+    assert!(router.try_handle_wire_message(1, &first).unwrap());
+
+    let conflict = encode_single_share_wire_message(21002, 0, "dup-type", 1, b"second").unwrap();
+    let err = router
+        .try_handle_wire_message(1, &conflict)
+        .expect_err("conflicting duplicate single share must be rejected");
+    assert!(err.contains("conflicting open_share payload"));
+}
+
+#[test]
+fn explicit_rbc_session_rejects_conflicting_duplicate_payload() {
+    let router = OpenMessageRouter::new();
+    let _reg = router.register_instance(21003);
+
+    let first = encode_rbc_wire_message(21003, 7, 1, b"payload-a").unwrap();
+    assert!(router.try_handle_wire_message(1, &first).unwrap());
+    assert!(router.try_handle_wire_message(1, &first).unwrap());
+
+    let conflict = encode_rbc_wire_message(21003, 7, 1, b"payload-b").unwrap();
+    let err = router
+        .try_handle_wire_message(1, &conflict)
+        .expect_err("conflicting duplicate RBC payload must be rejected");
+    assert!(err.contains("conflicting RBC payload"));
+}
+
+#[test]
+fn explicit_exp_sequence_prevents_reordered_partial_point_mixing() {
+    let router = OpenMessageRouter::new();
+    let reg = router.register_instance(21004);
+
+    let seq1_first = encode_hb_open_exp_wire_message(21004, 1, 1, 1, b"remote-exp-seq1")
+        .expect("encode reordered exp seq1 contribution");
+    assert!(router
+        .try_handle_hb_open_exp_wire_message(1, &seq1_first)
+        .unwrap());
+    let seq0_second = encode_hb_open_exp_wire_message(21004, 0, 1, 1, b"remote-exp-seq0")
+        .expect("encode reordered exp seq0 contribution");
+    assert!(router
+        .try_handle_hb_open_exp_wire_message(1, &seq0_second)
+        .unwrap());
+
+    let opened = reg
+        .exp_open_wait(
+            ExpOpenRequest {
+                kind: ExpOpenRegistryKind::G1,
+                sequence: Some(0),
+                party_id: 0,
+                share_id: 0,
+                partial_point: b"local-exp-seq0",
+                required: 2,
+                timeout_message: "timeout waiting for explicit exp sequence test",
+            },
+            |partial_points| {
+                Ok(partial_points
+                    .iter()
+                    .flat_map(|(_, point)| point.clone())
+                    .collect())
+            },
+        )
+        .expect("seq0 should open with seq0 partial points only");
+
+    assert_eq!(opened, b"remote-exp-seq0local-exp-seq0".to_vec());
+    assert_eq!(
+        reg.exp
+            .lock()
+            .get(&1)
+            .expect("seq1 bucket should remain separate")
+            .partial_points,
+        vec![(1, b"remote-exp-seq1".to_vec())]
+    );
+}
+
+#[test]
+fn duplicate_exp_sequence_from_same_sender_must_match_payload() {
+    let router = OpenMessageRouter::new();
+    let _reg = router.register_instance(21005);
+
+    let first = encode_hb_open_exp_wire_message(21005, 0, 1, 1, b"first").unwrap();
+    assert!(router
+        .try_handle_hb_open_exp_wire_message(1, &first)
+        .unwrap());
+    assert!(router
+        .try_handle_hb_open_exp_wire_message(1, &first)
+        .unwrap());
+
+    let conflict = encode_hb_open_exp_wire_message(21005, 0, 1, 1, b"second").unwrap();
+    let err = router
+        .try_handle_hb_open_exp_wire_message(1, &conflict)
+        .expect_err("conflicting duplicate EXP contribution must be rejected");
+    assert!(err.contains("conflicting G1 open-in-exponent payload"));
 }
 
 #[test]
@@ -271,7 +400,7 @@ fn exp_open_contribution_collects_and_reuses_completed_result() {
     let mut sequence = None;
 
     let progress = reg
-        .contribute_exp_open(ExpOpenRegistryKind::G1, &mut sequence, 0, 3, b"p0", 1)
+        .contribute_exp_open(ExpOpenRegistryKind::G1, &mut sequence, None, 0, 3, b"p0", 1)
         .unwrap();
     let ExpOpenProgress::Collected {
         sequence: seq,
@@ -287,7 +416,15 @@ fn exp_open_contribution_collects_and_reuses_completed_result() {
         .unwrap();
 
     let ready = reg
-        .contribute_exp_open(ExpOpenRegistryKind::G1, &mut sequence, 0, 3, b"ignored", 1)
+        .contribute_exp_open(
+            ExpOpenRegistryKind::G1,
+            &mut sequence,
+            None,
+            0,
+            3,
+            b"ignored",
+            1,
+        )
         .unwrap();
     assert_eq!(ready, ExpOpenProgress::Ready(b"result".to_vec()));
 }
@@ -299,7 +436,7 @@ fn exp_open_contribution_reports_missing_registry_entry_without_panicking() {
     let mut sequence = Some(0);
 
     let err = reg
-        .contribute_exp_open(ExpOpenRegistryKind::G2, &mut sequence, 0, 3, b"p0", 1)
+        .contribute_exp_open(ExpOpenRegistryKind::G2, &mut sequence, None, 0, 3, b"p0", 1)
         .unwrap_err();
 
     assert!(
@@ -317,6 +454,7 @@ fn exp_open_wait_reconstructs_and_completes_result() {
         .exp_open_wait(
             ExpOpenRequest {
                 kind: ExpOpenRegistryKind::G1,
+                sequence: None,
                 party_id: 0,
                 share_id: 3,
                 partial_point: b"p0",
@@ -350,6 +488,7 @@ async fn local_exp_insert_wakes_waiters() {
         reg2.exp_open_async(
             ExpOpenRequest {
                 kind: ExpOpenRegistryKind::G1,
+                sequence: Some(0),
                 party_id: 0,
                 share_id: 3,
                 partial_point: b"p0",
@@ -386,6 +525,7 @@ async fn local_exp_insert_wakes_waiters() {
         reg3.exp_open_async(
             ExpOpenRequest {
                 kind: ExpOpenRegistryKind::G1,
+                sequence: Some(0),
                 party_id: 1,
                 share_id: 4,
                 partial_point: b"p1",
@@ -419,9 +559,10 @@ async fn local_single_insert_wakes_waiters() {
 
     let reg2 = reg.clone();
     let waiter = tokio::spawn(async move {
-        reg2.open_share_async(
+        reg2.open_share_at_async(
             0,
             "single-notify".to_string(),
+            0,
             b"s0".to_vec(),
             2,
             |shares| Ok(ClearShareValue::Integer(shares.len() as i64)),
@@ -448,9 +589,10 @@ async fn local_single_insert_wakes_waiters() {
 
     let reg3 = reg.clone();
     let finalizer = tokio::spawn(async move {
-        reg3.open_share_async(
+        reg3.open_share_at_async(
             1,
             "single-notify".to_string(),
+            0,
             b"s1".to_vec(),
             2,
             |shares| Ok(ClearShareValue::Integer(shares.len() as i64)),
@@ -475,9 +617,10 @@ async fn local_batch_insert_wakes_waiters() {
 
     let reg2 = reg.clone();
     let waiter = tokio::spawn(async move {
-        reg2.batch_open_async(
+        reg2.batch_open_at_async(
             0,
             "batch-notify".to_string(),
+            Some(0),
             vec![b"a0".to_vec(), b"b0".to_vec()],
             2,
             |shares, _pos| Ok(ClearShareValue::Integer(shares.len() as i64)),
@@ -503,9 +646,10 @@ async fn local_batch_insert_wakes_waiters() {
 
     let reg3 = reg.clone();
     let finalizer = tokio::spawn(async move {
-        reg3.batch_open_async(
+        reg3.batch_open_at_async(
             1,
             "batch-notify".to_string(),
+            Some(0),
             vec![b"a1".to_vec(), b"b1".to_vec()],
             2,
             |shares, _pos| Ok(ClearShareValue::Integer(shares.len() as i64)),
@@ -536,9 +680,13 @@ async fn two_instances_are_isolated() {
     let reg_b = router.register_instance(30002);
 
     // Insert into instance A
-    reg_a.insert_single("key", 0, b"share_a".to_vec());
+    reg_a
+        .insert_single(0, "key", 0, b"share_a".to_vec())
+        .unwrap();
     // Insert into instance B
-    reg_b.insert_single("key", 0, b"share_b".to_vec());
+    reg_b
+        .insert_single(0, "key", 0, b"share_b".to_vec())
+        .unwrap();
 
     // Verify isolation
     let a_count = reg_a

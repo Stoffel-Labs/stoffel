@@ -76,20 +76,27 @@ where
 }
 
 impl InstanceRegistry {
-    pub(crate) fn insert_rbc_broadcast(&self, party_id: usize, message: Vec<u8>) {
+    pub(crate) fn insert_rbc_broadcast(
+        &self,
+        session_id: u64,
+        party_id: usize,
+        message: Vec<u8>,
+    ) -> Result<(), String> {
         let mut registry = self.rbc.lock();
 
-        let mut session_id = 0u64;
-        while registry.messages.contains_key(&(session_id, party_id)) {
-            session_id = match session_id.checked_add(1) {
-                Some(next) => next,
-                None => return,
-            };
+        if let Some(existing) = registry.messages.get(&(session_id, party_id)) {
+            if existing == &message {
+                return Ok(());
+            }
+            return Err(format!(
+                "conflicting RBC payload for session {session_id} from party {party_id}"
+            ));
         }
 
         registry.messages.insert((session_id, party_id), message);
         drop(registry);
         self.rbc_notify.notify_waiters();
+        Ok(())
     }
 
     pub fn rbc_broadcast(&self, party_id: usize, message: &[u8]) -> Result<u64, String> {

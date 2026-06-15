@@ -565,8 +565,13 @@ impl AsyncMpcEngine for HbTurmoilVmEngine {
         share_bytes: &[u8],
     ) -> MpcEngineResult<ClearShareValue> {
         let type_key = format!("hb-vm-turmoil-open-{ty:?}");
+        let seq = self
+            .open_registry
+            .insert_single_next(&type_key, self.topology.party_id(), share_bytes.to_vec())
+            .map_err(|error| MpcEngineError::operation_failed("hb_open_registry", error))?;
         let wire_message = crate::net::open_registry::encode_single_share_wire_message(
             self.topology.instance_id(),
+            seq,
             &type_key,
             self.topology.party_id(),
             share_bytes,
@@ -580,9 +585,10 @@ impl AsyncMpcEngine for HbTurmoilVmEngine {
         let t = self.topology.threshold();
         let required = 2 * t + 1;
         self.open_registry
-            .open_share_async(
+            .open_share_at_async(
                 self.topology.party_id(),
                 type_key,
+                seq,
                 share_bytes.to_vec(),
                 required,
                 |collected| {
@@ -843,8 +849,13 @@ impl AsyncMpcEngine for AvssTurmoilVmEngine {
         share_bytes: &[u8],
     ) -> MpcEngineResult<ClearShareValue> {
         let type_key = format!("avss-vm-turmoil-open-{ty:?}");
+        let seq = self
+            .open_registry
+            .insert_single_next(&type_key, self.topology.party_id(), share_bytes.to_vec())
+            .map_err(|error| MpcEngineError::operation_failed("avss_open_registry", error))?;
         let wire_message = crate::net::open_registry::encode_single_share_wire_message(
             self.topology.instance_id(),
+            seq,
             &type_key,
             self.topology.party_id(),
             share_bytes,
@@ -858,9 +869,10 @@ impl AsyncMpcEngine for AvssTurmoilVmEngine {
         let t = self.topology.threshold();
         let required = n - t;
         self.open_registry
-            .open_share_async(
+            .open_share_at_async(
                 self.topology.party_id(),
                 type_key,
+                seq,
                 share_bytes.to_vec(),
                 required,
                 |collected| {

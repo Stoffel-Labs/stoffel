@@ -235,8 +235,14 @@ where
                 }
             };
 
+            let seq = self.open_registry.insert_single_next(
+                &type_key,
+                self.topology.party_id(),
+                share_bytes.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_single_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 share_bytes,
@@ -247,9 +253,10 @@ where
             let t = self.topology.threshold();
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
-            self.open_registry.open_share_wait(
+            self.open_registry.open_share_at_wait(
                 self.topology.party_id(),
                 &type_key,
+                seq,
                 share_bytes,
                 required,
                 |collected| {
@@ -281,8 +288,14 @@ where
                 }
             };
 
+            let seq = self.open_registry.insert_batch_next(
+                &type_key,
+                self.topology.party_id(),
+                shares.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_batch_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 shares,
@@ -293,9 +306,10 @@ where
             let t = self.topology.threshold();
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
-            self.open_registry.batch_open_wait(
+            self.open_registry.batch_open_at_wait(
                 self.topology.party_id(),
                 &type_key,
+                seq,
                 shares,
                 required,
                 |collected, pos| {

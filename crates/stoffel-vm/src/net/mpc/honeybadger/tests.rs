@@ -47,6 +47,7 @@ fn open_exp_test_payload(
 ) -> Vec<u8> {
     crate::net::open_registry::encode_hb_open_exp_wire_message(
         instance_id,
+        0,
         sender_party_id,
         share_id,
         &partial_point,
