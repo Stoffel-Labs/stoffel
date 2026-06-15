@@ -39,6 +39,7 @@ pub(super) enum SessionRegistrationEvent {
         registered_parties: usize,
         target_parties: usize,
     },
+    RejectedDuplicateParty,
     RejectedProgramMismatch,
 }
 
@@ -155,7 +156,9 @@ impl BootnodeState {
 
         let event = match pending.as_mut() {
             Some(session) => {
-                if session.program_id != registration.program_id {
+                if session.parties.contains_key(&registration.party_id) {
+                    SessionRegistrationEvent::RejectedDuplicateParty
+                } else if session.program_id != registration.program_id {
                     SessionRegistrationEvent::RejectedProgramMismatch
                 } else {
                     session
@@ -192,7 +195,11 @@ impl BootnodeState {
             }
         };
 
-        if matches!(event, SessionRegistrationEvent::RejectedProgramMismatch) {
+        if matches!(
+            event,
+            SessionRegistrationEvent::RejectedDuplicateParty
+                | SessionRegistrationEvent::RejectedProgramMismatch
+        ) {
             return Ok(SessionRegistrationReport {
                 event,
                 ready_session: None,
@@ -482,6 +489,7 @@ impl BootnodeConnection {
         auth_token: Option<String>,
     ) {
         let party_id = registration.party_id;
+        let listen_addr = registration.listen_addr;
         eprintln!(
             "[bootnode] Received RegisterWithSession from party {} (program: {}, n={}, t={}, has_bytes={})",
             party_id,
@@ -500,7 +508,6 @@ impl BootnodeConnection {
             return;
         }
 
-        self.my_party_id = Some(party_id);
         eprintln!(
             "[bootnode] Party {} registering for session (program: {}, n={}, t={}, has_bytes={})",
             party_id,
@@ -530,9 +537,6 @@ impl BootnodeConnection {
             }
         }
 
-        self.state
-            .register_peer(party_id, registration.listen_addr)
-            .await;
         self.waiting_for_session = true;
 
         let report = match self.state.register_session(registration).await {
@@ -572,7 +576,19 @@ impl BootnodeConnection {
                 self.waiting_for_session = false;
                 return;
             }
+            SessionRegistrationEvent::RejectedDuplicateParty => {
+                eprintln!(
+                    "[bootnode] Rejected RegisterWithSession from party {} (duplicate party_id)",
+                    party_id
+                );
+                let _ = send_ctrl(&*self.conn, &DiscoveryMessage::PeerLeft { party_id }).await;
+                self.waiting_for_session = false;
+                return;
+            }
         }
+
+        self.my_party_id = Some(party_id);
+        self.state.register_peer(party_id, listen_addr).await;
 
         if let Some(session_info) = report.ready_session {
             eprintln!(
@@ -909,6 +925,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_session_registration_does_not_authenticate_or_replace_peer() {
+        let state = BootnodeState::new(Some(2));
+        let program_id = [8u8; 32];
+
+        let first_conn = Arc::new(RecordingConnection::default());
+        let mut first_handler = BootnodeConnection::new(first_conn, state.clone(), None);
+        first_handler
+            .handle_session_registration(registration(0, program_id), None, None)
+            .await;
+
+        let attacker_addr = addr(12_345);
+        let duplicate = SessionRegistration {
+            listen_addr: attacker_addr,
+            tls_derived_id: Some(777),
+            ..registration(0, program_id)
+        };
+        let duplicate_conn = Arc::new(RecordingConnection::default());
+        let mut duplicate_handler =
+            BootnodeConnection::new(duplicate_conn.clone(), state.clone(), None);
+        duplicate_handler
+            .handle_session_registration(duplicate, None, None)
+            .await;
+
+        assert_eq!(duplicate_handler.my_party_id, None);
+        assert!(state
+            .peer_list()
+            .await
+            .iter()
+            .any(|(party_id, listen_addr)| *party_id == 0 && *listen_addr == addr(10_000)));
+        assert!(!state
+            .peer_list()
+            .await
+            .iter()
+            .any(|(party_id, listen_addr)| *party_id == 0 && *listen_addr == attacker_addr));
+
+        let sent = duplicate_conn.sent_messages();
+        assert_eq!(sent.len(), 1);
+        let response =
+            bincode::deserialize::<DiscoveryMessage>(&sent[0]).expect("response decodes");
+        assert!(matches!(
+            response,
+            DiscoveryMessage::PeerLeft { party_id: 0 }
+        ));
+    }
+
+    #[tokio::test]
     async fn session_registration_announces_ready_without_manual_unwraps() {
         let state = BootnodeState::new(None);
         let program_id = [7u8; 32];
@@ -969,5 +1031,55 @@ mod tests {
             .parties
             .iter()
             .any(|(party_id, listen_addr)| *party_id == 1 && *listen_addr == addr(10_001)));
+    }
+
+    #[tokio::test]
+    async fn session_registration_rejects_duplicate_party_without_overwriting_existing_slot() {
+        let state = BootnodeState::new(Some(2));
+        let program_id = [9u8; 32];
+
+        state
+            .register_session(registration(0, program_id))
+            .await
+            .expect("first party registers");
+
+        let attacker_addr = addr(12_345);
+        let attacker_tls_id = 777;
+        let duplicate = SessionRegistration {
+            listen_addr: attacker_addr,
+            tls_derived_id: Some(attacker_tls_id),
+            ..registration(0, program_id)
+        };
+        let duplicate_report = state
+            .register_session(duplicate)
+            .await
+            .expect("duplicate party registration is handled");
+        assert_eq!(
+            duplicate_report.event,
+            SessionRegistrationEvent::RejectedDuplicateParty
+        );
+        assert!(duplicate_report.ready_session.is_none());
+
+        let final_report = state
+            .register_session(registration(1, program_id))
+            .await
+            .expect("second unique party registers");
+        let session = final_report.ready_session.expect("session becomes ready");
+        assert!(session
+            .parties
+            .iter()
+            .any(|(party_id, listen_addr)| *party_id == 0 && *listen_addr == addr(10_000)));
+        assert!(!session
+            .parties
+            .iter()
+            .any(|(party_id, listen_addr)| *party_id == 0 && *listen_addr == attacker_addr));
+        assert!(session
+            .tls_ids
+            .iter()
+            .any(|(party_id, tls_id)| *party_id == 0 && *tls_id == 100));
+        assert!(!session
+            .tls_ids
+            .iter()
+            .any(|(party_id, tls_id)| *party_id == 0 && *tls_id == attacker_tls_id));
     }
 }
