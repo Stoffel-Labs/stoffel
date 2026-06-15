@@ -81,6 +81,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_mlp_inference`: linear→ReLU→linear→argmax private inference.
 - `mpc_knn`: nearest-neighbour classification (L2² + argmin).
 - `mpc_naive_bayes`: multinomial NB scoring + argmax.
+- `mpc_voting_tally`: tally secret votes, reveal only [tally ≥ τ].
 
 ## Algorithm gallery
 
