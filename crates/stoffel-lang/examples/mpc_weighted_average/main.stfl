@@ -1,3 +1,4 @@
+# run-args: --client-input 0=10 --client-input 1=20 --client-input 2=30 --expected-output-clients 3
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -137,15 +138,22 @@ def weighted_average(x: list[Share], w: list[Share], l: int64, kappa: int64) -> 
 def main() -> int64:
   var l = 12
   var kappa = 8
-  var xr = [10, 20, 30]
-  var wr = [1, 2, 3]
+  var n = 3
+  var wpub = [1, 2, 3]
   var x: list[Share] = []
   var w: list[Share] = []
   var i = 0
-  while i < len(xr):
-    x.append(Share.from_clear_int(xr[i], l))
-    w.append(Share.from_clear_int(wr[i], l))
+  while i < n:
+    var v: secret int64 = ClientStore.take_share(i, 0)
+    x.append(v)
+    w.append(Share.from_clear_int(wpub[i], 64))
     i = i + 1
-  var a = Share.open(Share.retag(weighted_average(x, w, l, kappa), 64))   # 140/6 = 23
-  assert a == 23, "weighted avg must be 23"
-  return a
+  var a = weighted_average(x, w, l, kappa)
+  if Mpc.has_capability("client-output"):
+    i = 0
+    while i < n:
+      a.send_to_client(i)
+      i = i + 1
+  var rv = Share.open(Share.retag(a, 64))
+  assert rv == 23, "weighted average 23"
+  return rv

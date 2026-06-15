@@ -1,3 +1,4 @@
+# run-args: --client-input 0=3 --client-input 1=5 --client-input 2=3 --client-input 3=7 --client-input 4=3 --expected-output-clients 5
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -129,12 +130,19 @@ def mode(arr: list[Share], cands: list[int64], l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 8
   var kappa = 4
-  var raw = [3, 5, 3, 7, 3]
+  var n = 5
   var arr: list[Share] = []
   var i = 0
-  while i < len(raw):
-    arr.append(Share.from_clear_int(raw[i], l))
+  while i < n:
+    var v: secret int64 = ClientStore.take_share(i, 0)
+    arr.append(v)
     i = i + 1
-  var m = Share.open(Share.retag(mode(arr, [3, 5, 7], l, kappa), 64))   # 3 appears most
-  assert m == 3, "mode must be 3"
-  return m
+  var m = mode(arr, [3, 5, 7], l, kappa)
+  if Mpc.has_capability("client-output"):
+    i = 0
+    while i < n:
+      m.send_to_client(i)
+      i = i + 1
+  var rv = Share.open(Share.retag(m, 64))
+  assert rv == 3, "mode is 3"
+  return rv

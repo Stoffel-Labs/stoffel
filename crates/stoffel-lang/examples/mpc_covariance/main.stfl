@@ -1,3 +1,4 @@
+# run-args: --client-input 0=1 --client-input 0=2 --client-input 0=3 --client-input 1=2 --client-input 1=4 --client-input 1=6 --expected-output-clients 2
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -120,15 +121,20 @@ def covariance_n2(x: list[Share], y: list[Share], n: int64) -> Share:
   return Share.sub(Share.mul_scalar(sxy, n), Share.mul(sx, sy))
 
 def main() -> int64:
-  var xr = [1, 2, 3]
-  var yr = [2, 4, 6]
+  var n = 3
   var x: list[Share] = []
   var y: list[Share] = []
   var i = 0
-  while i < len(xr):
-    x.append(Share.from_clear_int(xr[i], 16))
-    y.append(Share.from_clear_int(yr[i], 16))
+  while i < n:
+    var xv: secret int64 = ClientStore.take_share(0, i)   # client 0 holds vector x
+    var yv: secret int64 = ClientStore.take_share(1, i)   # client 1 holds vector y
+    x.append(xv)
+    y.append(yv)
     i = i + 1
-  var c = Share.open(Share.retag(covariance_n2(x, y, len(xr)), 64))   # cov=4/3, n^2=9 -> 12
-  assert c == 12, "cov*n^2 must be 12"
-  return c
+  var c = covariance_n2(x, y, n)
+  if Mpc.has_capability("client-output"):
+    c.send_to_client(0)
+    c.send_to_client(1)
+  var rv = Share.open(Share.retag(c, 64))
+  assert rv == 12, "covariance*n^2 = 12"
+  return rv

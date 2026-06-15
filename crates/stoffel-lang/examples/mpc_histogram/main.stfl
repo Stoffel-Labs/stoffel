@@ -1,3 +1,4 @@
+# run-args: --client-input 0=5 --client-input 1=12 --client-input 2=18 --client-input 3=25 --client-input 4=8 --expected-output-clients 5
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -127,14 +128,23 @@ def histogram(arr: list[Share], bounds: list[int64], l: int64, kappa: int64) -> 
 def main() -> int64:
   var l = 8
   var kappa = 4
-  var raw = [5, 12, 18, 25, 8]
+  var n = 5
   var arr: list[Share] = []
   var i = 0
-  while i < len(raw):
-    arr.append(Share.from_clear_int(raw[i], l))
+  while i < n:
+    var v: secret int64 = ClientStore.take_share(i, 0)
+    arr.append(v)
     i = i + 1
-  var h = histogram(arr, [0, 10, 20, 30], l, kappa)   # [2, 2, 1]
-  assert Share.open(Share.retag(h[0], 64)) == 2, "bucket [0,10) = 2"
-  assert Share.open(Share.retag(h[1], 64)) == 2, "bucket [10,20) = 2"
-  assert Share.open(Share.retag(h[2], 64)) == 1, "bucket [20,30) = 1"
+  var h = histogram(arr, [0, 10, 20, 30], l, kappa)
+  if Mpc.has_capability("client-output"):
+    i = 0
+    while i < n:
+      var b = 0
+      while b < len(h):
+        h[b].send_to_client(i)
+        b = b + 1
+      i = i + 1
+  assert Share.open(Share.retag(h[0], 64)) == 2, "bucket0 = 2"
+  assert Share.open(Share.retag(h[1], 64)) == 2, "bucket1 = 2"
+  assert Share.open(Share.retag(h[2], 64)) == 1, "bucket2 = 1"
   return 1
