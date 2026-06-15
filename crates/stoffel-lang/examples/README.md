@@ -49,6 +49,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_clamp`: clamp `x` to `[lo,hi]` = max(lo, min(x, hi)).
 - `mpc_mux_tree`: log-depth n-way multiplexer over a secret index (select tree on index bits).
 - `mpc_compare_family`: `>`, `≤`, `≥`, and compare-to-constant from `less_than`.
+- `mpc_is_zero`: zero test `[x==0]` with a single comparison.
 
 ## Algorithm gallery
 
