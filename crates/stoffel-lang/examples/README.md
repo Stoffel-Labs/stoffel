@@ -93,6 +93,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_secure_shuffle`: oblivious permutation by sorting (value, random-tag) pairs.
 - `mpc_top_k`: k-th smallest (order statistic) via sorting network.
 - `mpc_rank_order`: rank of each element = count of smaller.
+- `mpc_bitonic_sort`: Batcher bitonic network for power-of-two lists.
 
 ## Algorithm gallery
 
