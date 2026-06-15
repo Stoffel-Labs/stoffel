@@ -61,6 +61,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_sign_extend`: reinterpret a secret unsigned value as signed two's complement.
 - `mpc_modulo_secret`: remainder `a mod d` for a secret divisor (long division).
 - `mpc_gcd`: Euclid GCD with a fixed iteration bound (secret modulo per round).
+- `mpc_reciprocal`: fixed-point `1/d` = ⌊2^F/d⌋ via long division.
 
 ## Algorithm gallery
 
