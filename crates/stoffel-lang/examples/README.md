@@ -50,6 +50,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_mux_tree`: log-depth n-way multiplexer over a secret index (select tree on index bits).
 - `mpc_compare_family`: `>`, `≤`, `≥`, and compare-to-constant from `less_than`.
 - `mpc_is_zero`: zero test `[x==0]` with a single comparison.
+- `mpc_count_frequency`: count list elements equal to a secret target.
 
 ## Algorithm gallery
 
