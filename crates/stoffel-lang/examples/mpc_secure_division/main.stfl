@@ -1,0 +1,134 @@
+# Integer division a / d by a SECRET divisor via comparison-based long division.
+#
+# Classic restoring division, data-oblivious: bit-decompose a, then for each
+# bit (MSB to LSB) shift it into the remainder R = 2R + a_i, compare R >= d,
+# set that quotient bit, and conditionally subtract d. l comparisons + l
+# multiplies. Exact (q = floor(a/d)); no convergence to tune. For fixed-point
+# reciprocal you would instead iterate Newton/Goldschmidt on shares.
+# kappa is small for speed (production uses ~40).
+
+def random_bit() -> Share:
+  while True:
+    var r = Share.random_field()
+    var r_squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(r_squared):
+      continue
+    var r_prime_inv = Field.inverse(Field.sqrt(r_squared))
+    var two_inv = Field.inverse(Field.from_int(2))
+    var c = Share.mul_field(r, r_prime_inv)
+    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
+    return Share.retag(a, 1)
+
+def pow2(i: int64) -> int64:
+  var p = 1
+  var k = 0
+  while k < i:
+    p = p * 2
+    k = k + 1
+  return p
+
+def combine_bits(bits: list[Share], n: int64) -> Share:
+  var acc = Share.mul_scalar(bits[0], 1)
+  var i = 1
+  while i < n:
+    acc = Share.add(acc, Share.mul_scalar(bits[i], pow2(i)))
+    i = i + 1
+  return Share.retag(acc, 64)
+
+# --- bit-decomposition (see mpc_bit_decomposition) ---
+def bit_decompose(a: Share, l: int64, kappa: int64) -> list[Share]:
+  var m = l + kappa
+  var n = m + 1
+  var rbits: list[Share] = []
+  var i = 0
+  while i < m:
+    rbits.append(random_bit())
+    i = i + 1
+  while i < n:
+    rbits.append(Share.from_clear_int(0, 1))
+    i = i + 1
+  var r = combine_bits(rbits, n)
+  var c = Share.open(Share.retag(Share.add(Share.retag(a, 64), r), 64))
+  var abits: list[Share] = []
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < n:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    var xorrb = Share.sub(Share.add(ri, borrow), Share.mul_scalar(rb, 2))
+    var ai = borrow
+    var nb = borrow
+    if ci == 0:
+      ai = xorrb
+      nb = Share.sub(Share.add(ri, borrow), rb)
+    else:
+      ai = Share.sub(Share.from_clear_int(1, 1), xorrb)
+      nb = rb
+    abits.append(Share.retag(ai, 1))
+    borrow = Share.retag(nb, 1)
+    i = i + 1
+  return abits
+
+# Secret-shared [a < b] for a, b in [0, 2^l): masked reveal + carry chain.
+def less_than(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  var z = Share.add_scalar(Share.sub(Share.retag(a, 64), Share.retag(b, 64)), pow2(l))
+  var rbits: list[Share] = []
+  var i = 0
+  while i < (l + 1):
+    rbits.append(random_bit())
+    i = i + 1
+  var r_low = combine_bits(rbits, l + 1)
+  var r_high = Share.retag(Share.random_int(kappa), 64)
+  var r = Share.add(r_low, Share.mul_scalar(r_high, pow2(l + 1)))
+  var c = Share.open(Share.retag(Share.add(Share.retag(z, 64), r), 64))
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < l:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    if ci == 0:
+      borrow = Share.retag(Share.sub(Share.add(ri, borrow), rb), 1)
+    else:
+      borrow = Share.retag(rb, 1)
+    i = i + 1
+  var cl = (c shr l) and 1
+  var rl = rbits[l]
+  var rlb = Share.mul(rl, borrow)
+  var zl = Share.sub(Share.add(rl, borrow), Share.mul_scalar(rlb, 2))
+  if cl == 1:
+    zl = Share.sub(Share.from_clear_int(1, 1), zl)
+  return Share.sub(Share.from_clear_int(1, 1), Share.retag(zl, 1))
+
+# Integer division by a SECRET divisor via comparison-based long division.
+# Returns the quotient q with a = q*d + r, 0 <= r < d, for a,d in [0, 2^l), d>0.
+# Each step shifts the next dividend bit into the remainder and conditionally
+# subtracts d if R >= d -- the classic restoring division, data-oblivious.
+def divide(a: Share, d: Share, l: int64, kappa: int64) -> Share:
+  var abits = bit_decompose(a, l, kappa)
+  var qbits: list[Share] = []
+  var t = 0
+  while t < l:
+    qbits.append(Share.from_clear_int(0, 1))
+    t = t + 1
+  var rem = Share.from_clear_int(0, 64)
+  var i = l - 1
+  while i >= 0:
+    rem = Share.add(Share.mul_scalar(rem, 2), Share.retag(abits[i], 64))  # R = 2R + a_i
+    var lt = less_than(rem, d, l + 1, kappa)                              # R < d ?
+    var ge = Share.sub(Share.from_clear_int(1, 1), lt)                    # R >= d
+    var sub_d = Share.mul(Share.retag(ge, 64), Share.retag(d, 64))        # (R>=d) * d
+    rem = Share.sub(rem, sub_d)
+    qbits[i] = Share.retag(ge, 1)
+    i = i - 1
+  return combine_bits(qbits, l)
+
+def main() -> int64:
+  var l = 8
+  var kappa = 8
+  var a = Share.from_clear_int(47, l)
+  var d = Share.from_clear_int(5, l)
+  var q = Share.open(Share.retag(divide(a, d, l, kappa), 64))   # 47 / 5 = 9
+  assert q == 9, "47 / 5 must be 9"
+  return q
