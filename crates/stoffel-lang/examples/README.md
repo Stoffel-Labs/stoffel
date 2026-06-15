@@ -95,6 +95,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_rank_order`: rank of each element = count of smaller.
 - `mpc_bitonic_sort`: Batcher bitonic network for power-of-two lists.
 - `mpc_modexp`: `base^e mod m` with a secret exponent (square-and-multiply + reduce).
+- `mpc_modinv`: modular inverse via Fermat `a^(p-2) mod p`.
 
 ## Algorithm gallery
 
