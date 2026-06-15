@@ -68,6 +68,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_secret_base_power`: `base^e` with secret base, public exponent.
 - `mpc_transcendental`: fixed-point function approx (exp Taylor) via Horner + truncation.
 - `mpc_mean`: mean = sum / n (division by public count).
+- `mpc_variance`: variance via `n·Σx² − (Σx)²` (no division).
 
 ## Algorithm gallery
 
