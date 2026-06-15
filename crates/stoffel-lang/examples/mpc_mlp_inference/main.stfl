@@ -1,3 +1,4 @@
+# run-args: --client-input 0=2 --client-input 0=3 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -125,14 +126,19 @@ def affine(w: list[int64], v: list[Share], b: int64) -> Share:
 def main() -> int64:
   var l = 12
   var kappa = 8
+  var x0: secret int64 = ClientStore.take_share(0, 0)
+  var x1: secret int64 = ClientStore.take_share(0, 1)
   var x: list[Share] = []
-  x.append(Share.from_clear_int(2, l))
-  x.append(Share.from_clear_int(3, l))
+  x.append(x0)
+  x.append(x1)
   var h: list[Share] = []
-  h.append(relu(affine([1, 1], x, 0), l, kappa))     # relu(5)=5
-  h.append(relu(affine([1, -1], x, 0), l, kappa))    # relu(-1)=0
-  var o0 = affine([1, 0], h, 0)                       # 5
-  var o1 = affine([0, 1], h, 0)                       # 0
-  var cls = Share.open(Share.retag(less_than(o0, o1, l, kappa), 64))  # [o0<o1] -> argmax index
-  assert cls == 0, "argmax class must be 0"
-  return cls
+  h.append(relu(affine([1, 1], x, 0), l, kappa))
+  h.append(relu(affine([1, -1], x, 0), l, kappa))
+  var o0 = affine([1, 0], h, 0)
+  var o1 = affine([0, 1], h, 0)
+  var cls = less_than(o0, o1, l, kappa)
+  if Mpc.has_capability("client-output"):
+    cls.send_to_client(0)
+  var rv = Share.open(Share.retag(cls, 64))
+  assert rv == 0, "argmax class 0"
+  return rv

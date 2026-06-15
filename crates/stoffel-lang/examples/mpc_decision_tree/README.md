@@ -8,5 +8,5 @@ path, so the traversal is data-oblivious.
 The example evaluates a depth-2 tree and routes to leaf `200`. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_decision_tree
+stoffel run crates/stoffel-lang/examples/mpc_decision_tree --client-input 0=3 --client-input 0=8 --expected-output-clients 1
 ```

@@ -9,5 +9,5 @@ The example scores two classes for features `[2,1]` and predicts class 1. `κ` i
 small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_naive_bayes
+stoffel run crates/stoffel-lang/examples/mpc_naive_bayes --client-input 0=2 --client-input 0=1 --expected-output-clients 1
 ```

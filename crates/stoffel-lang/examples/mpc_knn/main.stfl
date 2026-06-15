@@ -1,3 +1,4 @@
+# run-args: --client-input 0=1 --client-input 0=1 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -142,16 +143,20 @@ def nn_label(q: list[Share], pts: list[Share], dim: int64, labels: list[int64], 
 def main() -> int64:
   var l = 12
   var kappa = 8
+  var q0: secret int64 = ClientStore.take_share(0, 0)
+  var q1: secret int64 = ClientStore.take_share(0, 1)
   var q: list[Share] = []
-  q.append(Share.from_clear_int(1, l))
-  q.append(Share.from_clear_int(1, l))
-  # points (0,0),(10,10),(5,5) flattened
+  q.append(q0)
+  q.append(q1)
   var raw = [0, 0, 10, 10, 5, 5]
   var pts: list[Share] = []
   var i = 0
   while i < len(raw):
     pts.append(Share.from_clear_int(raw[i], l))
     i = i + 1
-  var lbl = Share.open(Share.retag(nn_label(q, pts, 2, [0, 1, 2], l, kappa), 64))  # nearest (0,0) -> label 0
-  assert lbl == 0, "nearest label must be 0"
-  return lbl
+  var lbl = nn_label(q, pts, 2, [0, 1, 2], l, kappa)
+  if Mpc.has_capability("client-output"):
+    lbl.send_to_client(0)
+  var rv = Share.open(Share.retag(lbl, 64))
+  assert rv == 0, "nearest label 0"
+  return rv

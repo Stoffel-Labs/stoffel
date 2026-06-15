@@ -8,5 +8,5 @@ classification — only the predicted class is revealed.
 The example runs a 2-2-2 network and predicts class 0. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_mlp_inference
+stoffel run crates/stoffel-lang/examples/mpc_mlp_inference --client-input 0=2 --client-input 0=3 --expected-output-clients 1
 ```

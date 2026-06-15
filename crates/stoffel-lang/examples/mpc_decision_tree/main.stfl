@@ -1,3 +1,4 @@
+# run-args: --client-input 0=3 --client-input 0=8 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -120,8 +121,11 @@ def tree(x0: Share, x1: Share, t0: int64, t1: int64,
 def main() -> int64:
   var l = 8
   var kappa = 8
-  # thresholds 5,5; leaves keyed (b0,b1): (1,1)=100 (1,0)=200 (0,1)=300 (0,0)=400
-  # x0=3 (<5 -> b0=1), x1=8 (>=5 -> b1=0) -> leaf 200
-  var r = Share.open(Share.retag(tree(Share.from_clear_int(3, l), Share.from_clear_int(8, l), 5, 5, 100, 200, 300, 400, l, kappa), 64))
-  assert r == 200, "tree must route to leaf 200"
-  return r
+  var x0: secret int64 = ClientStore.take_share(0, 0)
+  var x1: secret int64 = ClientStore.take_share(0, 1)
+  var r = tree(x0, x1, 5, 5, 100, 200, 300, 400, l, kappa)
+  if Mpc.has_capability("client-output"):
+    r.send_to_client(0)
+  var rv = Share.open(Share.retag(r, 64))
+  assert rv == 200, "routes to leaf 200"
+  return rv

@@ -10,5 +10,5 @@ The example classifies a feature vector under two weight sets (→ 1 and 0). `κ
 small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_logistic_regression
+stoffel run crates/stoffel-lang/examples/mpc_logistic_regression --client-input 0=3 --client-input 0=5 --expected-output-clients 1
 ```

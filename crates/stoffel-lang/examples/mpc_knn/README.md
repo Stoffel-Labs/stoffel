@@ -9,5 +9,5 @@ The example classifies query `(1,1)` against points `(0,0)/(10,10)/(5,5)` → la
 of the nearest `(0,0)` = 0. `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_knn
+stoffel run crates/stoffel-lang/examples/mpc_knn --client-input 0=1 --client-input 0=1 --expected-output-clients 1
 ```
