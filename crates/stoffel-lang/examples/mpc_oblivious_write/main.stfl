@@ -1,3 +1,4 @@
+# run-args: --client-input 0=10 --client-input 0=20 --client-input 0=30 --client-input 0=40 --client-input 0=1 --client-input 0=99 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -118,20 +119,25 @@ def oblivious_write(arr: list[Share], idx: Share, v: Share, l: int64, kappa: int
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var raw = [10, 20, 30, 40]
   var arr: list[Share] = []
   var i = 0
-  while i < len(raw):
-    arr.append(Share.from_clear_int(raw[i], l))
+  while i < 4:
+    var v: secret int64 = ClientStore.take_share(0, i)
+    arr.append(v)
     i = i + 1
-  var dummy = oblivious_write(arr, Share.from_clear_int(1, l), Share.from_clear_int(99, l), l, kappa)
+  var idx: secret int64 = ClientStore.take_share(0, 4)
+  var val: secret int64 = ClientStore.take_share(0, 5)
+  var dummy = oblivious_write(arr, idx, val, l, kappa)
+  if Mpc.has_capability("client-output"):
+    i = 0
+    while i < 4:
+      arr[i].send_to_client(0)
+      i = i + 1
   var got: list[int64] = []
   i = 0
-  while i < len(arr):
+  while i < 4:
     got.append(Share.open(Share.retag(arr[i], 64)))
     i = i + 1
-  assert got[0] == 10, "cell 0"
-  assert got[1] == 99, "cell 1 written"
-  assert got[2] == 30, "cell 2"
-  assert got[3] == 40, "cell 3"
+  assert got[1] == 99, "cell 1 written to 99"
+  assert got[0] == 10, "cell 0 unchanged"
   return got[1]

@@ -1,3 +1,4 @@
+# run-args: --client-input 0=20 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -119,6 +120,10 @@ def lookup(keys: list[int64], vals: list[int64], key: Share, l: int64, kappa: in
 def main() -> int64:
   var l = 8
   var kappa = 8
-  var v = Share.open(Share.retag(lookup([10, 20, 30], [100, 200, 300], Share.from_clear_int(20, l), l, kappa), 64))
-  assert v == 200, "table[20] must be 200"
-  return v
+  var key: secret int64 = ClientStore.take_share(0, 0)
+  var v = lookup([10, 20, 30], [100, 200, 300], key, l, kappa)
+  if Mpc.has_capability("client-output"):
+    v.send_to_client(0)
+  var rv = Share.open(Share.retag(v, 64))
+  assert rv == 200, "table[20] = 200"
+  return rv

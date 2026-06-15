@@ -6,5 +6,5 @@ Oblivious key→value lookup over a public table for a **secret** key:
 The example looks up key `20` in `{10→100, 20→200, 30→300}` (→ 200). `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_lookup_table
+stoffel run crates/stoffel-lang/examples/mpc_lookup_table --client-input 0=20 --expected-output-clients 1
 ```

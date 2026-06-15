@@ -1,3 +1,4 @@
+# run-args: --client-input 0=2 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -129,7 +130,10 @@ def main() -> int64:
   while i < len(raw):
     opts.append(Share.from_clear_int(raw[i], 8))
     i = i + 1
-  var idx = Share.from_clear_int(2, 4)
-  var v = Share.open(Share.retag(mux_tree(opts, idx, 2, kappa), 64))
-  assert v == 30, "options[2] must be 30"
-  return v
+  var idx: secret int64 = ClientStore.take_share(0, 0)
+  var v = mux_tree(opts, idx, 2, kappa)
+  if Mpc.has_capability("client-output"):
+    v.send_to_client(0)
+  var rv = Share.open(Share.retag(v, 64))
+  assert rv == 30, "options[2] = 30"
+  return rv
