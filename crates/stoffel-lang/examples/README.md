@@ -54,6 +54,7 @@ MPC subprotocol library (built on the random-bit / comparison primitives):
 - `mpc_linear_search`: secret found-flag + first matching index.
 - `mpc_popcount_secret`: population count of a secret int (decompose + sum bits).
 - `mpc_msb_log2`: MSB index / floor(log2) via top-down prefix-OR.
+- `mpc_lowest_set_bit`: trailing-zero count via bottom-up prefix-OR.
 
 ## Algorithm gallery
 
