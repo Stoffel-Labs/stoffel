@@ -1,0 +1,99 @@
+# Exponentiation base^e with a SECRET exponent, via square-and-multiply.
+#
+# Bit-decompose the secret exponent e; acc starts at 1, and for each bit we
+# obliviously multiply acc by the running power when the bit is 1
+# (acc = select(e_i, acc*power, acc)) and square the power each step. The
+# control flow is data-independent (every bit is processed), so nothing about
+# e leaks. Keep base/e small so base^e fits; kappa is small for speed.
+
+def random_bit() -> Share:
+  while True:
+    var r = Share.random_field()
+    var r_squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(r_squared):
+      continue
+    var r_prime_inv = Field.inverse(Field.sqrt(r_squared))
+    var two_inv = Field.inverse(Field.from_int(2))
+    var c = Share.mul_field(r, r_prime_inv)
+    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
+    return Share.retag(a, 1)
+
+def pow2(i: int64) -> int64:
+  var p = 1
+  var k = 0
+  while k < i:
+    p = p * 2
+    k = k + 1
+  return p
+
+def combine_bits(bits: list[Share], n: int64) -> Share:
+  var acc = Share.mul_scalar(bits[0], 1)
+  var i = 1
+  while i < n:
+    acc = Share.add(acc, Share.mul_scalar(bits[i], pow2(i)))
+    i = i + 1
+  return Share.retag(acc, 64)
+
+# --- bit-decomposition (see mpc_bit_decomposition) ---
+def bit_decompose(a: Share, l: int64, kappa: int64) -> list[Share]:
+  var m = l + kappa
+  var n = m + 1
+  var rbits: list[Share] = []
+  var i = 0
+  while i < m:
+    rbits.append(random_bit())
+    i = i + 1
+  while i < n:
+    rbits.append(Share.from_clear_int(0, 1))
+    i = i + 1
+  var r = combine_bits(rbits, n)
+  var c = Share.open(Share.retag(Share.add(Share.retag(a, 64), r), 64))
+  var abits: list[Share] = []
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < n:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    var xorrb = Share.sub(Share.add(ri, borrow), Share.mul_scalar(rb, 2))
+    var ai = borrow
+    var nb = borrow
+    if ci == 0:
+      ai = xorrb
+      nb = Share.sub(Share.add(ri, borrow), rb)
+    else:
+      ai = Share.sub(Share.from_clear_int(1, 1), xorrb)
+      nb = rb
+    abits.append(Share.retag(ai, 1))
+    borrow = Share.retag(nb, 1)
+    i = i + 1
+  return abits
+
+# Oblivious select: a if cond==1 else b (retag inputs to a common width).
+def select(cond: Share, a: Share, b: Share) -> Share:
+  var aa = Share.retag(a, 64)
+  var bb = Share.retag(b, 64)
+  var c = Share.retag(cond, 64)
+  return Share.add(bb, Share.mul(c, Share.sub(aa, bb)))
+
+# base^e with a SECRET exponent e in [0, 2^le): square-and-multiply over e's bits.
+# acc starts at 1; for each exponent bit, obliviously multiply acc by the current
+# power (acc * (e_i ? power : 1)) and square the power.
+def pow_secret(base: int64, e: Share, le: int64, kappa: int64) -> Share:
+  var ebits = bit_decompose(e, le, kappa)
+  var acc = Share.from_clear_int(1, 64)
+  var power = Share.from_clear_int(base, 64)
+  var i = 0
+  while i < le:
+    acc = select(ebits[i], Share.mul(acc, power), acc)
+    power = Share.mul(power, power)
+    i = i + 1
+  return acc
+
+def main() -> int64:
+  var le = 3
+  var kappa = 8
+  var e = Share.from_clear_int(5, le)
+  var r = Share.open(Share.retag(pow_secret(3, e, le, kappa), 64))   # 3^5 = 243
+  assert r == 243, "3^5 must be 243"
+  return r
