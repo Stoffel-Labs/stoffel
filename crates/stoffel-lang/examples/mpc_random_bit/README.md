@@ -19,7 +19,7 @@ result to the constant bit `1`.
 Run it through the local MPC CLI from the repository root:
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_random_bit
+stoffel run crates/stoffel-lang/examples/mpc_random_bit --expected-output-clients 1
 ```
 
 Each run reveals a fresh `0` or `1`; the program asserts the result is a valid

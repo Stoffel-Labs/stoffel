@@ -1,3 +1,4 @@
+# run-args: --client-input 0=3 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -136,6 +137,10 @@ def modinv(a: Share, p: int64, l: int64, kappa: int64) -> Share:
 def main() -> int64:
   var l = 7
   var kappa = 6
-  var inv = Share.open(Share.retag(modinv(Share.from_clear_int(3, l), 7, l, kappa), 64))   # 3^-1 mod 7 = 5
-  assert inv == 5, "inverse of 3 mod 7 must be 5"
-  return inv
+  var a: secret int64 = ClientStore.take_share(0, 0)
+  var inv = modinv(a, 7, l, kappa)                     # a^-1 mod 7
+  if Mpc.has_capability("client-output"):
+    inv.send_to_client(0)
+  var rv = Share.open(Share.retag(inv, 64))
+  assert rv == 5, "inverse of 3 mod 7 must be 5"
+  return rv

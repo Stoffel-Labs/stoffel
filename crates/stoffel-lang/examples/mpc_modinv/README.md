@@ -7,5 +7,5 @@ theorem: `a⁻¹ ≡ a^{p-2} (mod p)`. Uses public-exponent modular exponentiati
 The example computes `3⁻¹ mod 7 = 5` (since `3·5 = 15 ≡ 1`). `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_modinv
+stoffel run crates/stoffel-lang/examples/mpc_modinv --client-input 0=3 --expected-output-clients 1
 ```

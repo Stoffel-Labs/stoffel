@@ -9,5 +9,5 @@ The example computes `gcd(12, 8) = 4`. Parameters are small (`l=5`) so it runs i
 reasonable time; this is the heaviest example (a secret modulo per round).
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_gcd
+stoffel run crates/stoffel-lang/examples/mpc_gcd --client-input 0=12 --client-input 0=8 --expected-output-clients 1
 ```

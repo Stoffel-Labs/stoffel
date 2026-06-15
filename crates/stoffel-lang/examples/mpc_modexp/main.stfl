@@ -1,3 +1,4 @@
+# run-args: --client-input 0=5 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -134,6 +135,10 @@ def modexp(base: int64, e: Share, m: int64, le: int64, l: int64, kappa: int64) -
 def main() -> int64:
   var l = 7
   var kappa = 6
-  var r = Share.open(Share.retag(modexp(3, Share.from_clear_int(5, 3), 7, 3, l, kappa), 64))   # 3^5 mod 7 = 5
-  assert r == 5, "3^5 mod 7 must be 5"
-  return r
+  var e: secret int64 = ClientStore.take_share(0, 0)   # secret exponent
+  var r = modexp(3, e, 7, 3, l, kappa)                 # 3^e mod 7
+  if Mpc.has_capability("client-output"):
+    r.send_to_client(0)
+  var rv = Share.open(Share.retag(r, 64))
+  assert rv == 5, "3^5 mod 7 must be 5"
+  return rv

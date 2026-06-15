@@ -1,3 +1,4 @@
+# run-args: --client-input 0=42 --expected-output-clients 1
 # Bit-decomposition (Damgard, Fitzi, Kiltz, Nielsen, Toft).
 #
 # Given a secret [a] known to lie in [0, 2^l), produce shares of its bits
@@ -89,16 +90,14 @@ def main() -> int64:
   var l = 8
   var kappa = 8
   var expected = 42
-
-  var a = Share.from_clear_int(expected, l)
+  var a: secret int64 = ClientStore.take_share(0, 0)
   var bits = bit_decompose(a, l, kappa)
-
-  # Reveal the low l bits and reconstruct, to show the decomposition is correct.
+  if Mpc.has_capability("client-output"):
+    bits[0].send_to_client(0)   # return the LSB (parity) to the client
   var recon = 0
   var i = 0
   while i < l:
     recon = recon + Share.open(Share.retag(bits[i], 64)) * pow2(i)
     i = i + 1
-
   assert recon == expected, "bit-decomposition must reconstruct the input"
   return recon

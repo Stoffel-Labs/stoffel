@@ -1,3 +1,4 @@
+# run-args: --expected-output-clients 1
 # Joint Random Bit Sharing (Damgard, Fitzi, Kiltz, Nielsen, Toft).
 #
 # The parties jointly produce a secret-shared uniformly random bit a in {0, 1}
@@ -36,7 +37,10 @@ def random_bit() -> secret bool:
     return Share.retag(a, 1)
 
 def main() -> bool:
-  # Reveal one shared random bit. The reveal is only here so the example has an
-  # observable result; a real program keeps the bit secret.
+  # No client inputs: this protocol generates a fresh shared random bit.
+  # Reveal it here so the example has an observable result, and (when client
+  # output is available) also hand the secret bit to client 0.
   var bit: secret bool = random_bit()
+  if Mpc.has_capability("client-output"):
+    bit.send_to_client(0)
   return bit.reveal()

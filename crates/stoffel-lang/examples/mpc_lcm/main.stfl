@@ -1,3 +1,4 @@
+# run-args: --client-input 0=4 --client-input 0=6 --expected-output-clients 1
 def random_bit() -> Share:
   while True:
     var r = Share.random_field()
@@ -149,10 +150,13 @@ def gcd(a0: Share, b0: Share, l: int64, kappa: int64, bound: int64) -> Share:
 def main() -> int64:
   var l = 6
   var kappa = 4
-  var a = Share.from_clear_int(4, l)
-  var b = Share.from_clear_int(6, l)
+  var a: secret int64 = ClientStore.take_share(0, 0)
+  var b: secret int64 = ClientStore.take_share(0, 1)
   var g = gcd(a, b, l, kappa, 6)
   var prod = Share.mul(Share.retag(a, 64), Share.retag(b, 64))   # 24
-  var lcm = Share.open(Share.retag(divide(prod, g, 8, kappa), 64))   # 24 / 2 = 12
-  assert lcm == 12, "lcm(4,6) must be 12"
-  return lcm
+  var lcm = divide(prod, g, 8, kappa)                            # 24 / 2 = 12
+  if Mpc.has_capability("client-output"):
+    lcm.send_to_client(0)
+  var rv = Share.open(Share.retag(lcm, 64))
+  assert rv == 12, "lcm(4, 6) must be 12"
+  return rv

@@ -8,5 +8,5 @@ The example computes `3^5 mod 7 = 5`. Parameters are small (one of the heavier
 examples — a secret modulo per step). `κ` is small for speed.
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_modexp
+stoffel run crates/stoffel-lang/examples/mpc_modexp --client-input 0=5 --expected-output-clients 1
 ```

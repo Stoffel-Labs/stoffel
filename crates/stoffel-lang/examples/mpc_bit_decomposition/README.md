@@ -23,5 +23,5 @@ the input.
 Run it from the repository root:
 
 ```sh
-stoffel run crates/stoffel-lang/examples/mpc_bit_decomposition
+stoffel run crates/stoffel-lang/examples/mpc_bit_decomposition --client-input 0=42 --expected-output-clients 1
 ```
