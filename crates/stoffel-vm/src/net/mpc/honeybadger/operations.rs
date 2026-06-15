@@ -40,6 +40,37 @@ where
             return Err("MPC engine not ready".into());
         }
 
+        // Secret fixed-point multiplication needs the truncating fixed-point
+        // multiply (the raw integer multiply would leave the product with 2f
+        // fractional bits) plus the same probabilistic-truncation preprocessing
+        // the fixed-point division path provisions. Route it through `mul_fixed`
+        // and provision a pool of prandbit/prandint (and the triples/randoms
+        // their generation consumes) so it is self-sufficient without a protocol
+        // change, mirroring `divide_fixed_by_constant_async`.
+        if let ShareType::SecretFixedPoint { precision } = ty {
+            let left_share = Self::decode_share(left)?;
+            let right_share = Self::decode_share(right)?;
+            let proto_precision =
+                FixedPointPrecision::new(precision.total_bits(), precision.fractional_bits());
+            let x = SecretFixedPoint::new_with_precision(left_share, proto_precision);
+            let y = SecretFixedPoint::new_with_precision(right_share, proto_precision);
+
+            let mut node = self.clone_node().await;
+            const PRANDBIT_POOL_MULS: usize = 16;
+            let f = precision.fractional_bits();
+            let pool = f.saturating_mul(PRANDBIT_POOL_MULS);
+            node.params.n_prandbit = node.params.n_prandbit.max(pool);
+            node.params.n_prandint = node.params.n_prandint.max(PRANDBIT_POOL_MULS);
+            node.params.n_triples = node.params.n_triples.saturating_add(pool);
+            node.params.n_random_shares = node.params.n_random_shares.saturating_add(pool);
+
+            let result = node
+                .mul_fixed(x, y, self.net.clone())
+                .await
+                .map_err(|e| format!("MPC fixed-point multiply failed: {:?}", e))?;
+            return Self::encode_share(result.value()).map(ShareData::Opaque);
+        }
+
         match ty {
             ShareType::SecretInt { .. }
             | ShareType::SecretUInt { .. }
@@ -48,6 +79,15 @@ where
                 let right_share = Self::decode_share(right)?;
 
                 let mut node = self.clone_node().await;
+                // Provision a triple pool so a secret*secret multiply is
+                // self-sufficient even when the program's static preprocessing
+                // estimate was 0 (e.g. operands produced by `Share.from_clear*`,
+                // whose opaque type the demand analysis doesn't count). node.mul
+                // regenerates from params on demand; `.max` never shrinks an
+                // already-sized estimate (e.g. AES/CBC). Triple generation pulls
+                // 2 randoms each, which run_preprocessing adds automatically.
+                const TRIPLE_POOL_MULS: usize = 64;
+                node.params.n_triples = node.params.n_triples.max(TRIPLE_POOL_MULS);
                 let trace = Self::trace_multiply_enabled();
                 let started_at = Instant::now();
                 if trace {

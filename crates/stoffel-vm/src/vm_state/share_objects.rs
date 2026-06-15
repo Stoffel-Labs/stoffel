@@ -12,6 +12,21 @@ impl VMState {
         )?)
     }
 
+    /// Normalize an operand for arithmetic ops: secret shares are stored in
+    /// registers as object handles (`Share.from_clear*`, share-method results),
+    /// but the arithmetic ops operate on `Value::Share`. Unwrap a share object
+    /// into its `Value::Share`; leave any other value (including a raw
+    /// `Value::Share`) untouched. This lets `*`, `/`, `+`, `-` work on shares
+    /// regardless of how they were produced.
+    pub(crate) fn unwrap_share_value_for_arith(&mut self, value: Value) -> VmResult<Value> {
+        if share_object::is_share_object(self.table_memory.as_mut(), &value) {
+            let (share_type, share_data) = self.extract_share_data(&value)?;
+            Ok(Value::Share(share_type, share_data))
+        } else {
+            Ok(value)
+        }
+    }
+
     pub(crate) fn extract_matching_share_pair(
         &mut self,
         left: &Value,

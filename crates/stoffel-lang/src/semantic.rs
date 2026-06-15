@@ -1573,6 +1573,23 @@ impl<'a> SemanticAnalyzer<'a> {
                 {
                     continue;
                 }
+                // A secret share absorbs a clear numeric scalar: `secret * 2.5`
+                // keeps the variable a share, with the MPC runtime handling the
+                // mixed-type scalar op. So a share/secret constraint wins over a
+                // clear-numeric one rather than conflicting (in either order).
+                let prev_share =
+                    Self::is_share_alias_type(&previous.ty) || previous.ty.is_secret();
+                let cur_share =
+                    Self::is_share_alias_type(&constraint.ty) || constraint.ty.is_secret();
+                let prev_num = Self::is_clear_numeric_type(previous.ty.underlying_type());
+                let cur_num = Self::is_clear_numeric_type(constraint.ty.underlying_type());
+                if prev_share && cur_num && !cur_share {
+                    continue;
+                }
+                if cur_share && prev_num && !prev_share {
+                    chosen = Some(constraint);
+                    continue;
+                }
                 self.error_reporter.add_error(
                     CompilerError::type_error(
                         format!(
@@ -1906,7 +1923,18 @@ impl<'a> SemanticAnalyzer<'a> {
                         | ">"
                         | ">="
                 ) {
-                    if Self::is_concrete_inference_type(&left_type)
+                    // Don't propagate a clear numeric type across the operator onto
+                    // a share/secret operand: a secret share multiplied by a
+                    // fixed-point/float scalar (e.g. `secret * 2.5`) keeps the share
+                    // typed as a share — the MPC runtime handles the mixed-type
+                    // scalar op — so forcing it to `float` here would wrongly
+                    // conflict with its share type.
+                    let right_is_share =
+                        Self::is_share_alias_type(&right_type) || right_type.is_secret();
+                    let left_is_share =
+                        Self::is_share_alias_type(&left_type) || left_type.is_secret();
+                    if !right_is_share
+                        && Self::is_concrete_inference_type(&left_type)
                         && (Self::is_clear_numeric_type(left_type.underlying_type())
                             || matches!(
                                 left_type.underlying_type(),
@@ -1922,7 +1950,8 @@ impl<'a> SemanticAnalyzer<'a> {
                             locals,
                         );
                     }
-                    if Self::is_concrete_inference_type(&right_type)
+                    if !left_is_share
+                        && Self::is_concrete_inference_type(&right_type)
                         && (Self::is_clear_numeric_type(right_type.underlying_type())
                             || matches!(
                                 right_type.underlying_type(),
@@ -2373,6 +2402,16 @@ impl<'a> SemanticAnalyzer<'a> {
                     op.as_str(),
                     "+" | "-" | "*" | "/" | "%" | "mod" | "shl" | "shr" | "and" | "or" | "xor"
                 ) {
+                    // A share/secret operand makes the whole arithmetic
+                    // expression a share/secret (the MPC runtime handles mixed
+                    // `share <op> scalar` cases, e.g. `secret * 2.5`), so it wins
+                    // over a clear numeric operand regardless of order.
+                    if Self::is_share_alias_type(&left_type) || left_type.is_secret() {
+                        return left_type;
+                    }
+                    if Self::is_share_alias_type(&right_type) || right_type.is_secret() {
+                        return right_type;
+                    }
                     if Self::is_concrete_inference_type(&left_type)
                         && (right_type == SymbolType::Unknown || left_type == right_type)
                     {

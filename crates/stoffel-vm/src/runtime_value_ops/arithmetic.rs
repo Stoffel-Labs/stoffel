@@ -3,7 +3,10 @@ use super::error::{
     ValueOpResult,
 };
 use super::share_operands::{matching_share_pair, share_scalar_operands};
-use stoffel_vm_types::core_types::{ShareType, Value, F64};
+use stoffel_vm_types::core_types::{
+    ClearShareInput, ClearShareValue, FixedPointPrecision, ShareType, Value, F64,
+    DEFAULT_FIXED_POINT_FRACTIONAL_BITS, DEFAULT_FIXED_POINT_TOTAL_BITS,
+};
 
 pub(crate) fn add(
     left: &Value,
@@ -77,6 +80,15 @@ pub(crate) fn mul(
         return Ok(Value::Share(pair.share_type, data));
     }
 
+    // Secret share x fixed-point (non-integer) scalar, in either operand order.
+    // Produces a fixed-point result; see `mul_share_by_fixed_scalar`.
+    if let Some(result) = mul_share_by_fixed_scalar(left, right, share_runtime)? {
+        return Ok(result);
+    }
+    if let Some(result) = mul_share_by_fixed_scalar(right, left, share_runtime)? {
+        return Ok(result);
+    }
+
     if let Some((share_type, share_data, scalar)) = share_scalar_operands(left, right)? {
         let data = share_runtime()?.mul_scalar_data(share_type, share_data, scalar)?;
         return Ok(Value::Share(share_type, data));
@@ -123,6 +135,73 @@ pub(crate) fn div(
     }
 
     type_error("DIV")
+}
+
+/// Multiply a secret share by a public fixed-point (non-integer) scalar, in a
+/// type-generic way. Returns `Ok(None)` when this isn't a `share x float` pair
+/// (so the caller can fall through to the integer-scalar path).
+///
+/// Result is always fixed-point. Fractional bits add under multiplication, so:
+/// - integer share x fixed scalar -> the integer contributes 0 fractional bits,
+///   so the product already has exactly `f` bits: scale the scalar by `2^f`,
+///   multiply locally, and reinterpret the result as fixed-point. No truncation.
+/// - fixed share x fixed scalar -> the product would carry `2f` fractional bits,
+///   so it must be truncated back to `f`. Secret-share the public scalar locally
+///   and run the secret*secret fixed-point multiply, which truncates.
+fn mul_share_by_fixed_scalar(
+    share_value: &Value,
+    scalar_value: &Value,
+    share_runtime: ShareRuntimeProvider<'_>,
+) -> ValueOpResult<Option<Value>> {
+    let Value::Share(share_type, share_data) = share_value else {
+        return Ok(None);
+    };
+    let Value::Float(F64(scalar)) = scalar_value else {
+        return Ok(None);
+    };
+    let scalar = *scalar;
+
+    // The product keeps the share's precision when the share is already
+    // fixed-point; otherwise it adopts the default fixed-point precision.
+    let (total_bits, target_f) = match share_type {
+        ShareType::SecretFixedPoint { precision } => {
+            (precision.total_bits(), precision.fractional_bits())
+        }
+        _ => (
+            DEFAULT_FIXED_POINT_TOTAL_BITS,
+            DEFAULT_FIXED_POINT_FRACTIONAL_BITS,
+        ),
+    };
+    let result_type = ShareType::SecretFixedPoint {
+        precision: FixedPointPrecision::new(total_bits, target_f),
+    };
+
+    let share_is_fixed = matches!(share_type, ShareType::SecretFixedPoint { .. });
+    if share_is_fixed {
+        // Fixed x fixed: needs the truncating secret*secret multiply.
+        let scalar_input =
+            ClearShareInput::new(result_type, ClearShareValue::FixedPoint(F64(scalar)));
+        let scalar_share = share_runtime()?.input_share(scalar_input)?;
+        let data = share_runtime()?.multiply_share_data(result_type, share_data, &scalar_share)?;
+        Ok(Some(Value::Share(result_type, data)))
+    } else {
+        // Integer x fixed: exact and local.
+        let Some(scaled) = scale_to_fixed(scalar, target_f) else {
+            return Ok(None);
+        };
+        let data = share_runtime()?.mul_scalar_data(*share_type, share_data, scaled)?;
+        Ok(Some(Value::Share(result_type, data)))
+    }
+}
+
+/// `round(value * 2^fractional_bits)` as `i64`, or `None` on overflow/non-finite.
+fn scale_to_fixed(value: f64, fractional_bits: usize) -> Option<i64> {
+    let scale = 2f64.powi(i32::try_from(fractional_bits).ok()?);
+    let scaled = (value * scale).round();
+    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled >= 9.223_372_036_854_776e18 {
+        return None;
+    }
+    Some(scaled as i64)
 }
 
 /// Scale a public divisor into the share's fixed-point representation

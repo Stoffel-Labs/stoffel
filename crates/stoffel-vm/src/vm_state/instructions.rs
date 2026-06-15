@@ -747,10 +747,13 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
-            Ok(runtime_value_ops::add(left, right, &|| {
-                state.share_runtime().map_err(Into::into)
-            })?)
+        let (left, right) = self.with_resolved_register_pair(src1, src2, |left, right, _| {
+            Ok((left.clone(), right.clone()))
+        })?;
+        let left = self.unwrap_share_value_for_arith(left)?;
+        let right = self.unwrap_share_value_for_arith(right)?;
+        let result_value = runtime_value_ops::add(&left, &right, &|| {
+            self.share_runtime().map_err(Into::into)
         })?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
@@ -927,10 +930,13 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
-            Ok(runtime_value_ops::sub(left, right, &|| {
-                state.share_runtime().map_err(Into::into)
-            })?)
+        let (left, right) = self.with_resolved_register_pair(src1, src2, |left, right, _| {
+            Ok((left.clone(), right.clone()))
+        })?;
+        let left = self.unwrap_share_value_for_arith(left)?;
+        let right = self.unwrap_share_value_for_arith(right)?;
+        let result_value = runtime_value_ops::sub(&left, &right, &|| {
+            self.share_runtime().map_err(Into::into)
         })?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
@@ -955,10 +961,13 @@ impl VMState {
             return Ok(());
         }
 
-        let computed = self.with_resolved_register_pair(src1, src2, |left, right, state| {
-            Ok(runtime_value_ops::mul(left, right, &|| {
-                state.share_runtime().map_err(Into::into)
-            })?)
+        let (left, right) = self.with_resolved_register_pair(src1, src2, |left, right, _| {
+            Ok((left.clone(), right.clone()))
+        })?;
+        let left = self.unwrap_share_value_for_arith(left)?;
+        let right = self.unwrap_share_value_for_arith(right)?;
+        let computed = runtime_value_ops::mul(&left, &right, &|| {
+            self.share_runtime().map_err(Into::into)
         })?;
 
         self.write_current_register(dest, computed, hooks_enabled)?;
@@ -983,10 +992,13 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
-            Ok(runtime_value_ops::div(left, right, &|| {
-                state.share_runtime().map_err(Into::into)
-            })?)
+        let (left, right) = self.with_resolved_register_pair(src1, src2, |left, right, _| {
+            Ok((left.clone(), right.clone()))
+        })?;
+        let left = self.unwrap_share_value_for_arith(left)?;
+        let right = self.unwrap_share_value_for_arith(right)?;
+        let result_value = runtime_value_ops::div(&left, &right, &|| {
+            self.share_runtime().map_err(Into::into)
         })?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
