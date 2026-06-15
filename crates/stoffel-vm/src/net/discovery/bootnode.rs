@@ -52,11 +52,17 @@ pub(super) struct SessionRegistrationReport {
 pub(super) struct BootnodeState {
     parties: Arc<Mutex<HashMap<PartyId, SocketAddr>>>,
     active_session: Arc<Mutex<Option<SessionInfo>>>,
-    program_bytes: Arc<Mutex<Option<Arc<Vec<u8>>>>>,
+    program_bytes: Arc<Mutex<Option<CachedProgram>>>,
     pending_session: Arc<Mutex<Option<PendingSession>>>,
     expected_parties: Option<usize>,
     session_tx: watch::Sender<Option<SessionInfo>>,
     ice_tx: broadcast::Sender<DiscoveryMessage>,
+}
+
+#[derive(Clone)]
+struct CachedProgram {
+    program_id: [u8; 32],
+    bytes: Arc<Vec<u8>>,
 }
 
 impl BootnodeState {
@@ -115,17 +121,29 @@ impl BootnodeState {
             .collect()
     }
 
-    pub async fn store_program_bytes_if_missing(&self, bytes: Vec<u8>) -> bool {
+    pub async fn store_program_bytes_if_missing(
+        &self,
+        program_id: [u8; 32],
+        bytes: Vec<u8>,
+    ) -> bool {
         let mut program_bytes = self.program_bytes.lock().await;
         if program_bytes.is_some() {
             return false;
         }
-        *program_bytes = Some(Arc::new(bytes));
+        *program_bytes = Some(CachedProgram {
+            program_id,
+            bytes: Arc::new(bytes),
+        });
         true
     }
 
-    pub async fn program_bytes(&self) -> Option<Arc<Vec<u8>>> {
-        self.program_bytes.lock().await.clone()
+    pub async fn program_bytes_for(&self, program_id: &[u8; 32]) -> Option<Arc<Vec<u8>>> {
+        self.program_bytes
+            .lock()
+            .await
+            .as_ref()
+            .filter(|cached| cached.program_id == *program_id)
+            .map(|cached| cached.bytes.clone())
     }
 
     pub async fn register_session(
@@ -342,11 +360,17 @@ impl BootnodeConnection {
                     .await;
             }
             DiscoveryMessage::RequestPeers => {
+                if self.authenticated_party_id("RequestPeers").is_none() {
+                    return;
+                }
                 let peers = self.state.peer_list().await;
                 let _ = send_ctrl(&*self.conn, &DiscoveryMessage::PeerList { peers }).await;
             }
             DiscoveryMessage::Heartbeat => {}
             DiscoveryMessage::ProgramFetchRequest { program_id } => {
+                if self.authenticated_party_id("ProgramFetchRequest").is_none() {
+                    return;
+                }
                 self.handle_program_fetch_request(program_id).await;
             }
             DiscoveryMessage::IceCandidates {
@@ -356,6 +380,9 @@ impl BootnodeConnection {
                 pwd,
                 candidates,
             } => {
+                if !self.authenticated_sender_matches("IceCandidates", from_party_id) {
+                    return;
+                }
                 eprintln!(
                     "[bootnode] Relaying {} ICE candidates from party {} to party {}",
                     candidates.len(),
@@ -374,6 +401,9 @@ impl BootnodeConnection {
                 from_party_id,
                 to_party_id,
             } => {
+                if !self.authenticated_sender_matches("IceExchangeRequest", from_party_id) {
+                    return;
+                }
                 eprintln!(
                     "[bootnode] ICE exchange request from party {} to party {}",
                     from_party_id, to_party_id
@@ -385,6 +415,31 @@ impl BootnodeConnection {
                     });
             }
             _ => {}
+        }
+    }
+
+    fn authenticated_party_id(&self, message_kind: &str) -> Option<PartyId> {
+        let party_id = self.my_party_id;
+        if party_id.is_none() {
+            eprintln!(
+                "[bootnode] Rejected {} from unauthenticated connection",
+                message_kind
+            );
+        }
+        party_id
+    }
+
+    fn authenticated_sender_matches(&self, message_kind: &str, from_party_id: PartyId) -> bool {
+        match self.authenticated_party_id(message_kind) {
+            Some(party_id) if party_id == from_party_id => true,
+            Some(party_id) => {
+                eprintln!(
+                    "[bootnode] Rejected {} from party {} spoofing party {}",
+                    message_kind, party_id, from_party_id
+                );
+                false
+            }
+            None => false,
         }
     }
 
@@ -457,7 +512,17 @@ impl BootnodeConnection {
 
         if let Some(bytes) = program_bytes {
             let byte_len = bytes.len();
-            if self.state.store_program_bytes_if_missing(bytes).await {
+            if !program_id_matches_bytes(&registration.program_id, &bytes) {
+                eprintln!(
+                    "[bootnode] Rejected program bytes from party {} for {} (hash mismatch)",
+                    party_id,
+                    hex::encode(&registration.program_id[..8])
+                );
+            } else if self
+                .state
+                .store_program_bytes_if_missing(registration.program_id, bytes)
+                .await
+            {
                 eprintln!(
                     "[bootnode] Storing program bytes from party {} ({} bytes)",
                     party_id, byte_len
@@ -525,7 +590,7 @@ impl BootnodeConnection {
     }
 
     async fn handle_program_fetch_request(&self, program_id: [u8; 32]) {
-        if let Some(bytes) = self.state.program_bytes().await {
+        if let Some(bytes) = self.state.program_bytes_for(&program_id).await {
             eprintln!(
                 "[bootnode] Sending program bytes ({} bytes) for {}",
                 bytes.len(),
@@ -550,7 +615,13 @@ impl BootnodeConnection {
                 let _ = send_prog_ctrl(&*self.conn, &message).await;
             }
             ProgramSyncMessage::ProgramFetchRequest { program_id } => {
-                if let Some(bytes) = self.state.program_bytes().await {
+                if self
+                    .authenticated_party_id("ProgramSync::ProgramFetchRequest")
+                    .is_none()
+                {
+                    return;
+                }
+                if let Some(bytes) = self.state.program_bytes_for(&program_id).await {
                     let _ = send_program_bytes(&*self.conn, program_id, bytes).await;
                 }
             }
@@ -594,13 +665,26 @@ fn session_nonce() -> u64 {
     random_instance_id()
 }
 
+fn program_id_matches_bytes(program_id: &[u8; 32], bytes: &[u8]) -> bool {
+    blake3::hash(bytes).as_bytes() == program_id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use stoffelnet::network_utils::ClientType;
+    use stoffelnet::transports::quic::{ConnectionState, PeerConnection};
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+    }
+
+    fn program_id(bytes: &[u8]) -> [u8; 32] {
+        *blake3::hash(bytes).as_bytes()
     }
 
     fn registration(party_id: PartyId, program_id: [u8; 32]) -> SessionRegistration {
@@ -613,6 +697,215 @@ mod tests {
             threshold: 1,
             tls_derived_id: Some(100 + party_id),
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingConnection {
+        sent: StdMutex<Vec<Vec<u8>>>,
+    }
+
+    impl RecordingConnection {
+        fn sent_messages(&self) -> Vec<Vec<u8>> {
+            self.sent.lock().expect("sent lock poisoned").clone()
+        }
+
+        fn clear_sent(&self) {
+            self.sent.lock().expect("sent lock poisoned").clear();
+        }
+    }
+
+    impl PeerConnection for RecordingConnection {
+        fn send<'a>(
+            &'a self,
+            data: &'a [u8],
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async move {
+                self.sent
+                    .lock()
+                    .expect("sent lock poisoned")
+                    .push(data.to_vec());
+                Ok(())
+            })
+        }
+
+        fn receive<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>> {
+            Box::pin(async { Err("no scripted receive".to_string()) })
+        }
+
+        fn remote_address(&self) -> SocketAddr {
+            addr(20_000)
+        }
+
+        fn close<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn state<'a>(&'a self) -> Pin<Box<dyn Future<Output = ConnectionState> + Send + 'a>> {
+            Box::pin(async { ConnectionState::Connected })
+        }
+
+        fn is_connected<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async { true })
+        }
+
+        fn get_connection_role(&self) -> ClientType {
+            ClientType::Server
+        }
+
+        fn remote_party_id(&self) -> Option<PartyId> {
+            None
+        }
+
+        fn set_remote_party_id(&self, _party_id: PartyId) {}
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_program_fetch_does_not_disclose_cached_bytes() {
+        let state = BootnodeState::new(None);
+        let bytes = b"compiled program".to_vec();
+        let program_id = program_id(&bytes);
+        assert!(
+            state
+                .store_program_bytes_if_missing(program_id, bytes)
+                .await
+        );
+
+        let conn = Arc::new(RecordingConnection::default());
+        let mut handler = BootnodeConnection::new(conn.clone(), state, Some("secret".to_string()));
+
+        handler
+            .handle_discovery_message(DiscoveryMessage::ProgramFetchRequest { program_id })
+            .await;
+
+        assert!(conn.sent_messages().is_empty());
+    }
+
+    #[tokio::test]
+    async fn program_fetch_requires_matching_cached_program_id() {
+        let state = BootnodeState::new(None);
+        let bytes = b"compiled program".to_vec();
+        let program_id = program_id(&bytes);
+        assert!(
+            state
+                .store_program_bytes_if_missing(program_id, bytes.clone())
+                .await
+        );
+
+        let conn = Arc::new(RecordingConnection::default());
+        let mut handler = BootnodeConnection::new(conn.clone(), state, None);
+        handler.handle_register(0, addr(10_000), None).await;
+        conn.clear_sent();
+
+        handler
+            .handle_discovery_message(DiscoveryMessage::ProgramFetchRequest {
+                program_id: [9u8; 32],
+            })
+            .await;
+        assert!(conn.sent_messages().is_empty());
+
+        handler
+            .handle_discovery_message(DiscoveryMessage::ProgramFetchRequest { program_id })
+            .await;
+        let sent = conn.sent_messages();
+        assert_eq!(sent.len(), 1);
+        let response =
+            bincode::deserialize::<DiscoveryMessage>(&sent[0]).expect("response decodes");
+        assert!(matches!(
+            response,
+            DiscoveryMessage::ProgramFetchResponse {
+                program_id: id,
+                bytes: response_bytes
+            } if id == program_id && response_bytes == bytes
+        ));
+    }
+
+    #[tokio::test]
+    async fn ice_relay_rejects_unauthenticated_and_spoofed_senders() {
+        let state = BootnodeState::new(None);
+        let mut ice_rx = state.subscribe_ice();
+        let conn = Arc::new(RecordingConnection::default());
+        let mut handler = BootnodeConnection::new(conn, state, None);
+
+        handler
+            .handle_discovery_message(DiscoveryMessage::IceExchangeRequest {
+                from_party_id: 1,
+                to_party_id: 2,
+            })
+            .await;
+        assert!(ice_rx.try_recv().is_err());
+
+        handler.my_party_id = Some(1);
+        handler
+            .handle_discovery_message(DiscoveryMessage::IceExchangeRequest {
+                from_party_id: 2,
+                to_party_id: 3,
+            })
+            .await;
+        assert!(ice_rx.try_recv().is_err());
+
+        handler
+            .handle_discovery_message(DiscoveryMessage::IceCandidates {
+                from_party_id: 2,
+                to_party_id: 3,
+                ufrag: "ufrag".to_string(),
+                pwd: "pwd".to_string(),
+                candidates: Vec::new(),
+            })
+            .await;
+        assert!(ice_rx.try_recv().is_err());
+
+        handler
+            .handle_discovery_message(DiscoveryMessage::IceExchangeRequest {
+                from_party_id: 1,
+                to_party_id: 3,
+            })
+            .await;
+        let relayed = ice_rx.try_recv().expect("matching sender relayed");
+        assert!(matches!(
+            relayed,
+            DiscoveryMessage::IceExchangeRequest {
+                from_party_id: 1,
+                to_party_id: 3
+            }
+        ));
+
+        handler
+            .handle_discovery_message(DiscoveryMessage::IceCandidates {
+                from_party_id: 1,
+                to_party_id: 3,
+                ufrag: "ufrag".to_string(),
+                pwd: "pwd".to_string(),
+                candidates: Vec::new(),
+            })
+            .await;
+        let relayed = ice_rx.try_recv().expect("matching candidates relayed");
+        assert!(matches!(
+            relayed,
+            DiscoveryMessage::IceCandidates {
+                from_party_id: 1,
+                to_party_id: 3,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_registration_rejects_program_bytes_hash_mismatch() {
+        let state = BootnodeState::new(None);
+        let conn = Arc::new(RecordingConnection::default());
+        let mut handler = BootnodeConnection::new(conn, state.clone(), None);
+
+        handler
+            .handle_session_registration(
+                registration(0, [4u8; 32]),
+                Some(b"wrong bytes".to_vec()),
+                None,
+            )
+            .await;
+
+        assert!(state.program_bytes_for(&[4u8; 32]).await.is_none());
     }
 
     #[tokio::test]
