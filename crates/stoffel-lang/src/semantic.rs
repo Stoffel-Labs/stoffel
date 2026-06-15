@@ -300,6 +300,63 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
                 None => false,
             },
+            // A `while true:` (or any constant-true condition) never falls through
+            // unless something `break`s out of it. With no escaping break the loop
+            // diverges, so the function returns (or loops forever) on this path and
+            // needs no trailing return — e.g. `while true: ... return x`.
+            AstNode::WhileLoop {
+                condition, body, ..
+            } => Self::is_const_true(condition) && !Self::contains_escaping_break(body),
+            _ => false,
+        }
+    }
+
+    /// True for a literal `true`/`True` condition.
+    fn is_const_true(node: &AstNode) -> bool {
+        matches!(
+            node,
+            AstNode::Literal {
+                value: crate::ast::Value::Bool(true),
+                ..
+            }
+        )
+    }
+
+    /// Whether `node` contains a `break` that would exit the *current* loop.
+    /// Breaks inside a nested loop target that inner loop, so nested
+    /// `WhileLoop`/`ForLoop` bodies are not descended into. Pure-expression and
+    /// leaf nodes cannot hold statements, so they contribute no break.
+    fn contains_escaping_break(node: &AstNode) -> bool {
+        match node {
+            AstNode::Break => true,
+            AstNode::WhileLoop { .. } | AstNode::ForLoop { .. } => false,
+            AstNode::Block(statements) => {
+                statements.iter().any(Self::contains_escaping_break)
+            }
+            AstNode::IfExpression {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::contains_escaping_break(then_branch)
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|branch| Self::contains_escaping_break(branch))
+            }
+            AstNode::TryCatch {
+                try_block,
+                catch_clauses,
+                finally_block,
+                ..
+            } => {
+                Self::contains_escaping_break(try_block)
+                    || catch_clauses
+                        .iter()
+                        .any(|clause| Self::contains_escaping_break(&clause.body))
+                    || finally_block
+                        .as_ref()
+                        .is_some_and(|block| Self::contains_escaping_break(block))
+            }
             _ => false,
         }
     }
