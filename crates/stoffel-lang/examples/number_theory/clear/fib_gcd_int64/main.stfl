@@ -1,0 +1,56 @@
+# The Fibonacci GCD identity: gcd(F(m), F(n)) = F(gcd(m, n)).
+# The Euclidean algorithm and the Fibonacci recurrence interlock here —
+# the same identity is why consecutive Fibonacci numbers are Euclid's
+# worst-case input.
+
+def gcd(a: int64, b: int64) -> int64:
+  var x: int64 = a
+  var y: int64 = b
+  while y != 0:
+    var t: int64 = x % y
+    x = y
+    y = t
+  return x
+
+def fib(n: int64) -> int64:
+  var a: int64 = 0
+  var b: int64 = 1
+  var i: int64 = 0
+  while i < n:
+    var next: int64 = a + b
+    a = b
+    b = next
+    i += 1
+  return a
+
+def main() -> int64:
+  # Spot values to anchor the table.
+  assert fib(10) == 55, "F(10)"
+  assert fib(12) == 144, "F(12)"
+  assert gcd(fib(10), fib(15)) == fib(5), "gcd(F10, F15) = F5 = 5"
+
+  # The identity across a grid of indices (kept below F(60) for safety).
+  var indices: list[int64] = [3, 5, 6, 9, 10, 12, 15, 18, 24, 30, 36, 48]
+  var i: int64 = 0
+  while i < indices.len():
+    var j: int64 = 0
+    while j < indices.len():
+      var m: int64 = indices[i]
+      var n: int64 = indices[j]
+      assert gcd(fib(m), fib(n)) == fib(gcd(m, n)), "gcd(F(m), F(n)) = F(gcd(m, n))"
+      j += 1
+    i += 1
+
+  # Consecutive indices are coprime, so consecutive Fibonacci numbers
+  # are too — the Euclidean worst case.
+  var k: int64 = 2
+  while k < 40:
+    assert gcd(fib(k), fib(k + 1)) == 1, "consecutive Fibonacci numbers are coprime"
+    k += 1
+
+  # Divisibility corollary: m | n implies F(m) | F(n).
+  assert fib(30) % fib(10) == 0, "F(10) divides F(30)"
+  assert fib(48) % fib(12) == 0, "F(12) divides F(48)"
+
+  print("fibonacci gcd: identity verified on a 12x12 grid of indices")
+  return 0

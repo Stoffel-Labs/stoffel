@@ -1,8 +1,8 @@
 //! MPC Builtin Functions for StoffelVM
 //!
 //! This module provides object-oriented MPC operations as foreign functions.
-//! It exposes secret sharing, RBC (Reliable Broadcast), and ABA (Asynchronous
-//! Binary Agreement) primitives as builtins.
+//! It exposes secret sharing and RBC (Reliable Broadcast) primitives as
+//! builtins.
 //!
 //! # API Pattern
 //!
@@ -32,23 +32,23 @@
 use crate::core_vm::VirtualMachine;
 use crate::VirtualMachineResult;
 
-#[cfg(feature = "avss")]
 mod avss;
 mod bytes;
 mod consensus;
 mod crypto;
+mod field;
 mod info;
 mod share;
 
-pub use crate::mpc_values::{
-    aba_fields, rbc_fields, share_fields, share_object, MpcValueError, MpcValueResult,
-};
-#[cfg(feature = "avss")]
 pub use crate::mpc_values::{avss_fields, avss_object};
+pub use crate::mpc_values::{
+    rbc_fields, share_fields, share_object, MpcValueError, MpcValueResult,
+};
 
 const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Share.from_clear",
     "Share.from_clear_int",
+    "Share.from_clear_uint",
     "Share.from_clear_fixed",
     "Share.add",
     "Share.sub",
@@ -64,10 +64,14 @@ const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Share.get_party_id",
     "Share.open_exp",
     "Share.random",
+    "Share.random_field",
+    "Share.random_int",
     "Share.get_commitment",
     "Share.commitment_count",
     "Share.has_commitments",
     "Share.mul_field",
+    "Share.add_field",
+    "Share.retag",
     "Share.open_field",
     "Share.open_exp_custom",
     "Bytes.concat",
@@ -80,6 +84,17 @@ const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Crypto.field_to_scalar_bytes",
     "Crypto.point_to_sec1",
     "Crypto.hash_to_g1",
+    "Field.from_int",
+    "Field.zero",
+    "Field.one",
+    "Field.is_zero",
+    "Field.eq",
+    "Field.add",
+    "Field.sub",
+    "Field.mul",
+    "Field.neg",
+    "Field.inverse",
+    "Field.sqrt",
     "Mpc.party_id",
     "Mpc.n_parties",
     "Mpc.threshold",
@@ -95,12 +110,8 @@ const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Rbc.broadcast",
     "Rbc.receive",
     "Rbc.receive_any",
-    "Aba.propose",
-    "Aba.result",
-    "Aba.propose_and_wait",
 ];
 
-#[cfg(feature = "avss")]
 const AVSS_BUILTIN_FUNCTIONS: &[&str] = &[
     "Avss.get_commitment",
     "Avss.get_key_name",
@@ -111,7 +122,6 @@ const AVSS_BUILTIN_FUNCTIONS: &[&str] = &[
 /// Try to register all MPC builtin functions with the VM.
 pub fn try_register_mpc_builtins(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     vm.ensure_function_names_available(MPC_BUILTIN_FUNCTIONS, "MPC builtins")?;
-    #[cfg(feature = "avss")]
     vm.ensure_function_names_available(AVSS_BUILTIN_FUNCTIONS, "AVSS builtins")?;
     register_mpc_builtins_unchecked(vm)
 }
@@ -126,10 +136,9 @@ fn register_mpc_builtins_unchecked(vm: &mut VirtualMachine) -> VirtualMachineRes
     share::register(vm)?;
     info::register(vm)?;
     consensus::register_rbc(vm)?;
-    consensus::register_aba(vm)?;
     crypto::register(vm)?;
+    field::register(vm)?;
     bytes::register(vm)?;
-    #[cfg(feature = "avss")]
     avss::register(vm)?;
     Ok(())
 }

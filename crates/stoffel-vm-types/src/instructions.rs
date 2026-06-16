@@ -67,6 +67,10 @@ pub enum ReducedOpcode {
     PUSHARG = 0x13,
     // CMP r1 r2
     CMP = 0x14,
+    // LDS r1, slot  (load register from spill slot)
+    LDS = 0x18,
+    // STS slot, r1  (store register to spill slot)
+    STS = 0x19,
 }
 
 /// Memory address or register operand
@@ -127,6 +131,11 @@ pub enum Instruction {
     PUSHARG(usize), // PUSHARG r1
     // Comparison
     CMP(usize, usize), // CMP r1, r2
+    // Spill-slot access (register allocator): a stable per-frame spill area that is
+    // independent of the volatile argument stack, so a reload can sit anywhere —
+    // including between PUSHARGs of a call.
+    LDS(usize, usize), // LDS r1, slot  -> r1 = spill[slot]
+    STS(usize, usize), // STS slot, r1  -> spill[slot] = r1
 }
 
 /// Resolved instruction with numeric indices instead of strings
@@ -172,4 +181,7 @@ pub enum ResolvedInstruction {
     PUSHARG(usize), // PUSHARG r1
     // Comparison
     CMP(usize, usize), // CMP r1, r2
+    // Spill-slot access (see symbolic form above).
+    LDS(usize, usize), // LDS r1, slot
+    STS(usize, usize), // STS slot, r1
 }

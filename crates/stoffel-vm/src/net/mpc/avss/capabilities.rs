@@ -12,7 +12,7 @@ use crate::net::mpc_engine::{
 use crate::net::open_registry::{ExpOpenRegistryKind, ExpOpenRequest};
 use crate::storage::preproc::PreprocStore;
 use ark_ec::CurveGroup;
-use ark_serialize::CanonicalSerialize;
+use ark_ff::UniformRand;
 use std::any::TypeId;
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType};
@@ -23,7 +23,7 @@ use stoffelnet::transports::quic::QuicNetworkManager;
 
 impl<F, G> AvssMpcEngine<F, G>
 where
-    F: SupportedMpcField,
+    F: SupportedMpcField + UniformRand,
     G: CurveGroup<ScalarField = F> + Send + Sync + 'static,
 {
     async fn broadcast_open_avss_exp_payload(&self, payload: Vec<u8>) -> Result<(), String> {
@@ -60,24 +60,33 @@ where
         let share_id = share.feldmanshare.id;
 
         let partial_point = generator * share_value;
-        let mut partial_bytes = Vec::new();
-        partial_point
-            .into_affine()
-            .serialize_compressed(&mut partial_bytes)
-            .map_err(|e| format!("serialize partial point: {}", e))?;
+        let partial_bytes =
+            Self::encode_verified_exp_contribution(&share, generator, partial_point)?;
 
+        let seq = self.open_registry.insert_exp_next(
+            ExpOpenRegistryKind::G1,
+            self.topology.party_id(),
+            share_id,
+            partial_bytes.clone(),
+        )?;
         let wire_message = crate::net::open_registry::encode_avss_open_exp_wire_message(
             self.topology.instance_id(),
+            seq,
             self.topology.party_id(),
             share_id,
             &partial_bytes,
         )?;
         self.broadcast_open_avss_exp_payload_sync(wire_message)?;
 
-        let required = self.topology.threshold() + 1;
+        let required_valid = self.topology.threshold() + 1;
+        let required = Self::byzantine_open_contribution_count(
+            self.topology.n_parties(),
+            self.topology.threshold(),
+        )?;
         self.open_registry.exp_open_wait(
             ExpOpenRequest {
                 kind: ExpOpenRegistryKind::G1,
+                sequence: Some(seq),
                 party_id: self.topology.party_id(),
                 share_id,
                 partial_point: &partial_bytes,
@@ -85,8 +94,15 @@ where
                 timeout_message: "Timeout waiting for AVSS open_share_in_exp contributions",
             },
             |partial_points| {
-                crate::net::group_interpolation::interpolate_compressed_group_points::<F, G, _>(
+                let verified_points = Self::filter_verified_exp_points(
+                    share_bytes,
+                    generator,
                     partial_points,
+                    required_valid,
+                    "AVSS open_share_in_exp",
+                )?;
+                crate::net::group_interpolation::interpolate_compressed_group_points::<F, G, _>(
+                    &verified_points,
                     |id| field_from_usize::<F>(id, "AVSS evaluation point"),
                     "deserialize partial point",
                     "zero denominator in AVSS Lagrange",
@@ -110,25 +126,34 @@ where
         let share_id = share.feldmanshare.id;
 
         let partial_point = generator * share_value;
-        let mut partial_bytes = Vec::new();
-        partial_point
-            .into_affine()
-            .serialize_compressed(&mut partial_bytes)
-            .map_err(|e| format!("serialize partial point: {}", e))?;
+        let partial_bytes =
+            Self::encode_verified_exp_contribution(&share, generator, partial_point)?;
 
+        let seq = self.open_registry.insert_exp_next(
+            ExpOpenRegistryKind::G1,
+            self.topology.party_id(),
+            share_id,
+            partial_bytes.clone(),
+        )?;
         let wire_message = crate::net::open_registry::encode_avss_open_exp_wire_message(
             self.topology.instance_id(),
+            seq,
             self.topology.party_id(),
             share_id,
             &partial_bytes,
         )?;
         self.broadcast_open_avss_exp_payload(wire_message).await?;
 
-        let required = self.topology.threshold() + 1;
+        let required_valid = self.topology.threshold() + 1;
+        let required = Self::byzantine_open_contribution_count(
+            self.topology.n_parties(),
+            self.topology.threshold(),
+        )?;
         self.open_registry
             .exp_open_async(
                 ExpOpenRequest {
                     kind: ExpOpenRegistryKind::G1,
+                    sequence: Some(seq),
                     party_id: self.topology.party_id(),
                     share_id,
                     partial_point: &partial_bytes,
@@ -136,8 +161,15 @@ where
                     timeout_message: "Timeout waiting for AVSS open_share_in_exp contributions",
                 },
                 |partial_points| {
-                    crate::net::group_interpolation::interpolate_compressed_group_points::<F, G, _>(
+                    let verified_points = Self::filter_verified_exp_points(
+                        share_bytes,
+                        generator,
                         partial_points,
+                        required_valid,
+                        "AVSS async_open_share_in_exp",
+                    )?;
+                    crate::net::group_interpolation::interpolate_compressed_group_points::<F, G, _>(
+                        &verified_points,
                         |id| field_from_usize::<F>(id, "AVSS evaluation point"),
                         "deserialize partial point",
                         "zero denominator in AVSS Lagrange",
@@ -154,8 +186,7 @@ where
         generator_g2_bytes: &[u8],
     ) -> Result<Vec<u8>, String> {
         use ark_bls12_381::{Fr, G2Projective};
-        use ark_ec::CurveGroup as _;
-        use ark_serialize::{CanonicalDeserialize as _, CanonicalSerialize as _};
+        use ark_serialize::CanonicalDeserialize as _;
 
         if F::CURVE_CONFIG != MpcCurveConfig::Bls12_381 {
             return Err(format!(
@@ -178,14 +209,17 @@ where
         let share_id: usize = share.feldmanshare.id;
 
         let partial_point: G2Projective = generator_g2 * share_value;
-        let mut partial_bytes = Vec::new();
-        partial_point
-            .into_affine()
-            .serialize_compressed(&mut partial_bytes)
-            .map_err(|e| format!("serialize G2 partial point: {}", e))?;
+        let partial_bytes = Self::encode_verified_g2_exp_contribution(partial_point)?;
 
+        let seq = self.open_registry.insert_exp_next(
+            ExpOpenRegistryKind::G2,
+            self.topology.party_id(),
+            share_id,
+            partial_bytes.clone(),
+        )?;
         let wire_payload = crate::net::open_registry::encode_avss_g2_open_exp_wire_message(
             self.topology.instance_id(),
+            seq,
             self.topology.party_id(),
             share_id,
             &partial_bytes,
@@ -199,10 +233,15 @@ where
             "broadcast avss g2 open-exp to",
         ))?;
 
-        let required = self.topology.threshold() + 1;
+        let required_valid = self.topology.threshold() + 1;
+        let required = Self::byzantine_open_contribution_count(
+            self.topology.n_parties(),
+            self.topology.threshold(),
+        )?;
         self.open_registry.exp_open_wait(
             ExpOpenRequest {
                 kind: ExpOpenRegistryKind::G2,
+                sequence: Some(seq),
                 party_id: self.topology.party_id(),
                 share_id,
                 partial_point: &partial_bytes,
@@ -210,12 +249,19 @@ where
                 timeout_message: "Timeout waiting for AVSS G2 open_share_in_exp contributions",
             },
             |partial_points| {
+                let verified_points = Self::filter_verified_bls12381_g2_exp_points(
+                    share_bytes,
+                    generator_g2,
+                    partial_points,
+                    required_valid,
+                    "AVSS G2 open_share_in_exp",
+                )?;
                 crate::net::group_interpolation::interpolate_compressed_group_points::<
                     Fr,
                     G2Projective,
                     _,
                 >(
-                    partial_points,
+                    &verified_points,
                     |id| usize_seed(id, "AVSS G2 evaluation point").map(Fr::from),
                     "deserialize G2 partial point",
                     "zero denominator in AVSS G2 Lagrange",
@@ -231,8 +277,7 @@ where
         generator_g2_bytes: &[u8],
     ) -> Result<Vec<u8>, String> {
         use ark_bls12_381::{Fr, G2Projective};
-        use ark_ec::CurveGroup as _;
-        use ark_serialize::{CanonicalDeserialize as _, CanonicalSerialize as _};
+        use ark_serialize::CanonicalDeserialize as _;
 
         if F::CURVE_CONFIG != MpcCurveConfig::Bls12_381 {
             return Err(format!(
@@ -255,14 +300,17 @@ where
         let share_id: usize = share.feldmanshare.id;
 
         let partial_point: G2Projective = generator_g2 * share_value;
-        let mut partial_bytes = Vec::new();
-        partial_point
-            .into_affine()
-            .serialize_compressed(&mut partial_bytes)
-            .map_err(|e| format!("serialize G2 partial point: {}", e))?;
+        let partial_bytes = Self::encode_verified_g2_exp_contribution(partial_point)?;
 
+        let seq = self.open_registry.insert_exp_next(
+            ExpOpenRegistryKind::G2,
+            self.topology.party_id(),
+            share_id,
+            partial_bytes.clone(),
+        )?;
         let wire_payload = crate::net::open_registry::encode_avss_g2_open_exp_wire_message(
             self.topology.instance_id(),
+            seq,
             self.topology.party_id(),
             share_id,
             &partial_bytes,
@@ -277,11 +325,16 @@ where
         )
         .await?;
 
-        let required = self.topology.threshold() + 1;
+        let required_valid = self.topology.threshold() + 1;
+        let required = Self::byzantine_open_contribution_count(
+            self.topology.n_parties(),
+            self.topology.threshold(),
+        )?;
         self.open_registry
             .exp_open_async(
                 ExpOpenRequest {
                     kind: ExpOpenRegistryKind::G2,
+                    sequence: Some(seq),
                     party_id: self.topology.party_id(),
                     share_id,
                     partial_point: &partial_bytes,
@@ -289,12 +342,19 @@ where
                     timeout_message: "Timeout waiting for AVSS G2 open_share_in_exp contributions",
                 },
                 |partial_points| {
+                    let verified_points = Self::filter_verified_bls12381_g2_exp_points(
+                        share_bytes,
+                        generator_g2,
+                        partial_points,
+                        required_valid,
+                        "AVSS G2 async_open_share_in_exp",
+                    )?;
                     crate::net::group_interpolation::interpolate_compressed_group_points::<
                         Fr,
                         G2Projective,
                         _,
                     >(
-                        partial_points,
+                        &verified_points,
                         |id| usize_seed(id, "AVSS G2 evaluation point").map(Fr::from),
                         "deserialize G2 partial point",
                         "zero denominator in AVSS G2 Lagrange",
@@ -389,13 +449,20 @@ where
         (|| -> Result<Vec<u8>, String> {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-field-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-field-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-field-fixed-{}-{}", precision.k(), precision.f())
                 }
             };
 
+            let seq = self.open_registry.insert_single_next(
+                &type_key,
+                self.topology.party_id(),
+                share_bytes.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_single_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 share_bytes,
@@ -406,9 +473,10 @@ where
             let t = self.topology.threshold();
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
-            self.open_registry.open_bytes_wait(
+            self.open_registry.open_bytes_at_wait(
                 self.topology.party_id(),
                 &type_key,
+                seq,
                 share_bytes,
                 required,
                 |collected| {
@@ -661,13 +729,20 @@ where
         async {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-fixed-{}-{}", precision.k(), precision.f())
                 }
             };
 
+            let seq = self.open_registry.insert_single_next(
+                &type_key,
+                self.topology.party_id(),
+                share_bytes.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_single_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 share_bytes,
@@ -679,9 +754,10 @@ where
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
             self.open_registry
-                .open_share_async(
+                .open_share_at_async(
                     self.topology.party_id(),
                     type_key,
+                    seq,
                     share_bytes.to_vec(),
                     required,
                     |collected| {
@@ -709,13 +785,20 @@ where
         async {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-batch-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-batch-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-batch-fixed-{}-{}", precision.k(), precision.f())
                 }
             };
 
+            let seq = self.open_registry.insert_batch_next(
+                &type_key,
+                self.topology.party_id(),
+                shares.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_batch_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 shares,
@@ -727,9 +810,10 @@ where
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
             self.open_registry
-                .batch_open_async(
+                .batch_open_at_async(
                     self.topology.party_id(),
                     type_key,
+                    Some(seq),
                     shares.to_vec(),
                     required,
                     |collected, pos| {
@@ -777,13 +861,20 @@ where
         async {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-field-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-field-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-field-fixed-{}-{}", precision.k(), precision.f())
                 }
             };
 
+            let seq = self.open_registry.insert_single_next(
+                &type_key,
+                self.topology.party_id(),
+                share_bytes.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_single_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 share_bytes,
@@ -795,9 +886,10 @@ where
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
             self.open_registry
-                .open_bytes_async(
+                .open_bytes_at_async(
                     self.topology.party_id(),
                     type_key,
+                    seq,
                     share_bytes.to_vec(),
                     required,
                     |collected| {

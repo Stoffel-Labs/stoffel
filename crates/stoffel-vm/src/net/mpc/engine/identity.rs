@@ -1,8 +1,60 @@
 use super::traits::MpcEngine;
 use super::{MpcCapabilities, MpcCapability};
 use crate::net::curve::{MpcCurveConfig, MpcFieldKind};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::num::NonZeroUsize;
+use x509_parser::prelude::*;
+
+/// Durable program-side identity used for local persistent MPC state.
+///
+/// Transport party IDs and client IDs are allocation artifacts that can change
+/// across runs. Persistent VM state instead keys node/client ownership to this
+/// digest, derived from certificate public-key material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct DurableIdentityDigest([u8; 32]);
+
+impl DurableIdentityDigest {
+    const DOMAIN: &'static [u8] = b"stoffel-identity-v1";
+    const LEGACY_DOMAIN: &'static [u8] = b"stoffel-legacy-party-id-v1";
+
+    pub fn from_public_key_bytes(bytes: &[u8]) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN);
+        hasher.update(bytes);
+        Self(*hasher.finalize().as_bytes())
+    }
+
+    pub fn from_cert_der(cert_der: &[u8]) -> Result<Self, String> {
+        let (_, cert) = X509Certificate::from_der(cert_der)
+            .map_err(|error| format!("parse X.509 certificate: {error:?}"))?;
+        Ok(Self::from_public_key_bytes(cert.public_key().raw))
+    }
+
+    pub fn from_legacy_party_id(party_id: usize) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::LEGACY_DOMAIN);
+        hasher.update(&party_id.to_le_bytes());
+        Self(*hasher.finalize().as_bytes())
+    }
+
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl fmt::Display for DurableIdentityDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
 
 /// Stable identifier for one MPC protocol instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -244,26 +296,6 @@ impl fmt::Display for RbcSessionId {
     }
 }
 
-/// Session handle returned by asynchronous binary agreement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AbaSessionId(u64);
-
-impl AbaSessionId {
-    pub const fn new(id: u64) -> Self {
-        Self(id)
-    }
-
-    pub const fn id(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for AbaSessionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
 /// Stable runtime identity for an MPC engine attached to a VM.
 ///
 /// Async execution receives an engine reference separately from the VM state.
@@ -273,6 +305,7 @@ impl fmt::Display for AbaSessionId {
 pub struct MpcEngineIdentity {
     protocol_name: &'static str,
     topology: MpcSessionTopology,
+    local_identity: DurableIdentityDigest,
     curve_config: MpcCurveConfig,
     field_kind: MpcFieldKind,
 }
@@ -282,6 +315,7 @@ impl MpcEngineIdentity {
         Self {
             protocol_name: engine.protocol_name(),
             topology: engine.topology(),
+            local_identity: MpcEngine::local_identity(engine),
             curve_config: engine.curve_config(),
             field_kind: engine.field_kind(),
         }
@@ -301,6 +335,10 @@ impl MpcEngineIdentity {
 
     pub fn party(self) -> MpcPartyId {
         self.topology.party()
+    }
+
+    pub const fn local_identity(self) -> DurableIdentityDigest {
+        self.local_identity
     }
 
     pub const fn party_count(self) -> MpcPartyCount {
@@ -324,10 +362,11 @@ impl fmt::Display for MpcEngineIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "'{}' (instance {}, party {}, parties {}, threshold {}, curve {}, field {})",
+            "'{}' (instance {}, party {}, identity {}, parties {}, threshold {}, curve {}, field {})",
             self.protocol_name,
             self.topology.instance_id(),
             self.topology.party(),
+            self.local_identity,
             self.topology.n_parties(),
             self.topology.threshold(),
             self.curve_config.name(),
@@ -387,6 +426,10 @@ impl MpcRuntimeInfo {
 
     pub fn party(self) -> MpcPartyId {
         self.identity.party()
+    }
+
+    pub const fn local_identity(self) -> DurableIdentityDigest {
+        self.identity.local_identity()
     }
 
     pub const fn party_count(self) -> MpcPartyCount {

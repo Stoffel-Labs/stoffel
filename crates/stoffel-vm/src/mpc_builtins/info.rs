@@ -1,6 +1,6 @@
 use crate::core_vm::VirtualMachine;
 use crate::net::mpc_engine::MpcCapability;
-use crate::value_conversions::{u64_to_vm_i64, usize_to_vm_i64};
+use crate::value_conversions::usize_to_vm_i64;
 use crate::VirtualMachineResult;
 use stoffel_vm_types::core_types::Value;
 
@@ -42,10 +42,7 @@ fn register_engine_info(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
 
     vm.try_register_typed_foreign_function("Mpc.instance_id", |ctx| {
         let info = ctx.require_mpc_runtime_info()?;
-        Ok(Value::I64(u64_to_vm_i64(
-            info.instance().id(),
-            "instance_id",
-        )?))
+        Ok(Value::U64(info.instance().id()))
     })?;
 
     vm.try_register_typed_foreign_function("Mpc.protocol_name", |ctx| {
@@ -66,9 +63,10 @@ fn register_engine_info(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     vm.try_register_typed_foreign_function("Mpc.has_capability", |ctx| {
         let args = ctx.named_args("Mpc.has_capability");
         args.require_exact(1, "1 argument: capability")?;
-        let capability =
-            MpcCapability::parse_name(args.string(0, "capability")?).map_err(String::from)?;
         let info = ctx.require_mpc_runtime_info()?;
+        let Some(capability) = MpcCapability::parse_name(args.string(0, "capability")?).ok() else {
+            return Ok(Value::Bool(false));
+        };
         Ok(Value::Bool(info.has_capability(capability)))
     })?;
 

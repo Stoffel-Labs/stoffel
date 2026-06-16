@@ -1,0 +1,13 @@
+# Test nested generic types
+
+# Basic nested list
+var matrix: list[list[int64]] = [[1, 2], [3, 4]]
+
+# Nested list with secret inner type
+var secret_matrix: list[list[secret int64]] = [[1, 2], [3, 4]]
+
+# Dict with list values
+var dict_of_lists: dict[string, list[int64]] = {"a": [1, 2], "b": [3, 4]}
+
+# Triple nested
+var deep: list[list[list[int64]]] = [[[1, 2]], [[3, 4]]]

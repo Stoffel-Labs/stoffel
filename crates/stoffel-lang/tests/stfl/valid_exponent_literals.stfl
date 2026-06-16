@@ -1,0 +1,11 @@
+# Scientific notation float literals (1e3, 2.5e-2).
+# Desired: supported. Currently suspected to fail lexing.
+def main() -> int64:
+  var ok = 2300
+  var a = 1e3
+  if a == 1000.0:
+    ok += 1
+  var b = 25e-1
+  if b == 2.5:
+    ok += 1
+  return ok

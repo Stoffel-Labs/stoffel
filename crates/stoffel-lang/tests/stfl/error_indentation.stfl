@@ -1,0 +1,21 @@
+# Indentation Errors
+
+var x = 10
+
+# Inconsistent dedentation
+if x > 5:
+  var y = 20
+ var z = 30 # Error: Dedented too far or inconsistently
+
+# Expected indentation
+if x < 100:
+  var a = 1 # Error: Expected an indented block
+
+# Mixed tabs and spaces (Lexer should catch this)
+if x == 10:
+    var tab_indent = 1 # Using a tab character (will cause lexer error)
+    var space_indent = 2 # Using spaces
+
+# Unexpected indentation
+var top_level = 1
+  var bad_indent = 2 # Error: Unexpected indent at top level

@@ -14,6 +14,7 @@
 
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::any::Any;
 use std::fmt;
@@ -337,6 +338,64 @@ impl Array {
         Ok(self.length_hint)
     }
 
+    pub fn try_replace_values(&mut self, values: Vec<Value>) -> TableMemoryResult<usize> {
+        let new_len = values.len();
+        i64::try_from(new_len).map_err(|_| TableMemoryError::VmIntegerRangeExceeded {
+            label: "Array length",
+            value: new_len,
+        })?;
+
+        self.elements.clear();
+        self.extra_fields.retain(|key, _| {
+            !Self::is_length_index_key(key, self.length_hint)
+                && !matches!(key, Value::I64(idx) if *idx >= 0)
+        });
+        self.length_hint = 0;
+        self.try_push_values(&values)
+    }
+
+    pub fn try_pop_at(&mut self, index: usize) -> TableMemoryResult<Option<Value>> {
+        if index >= self.length_hint {
+            return Ok(None);
+        }
+
+        let mut values = self.values()?;
+        let value = values.remove(index);
+        self.try_replace_values(values)?;
+        Ok(Some(value))
+    }
+
+    pub fn try_insert_at(&mut self, index: usize, value: Value) -> TableMemoryResult<usize> {
+        let mut values = self.values()?;
+        let index = index.min(values.len());
+        values.insert(index, value);
+        self.try_replace_values(values)
+    }
+
+    pub fn try_clear(&mut self) -> TableMemoryResult<()> {
+        self.try_replace_values(Vec::new()).map(|_| ())
+    }
+
+    pub fn try_reverse(&mut self) -> TableMemoryResult<()> {
+        let mut values = self.values()?;
+        values.reverse();
+        self.try_replace_values(values).map(|_| ())
+    }
+
+    pub fn values(&self) -> TableMemoryResult<Vec<Value>> {
+        let mut values = Vec::with_capacity(self.length_hint);
+        for index in 0..self.length_hint {
+            let index_i64 =
+                i64::try_from(index).map_err(|_| TableMemoryError::VmIntegerRangeExceeded {
+                    label: "Array index",
+                    value: index,
+                })?;
+            let key = Value::I64(index_i64);
+            values.push(self.get(&key).cloned().unwrap_or(Value::Unit));
+        }
+        Ok(values)
+    }
+
     pub fn length(&self) -> usize {
         self.length_hint
     }
@@ -525,7 +584,7 @@ pub const DEFAULT_FIXED_POINT_FRACTIONAL_BITS: usize = 16;
 /// This deliberately lives in `stoffel-vm-types` instead of an MPC backend crate
 /// so bytecode/value metadata remains independent from the protocol selected at
 /// runtime. Backends can map this shape onto their own fixed-point encodings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FixedPointPrecision {
     total_bits: usize,
     fractional_bits: usize,
@@ -623,10 +682,12 @@ impl FixedPointPrecision {
 }
 
 /// Enum to represent the underlying type of a secret share
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ShareType {
     /// Secure integer shares (mirrors `SecretInt` in mpc-protocols)
     SecretInt { bit_length: usize },
+    /// Secure unsigned integer shares.
+    SecretUInt { bit_length: usize },
     /// Secure fixed-point shares (mirrors `SecretFixedPoint` in mpc-protocols)
     SecretFixedPoint { precision: FixedPointPrecision },
 }
@@ -641,6 +702,18 @@ impl ShareType {
 
     pub fn secret_int(bit_length: usize) -> Self {
         Self::try_secret_int(bit_length).expect("secret integers require a positive bit length")
+    }
+
+    pub fn try_secret_uint(bit_length: usize) -> ShareTypeResult<Self> {
+        if bit_length == 0 {
+            return Err(ShareTypeError::SecretIntBitLengthZero);
+        }
+        Ok(ShareType::SecretUInt { bit_length })
+    }
+
+    pub fn secret_uint(bit_length: usize) -> Self {
+        Self::try_secret_uint(bit_length)
+            .expect("secret unsigned integers require a positive bit length")
     }
 
     pub fn boolean() -> Self {
@@ -677,7 +750,9 @@ impl ShareType {
 
     pub fn bit_length(&self) -> Option<usize> {
         match self {
-            ShareType::SecretInt { bit_length } => Some(*bit_length),
+            ShareType::SecretInt { bit_length } | ShareType::SecretUInt { bit_length } => {
+                Some(*bit_length)
+            }
             _ => None,
         }
     }
@@ -708,6 +783,10 @@ impl Hash for ShareType {
                 0u8.hash(state);
                 bit_length.hash(state);
             }
+            ShareType::SecretUInt { bit_length } => {
+                2u8.hash(state);
+                bit_length.hash(state);
+            }
             ShareType::SecretFixedPoint { precision } => {
                 1u8.hash(state);
                 precision.k().hash(state);
@@ -720,6 +799,7 @@ impl Hash for ShareType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClearShareValue {
     Integer(i64),
+    UnsignedInteger(u64),
     FixedPoint(F64),
     Boolean(bool),
 }
@@ -1094,6 +1174,7 @@ impl ClearShareValue {
     pub fn into_vm_value(self) -> Value {
         match self {
             ClearShareValue::Integer(value) => Value::I64(value),
+            ClearShareValue::UnsignedInteger(value) => Value::U64(value),
             ClearShareValue::FixedPoint(value) => Value::Float(value),
             ClearShareValue::Boolean(value) => Value::Bool(value),
         }
@@ -1584,6 +1665,44 @@ pub trait TableMemory: Send + Sync {
         array_ref: ArrayRef,
         values: &[Value],
     ) -> TableMemoryResult<usize>;
+    fn pop_array_ref_value(
+        &mut self,
+        _array_ref: ArrayRef,
+        _index: usize,
+    ) -> TableMemoryResult<Option<Value>> {
+        Err(TableMemoryError::backend(
+            "array pop is not supported by this table memory backend",
+        ))
+    }
+    fn insert_array_ref_value(
+        &mut self,
+        _array_ref: ArrayRef,
+        _index: usize,
+        _value: Value,
+    ) -> TableMemoryResult<usize> {
+        Err(TableMemoryError::backend(
+            "array insert is not supported by this table memory backend",
+        ))
+    }
+    fn replace_array_ref_values(
+        &mut self,
+        _array_ref: ArrayRef,
+        _values: Vec<Value>,
+    ) -> TableMemoryResult<usize> {
+        Err(TableMemoryError::backend(
+            "array replacement is not supported by this table memory backend",
+        ))
+    }
+    fn clear_array_ref(&mut self, _array_ref: ArrayRef) -> TableMemoryResult<()> {
+        Err(TableMemoryError::backend(
+            "array clear is not supported by this table memory backend",
+        ))
+    }
+    fn reverse_array_ref(&mut self, _array_ref: ArrayRef) -> TableMemoryResult<()> {
+        Err(TableMemoryError::backend(
+            "array reverse is not supported by this table memory backend",
+        ))
+    }
     /// Semantically read an object length through the VM-visible memory path.
     fn read_object_ref_len(&mut self, object_ref: ObjectRef) -> TableMemoryResult<usize>;
     /// Semantically read object entries through the VM-visible memory path.
@@ -1891,6 +2010,54 @@ impl TableMemory for ObjectStore {
             .get_array_ref_mut(array_ref)
             .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
         array.try_push_values(values)
+    }
+
+    fn pop_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+    ) -> TableMemoryResult<Option<Value>> {
+        let array = self
+            .get_array_ref_mut(array_ref)
+            .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
+        array.try_pop_at(index)
+    }
+
+    fn insert_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+        value: Value,
+    ) -> TableMemoryResult<usize> {
+        let array = self
+            .get_array_ref_mut(array_ref)
+            .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
+        array.try_insert_at(index, value)
+    }
+
+    fn replace_array_ref_values(
+        &mut self,
+        array_ref: ArrayRef,
+        values: Vec<Value>,
+    ) -> TableMemoryResult<usize> {
+        let array = self
+            .get_array_ref_mut(array_ref)
+            .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
+        array.try_replace_values(values)
+    }
+
+    fn clear_array_ref(&mut self, array_ref: ArrayRef) -> TableMemoryResult<()> {
+        let array = self
+            .get_array_ref_mut(array_ref)
+            .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
+        array.try_clear()
+    }
+
+    fn reverse_array_ref(&mut self, array_ref: ArrayRef) -> TableMemoryResult<()> {
+        let array = self
+            .get_array_ref_mut(array_ref)
+            .ok_or_else(|| ObjectStore::array_not_found(array_ref))?;
+        array.try_reverse()
     }
 
     fn read_object_ref_len(&mut self, object_ref: ObjectRef) -> TableMemoryResult<usize> {

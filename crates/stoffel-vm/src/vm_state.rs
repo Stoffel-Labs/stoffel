@@ -48,7 +48,9 @@ mod share_objects;
 mod table_memory;
 mod upvalues;
 
-pub(crate) use effect::{CompletedVmEffect, VmEffect, VmExecutionBudget, VmRunSlice};
+pub(crate) use effect::{
+    CompletedVmEffect, VmEffect, VmEffectKind, VmEffectSummary, VmExecutionBudget, VmRunSlice,
+};
 
 pub(crate) struct VMStateConfig {
     table_memory: Box<dyn TableMemory>,
@@ -56,6 +58,7 @@ pub(crate) struct VMStateConfig {
     mpc_engine: Option<Arc<dyn MpcEngine>>,
     output_sink: Arc<dyn VmOutputSink>,
     local_storage: Option<Arc<Mutex<Box<dyn LocalStorage>>>>,
+    local_storage_party_id: Option<usize>,
 }
 
 impl Default for VMStateConfig {
@@ -66,6 +69,7 @@ impl Default for VMStateConfig {
             mpc_engine: None,
             output_sink: Arc::new(StdoutOutputSink),
             local_storage: None,
+            local_storage_party_id: None,
         }
     }
 }
@@ -96,6 +100,11 @@ impl VMStateConfig {
         local_storage: Arc<Mutex<Box<dyn LocalStorage>>>,
     ) -> Self {
         self.local_storage = Some(local_storage);
+        self
+    }
+
+    pub(crate) fn with_local_storage_party_id(mut self, party_id: usize) -> Self {
+        self.local_storage_party_id = Some(party_id);
         self
     }
 }
@@ -141,6 +150,8 @@ pub(crate) struct VMState {
     output_sink: Arc<dyn VmOutputSink>,
     /// Persistent local storage configured for VM programs.
     local_storage: Option<Arc<Mutex<Box<dyn LocalStorage>>>>,
+    /// Stable physical node slot used to encode persistent MPC shares.
+    local_storage_party_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +223,7 @@ impl VMState {
             register_layout: config.register_layout,
             output_sink: config.output_sink,
             local_storage: config.local_storage,
+            local_storage_party_id: config.local_storage_party_id,
         }
     }
 
@@ -222,6 +234,9 @@ impl VMState {
             .with_output_sink(Arc::clone(&self.output_sink));
         if let Some(local_storage) = &self.local_storage {
             config = config.with_shared_local_storage(Arc::clone(local_storage));
+        }
+        if let Some(party_id) = self.local_storage_party_id {
+            config = config.with_local_storage_party_id(party_id);
         }
 
         let mut cloned = Self::from_config(config);

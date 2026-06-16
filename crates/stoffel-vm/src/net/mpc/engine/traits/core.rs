@@ -1,7 +1,7 @@
 use super::super::{
-    MpcCapabilities, MpcCapability, MpcEngineError, MpcEngineIdentity, MpcEngineResult,
-    MpcInstanceId, MpcPartyCount, MpcPartyId, MpcSessionTopology, MpcSessionTopologyError,
-    MpcThreshold, ShareAlgebraResult,
+    DurableIdentityDigest, MpcCapabilities, MpcCapability, MpcEngineError, MpcEngineIdentity,
+    MpcEngineResult, MpcInstanceId, MpcPartyCount, MpcPartyId, MpcSessionTopology,
+    MpcSessionTopologyError, MpcThreshold, ShareAlgebraResult,
 };
 use super::capability::{
     MpcEngineClientOps, MpcEngineClientOutput, MpcEngineFieldOpen, MpcEngineMultiplication,
@@ -196,6 +196,21 @@ pub trait MpcEngine: Send + Sync {
         )
     }
 
+    /// Locally add a serialized field element to a share owned by this party.
+    fn add_share_field_local(
+        &self,
+        ty: ShareType,
+        share_bytes: &[u8],
+        field_bytes: &[u8],
+    ) -> ShareAlgebraResult<Vec<u8>> {
+        crate::net::share_algebra::add_share_field_for_curve(
+            self.curve_config(),
+            ty,
+            share_bytes,
+            field_bytes,
+        )
+    }
+
     /// Locally reconstruct a secret from explicit share bytes.
     fn interpolate_shares_local(
         &self,
@@ -217,6 +232,11 @@ pub trait MpcEngine: Send + Sync {
     /// Typed party identity for this node.
     fn party(&self) -> MpcPartyId {
         self.topology().party()
+    }
+
+    /// Durable identity used to key persistent local MPC state.
+    fn local_identity(&self) -> DurableIdentityDigest {
+        DurableIdentityDigest::from_legacy_party_id(self.party().id())
     }
 
     /// Fallible typed party count for this MPC session.

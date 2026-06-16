@@ -1,0 +1,43 @@
+def main() -> None:
+  var age: int64 = 30
+  var bonusYears: int64 = 3
+  var threshold: int64 = 25
+  var upper: int64 = 40
+  var salary: secret int64 = 5000
+
+  # Basic relational operators on public ints inside if
+  if age > threshold:
+    salary = salary + 1000
+
+  if age >= 30:
+    salary = salary + 10
+
+  if age < upper:
+    salary = salary + 20
+
+  if age <= 35:
+    salary = salary + 30
+
+  if age == 30:
+    salary = salary + 40
+
+  if age != 31:
+    salary = salary + 50
+
+  # While with public comparison
+  while age < 32:
+    age = age + 1
+    salary = salary + 1
+
+  # Mix an expression on the left and a literal on the right
+  if (age - bonusYears) >= 27:
+    salary = salary + 2
+
+  # Keep the compiler from optimizing everything away; touch public var
+  var touch: int64 = 0
+  if threshold < upper:
+    # no-op
+    touch = touch
+
+  # Program end
+  discard touch

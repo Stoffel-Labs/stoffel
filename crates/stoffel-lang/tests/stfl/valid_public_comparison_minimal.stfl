@@ -1,0 +1,15 @@
+def main() -> None:
+  var a: int64 = 1
+  var b: int64 = 2
+  var s: secret int64 = 0
+
+  if a < b:
+    # simple arithmetic to ensure code path executes
+    # (still fine even if not executed at runtime)
+    discard s
+
+  while a < 1:
+    discard s
+
+  if (a + 10) >= 5:
+    discard s

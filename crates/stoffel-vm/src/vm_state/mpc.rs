@@ -6,11 +6,10 @@ use crate::net::client_store::{
     ClientShareIndex,
 };
 use crate::net::mpc_engine::{
-    AbaSessionId, MpcEngine, MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
+    MpcEngine, MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
 };
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType, Value};
-#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelnet::network_utils::ClientId;
 
@@ -57,27 +56,31 @@ impl VMState {
         self.mpc_runtime.rbc_receive_any(timeout_ms)
     }
 
-    pub(crate) fn aba_propose(&self, value: bool) -> VmResult<AbaSessionId> {
-        self.mpc_runtime.aba_propose(value)
-    }
-
-    pub(crate) fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> VmResult<bool> {
-        self.mpc_runtime.aba_result(session_id, timeout_ms)
-    }
-
-    pub(crate) fn aba_propose_and_wait(&self, value: bool, timeout_ms: u64) -> VmResult<bool> {
-        self.mpc_runtime.aba_propose_and_wait(value, timeout_ms)
-    }
-
     /// Get the number of clients that have provided inputs.
     #[inline]
     pub(crate) fn client_store_len(&self) -> usize {
         self.mpc_runtime.client_store_len()
     }
 
-    #[cfg(feature = "honeybadger")]
+    #[inline]
+    pub(crate) fn input_client_count(&self) -> usize {
+        self.mpc_runtime.input_client_count()
+    }
+
+    #[inline]
+    pub(crate) fn output_client_count(&self) -> usize {
+        self.mpc_runtime.output_client_count()
+    }
+
     pub(crate) fn client_input_store(&self) -> Arc<crate::net::client_store::ClientInputStore> {
         self.mpc_runtime.client_store()
+    }
+
+    pub(crate) fn set_client_roster<I>(&self, clients: I)
+    where
+        I: IntoIterator<Item = ClientId>,
+    {
+        self.mpc_runtime.set_client_roster(clients);
     }
 
     /// Get a client ID by index in sorted order.
@@ -113,7 +116,6 @@ impl VMState {
     }
 
     /// Store HoneyBadger client shares through the runtime boundary.
-    #[cfg(feature = "honeybadger")]
     pub(crate) fn try_store_client_input<F>(
         &self,
         client_id: ClientId,
@@ -125,8 +127,21 @@ impl VMState {
         self.mpc_runtime.try_store_client_input(client_id, shares)
     }
 
+    /// Store HoneyBadger client shares with per-input manifest share types.
+    pub(crate) fn try_store_client_input_with_types<F>(
+        &self,
+        client_id: ClientId,
+        shares: Vec<RobustShare<F>>,
+        share_types: &[ShareType],
+    ) -> VmResult<usize>
+    where
+        F: ark_ff::FftField,
+    {
+        self.mpc_runtime
+            .try_store_client_input_with_types(client_id, shares, share_types)
+    }
+
     /// Store AVSS Feldman client shares through the runtime boundary.
-    #[cfg(feature = "avss")]
     pub(crate) fn try_store_client_input_feldman<F, G>(
         &self,
         client_id: ClientId,
@@ -140,8 +155,22 @@ impl VMState {
             .try_store_client_input_feldman(client_id, shares)
     }
 
+    /// Store AVSS Feldman client shares with per-input manifest share types.
+    pub(crate) fn try_store_client_input_feldman_with_types<F, G>(
+        &self,
+        client_id: ClientId,
+        shares: Vec<stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare<F, G>>,
+        share_types: &[ShareType],
+    ) -> VmResult<usize>
+    where
+        F: ark_ff::FftField + ark_ff::PrimeField,
+        G: ark_ec::CurveGroup<ScalarField = F>,
+    {
+        self.mpc_runtime
+            .try_store_client_input_feldman_with_types(client_id, shares, share_types)
+    }
+
     /// Replace all VM client inputs with robust shares.
-    #[cfg(feature = "honeybadger")]
     pub(crate) fn try_replace_client_input<F, I>(&self, inputs: I) -> VmResult<usize>
     where
         F: ark_ff::FftField,
@@ -151,7 +180,6 @@ impl VMState {
     }
 
     /// Retrieve a robust share for a client input.
-    #[cfg(feature = "honeybadger")]
     pub(crate) fn client_share<F>(
         &self,
         client_id: ClientId,
@@ -170,7 +198,7 @@ impl VMState {
         index: ClientShareIndex,
     ) -> VmResult<Value> {
         self.mpc_runtime
-            .client_share_as(client_id, index, ClientShareRequest::default_secret_int())
+            .client_share_inferred_or_default(client_id, index)
     }
 
     /// Load a client's input share with an explicit VM share type.
@@ -219,6 +247,10 @@ impl VMState {
 
     pub(crate) fn random_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
         self.share_runtime()?.random_share_data(ty)
+    }
+
+    pub(crate) fn random_integer_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
+        self.share_runtime()?.random_integer_share_data(ty)
     }
 
     pub(crate) fn open_share_as_field_data(
@@ -337,6 +369,16 @@ impl VMState {
     ) -> VmResult<ShareData> {
         self.share_runtime()?
             .mul_field_data(ty, share_data, scalar_bytes)
+    }
+
+    pub(crate) fn secret_share_add_field_data(
+        &self,
+        ty: ShareType,
+        share_data: &ShareData,
+        field_bytes: &[u8],
+    ) -> VmResult<ShareData> {
+        self.share_runtime()?
+            .add_field_data(ty, share_data, field_bytes)
     }
 
     #[cfg(test)]

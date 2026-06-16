@@ -1,0 +1,46 @@
+# run-args: --expected-output-clients 1
+# Joint Random Bit Sharing (Damgard, Fitzi, Kiltz, Nielsen, Toft).
+#
+# The parties jointly produce a secret-shared uniformly random bit a in {0, 1}
+# without any party learning it, in a constant number of rounds:
+#
+#   1. Draw [r] uniformly at random over the whole field and reveal r^2 = r * r.
+#   2. If r^2 == 0 (probability 1/p, negligible) retry.
+#   3. Take r' = sqrt(r^2), the canonical root with 0 < r' < p/2.
+#   4. Set [a] = 2^-1 * (r'^-1 * [r] + 1).
+#
+# Because r'^-1 * r is +1 or -1 with equal probability, [a] is a uniform bit.
+#
+# r^2, r', r'^-1 and 2^-1 are all PUBLIC field values: r^2 is revealed, and the
+# square root and inverse are deterministic functions of it, so every party
+# computes the same constants locally and folds them back into the share with the
+# local Field-scalar operations (mul_field / add_field).
+#
+# IMPORTANT: r must be uniform over the whole field, so it uses
+# `Share.random_field()`. A bounded `secret int64` random would always be < p/2,
+# which collapses the result to the constant bit 1.
+def random_bit() -> secret bool:
+  while True:
+    var r = Share.random_field()
+    var r_squared = Share.open_field(Share.mul(r, r))
+
+    if Field.is_zero(r_squared):
+      continue
+
+    var r_prime = Field.sqrt(r_squared)              # canonical root in (0, p/2)
+    var r_prime_inv = Field.inverse(r_prime)         # r'^-1
+    var two_inv = Field.inverse(Field.from_int(2))   # 2^-1
+
+    var c = Share.mul_field(r, r_prime_inv)          # [c] = r'^-1 [r] in {-1, +1}
+    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
+    # `a` holds 0 or 1; retag the wide field share as a 1-bit `secret bool`.
+    return Share.retag(a, 1)
+
+def main() -> bool:
+  # No client inputs: this protocol generates a fresh shared random bit.
+  # Reveal it here so the example has an observable result, and (when client
+  # output is available) also hand the secret bit to client 0.
+  var bit: secret bool = random_bit()
+  if Mpc.has_capability("client-output"):
+    bit.send_to_client(0)
+  return bit.reveal()

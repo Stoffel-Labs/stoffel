@@ -18,6 +18,7 @@ pub(super) const AVSS_G2_EXP_WIRE_PREFIX: &[u8; 4] = b"AXG2";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ExpOpenWireMessage {
     pub(super) instance_id: u64,
+    pub(super) seq: u64,
     pub(super) sender_party_id: usize,
     pub(super) share_id: usize,
     pub(super) partial_point: Vec<u8>,
@@ -26,26 +27,36 @@ pub(super) struct ExpOpenWireMessage {
 pub(super) enum OpenRegistryWireMessage {
     Single {
         instance_id: u64,
+        seq: u64,
         type_key: String,
         sender_party_id: usize,
         share: Vec<u8>,
     },
     Batch {
         instance_id: u64,
+        seq: u64,
         type_key: String,
         sender_party_id: usize,
         shares: Vec<Vec<u8>>,
+    },
+    Rbc {
+        instance_id: u64,
+        session_id: u64,
+        sender_party_id: usize,
+        message: Vec<u8>,
     },
 }
 
 pub fn encode_single_share_wire_message(
     instance_id: u64,
+    seq: usize,
     type_key: &str,
     sender_party_id: usize,
     share_bytes: &[u8],
 ) -> Result<Vec<u8>, String> {
     let payload = OpenRegistryWireMessage::Single {
         instance_id,
+        seq: seq as u64,
         type_key: type_key.to_string(),
         sender_party_id,
         share: share_bytes.to_vec(),
@@ -60,12 +71,14 @@ pub fn encode_single_share_wire_message(
 
 pub fn encode_batch_share_wire_message(
     instance_id: u64,
+    seq: usize,
     type_key: &str,
     sender_party_id: usize,
     shares: &[Vec<u8>],
 ) -> Result<Vec<u8>, String> {
     let payload = OpenRegistryWireMessage::Batch {
         instance_id,
+        seq: seq as u64,
         type_key: type_key.to_string(),
         sender_party_id,
         shares: shares.to_vec(),
@@ -78,16 +91,38 @@ pub fn encode_batch_share_wire_message(
     Ok(out)
 }
 
+pub fn encode_rbc_wire_message(
+    instance_id: u64,
+    session_id: u64,
+    sender_party_id: usize,
+    message: &[u8],
+) -> Result<Vec<u8>, String> {
+    let payload = OpenRegistryWireMessage::Rbc {
+        instance_id,
+        session_id,
+        sender_party_id,
+        message: message.to_vec(),
+    };
+    let encoded =
+        bincode::serialize(&payload).map_err(|e| format!("serialize RBC payload: {}", e))?;
+    let mut out = Vec::with_capacity(OPEN_REGISTRY_WIRE_PREFIX.len() + encoded.len());
+    out.extend_from_slice(OPEN_REGISTRY_WIRE_PREFIX);
+    out.extend_from_slice(&encoded);
+    Ok(out)
+}
+
 fn encode_exp_open_wire_message(
     prefix: &[u8; 4],
     serialize_context: &str,
     instance_id: u64,
+    seq: usize,
     sender_party_id: usize,
     share_id: usize,
     partial_point: &[u8],
 ) -> Result<Vec<u8>, String> {
     let payload = ExpOpenWireMessage {
         instance_id,
+        seq: seq as u64,
         sender_party_id,
         share_id,
         partial_point: partial_point.to_vec(),
@@ -101,6 +136,7 @@ fn encode_exp_open_wire_message(
 
 pub fn encode_hb_open_exp_wire_message(
     instance_id: u64,
+    seq: usize,
     sender_party_id: usize,
     share_id: usize,
     partial_point: &[u8],
@@ -109,6 +145,7 @@ pub fn encode_hb_open_exp_wire_message(
         HB_EXP_OPEN_WIRE_PREFIX,
         "serialize open-exp payload",
         instance_id,
+        seq,
         sender_party_id,
         share_id,
         partial_point,
@@ -117,6 +154,7 @@ pub fn encode_hb_open_exp_wire_message(
 
 pub fn encode_avss_open_exp_wire_message(
     instance_id: u64,
+    seq: usize,
     sender_party_id: usize,
     share_id: usize,
     partial_point: &[u8],
@@ -125,6 +163,7 @@ pub fn encode_avss_open_exp_wire_message(
         AVSS_EXP_WIRE_PREFIX,
         "serialize avss open-exp payload",
         instance_id,
+        seq,
         sender_party_id,
         share_id,
         partial_point,
@@ -133,6 +172,7 @@ pub fn encode_avss_open_exp_wire_message(
 
 pub fn encode_avss_g2_open_exp_wire_message(
     instance_id: u64,
+    seq: usize,
     sender_party_id: usize,
     share_id: usize,
     partial_point: &[u8],
@@ -141,6 +181,7 @@ pub fn encode_avss_g2_open_exp_wire_message(
         AVSS_G2_EXP_WIRE_PREFIX,
         "serialize avss g2 open-exp payload",
         instance_id,
+        seq,
         sender_party_id,
         share_id,
         partial_point,

@@ -1,0 +1,93 @@
+# Scalar and elementwise algebra on uint64 matrices: trace linearity,
+# distributivity of scalar multiplication over addition, and the
+# Hadamard (elementwise) product.
+
+def mat_add(a: list[list[uint64]], b: list[list[uint64]]) -> list[list[uint64]]:
+  var out: list[list[uint64]] = []
+  var i: int64 = 0
+  while i < a.len():
+    var row: list[uint64] = []
+    var j: int64 = 0
+    while j < a[i].len():
+      row.append(a[i][j] + b[i][j])
+      j += 1
+    out.append(row)
+    i += 1
+  return out
+
+def mat_scale(k: uint64, a: list[list[uint64]]) -> list[list[uint64]]:
+  var out: list[list[uint64]] = []
+  var i: int64 = 0
+  while i < a.len():
+    var row: list[uint64] = []
+    var j: int64 = 0
+    while j < a[i].len():
+      row.append(k * a[i][j])
+      j += 1
+    out.append(row)
+    i += 1
+  return out
+
+def hadamard(a: list[list[uint64]], b: list[list[uint64]]) -> list[list[uint64]]:
+  var out: list[list[uint64]] = []
+  var i: int64 = 0
+  while i < a.len():
+    var row: list[uint64] = []
+    var j: int64 = 0
+    while j < a[i].len():
+      row.append(a[i][j] * b[i][j])
+      j += 1
+    out.append(row)
+    i += 1
+  return out
+
+def trace(a: list[list[uint64]]) -> uint64:
+  var acc: uint64 = 0u64
+  var i: int64 = 0
+  while i < a.len():
+    acc += a[i][i]
+    i += 1
+  return acc
+
+def mat_equal(a: list[list[uint64]], b: list[list[uint64]]) -> bool:
+  var i: int64 = 0
+  while i < a.len():
+    var j: int64 = 0
+    while j < a[i].len():
+      if a[i][j] != b[i][j]:
+        return False
+      j += 1
+    i += 1
+  return True
+
+def main() -> int64:
+  var a: list[list[uint64]] = [[1u64, 2u64, 3u64], [4u64, 5u64, 6u64], [7u64, 8u64, 9u64]]
+  var b: list[list[uint64]] = [[9u64, 8u64, 7u64], [6u64, 5u64, 4u64], [3u64, 2u64, 1u64]]
+
+  # Trace is linear: tr(A+B) == tr(A) + tr(B).
+  assert trace(a) == 15u64, "trace of a"
+  assert trace(b) == 15u64, "trace of b"
+  assert trace(mat_add(a, b)) == trace(a) + trace(b), "trace linearity"
+
+  # Scalar multiplication distributes over matrix addition.
+  var k: uint64 = 1000000007u64
+  var left: list[list[uint64]] = mat_scale(k, mat_add(a, b))
+  var right: list[list[uint64]] = mat_add(mat_scale(k, a), mat_scale(k, b))
+  assert mat_equal(left, right), "k(A+B) == kA + kB"
+
+  # Every entry of A+B is 10 here, so scaling gives k*10 everywhere.
+  assert left[2][0] == 10u64 * k, "scaled uniform entry"
+
+  # Hadamard product is commutative and matches a hand-checked entry.
+  var hab: list[list[uint64]] = hadamard(a, b)
+  var hba: list[list[uint64]] = hadamard(b, a)
+  assert mat_equal(hab, hba), "Hadamard commutes"
+  assert hab[1][1] == 25u64, "5*5 at the center"
+  assert hab[0][2] == 21u64, "3*7 at the corner"
+
+  # tr(A Hadamard I) picks out the diagonal of A.
+  var eye: list[list[uint64]] = [[1u64, 0u64, 0u64], [0u64, 1u64, 0u64], [0u64, 0u64, 1u64]]
+  assert trace(hadamard(a, eye)) == trace(a), "Hadamard with identity keeps the diagonal"
+
+  print("scalar algebra: trace, distributivity and Hadamard laws verified")
+  return 0

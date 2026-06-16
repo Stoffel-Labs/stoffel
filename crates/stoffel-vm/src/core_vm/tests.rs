@@ -2,10 +2,10 @@ use super::*;
 use crate::foreign_functions::ForeignFunctionCallbackError;
 use crate::net::client_store::{ClientOutputShareCount, ClientShare, ClientShareIndex};
 use crate::net::mpc_engine::{
-    AbaSessionId, AsyncMpcEngine, AsyncMpcEngineConsensus, MpcCapabilities, MpcEngine,
-    MpcEngineClientOutput, MpcEngineConsensus, MpcEngineError, MpcEngineFieldOpen,
-    MpcEngineMultiplication, MpcEngineOpenInExponent, MpcEngineRandomness, MpcEngineResult,
-    MpcExponentGroup, MpcPartyId, MpcSessionTopology, RbcSessionId,
+    AsyncMpcEngine, AsyncMpcEngineConsensus, MpcCapabilities, MpcEngine, MpcEngineClientOutput,
+    MpcEngineConsensus, MpcEngineError, MpcEngineFieldOpen, MpcEngineMultiplication,
+    MpcEngineOpenInExponent, MpcEngineRandomness, MpcEngineResult, MpcExponentGroup, MpcPartyId,
+    MpcSessionTopology, RbcSessionId,
 };
 use crate::runtime_hooks::{HookCallbackError, HookEvent, HookId};
 use crate::VirtualMachineError;
@@ -17,6 +17,7 @@ use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use stoffel_vm_types::compiled_binary::{MpcBackend, MpcCurve};
 use stoffel_vm_types::core_types::{
     ArrayRef, ClearShareInput, ClearShareValue, ForeignObjectRef, ObjectRef, ObjectStore,
     ShareData, ShareType, TableMemory, TableMemoryResult, TableRef, Value,
@@ -43,6 +44,252 @@ fn callback_error(error: &VirtualMachineError) -> &ForeignFunctionCallbackError 
     }
 
     panic!("expected foreign function callback error source");
+}
+
+fn compile_vm_source(source: &str) -> VirtualMachine {
+    let options = stoffellang::CompilerOptions {
+        optimize: false,
+        optimization_level: 0,
+        print_ir: false,
+        mpc_backend: MpcBackend::HoneyBadger,
+        mpc_curve: MpcCurve::default(),
+    };
+    let program =
+        stoffellang::compile(source, "vm-test.stfl", &options).expect("test source should compile");
+    let binary = stoffellang::convert_to_binary(&program);
+    let mut vm = VirtualMachine::try_new().expect("vm should initialize");
+    for function in binary
+        .try_to_vm_functions()
+        .expect("compiled bytecode should convert to VM functions")
+    {
+        vm.try_register_function(function)
+            .expect("function should register");
+    }
+    vm
+}
+
+fn vm_array(vm: &mut VirtualMachine, values: &[Value]) -> Value {
+    let array_ref = vm
+        .create_array_ref(values.len())
+        .expect("array should be created");
+    vm.push_array_ref_values(array_ref, values)
+        .expect("array values should push");
+    Value::from(array_ref)
+}
+
+fn read_vm_array(vm: &mut VirtualMachine, value: Value) -> Vec<Value> {
+    let array_ref = ArrayRef::try_from(&value).expect("value should be an array");
+    let len = vm
+        .read_array_ref_len(array_ref)
+        .expect("array length should read");
+    (0..len)
+        .map(|index| {
+            vm.read_table_field(TableRef::from(array_ref), &Value::I64(index as i64))
+                .expect("array element should read")
+                .unwrap_or(Value::Unit)
+        })
+        .collect()
+}
+
+#[test]
+fn compiled_nested_list_index_concat_executes_as_list_concat() {
+    let mut vm = compile_vm_source(
+        r#"
+def main(a: list[list[int64]], a_rows: int64, a_cols: int64) -> list[int64]:
+  var nested_list: list[list[int64]] = a
+  var result: list[int64] = []
+  for i in 0..a_rows:
+    result = nested_list[i] + nested_list[i]
+  return result
+"#,
+    );
+    let row0 = vm_array(&mut vm, &[Value::I64(1), Value::I64(2)]);
+    let row1 = vm_array(&mut vm, &[Value::I64(3), Value::I64(4)]);
+    let input = vm_array(&mut vm, &[row0, row1]);
+
+    let result = vm
+        .execute_with_args("main", &[input, Value::I64(2), Value::I64(2)])
+        .expect("nested list concat program should execute");
+
+    assert_eq!(
+        read_vm_array(&mut vm, result),
+        vec![Value::I64(3), Value::I64(4), Value::I64(3), Value::I64(4)]
+    );
+}
+
+#[test]
+fn compiled_nested_list_index_assignment_autovivifies_inner_lists() {
+    let mut vm = compile_vm_source(
+        r#"
+def main() -> list[list[int64]]:
+  var rows: list[list[int64]]
+  rows[0][0] = 11
+  rows[0][1] = 12
+  rows[1].append(21)
+  rows[1].append(22)
+  return rows
+"#,
+    );
+
+    let result = vm
+        .execute_with_args("main", &[])
+        .expect("nested list mutation program should execute");
+
+    let rows = read_vm_array(&mut vm, result);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        read_vm_array(&mut vm, rows[0].clone()),
+        vec![Value::I64(11), Value::I64(12)]
+    );
+    assert_eq!(
+        read_vm_array(&mut vm, rows[1].clone()),
+        vec![Value::I64(21), Value::I64(22)]
+    );
+}
+
+#[test]
+fn compiled_list_methods_follow_python_style_mutation_semantics() {
+    let mut vm = compile_vm_source(
+        r#"
+def main() -> list[int64]:
+  var items: list[int64] = [3, 1, 2]
+  items.insert(1, 9)
+  var popped: int64 = items.pop(-2)
+  items.remove(9)
+  items.extend([5, 5])
+  var five_count: int64 = items.count(5)
+  var two_index: int64 = items.index(2)
+  items.reverse()
+  items.sort()
+  items.append(popped)
+  items.append(five_count)
+  items.append(two_index)
+  return items
+"#,
+    );
+
+    let result = vm
+        .execute_with_args("main", &[])
+        .expect("list method program should execute");
+
+    assert_eq!(
+        read_vm_array(&mut vm, result),
+        vec![
+            Value::I64(2),
+            Value::I64(3),
+            Value::I64(5),
+            Value::I64(5),
+            Value::I64(1),
+            Value::I64(2),
+            Value::I64(1),
+        ]
+    );
+}
+
+#[test]
+fn compiled_list_copy_clear_and_repeat_follow_python_style_semantics() {
+    let mut vm = compile_vm_source(
+        r#"
+def main() -> list[int64]:
+  var items: list[int64] = [4, 6]
+  var copied: list[int64] = items.copy()
+  items.clear()
+  return copied + ([7] * 2) + (2 * [8]) + [len(items)]
+"#,
+    );
+
+    let result = vm
+        .execute_with_args("main", &[])
+        .expect("copy clear repeat program should execute");
+
+    assert_eq!(
+        read_vm_array(&mut vm, result),
+        vec![
+            Value::I64(4),
+            Value::I64(6),
+            Value::I64(7),
+            Value::I64(7),
+            Value::I64(8),
+            Value::I64(8),
+            Value::I64(0),
+        ]
+    );
+}
+
+#[test]
+fn compiled_lists_cover_python_style_indexing_slicing_and_mutation() {
+    let mut vm = compile_vm_source(
+        r#"
+def main() -> list[int64]:
+  var items: list[int64] = [0, 1, 2, 3, 4, 5]
+  var evens: list[int64] = items[::2]
+  var reverse_middle: list[int64] = items[4:1:-2]
+  var tail: list[int64] = items[-3:]
+  var stepped_range: list[int64] = range(5, -1, -2)
+  var found: int64 = items.index(3, -4, -1)
+  items.delete(0)
+  var popped: int64 = items.pop()
+  items.insert(-100, 9)
+  items.remove(3)
+  return evens + reverse_middle + tail + stepped_range + [found, popped] + items
+"#,
+    );
+
+    let result = vm
+        .execute_with_args("main", &[])
+        .expect("python-style list program should execute");
+
+    assert_eq!(
+        read_vm_array(&mut vm, result),
+        vec![
+            Value::I64(0),
+            Value::I64(2),
+            Value::I64(4),
+            Value::I64(4),
+            Value::I64(2),
+            Value::I64(3),
+            Value::I64(4),
+            Value::I64(5),
+            Value::I64(5),
+            Value::I64(3),
+            Value::I64(1),
+            Value::I64(3),
+            Value::I64(5),
+            Value::I64(9),
+            Value::I64(1),
+            Value::I64(2),
+            Value::I64(4),
+        ]
+    );
+}
+
+#[test]
+fn compiled_lists_compare_by_value_and_strings_support_stepped_slices() {
+    let mut vm = compile_vm_source(
+        r#"
+def main() -> list[int64]:
+  var left: list[int64] = [1, 2, 3]
+  var same: list[int64] = [1, 2, 3]
+  var different: list[int64] = [1, 2]
+  var text: string = "abcdef"[::-2] + "|" + "abcdef"[1:5:2]
+  var result: list[int64] = []
+  if left == same:
+    result.append(1)
+  if left != different:
+    result.append(2)
+  result.append(len(text))
+  return result
+"#,
+    );
+
+    let result = vm
+        .execute_with_args("main", &[])
+        .expect("list equality and string slice program should execute");
+
+    assert_eq!(
+        read_vm_array(&mut vm, result),
+        vec![Value::I64(1), Value::I64(2), Value::I64(6)]
+    );
 }
 
 struct ClonePreservedEngine;
@@ -220,6 +467,7 @@ impl AsyncMpcEngine for BarrierInputEngine {
     async fn input_share_async(&self, clear: ClearShareInput) -> MpcEngineResult<ShareData> {
         let share_byte = match clear.value() {
             ClearShareValue::Integer(value) => value.to_le_bytes()[0],
+            ClearShareValue::UnsignedInteger(value) => value.to_le_bytes()[0],
             ClearShareValue::FixedPoint(value) => (value.0 as i64).to_le_bytes()[0],
             ClearShareValue::Boolean(value) => u8::from(value),
         };
@@ -331,11 +579,115 @@ impl AsyncMpcEngine for AsyncBatchOpenEngine {
     }
 }
 
+struct AsyncBatchMulEngine {
+    sync_mul_calls: AtomicUsize,
+    async_batch_calls: AtomicUsize,
+}
+
+impl AsyncBatchMulEngine {
+    fn new() -> Self {
+        Self {
+            sync_mul_calls: AtomicUsize::new(0),
+            async_batch_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl MpcEngine for AsyncBatchMulEngine {
+    fn protocol_name(&self) -> &'static str {
+        "async-batch-mul"
+    }
+
+    fn topology(&self) -> MpcSessionTopology {
+        MpcSessionTopology::try_new(11, 1, 3, 1).expect("test topology should be valid")
+    }
+
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    fn start(&self) -> MpcEngineResult<()> {
+        Ok(())
+    }
+
+    fn input_share(&self, _clear: ClearShareInput) -> MpcEngineResult<ShareData> {
+        Ok(ShareData::Opaque(Vec::new()))
+    }
+
+    fn open_share(&self, _ty: ShareType, _share_bytes: &[u8]) -> MpcEngineResult<ClearShareValue> {
+        Err(MpcEngineError::operation_failed("open_share", "not used"))
+    }
+
+    fn capabilities(&self) -> MpcCapabilities {
+        MpcCapabilities::MULTIPLICATION
+    }
+
+    fn as_multiplication(&self) -> Option<&dyn MpcEngineMultiplication> {
+        Some(self)
+    }
+}
+
+impl MpcEngineMultiplication for AsyncBatchMulEngine {
+    fn multiply_share(
+        &self,
+        _ty: ShareType,
+        _left: &[u8],
+        _right: &[u8],
+    ) -> MpcEngineResult<ShareData> {
+        self.sync_mul_calls.fetch_add(1, Ordering::SeqCst);
+        Err(MpcEngineError::operation_failed(
+            "multiply_share",
+            "sync multiply_share should not be used by async batch builtin calls",
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncMpcEngine for AsyncBatchMulEngine {
+    async fn multiply_share_async(
+        &self,
+        _ty: ShareType,
+        _left: &[u8],
+        _right: &[u8],
+    ) -> MpcEngineResult<ShareData> {
+        Err(MpcEngineError::operation_failed(
+            "async_multiply_share",
+            "scalar async multiply should not be used by async batch builtin calls",
+        ))
+    }
+
+    async fn batch_multiply_share_async(
+        &self,
+        _ty: ShareType,
+        pairs: &[(Vec<u8>, Vec<u8>)],
+    ) -> MpcEngineResult<Vec<ShareData>> {
+        self.async_batch_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(pairs
+            .iter()
+            .map(|(left, right)| {
+                let left_byte = left.first().copied().unwrap_or_default();
+                let right_byte = right.first().copied().unwrap_or_default();
+                ShareData::Opaque(vec![left_byte.wrapping_mul(right_byte)])
+            })
+            .collect())
+    }
+
+    async fn open_share_async(
+        &self,
+        _ty: ShareType,
+        _share_bytes: &[u8],
+    ) -> MpcEngineResult<ClearShareValue> {
+        Err(MpcEngineError::operation_failed(
+            "async_open_share",
+            "not used",
+        ))
+    }
+}
+
 struct BarrierConsensusEngine {
     barrier: Arc<tokio::sync::Barrier>,
     rbc_receive_started: AtomicUsize,
     rbc_receive_finished: AtomicUsize,
-    aba_result_calls: AtomicUsize,
 }
 
 impl BarrierConsensusEngine {
@@ -344,7 +696,6 @@ impl BarrierConsensusEngine {
             barrier: Arc::new(tokio::sync::Barrier::new(expected_concurrent_receives)),
             rbc_receive_started: AtomicUsize::new(0),
             rbc_receive_finished: AtomicUsize::new(0),
-            aba_result_calls: AtomicUsize::new(0),
         }
     }
 }
@@ -407,20 +758,6 @@ impl MpcEngineConsensus for BarrierConsensusEngine {
             "sync rbc_receive_any should not be used by async builtin calls",
         ))
     }
-
-    fn aba_propose(&self, _value: bool) -> MpcEngineResult<AbaSessionId> {
-        Err(crate::net::mpc_engine::MpcEngineError::operation_failed(
-            "aba_propose",
-            "sync aba_propose should not be used by async builtin calls",
-        ))
-    }
-
-    fn aba_result(&self, _session_id: AbaSessionId, _timeout_ms: u64) -> MpcEngineResult<bool> {
-        Err(crate::net::mpc_engine::MpcEngineError::operation_failed(
-            "aba_result",
-            "sync aba_result should not be used by async builtin calls",
-        ))
-    }
 }
 
 #[async_trait::async_trait]
@@ -463,19 +800,6 @@ impl AsyncMpcEngineConsensus for BarrierConsensusEngine {
         _timeout_ms: u64,
     ) -> MpcEngineResult<(MpcPartyId, Vec<u8>)> {
         Ok((MpcPartyId::new(2), b"any".to_vec()))
-    }
-
-    async fn aba_propose_async(&self, _value: bool) -> MpcEngineResult<AbaSessionId> {
-        Ok(AbaSessionId::new(3))
-    }
-
-    async fn aba_result_async(
-        &self,
-        _session_id: AbaSessionId,
-        _timeout_ms: u64,
-    ) -> MpcEngineResult<bool> {
-        self.aba_result_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(true)
     }
 }
 
@@ -569,20 +893,6 @@ impl MpcEngineConsensus for TurmoilConsensusEngine {
             "sync rbc_receive_any should not be used by async VM execution",
         ))
     }
-
-    fn aba_propose(&self, _value: bool) -> MpcEngineResult<AbaSessionId> {
-        Err(MpcEngineError::operation_failed(
-            "aba_propose",
-            "sync aba_propose should not be used by async VM execution",
-        ))
-    }
-
-    fn aba_result(&self, _session_id: AbaSessionId, _timeout_ms: u64) -> MpcEngineResult<bool> {
-        Err(MpcEngineError::operation_failed(
-            "aba_result",
-            "sync aba_result should not be used by async VM execution",
-        ))
-    }
 }
 
 #[async_trait::async_trait]
@@ -670,24 +980,6 @@ impl AsyncMpcEngineConsensus for TurmoilConsensusEngine {
             "not used by network consensus tests",
         ))
     }
-
-    async fn aba_propose_async(&self, _value: bool) -> MpcEngineResult<AbaSessionId> {
-        Err(MpcEngineError::operation_failed(
-            "async_aba_propose",
-            "not used by network consensus tests",
-        ))
-    }
-
-    async fn aba_result_async(
-        &self,
-        _session_id: AbaSessionId,
-        _timeout_ms: u64,
-    ) -> MpcEngineResult<bool> {
-        Err(MpcEngineError::operation_failed(
-            "async_aba_result",
-            "not used by network consensus tests",
-        ))
-    }
 }
 
 async fn run_turmoil_rbc_peer(
@@ -739,7 +1031,7 @@ async fn serve_turmoil_rbc_connection(
     Ok(())
 }
 
-const TURMOIL_ASYNC_OP_COUNT: usize = 15;
+const TURMOIL_ASYNC_OP_COUNT: usize = 12;
 const TURMOIL_RPC_TIMEOUT_MS: u64 = 1_000;
 
 #[repr(u8)]
@@ -757,9 +1049,6 @@ enum TurmoilAsyncOperation {
     RbcBroadcast = 10,
     RbcReceive = 11,
     RbcReceiveAny = 12,
-    AbaPropose = 13,
-    AbaResult = 14,
-    AbaProposeAndWait = 15,
 }
 
 impl TurmoilAsyncOperation {
@@ -785,9 +1074,6 @@ impl TurmoilAsyncOperation {
             10 => Some(Self::RbcBroadcast),
             11 => Some(Self::RbcReceive),
             12 => Some(Self::RbcReceiveAny),
-            13 => Some(Self::AbaPropose),
-            14 => Some(Self::AbaResult),
-            15 => Some(Self::AbaProposeAndWait),
             _ => None,
         }
     }
@@ -900,6 +1186,7 @@ impl TurmoilAllOpsEngine {
     fn clear_payload(clear: ClearShareInput) -> Vec<u8> {
         let value = match clear.value() {
             ClearShareValue::Integer(value) => value as u8,
+            ClearShareValue::UnsignedInteger(value) => value as u8,
             ClearShareValue::FixedPoint(_) => 0,
             ClearShareValue::Boolean(value) => u8::from(value),
         };
@@ -1059,20 +1346,6 @@ impl MpcEngineConsensus for TurmoilAllOpsEngine {
         Err(MpcEngineError::operation_failed(
             "rbc_receive_any",
             "sync rbc_receive_any should not be used by async VM execution",
-        ))
-    }
-
-    fn aba_propose(&self, _value: bool) -> MpcEngineResult<AbaSessionId> {
-        Err(MpcEngineError::operation_failed(
-            "aba_propose",
-            "sync aba_propose should not be used by async VM execution",
-        ))
-    }
-
-    fn aba_result(&self, _session_id: AbaSessionId, _timeout_ms: u64) -> MpcEngineResult<bool> {
-        Err(MpcEngineError::operation_failed(
-            "aba_result",
-            "sync aba_result should not be used by async VM execution",
         ))
     }
 }
@@ -1266,47 +1539,6 @@ impl AsyncMpcEngineConsensus for TurmoilAllOpsEngine {
             message.to_vec(),
         ))
     }
-
-    async fn aba_propose_async(&self, value: bool) -> MpcEngineResult<AbaSessionId> {
-        let response = self
-            .rpc(
-                TurmoilAsyncOperation::AbaPropose,
-                vec![u8::from(value)],
-                TURMOIL_RPC_TIMEOUT_MS,
-            )
-            .await?;
-        Ok(AbaSessionId::new(bytes_to_u64(&response)))
-    }
-
-    async fn aba_result_async(
-        &self,
-        session_id: AbaSessionId,
-        timeout_ms: u64,
-    ) -> MpcEngineResult<bool> {
-        let response = self
-            .rpc(
-                TurmoilAsyncOperation::AbaResult,
-                session_id.id().to_be_bytes().to_vec(),
-                timeout_ms,
-            )
-            .await?;
-        Ok(response.first().copied().unwrap_or_default() != 0)
-    }
-
-    async fn aba_propose_and_wait_async(
-        &self,
-        value: bool,
-        timeout_ms: u64,
-    ) -> MpcEngineResult<bool> {
-        let response = self
-            .rpc(
-                TurmoilAsyncOperation::AbaProposeAndWait,
-                vec![u8::from(value)],
-                timeout_ms,
-            )
-            .await?;
-        Ok(response.first().copied().unwrap_or_default() != 0)
-    }
 }
 
 async fn run_turmoil_all_ops_peer(
@@ -1403,14 +1635,6 @@ fn turmoil_all_ops_response(
             let mut response = party_id.to_be_bytes().to_vec();
             response.extend_from_slice(b"any-3");
             response
-        }
-        TurmoilAsyncOperation::AbaPropose => {
-            let session_id = 800 + u64::from(payload.first().copied().unwrap_or_default() != 0);
-            session_id.to_be_bytes().to_vec()
-        }
-        TurmoilAsyncOperation::AbaResult => vec![1],
-        TurmoilAsyncOperation::AbaProposeAndWait => {
-            vec![u8::from(payload.first().copied().unwrap_or_default() != 0)]
         }
     }
 }
@@ -1890,6 +2114,7 @@ fn try_new_exposes_fallible_default_construction() {
 
     assert!(vm.has_function("create_object"));
     assert!(vm.has_function("Share.from_clear"));
+    assert!(vm.has_function("Share.from_clear_uint"));
 }
 
 #[test]
@@ -3131,60 +3356,18 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
             ],
             HashMap::new(),
         ));
-        vm.register_function(VMFunction::new(
-            "turmoil_aba_propose".to_string(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            2,
-            vec![
-                Instruction::LDI(1, Value::Bool(true)),
-                Instruction::PUSHARG(1),
-                Instruction::CALL("Aba.propose".to_string()),
-                Instruction::RET(0),
-            ],
-            HashMap::new(),
-        ));
-        vm.register_function(VMFunction::new(
-            "turmoil_aba_result".to_string(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            3,
-            vec![
-                Instruction::LDI(1, Value::I64(801)),
-                Instruction::PUSHARG(1),
-                Instruction::LDI(2, Value::I64(1_000)),
-                Instruction::PUSHARG(2),
-                Instruction::CALL("Aba.result".to_string()),
-                Instruction::RET(0),
-            ],
-            HashMap::new(),
-        ));
-        vm.register_function(VMFunction::new(
-            "turmoil_aba_propose_and_wait".to_string(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            3,
-            vec![
-                Instruction::LDI(1, Value::Bool(true)),
-                Instruction::PUSHARG(1),
-                Instruction::LDI(2, Value::I64(1_000)),
-                Instruction::PUSHARG(2),
-                Instruction::CALL("Aba.propose_and_wait".to_string()),
-                Instruction::RET(0),
-            ],
-            HashMap::new(),
-        ));
 
         let from_clear = vm
             .execute_async("turmoil_from_clear", engine.as_ref())
             .await?;
         assert!(matches!(from_clear, Value::Object(_)));
         assert_eq!(
-            vm.execute_async_with_args("turmoil_open_arg", &[from_clear.clone()], engine.as_ref(),)
-                .await?,
+            vm.execute_async_with_args(
+                "turmoil_open_arg",
+                std::slice::from_ref(&from_clear),
+                engine.as_ref(),
+            )
+            .await?,
             Value::I64(7)
         );
 
@@ -3326,22 +3509,6 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
             Some(Value::String("any-3".to_string()))
         );
 
-        assert_eq!(
-            vm.execute_async("turmoil_aba_propose", engine.as_ref())
-                .await?,
-            Value::I64(801)
-        );
-        assert_eq!(
-            vm.execute_async("turmoil_aba_result", engine.as_ref())
-                .await?,
-            Value::Bool(true)
-        );
-        assert_eq!(
-            vm.execute_async("turmoil_aba_propose_and_wait", engine.as_ref())
-                .await?,
-            Value::Bool(true)
-        );
-
         assert_eq!(engine.started(TurmoilAsyncOperation::InputShare), 1);
         assert_eq!(engine.finished(TurmoilAsyncOperation::InputShare), 1);
         assert_eq!(engine.started(TurmoilAsyncOperation::Multiply), 1);
@@ -3366,12 +3533,6 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
         assert_eq!(engine.finished(TurmoilAsyncOperation::RbcReceive), 1);
         assert_eq!(engine.started(TurmoilAsyncOperation::RbcReceiveAny), 1);
         assert_eq!(engine.finished(TurmoilAsyncOperation::RbcReceiveAny), 1);
-        assert_eq!(engine.started(TurmoilAsyncOperation::AbaPropose), 1);
-        assert_eq!(engine.finished(TurmoilAsyncOperation::AbaPropose), 1);
-        assert_eq!(engine.started(TurmoilAsyncOperation::AbaResult), 1);
-        assert_eq!(engine.finished(TurmoilAsyncOperation::AbaResult), 1);
-        assert_eq!(engine.started(TurmoilAsyncOperation::AbaProposeAndWait), 1);
-        assert_eq!(engine.finished(TurmoilAsyncOperation::AbaProposeAndWait), 1);
         Ok(())
     });
 
@@ -3478,22 +3639,6 @@ fn turmoil_execute_many_async_runs_mixed_programs_under_randomized_network_order
         ));
         vm.register_function(async_rbc_receive_call_function("mixed_rbc", 4));
         vm.register_function(VMFunction::new(
-            "mixed_aba_wait".to_string(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            3,
-            vec![
-                Instruction::LDI(1, Value::Bool(true)),
-                Instruction::PUSHARG(1),
-                Instruction::LDI(2, Value::I64(1_000)),
-                Instruction::PUSHARG(2),
-                Instruction::CALL("Aba.propose_and_wait".to_string()),
-                Instruction::RET(0),
-            ],
-            HashMap::new(),
-        ));
-        vm.register_function(VMFunction::new(
             "mixed_secret_math".to_string(),
             Vec::new(),
             Vec::new(),
@@ -3513,12 +3658,7 @@ fn turmoil_execute_many_async_runs_mixed_programs_under_randomized_network_order
 
         let result = vm
             .execute_many_async(
-                [
-                    "mixed_open",
-                    "mixed_rbc",
-                    "mixed_aba_wait",
-                    "mixed_secret_math",
-                ],
+                ["mixed_open", "mixed_rbc", "mixed_secret_math"],
                 engine.as_ref(),
             )
             .await?;
@@ -3527,7 +3667,6 @@ fn turmoil_execute_many_async_runs_mixed_programs_under_randomized_network_order
             vec![
                 Value::I64(21),
                 Value::String("from-4".to_string()),
-                Value::Bool(true),
                 Value::I64(32),
             ]
         );
@@ -3535,7 +3674,6 @@ fn turmoil_execute_many_async_runs_mixed_programs_under_randomized_network_order
         assert_eq!(engine.started(TurmoilAsyncOperation::Multiply), 1);
         assert_eq!(engine.started(TurmoilAsyncOperation::Open), 2);
         assert_eq!(engine.started(TurmoilAsyncOperation::RbcReceive), 1);
-        assert_eq!(engine.started(TurmoilAsyncOperation::AbaProposeAndWait), 1);
         Ok(())
     });
 
@@ -3775,40 +3913,6 @@ fn turmoil_malicious_receive_any_party_id_is_rejected_without_poisoning_vm() -> 
 }
 
 #[tokio::test]
-async fn aba_result_builtin_uses_async_consensus_ops() {
-    let engine = Arc::new(BarrierConsensusEngine::new(1));
-    let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
-    let mut vm = VirtualMachine::builder()
-        .with_standard_library(false)
-        .with_mpc_engine(runtime_engine)
-        .build();
-    vm.register_function(VMFunction::new(
-        "aba_result_async".to_string(),
-        Vec::new(),
-        Vec::new(),
-        None,
-        3,
-        vec![
-            Instruction::LDI(1, Value::I64(3)),
-            Instruction::PUSHARG(1),
-            Instruction::LDI(2, Value::I64(1_000)),
-            Instruction::PUSHARG(2),
-            Instruction::CALL("Aba.result".to_string()),
-            Instruction::RET(0),
-        ],
-        HashMap::new(),
-    ));
-
-    let result = vm
-        .execute_async("aba_result_async", engine.as_ref())
-        .await
-        .expect("Aba.result should execute through async consensus ops");
-
-    assert_eq!(result, Value::Bool(true));
-    assert_eq!(engine.aba_result_calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
 async fn execute_many_async_yields_on_share_open_builtin_call() {
     let engine = Arc::new(BarrierOpenEngine::new(2));
     let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
@@ -3891,6 +3995,75 @@ async fn share_batch_open_builtin_uses_async_batch_open() {
         Some(Value::I64(8))
     );
     assert_eq!(engine.sync_batch_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.async_batch_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn share_batch_mul_builtin_uses_async_batch_multiply() {
+    let engine = Arc::new(AsyncBatchMulEngine::new());
+    let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
+    let ty = ShareType::boolean();
+    let mut vm = VirtualMachine::builder()
+        .with_standard_library(false)
+        .with_mpc_engine(runtime_engine)
+        .build();
+    let lefts = vm.create_array_ref(2).expect("create left shares array");
+    vm.push_array_values(
+        lefts,
+        &[
+            Value::Share(ty, ShareData::Opaque(vec![1])),
+            Value::Share(ty, ShareData::Opaque(vec![0])),
+        ],
+    )
+    .expect("seed left shares array");
+    let rights = vm.create_array_ref(2).expect("create right shares array");
+    vm.push_array_values(
+        rights,
+        &[
+            Value::Share(ty, ShareData::Opaque(vec![1])),
+            Value::Share(ty, ShareData::Opaque(vec![1])),
+        ],
+    )
+    .expect("seed right shares array");
+    vm.register_function(VMFunction::new(
+        "builtin_batch_mul".to_string(),
+        vec!["lefts".to_string(), "rights".to_string()],
+        Vec::new(),
+        None,
+        2,
+        vec![
+            Instruction::PUSHARG(0),
+            Instruction::PUSHARG(1),
+            Instruction::CALL("Share.batch_mul".to_string()),
+            Instruction::RET(0),
+        ],
+        HashMap::new(),
+    ));
+
+    let result = vm
+        .execute_async_with_args(
+            "builtin_batch_mul",
+            &[Value::from(lefts), Value::from(rights)],
+            engine.as_ref(),
+        )
+        .await
+        .expect("Share.batch_mul should execute through async engine");
+    let Value::Array(result_ref) = result else {
+        panic!("Share.batch_mul should return an array");
+    };
+
+    assert_eq!(vm.read_array_len(result_ref).expect("result length"), 2);
+    assert_eq!(
+        vm.read_table_field(TableRef::from(result_ref), &Value::I64(0))
+            .expect("read first result"),
+        Some(Value::Share(ty, ShareData::Opaque(vec![1])))
+    );
+    assert_eq!(
+        vm.read_table_field(TableRef::from(result_ref), &Value::I64(1))
+            .expect("read second result"),
+        Some(Value::Share(ty, ShareData::Opaque(vec![0])))
+    );
+    assert_eq!(engine.sync_mul_calls.load(Ordering::SeqCst), 0);
     assert_eq!(engine.async_batch_calls.load(Ordering::SeqCst), 1);
 }
 

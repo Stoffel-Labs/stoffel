@@ -1,0 +1,77 @@
+# Transpose of a rectangular uint64 matrix: involution, shape swap,
+# and conservation of row sums into column sums.
+
+def transpose(m: list[list[uint64]]) -> list[list[uint64]]:
+  var rows: int64 = m.len()
+  var cols: int64 = m[0].len()
+  var out: list[list[uint64]] = []
+  var j: int64 = 0
+  while j < cols:
+    var row: list[uint64] = []
+    var i: int64 = 0
+    while i < rows:
+      row.append(m[i][j])
+      i += 1
+    out.append(row)
+    j += 1
+  return out
+
+def row_sums(m: list[list[uint64]]) -> list[uint64]:
+  var sums: list[uint64] = []
+  var i: int64 = 0
+  while i < m.len():
+    var acc: uint64 = 0u64
+    var j: int64 = 0
+    while j < m[i].len():
+      acc += m[i][j]
+      j += 1
+    sums.append(acc)
+    i += 1
+  return sums
+
+def mat_equal(a: list[list[uint64]], b: list[list[uint64]]) -> bool:
+  if a.len() != b.len():
+    return False
+  var i: int64 = 0
+  while i < a.len():
+    if a[i].len() != b[i].len():
+      return False
+    var j: int64 = 0
+    while j < a[i].len():
+      if a[i][j] != b[i][j]:
+        return False
+      j += 1
+    i += 1
+  return True
+
+def main() -> int64:
+  # 2x4 matrix with values too large for int32, exercising uint64.
+  var m: list[list[uint64]] = [
+    [1u64, 2u64, 3u64, 4000000000000000000u64],
+    [5u64, 6u64, 7u64, 9000000000000000000u64]
+  ]
+
+  var t: list[list[uint64]] = transpose(m)
+
+  # Shape swaps from 2x4 to 4x2.
+  assert t.len() == 4, "transposed row count"
+  assert t[0].len() == 2, "transposed column count"
+
+  # Spot-check the corner moves.
+  assert t[0][0] == 1u64, "top-left fixed"
+  assert t[3][0] == 4000000000000000000u64, "top-right moves to bottom-left"
+  assert t[0][1] == 5u64, "bottom-left moves to top-right"
+
+  # Involution: transposing twice restores the matrix.
+  assert mat_equal(transpose(t), m), "double transpose is identity"
+
+  # Row sums of m equal column sums of t (i.e. row sums of transpose's transpose rows).
+  var original_rows: list[uint64] = row_sums(m)
+  var transposed_cols: list[uint64] = row_sums(transpose(t))
+  var i: int64 = 0
+  while i < original_rows.len():
+    assert original_rows[i] == transposed_cols[i], "row sums preserved"
+    i += 1
+
+  print("transpose: shape, involution and sum conservation verified")
+  return 0

@@ -1,0 +1,130 @@
+# run-args: --client-input 0=5 --expected-output-clients 1
+def random_bit() -> Share:
+  while True:
+    var r = Share.random_field()
+    var r_squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(r_squared):
+      continue
+    var r_prime_inv = Field.inverse(Field.sqrt(r_squared))
+    var two_inv = Field.inverse(Field.from_int(2))
+    var c = Share.mul_field(r, r_prime_inv)
+    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
+    return Share.retag(a, 1)
+
+def pow2(i: int64) -> int64:
+  var p = 1
+  var k = 0
+  while k < i:
+    p = p * 2
+    k = k + 1
+  return p
+
+def combine_bits(bits: list[Share], n: int64) -> Share:
+  var acc = Share.mul_scalar(bits[0], 1)
+  var i = 1
+  while i < n:
+    acc = Share.add(acc, Share.mul_scalar(bits[i], pow2(i)))
+    i = i + 1
+  return Share.retag(acc, 64)
+
+# Shares of the bits of a in [0, 2^l) (low l usable).
+def bit_decompose(a: Share, l: int64, kappa: int64) -> list[Share]:
+  var m = l + kappa
+  var n = m + 1
+  var rbits: list[Share] = []
+  var i = 0
+  while i < m:
+    rbits.append(random_bit())
+    i = i + 1
+  while i < n:
+    rbits.append(Share.from_clear_int(0, 1))
+    i = i + 1
+  var r = combine_bits(rbits, n)
+  var c = Share.open(Share.retag(Share.add(Share.retag(a, 64), r), 64))
+  var abits: list[Share] = []
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < n:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    var xorrb = Share.sub(Share.add(ri, borrow), Share.mul_scalar(rb, 2))
+    var ai = borrow
+    var nb = borrow
+    if ci == 0:
+      ai = xorrb
+      nb = Share.sub(Share.add(ri, borrow), rb)
+    else:
+      ai = Share.sub(Share.from_clear_int(1, 1), xorrb)
+      nb = rb
+    abits.append(Share.retag(ai, 1))
+    borrow = Share.retag(nb, 1)
+    i = i + 1
+  return abits
+
+# Secret-shared [a < b] for a, b in [0, 2^l): masked reveal + carry chain.
+def less_than(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  var z = Share.add_scalar(Share.sub(Share.retag(a, 64), Share.retag(b, 64)), pow2(l))
+  var rbits: list[Share] = []
+  var i = 0
+  while i < (l + 1):
+    rbits.append(random_bit())
+    i = i + 1
+  var r_low = combine_bits(rbits, l + 1)
+  var r_high = Share.retag(Share.random_int(kappa), 64)
+  var r = Share.add(r_low, Share.mul_scalar(r_high, pow2(l + 1)))
+  var c = Share.open(Share.retag(Share.add(Share.retag(z, 64), r), 64))
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < l:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    if ci == 0:
+      borrow = Share.retag(Share.sub(Share.add(ri, borrow), rb), 1)
+    else:
+      borrow = Share.retag(rb, 1)
+    i = i + 1
+  var cl = (c shr l) and 1
+  var rl = rbits[l]
+  var rlb = Share.mul(rl, borrow)
+  var zl = Share.sub(Share.add(rl, borrow), Share.mul_scalar(rlb, 2))
+  if cl == 1:
+    zl = Share.sub(Share.from_clear_int(1, 1), zl)
+  return Share.sub(Share.from_clear_int(1, 1), Share.retag(zl, 1))
+
+# Oblivious select: a if cond==1 else b (inputs retagged to a common width).
+def select(cond: Share, a: Share, b: Share) -> Share:
+  var aa = Share.retag(a, 64)
+  var bb = Share.retag(b, 64)
+  var c = Share.retag(cond, 64)
+  return Share.add(bb, Share.mul(c, Share.sub(aa, bb)))
+
+# [a == b] = NOT(a<b) AND NOT(b<a)
+def equal(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  var nlt = Share.sub(Share.from_clear_int(1, 1), less_than(a, b, l, kappa))
+  var ngt = Share.sub(Share.from_clear_int(1, 1), less_than(b, a, l, kappa))
+  return Share.mul(nlt, ngt)
+
+# Evaluate a polynomial with PUBLIC coefficients at a SECRET point via Horner.
+# coeffs are [c0, c1, ..., cn]; p(x) = ((cn*x + c_{n-1})*x + ...).
+def horner(coeffs: list[int64], x: Share) -> Share:
+  var n = len(coeffs)
+  var acc = Share.from_clear_int(coeffs[n - 1], 64)
+  var xx = Share.retag(x, 64)
+  var i = n - 2
+  while i >= 0:
+    acc = Share.add(Share.mul(acc, xx), Share.from_clear_int(coeffs[i], 64))
+    i = i - 1
+  return acc
+
+def main() -> int64:
+  # p(x) = 2x^2 + 3x + 1 at the client's secret x -> p(5) = 66
+  var coeffs = [1, 3, 2]
+  var x: secret int64 = ClientStore.take_share(0, 0)
+  var r = horner(coeffs, x)
+  if Mpc.has_capability("client-output"):
+    r.send_to_client(0)
+  var rv = Share.open(Share.retag(r, 64))
+  assert rv == 66, "p(5) must be 66"
+  return rv

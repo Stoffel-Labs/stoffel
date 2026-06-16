@@ -255,6 +255,7 @@ impl LocalStorage for RedbLocalStorage {
 #[cfg(test)]
 mod tests {
     use super::{LocalStorage, LocalStorageValues, RedbLocalStorage};
+    use crate::net::mpc_engine::DurableIdentityDigest;
     use crate::storage::PersistentShareContext;
     use crate::storage::PersistentValueContext;
     use stoffel_vm_types::core_types::{
@@ -333,7 +334,7 @@ mod tests {
                 "avss-mpc",
                 "bls12-381",
                 "bls12-381-fr",
-                0,
+                DurableIdentityDigest::from_legacy_party_id(0),
                 5,
                 1,
                 b"state",
@@ -353,7 +354,7 @@ mod tests {
             "avss-mpc",
             "bls12-381",
             "bls12-381-fr",
-            0,
+            DurableIdentityDigest::from_legacy_party_id(0),
             5,
             1,
             b"state",

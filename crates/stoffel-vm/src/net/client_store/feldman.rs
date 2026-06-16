@@ -81,6 +81,23 @@ impl ClientInputStore {
         Ok(count)
     }
 
+    /// Store Feldman shares with per-input VM-level type metadata.
+    pub fn try_store_client_input_feldman_with_types<F, G>(
+        &self,
+        client_id: ClientId,
+        shares: Vec<FeldmanShamirShare<F, G>>,
+        share_types: &[ShareType],
+    ) -> Result<usize, ClientInputStoreError>
+    where
+        F: FftField + PrimeField,
+        G: CurveGroup<ScalarField = F>,
+    {
+        let client_shares = feldman_client_shares_with_types(client_id, shares, share_types)?;
+        let count = client_shares.len();
+        self.store_client_shares(client_id, client_shares);
+        Ok(count)
+    }
+
     /// Retrieve typed Feldman shares for a specific client (AVSS backend).
     pub fn get_client_input_feldman<F, G>(
         &self,
@@ -161,6 +178,55 @@ where
                 Some(share_type) => ClientShare::typed(share_type, data),
                 None => ClientShare::untyped(data),
             })
+        })
+        .collect()
+}
+
+fn feldman_client_shares_with_types<F, G>(
+    client_id: ClientId,
+    shares: Vec<FeldmanShamirShare<F, G>>,
+    share_types: &[ShareType],
+) -> Result<Vec<ClientShare>, ClientInputStoreError>
+where
+    F: FftField + PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    if shares.len() != share_types.len() {
+        return Err(ClientInputStoreError::ShareTypeCountMismatch {
+            client_id,
+            share_count: shares.len(),
+            type_count: share_types.len(),
+        });
+    }
+
+    shares
+        .into_iter()
+        .zip(share_types.iter().copied())
+        .enumerate()
+        .map(|(share_index, (share, share_type))| {
+            let share_index = ClientShareIndex::new(share_index);
+            let mut bytes = Vec::new();
+            share.serialize_compressed(&mut bytes).map_err(|error| {
+                ClientInputStoreError::FeldmanShareSerialization {
+                    client_id,
+                    share_index,
+                    reason: error.to_string(),
+                }
+            })?;
+            let commitments = serialize_feldman_commitments(&share).map_err(|reason| {
+                ClientInputStoreError::FeldmanCommitmentSerialization {
+                    client_id,
+                    share_index,
+                    reason,
+                }
+            })?;
+            Ok(ClientShare::typed(
+                share_type,
+                ShareData::Feldman {
+                    data: bytes,
+                    commitments,
+                },
+            ))
         })
         .collect()
 }

@@ -1,0 +1,9 @@
+# Left branch of diamond - imports shared
+import shared
+
+def left_compute() -> int64:
+  var base = shared_constant()
+  return base + 10
+
+def left_process(x: int64) -> int64:
+  return identity(x) + 1

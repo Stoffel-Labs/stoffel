@@ -3,6 +3,7 @@
 //! The VM queues secret-to-clear register moves here so a backend can open
 //! multiple shares with fewer protocol round trips.
 
+use crate::net::curve::clear_share_value_to_vm_value;
 use crate::net::mpc_engine::MpcEngine;
 use crate::reveal_destination::{FrameDepth, RevealDestination};
 use rustc_hash::FxHashMap;
@@ -260,7 +261,8 @@ impl RevealBatcher {
                 });
             }
             for (pos, value) in revealed.into_iter().enumerate() {
-                revealed_by_index[indices[pos]] = Some(value.into_vm_value());
+                revealed_by_index[indices[pos]] =
+                    Some(clear_share_value_to_vm_value(share_type, value));
             }
         }
 

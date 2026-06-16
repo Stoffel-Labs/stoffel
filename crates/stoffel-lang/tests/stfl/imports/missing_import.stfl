@@ -1,0 +1,5 @@
+# This file imports a module that doesn't exist
+import nonexistent.module
+
+def main() -> int64:
+  return 0

@@ -1,0 +1,4 @@
+# lambda is unsupported; desired: targeted diagnostic.
+def main() -> int64:
+  var f = lambda x: x + 1
+  return f(1)

@@ -29,6 +29,7 @@ use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId, 
 use stoffelnet::transports::quic::{NetworkManager, PeerConnection, QuicNetworkManager};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info, trace, warn};
@@ -627,6 +628,10 @@ impl<F: FftField + PrimeField + 'static> HoneyBadgerQuicServer<F> {
 pub enum ClientActorMessage {
     ProcessData(PartyId, Vec<u8>),
     SetConnections(Vec<Option<Arc<dyn PeerConnection>>>),
+    SetProtocolClientId {
+        client_id: ClientId,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -689,7 +694,7 @@ impl<F: FftField + 'static> HoneyBadgerQuicClient<F> {
         mut rx: mpsc::Receiver<ClientActorMessage>,
         network: Arc<Mutex<QuicNetworkManager>>,
     ) -> HoneyBadgerMPCClient<F, Avid<HbSessionId>> {
-        let client_id = client.id;
+        let mut client_id = client.id;
         info!("Starting actor loop for client {}", client_id);
 
         // Placeholder until SetConnections arrives.
@@ -727,6 +732,36 @@ impl<F: FftField + 'static> HoneyBadgerQuicClient<F> {
                     if let Err(e) = client.process(sender_id, data, net.clone()).await {
                         error!("Client {} failed to process message: {:?}", client_id, e);
                     }
+                }
+                ClientActorMessage::SetProtocolClientId {
+                    client_id: new_client_id,
+                    reply,
+                } => {
+                    let n = client.input.n;
+                    let t = client.input.t;
+                    let instance_id = client.input.instance_id;
+                    let input_len = client.output.input_len;
+                    let inputs = client.input.client_data.lock().await.inputs.clone();
+                    let result = HoneyBadgerMPCClient::new(
+                        new_client_id,
+                        n,
+                        t,
+                        instance_id,
+                        inputs,
+                        input_len,
+                    )
+                    .map(|new_client| {
+                        client = new_client;
+                        net = Arc::new(ClientMpcNetwork {
+                            inner: net.inner.clone(),
+                            conns: net.conns.clone(),
+                            n: net.n,
+                            local_id: new_client_id,
+                        });
+                        client_id = new_client_id;
+                    })
+                    .map_err(|error| format!("{error:?}"));
+                    let _ = reply.send(result);
                 }
                 ClientActorMessage::Shutdown => {
                     info!("Client {} actor received shutdown signal", client_id);
@@ -852,6 +887,25 @@ impl<F: FftField + 'static> HoneyBadgerQuicClient<F> {
         Ok(())
     }
 
+    pub async fn set_protocol_client_id(
+        &mut self,
+        client_id: ClientId,
+    ) -> Result<(), HoneyBadgerError> {
+        let (reply, rx) = oneshot::channel();
+        self.actor_tx
+            .send(ClientActorMessage::SetProtocolClientId { client_id, reply })
+            .await
+            .map_err(|_| HoneyBadgerError::NetworkError(NetworkError::SendError))?;
+        rx.await
+            .map_err(|_| HoneyBadgerError::NetworkError(NetworkError::SendError))?
+            .map_err(|error| {
+                error!("Failed to update client protocol id: {}", error);
+                HoneyBadgerError::NetworkError(NetworkError::SendError)
+            })?;
+        self.client_id = client_id;
+        Ok(())
+    }
+
     pub async fn stop(
         mut self,
     ) -> Result<HoneyBadgerMPCClient<F, Avid<HbSessionId>>, HoneyBadgerError> {
@@ -930,6 +984,59 @@ pub async fn setup_honeybadger_quic_clients<F: FftField + 'static>(
     }
 
     Ok(clients)
+}
+
+pub async fn assign_topological_client_ids<F: FftField + 'static>(
+    clients: &mut [HoneyBadgerQuicClient<F>],
+) -> Result<(), HoneyBadgerError> {
+    let mut ordered_clients = Vec::with_capacity(clients.len());
+    for (client_index, client) in clients.iter().enumerate() {
+        let key = {
+            let manager = client.network.lock().await;
+            manager.get_public_key().cloned()
+        }
+        .ok_or(HoneyBadgerError::NetworkError(NetworkError::Timeout))?;
+        ordered_clients.push((key, client_index));
+    }
+
+    ordered_clients.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (protocol_id, (_, client_index)) in ordered_clients.into_iter().enumerate() {
+        clients[client_index]
+            .set_protocol_client_id(protocol_id)
+            .await?;
+    }
+
+    Ok(())
+}
+
+pub fn register_topological_client_connections<F: FftField + PrimeField + 'static>(
+    servers: &[HoneyBadgerQuicServer<F>],
+) {
+    for server in servers {
+        let all_clients = server
+            .network
+            .as_ref()
+            .expect("network should be set")
+            .get_all_client_connections();
+        for (client_id, conn) in all_clients {
+            if let Some(ref routed) = server.routed_network {
+                routed.register_client(client_id, conn.clone());
+            }
+            let txx = server.channels.clone();
+            tokio::spawn(async move {
+                loop {
+                    match conn.receive().await {
+                        Ok(data) => {
+                            if txx.send((client_id, data)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+    }
 }
 
 /// Sets up a complete HoneyBadger MPC network with QUIC.
@@ -1051,9 +1158,8 @@ mod tests {
             SessionId::pack_slot24(0, 0, 0),
             instance_id as u32,
         );
-        // Define client IDs before network setup (client IDs must be registered at setup time)
-        // Client 100 is for input, client 200 is for output only
-        let input_client_id: ClientId = 100;
+        // Protocol client IDs are topologically sorted client indexes.
+        let input_client_id: ClientId = 0;
         let output_client_id: ClientId = 200;
         let clientid: Vec<ClientId> = vec![input_client_id]; // Only register input client
         let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
@@ -1149,25 +1255,10 @@ mod tests {
             );
         }
 
-        // Register client connections under logical IDs in each server's RoutedNetwork
-        for server in servers.iter() {
-            if let Some(ref routed) = server.routed_network {
-                let all_clients = server
-                    .network
-                    .as_ref()
-                    .expect("network should be set")
-                    .get_all_client_connections();
-                for (_, conn) in &all_clients {
-                    routed.register_client(input_client_id, conn.clone());
-                }
-                info!(
-                    "Server {} registered {} client connection(s) under logical ID {}",
-                    server.node_id,
-                    all_clients.len(),
-                    input_client_id
-                );
-            }
-        }
+        assign_topological_client_ids(&mut clients)
+            .await
+            .expect("Failed to assign topological client IDs");
+        register_topological_client_connections(&servers);
 
         // Spawn receive-loop tasks with updated nodes and routed networks
         for (i, server) in servers.iter().enumerate() {
@@ -1444,7 +1535,7 @@ mod tests {
         let instance_id = 99997;
         let base_port = 9220; // Unique port range for test_client_input_only
                               // Define client IDs before network setup (client IDs must be registered at setup time)
-        let clientid: Vec<ClientId> = vec![100, 200];
+        let clientid: Vec<ClientId> = vec![0, 1];
         let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
 
         let mut config = HoneyBadgerQuicConfig::default();
@@ -1537,28 +1628,10 @@ mod tests {
             );
         }
 
-        // Register client connections under logical IDs in each server's RoutedNetwork
-        for server in servers.iter() {
-            if let Some(ref routed) = server.routed_network {
-                let all_clients = server
-                    .network
-                    .as_ref()
-                    .expect("network should be set")
-                    .get_all_client_connections();
-                // Register each client connection under both logical client IDs
-                for (_, conn) in &all_clients {
-                    for &cid in &clientid {
-                        routed.register_client(cid, conn.clone());
-                    }
-                }
-                info!(
-                    "Server {} registered {} client connection(s) under logical IDs {:?}",
-                    server.node_id,
-                    all_clients.len(),
-                    clientid
-                );
-            }
-        }
+        assign_topological_client_ids(&mut clients)
+            .await
+            .expect("Failed to assign topological client IDs");
+        register_topological_client_connections(&servers);
 
         // Spawn receive-loop tasks with updated nodes and routed networks
         for (i, server) in servers.iter().enumerate() {

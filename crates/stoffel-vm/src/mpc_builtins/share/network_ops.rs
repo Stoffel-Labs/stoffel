@@ -4,23 +4,47 @@ use crate::foreign_functions::{
     ForeignFunctionCallbackResult, ForeignFunctionContext, MpcOnlineBuiltin,
 };
 use crate::net::client_store::ClientOutputShareCount;
+use crate::net::curve::clear_share_value_to_vm_value;
 use crate::net::mpc_engine::MpcExponentGenerator;
 use crate::value_conversions::value_to_usize;
 use crate::VirtualMachineResult;
 use stoffel_vm_types::core_types::{ShareType, Value};
 
 pub(super) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
-    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::Mul, share_mul)?;
-    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::Open, share_open)?;
+    vm.try_register_mpc_online_foreign_method("Share", "mul", MpcOnlineBuiltin::Mul, share_mul)?;
+    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::BatchMul, share_batch_mul)?;
+    vm.try_register_mpc_online_foreign_method("Share", "open", MpcOnlineBuiltin::Open, share_open)?;
+    vm.try_register_mpc_online_foreign_method(
+        "Share",
+        "open_fixed",
+        MpcOnlineBuiltin::Open,
+        share_open,
+    )?;
     vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::BatchOpen, share_batch_open)?;
-    vm.try_register_mpc_online_foreign_function(
+    vm.try_register_mpc_online_foreign_method(
+        "Share",
+        "send_to_client",
         MpcOnlineBuiltin::SendToClient,
         share_send_to_client,
     )?;
-    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::OpenExp, share_open_exp)?;
+    vm.try_register_mpc_online_foreign_method(
+        "Share",
+        "open_exp",
+        MpcOnlineBuiltin::OpenExp,
+        share_open_exp,
+    )?;
     vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::Random, share_random)?;
-    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::OpenField, share_open_field)?;
-    vm.try_register_mpc_online_foreign_function(
+    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::RandomField, share_random)?;
+    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::RandomInt, share_random_int)?;
+    vm.try_register_mpc_online_foreign_method(
+        "Share",
+        "open_field",
+        MpcOnlineBuiltin::OpenField,
+        share_open_field,
+    )?;
+    vm.try_register_mpc_online_foreign_method(
+        "Share",
+        "open_exp_custom",
         MpcOnlineBuiltin::OpenExpCustom,
         share_open_exp_custom,
     )?;
@@ -42,6 +66,50 @@ fn share_mul(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<V
     create_result_share_object(&mut ctx, share_type, result_data)
 }
 
+fn share_batch_mul(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
+    let (lefts_arg, rights_arg) = {
+        let args = ctx.named_args("Share.batch_mul");
+        args.require_exact(2, "2 arguments: lefts_array, rights_array")?;
+        (args.cloned(0)?, args.cloned(1)?)
+    };
+
+    let Some((share_type, left_data)) =
+        ctx.extract_homogeneous_share_array(&lefts_arg, "Share.batch_mul lefts_array")?
+    else {
+        return ctx.create_array(0);
+    };
+    let Some((right_share_type, right_data)) =
+        ctx.extract_homogeneous_share_array(&rights_arg, "Share.batch_mul rights_array")?
+    else {
+        return ctx.create_array(0);
+    };
+
+    if share_type != right_share_type {
+        return Err(
+            crate::foreign_functions::ForeignFunctionCallbackError::Message(
+                "Share.batch_mul requires arrays with matching share types".to_string(),
+            ),
+        );
+    }
+    if left_data.len() != right_data.len() {
+        return Err(
+            crate::foreign_functions::ForeignFunctionCallbackError::Message(
+                "Share.batch_mul requires arrays with the same length".to_string(),
+            ),
+        );
+    }
+
+    let mut results = Vec::with_capacity(left_data.len());
+    for (left, right) in left_data.iter().zip(right_data.iter()) {
+        let result_data = ctx.secret_share_mul_data(share_type, left, right)?;
+        results.push(Value::Share(share_type, result_data));
+    }
+
+    let result_ref = ctx.create_array_ref(results.len())?;
+    ctx.push_array_ref_values(result_ref, &results)?;
+    Ok(Value::from(result_ref))
+}
+
 fn share_open(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
     let (ty, data) = {
         let share_value = {
@@ -54,7 +122,7 @@ fn share_open(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<
     };
 
     let revealed = ctx.open_share_data(ty, &data)?;
-    Ok(revealed.into_vm_value())
+    Ok(clear_share_value_to_vm_value(ty, revealed))
 }
 
 fn share_batch_open(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
@@ -73,7 +141,7 @@ fn share_batch_open(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackR
     let revealed: Vec<Value> = ctx
         .batch_open_share_data(share_type, &share_data)?
         .into_iter()
-        .map(|value| value.into_vm_value())
+        .map(|value| clear_share_value_to_vm_value(share_type, value))
         .collect();
 
     let result_ref = ctx.create_array_ref(revealed.len())?;
@@ -127,6 +195,17 @@ fn share_random(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResul
     let share_type = ShareType::default_secret_int();
     let share_data = ctx.random_share_data(share_type)?;
     create_result_share_object(&mut ctx, share_type, share_data)
+}
+
+fn share_random_int(ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
+    let bit_length = {
+        let args = ctx.named_args("Share.random_int");
+        args.require_exact(1, "1 argument: bit_length")?;
+        value_to_usize(&args.cloned(0)?, "bit_length")?
+    };
+    let share_type = ShareType::secret_int(bit_length);
+    let share_data = ctx.random_integer_share_data(share_type)?;
+    Ok(Value::Share(share_type, share_data))
 }
 
 fn share_open_field(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {

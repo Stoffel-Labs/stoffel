@@ -1,0 +1,94 @@
+object bitwise_share:
+  bits: list[secret bool]
+  length: int64
+
+def reveal_bitwise_share(b: bitwise_share) -> None:
+  for i in 0..b.length:
+    print(b.bits[i].reveal())
+
+def NOT(b: bitwise_share) -> bitwise_share:
+  var tmp: bitwise_share
+  tmp.length = b.length
+
+  for i in 0..tmp.length:
+    tmp.bits.append(not b.bits[i])
+
+  return tmp
+
+def AND(a: bitwise_share, b: bitwise_share) -> bitwise_share:
+  var tmp: bitwise_share
+
+  if a.length == b.length:
+    tmp.length = a.length
+    for i in 0..tmp.length:
+      tmp.bits.append(a.bits[i] and b.bits[i])
+
+  return tmp
+
+def OR(a: bitwise_share, b: bitwise_share) -> bitwise_share:
+  var tmp: bitwise_share
+
+  if a.length == b.length:
+    tmp.length = a.length
+    for i in 0..tmp.length:
+      tmp.bits.append(a.bits[i] or b.bits[i])
+
+  return tmp
+
+def XOR(a: bitwise_share, b: bitwise_share) -> bitwise_share:
+  var tmp: bitwise_share
+
+  if a.length == b.length:
+    tmp.length = a.length
+    for i in 0..tmp.length:
+      tmp.bits.append(a.bits[i] xor b.bits[i])
+
+  return tmp
+
+def main(a: list[secret bool], b: list[secret bool]) -> None:
+  var A: bitwise_share
+  A.bits = a
+  A.length = len(a)
+
+  var B: bitwise_share
+  B.bits = b
+  B.length = len(b)
+
+  var not_bitwise_A: bitwise_share
+  var not_bitwise_B: bitwise_share
+  var and_bitwise_AB: bitwise_share
+  var and_bitwise_notA_notB: bitwise_share
+  var or_bitwise_AB: bitwise_share
+  var xor_bitwise_AB: bitwise_share
+
+  not_bitwise_A = NOT(A)
+  not_bitwise_B = NOT(B)
+  and_bitwise_AB = AND(A, B)
+  and_bitwise_notA_notB = AND(not_bitwise_A, not_bitwise_B)
+  or_bitwise_AB = OR(A, B)
+  xor_bitwise_AB = XOR(A, B)
+
+  for i in 0..len(a):
+    print("A vs not A")
+    print(A.bits[i], not_bitwise_A.bits[i])
+    print(A.bits[i].reveal(), not_bitwise_A.bits[i].reveal())
+
+    print("B vs not B")
+    print(B.bits[i], not_bitwise_B.bits[i])
+    print(B.bits[i].reveal(), not_bitwise_B.bits[i].reveal())
+
+    print("A AND B")
+    print(A.bits[i], B.bits[i], and_bitwise_AB.bits[i])
+    print(A.bits[i].reveal(), B.bits[i].reveal(), and_bitwise_AB.bits[i].reveal())
+
+    print("NOT A AND NOT B")
+    print(not_bitwise_A.bits[i], not_bitwise_B.bits[i], and_bitwise_notA_notB.bits[i])
+    print(not_bitwise_A.bits[i].reveal(), not_bitwise_B.bits[i].reveal(), and_bitwise_notA_notB.bits[i].reveal())
+
+  print("A OR B")
+  print(or_bitwise_AB)
+  reveal_bitwise_share(or_bitwise_AB)
+
+  print("A XOR B")
+  print(xor_bitwise_AB)
+  reveal_bitwise_share(xor_bitwise_AB)

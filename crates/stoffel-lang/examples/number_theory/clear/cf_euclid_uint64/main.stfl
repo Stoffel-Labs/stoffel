@@ -1,0 +1,79 @@
+# The Euclidean algorithm computes more than the gcd: its quotient
+# sequence is the continued-fraction expansion of a/b. This example
+# expands rationals in uint64, then folds the expansion back into a
+# fraction with backward recurrence and recovers a/b in lowest terms.
+
+def cf_expansion(a: uint64, b: uint64) -> list[uint64]:
+  # Quotients of Euclid: a = q*b + r, descend on (b, r) until r = 0.
+  var quotients: list[uint64] = []
+  var x: uint64 = a
+  var y: uint64 = b
+  while y != 0u64:
+    quotients.append(x / y)
+    var r: uint64 = x % y
+    x = y
+    y = r
+  return quotients
+
+def gcd(a: uint64, b: uint64) -> uint64:
+  var x: uint64 = a
+  var y: uint64 = b
+  while y != 0u64:
+    var t: uint64 = x % y
+    x = y
+    y = t
+  return x
+
+def cf_fold(quotients: list[uint64]) -> list[uint64]:
+  # Fold [q0; q1, q2, ...] back into a fraction [num, den] from the
+  # right: start at the last quotient and repeatedly take q + 1/acc.
+  var num: uint64 = quotients[quotients.len() - 1]
+  var den: uint64 = 1u64
+  var i: int64 = quotients.len() - 2
+  while i >= 0:
+    # q + den/num, i.e. (q*num + den) / num.
+    var next_num: uint64 = quotients[i] * num + den
+    den = num
+    num = next_num
+    i -= 1
+  return [num, den]
+
+def main() -> int64:
+  # Euclid's own pair: 1071/462. Quotients 2, 3, 7 and gcd 21.
+  var q1: list[uint64] = cf_expansion(1071u64, 462u64)
+  assert q1.len() == 3, "1071/462 has a depth-3 expansion"
+  assert q1[0] == 2u64 and q1[1] == 3u64 and q1[2] == 7u64, "expansion [2; 3, 7]"
+
+  # Folding the expansion recovers the fraction in lowest terms.
+  var f1: list[uint64] = cf_fold(q1)
+  var g1: uint64 = gcd(1071u64, 462u64)
+  assert g1 == 21u64, "gcd(1071, 462)"
+  assert f1[0] == 1071u64 / g1, "numerator reduced by the gcd"
+  assert f1[1] == 462u64 / g1, "denominator reduced by the gcd"
+
+  # Consecutive Fibonacci numbers are Euclid's worst case: every
+  # quotient is 1 (except the last), which is why the expansion of
+  # their ratio approximates the golden ratio.
+  var fib_q: list[uint64] = cf_expansion(55u64, 34u64)
+  assert fib_q.len() == 8, "55/34 takes 8 division steps"
+  var i: int64 = 0
+  while i < fib_q.len() - 1:
+    assert fib_q[i] == 1u64, "all golden-ratio quotients are 1"
+    i += 1
+  assert fib_q[fib_q.len() - 1] == 2u64, "terminal quotient"
+  var fib_f: list[uint64] = cf_fold(fib_q)
+  assert fib_f[0] == 55u64 and fib_f[1] == 34u64, "55 and 34 are already coprime"
+
+  # An integer has a depth-1 expansion; a unit fraction has depth 2.
+  var whole: list[uint64] = cf_expansion(42u64, 7u64)
+  assert whole.len() == 1 and whole[0] == 6u64, "42/7 is just 6"
+  var unit: list[uint64] = cf_expansion(1u64, 4u64)
+  assert unit.len() == 2 and unit[0] == 0u64 and unit[1] == 4u64, "1/4 is [0; 4]"
+
+  # Large 64-bit pair round-trips through expansion and folding.
+  var big_q: list[uint64] = cf_expansion(12297829382473034410u64, 6148914691236517205u64)
+  var big_f: list[uint64] = cf_fold(big_q)
+  assert big_f[0] == 2u64 and big_f[1] == 1u64, "0xAAAA... over 0x5555... is exactly 2"
+
+  print("continued fractions: euclid quotients fold back to lowest terms")
+  return 0

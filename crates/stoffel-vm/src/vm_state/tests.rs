@@ -3,6 +3,7 @@ use crate::core_vm::VirtualMachine;
 use crate::error::VirtualMachineErrorKind;
 use crate::error::VmError;
 use crate::foreign_functions::{ForeignFunction, ForeignFunctionCallbackError, Function};
+use crate::mpc_values::share_object;
 use crate::net::client_store::{ClientOutputShareCount, ClientShare, ClientShareIndex};
 use crate::net::curve::{MpcCurveConfig, MpcFieldKind};
 use crate::net::mpc_engine::{
@@ -80,6 +81,131 @@ fn function_registration_clears_vm_local_call_target_cache() {
     )))
     .expect("register new function");
     assert!(vm.last_call_target.is_none());
+}
+
+fn tagged_share_object(vm: &mut VMState) -> Value {
+    let object_ref = vm
+        .table_memory
+        .create_object_ref()
+        .expect("create test object");
+    vm.table_memory
+        .set_table_field(
+            stoffel_vm_types::core_types::TableRef::from(object_ref),
+            Value::String("__type".to_string()),
+            Value::String("Share".to_string()),
+        )
+        .expect("set type tag");
+    Value::from(object_ref)
+}
+
+fn register_test_share_open(vm: &mut VMState) {
+    vm.try_insert_method(
+        "Share",
+        "open",
+        Function::foreign(ForeignFunction::new(
+            "Share.open",
+            Arc::new(|_| Ok(Value::I64(42))),
+        )),
+    )
+    .expect("register Share.open method");
+}
+
+#[test]
+fn call_dispatches_bare_method_by_receiver_runtime_type() {
+    let mut vm = VMState::new();
+    register_test_share_open(&mut vm);
+    let receiver = tagged_share_object(&mut vm);
+    vm.push_activation_record(ActivationRecord::with_registers(
+        "caller",
+        RegisterFile::from(vec![Value::Unit]),
+        vec![],
+        None,
+    ));
+    vm.current_frame_mut()
+        .expect("caller frame")
+        .push_stack(receiver);
+
+    vm.execute_call("open", false)
+        .expect("dispatch bare receiver method");
+
+    let frame = vm.current_activation_record().expect("caller frame");
+    assert_eq!(frame.register(r(0)), Some(&Value::I64(42)));
+}
+
+#[test]
+fn call_validates_explicit_method_receiver_runtime_type() {
+    let mut vm = VMState::new();
+    register_test_share_open(&mut vm);
+    let receiver = tagged_share_object(&mut vm);
+    vm.push_activation_record(ActivationRecord::with_registers(
+        "caller",
+        RegisterFile::from(vec![Value::Unit]),
+        vec![],
+        None,
+    ));
+    vm.current_frame_mut()
+        .expect("caller frame")
+        .push_stack(receiver);
+
+    vm.execute_call("Share.open", false)
+        .expect("dispatch explicit receiver method");
+
+    let frame = vm.current_activation_record().expect("caller frame");
+    assert_eq!(frame.register(r(0)), Some(&Value::I64(42)));
+}
+
+#[test]
+fn call_errors_when_method_receiver_is_missing_or_wrong_type() {
+    let mut vm = VMState::new();
+    register_test_share_open(&mut vm);
+    vm.push_activation_record(ActivationRecord::with_registers(
+        "caller",
+        RegisterFile::from(vec![Value::Unit]),
+        vec![],
+        None,
+    ));
+
+    let err = vm
+        .execute_call("open", false)
+        .expect_err("method call without receiver should fail");
+    assert!(matches!(err, VmError::MethodCallRequiresReceiver { .. }));
+
+    vm.current_frame_mut()
+        .expect("caller frame")
+        .push_stack(Value::I64(1));
+    let err = vm
+        .execute_call("Share.open", false)
+        .expect_err("explicit method call with wrong receiver should fail");
+    assert!(matches!(
+        err,
+        VmError::MethodReceiverTypeMismatch { expected, actual, .. }
+            if expected == "Share" && actual == "int64"
+    ));
+}
+
+#[test]
+fn duplicate_method_registration_is_rejected() {
+    let mut vm = VMState::new();
+    register_test_share_open(&mut vm);
+
+    let err = vm
+        .try_insert_method(
+            "Share",
+            "open",
+            Function::foreign(ForeignFunction::new(
+                "Share.open_duplicate",
+                Arc::new(|_| Ok(Value::Unit)),
+            )),
+        )
+        .expect_err("duplicate method registration should fail");
+
+    assert!(matches!(
+        err,
+        VmError::MethodAlreadyRegistered {
+            receiver_type,
+            method
+        } if receiver_type == "Share" && method == "open"
+    ));
 }
 
 impl MpcEngine for DummyFieldEngine {
@@ -173,6 +299,9 @@ impl MpcEngine for MockBatchEngine {
             .map(|bytes| match ty {
                 ShareType::SecretInt { .. } => {
                     ClearShareValue::Integer(bytes.first().copied().unwrap_or(0) as i64)
+                }
+                ShareType::SecretUInt { .. } => {
+                    ClearShareValue::UnsignedInteger(bytes.first().copied().unwrap_or(0) as u64)
                 }
                 ShareType::SecretFixedPoint { .. } => {
                     ClearShareValue::FixedPoint(F64(
@@ -1847,6 +1976,32 @@ fn register_layout_controls_clear_to_secret_mov_boundary() {
 }
 
 #[test]
+fn clear_to_secret_mov_extracts_share_object_payload() {
+    let mut vm = VMState::new();
+    vm.set_register_layout(RegisterLayout::new(8));
+    let ty = ShareType::secret_int(64);
+    let data = ShareData::Opaque(vec![1, 2, 3]);
+    let share_ref =
+        share_object::create_share_object_ref(vm.table_memory.as_mut(), ty, data.clone(), 0)
+            .expect("create share object");
+
+    let mut registers = RegisterFile::new(RegisterLayout::new(8), 9);
+    *registers.get_mut(r(0)).expect("clear register r0") = Value::from(share_ref);
+    vm.push_activation_record(ActivationRecord::with_registers(
+        "test",
+        registers,
+        vec![],
+        None,
+    ));
+
+    vm.execute_mov(runtime_reg(8, 9), runtime_reg(0, 9), false)
+        .expect("share object should move into a secret register");
+
+    let record = vm.current_activation_record().unwrap();
+    assert_eq!(record.register(r(8)), Some(&Value::Share(ty, data)));
+}
+
+#[test]
 fn active_frame_layout_controls_secret_to_clear_mov_boundary() {
     let mut vm = VMState::new();
     let engine = Arc::new(MockBatchEngine::default());
@@ -2423,7 +2578,21 @@ fn client_share_load_accepts_explicit_share_type_request() {
 }
 
 #[test]
-fn client_share_load_rejects_mismatched_stored_type() {
+fn client_share_load_infers_stored_type() {
+    let vm = VMState::new();
+    let share_type = ShareType::default_secret_fixed_point();
+    let share_data = ShareData::Opaque(vec![1, 2, 3]);
+    vm.store_client_shares(42, vec![ClientShare::typed(share_type, share_data.clone())]);
+
+    let loaded = vm
+        .load_client_share(42, ClientShareIndex::new(0))
+        .expect("untyped load should infer stored type");
+
+    assert_eq!(loaded, Value::Share(share_type, share_data));
+}
+
+#[test]
+fn client_share_load_rejects_mismatched_explicit_type_request() {
     let vm = VMState::new();
     vm.store_client_shares(
         42,
@@ -2434,7 +2603,11 @@ fn client_share_load_rejects_mismatched_stored_type() {
     );
 
     let err = vm
-        .load_client_share(42, ClientShareIndex::new(0))
+        .load_client_share_as(
+            42,
+            ClientShareIndex::new(0),
+            ShareType::default_secret_int(),
+        )
         .unwrap_err();
 
     assert!(

@@ -1,6 +1,5 @@
 use super::VMState;
 use crate::error::VmResult;
-#[cfg(feature = "avss")]
 use crate::mpc_values::avss_object;
 use crate::mpc_values::share_object;
 use stoffel_vm_types::core_types::{ShareData, ShareType, Value};
@@ -11,6 +10,21 @@ impl VMState {
             self.table_memory.as_mut(),
             value,
         )?)
+    }
+
+    /// Normalize an operand for arithmetic ops: secret shares are stored in
+    /// registers as object handles (`Share.from_clear*`, share-method results),
+    /// but the arithmetic ops operate on `Value::Share`. Unwrap a share object
+    /// into its `Value::Share`; leave any other value (including a raw
+    /// `Value::Share`) untouched. This lets `*`, `/`, `+`, `-` work on shares
+    /// regardless of how they were produced.
+    pub(crate) fn unwrap_share_value_for_arith(&mut self, value: Value) -> VmResult<Value> {
+        if share_object::is_share_object(self.table_memory.as_mut(), &value) {
+            let (share_type, share_data) = self.extract_share_data(&value)?;
+            Ok(Value::Share(share_type, share_data))
+        } else {
+            Ok(value)
+        }
     }
 
     pub(crate) fn extract_matching_share_pair(
@@ -35,6 +49,18 @@ impl VMState {
         context: &'static str,
     ) -> VmResult<Option<(ShareType, Vec<ShareData>)>> {
         Ok(share_object::extract_homogeneous_share_array(
+            self.table_memory.as_mut(),
+            value,
+            context,
+        )?)
+    }
+
+    pub(crate) fn extract_share_or_scalar_array(
+        &mut self,
+        value: &Value,
+        context: &'static str,
+    ) -> VmResult<Vec<share_object::ShareOrScalar>> {
+        Ok(share_object::extract_share_or_scalar_array(
             self.table_memory.as_mut(),
             value,
             context,
@@ -69,8 +95,6 @@ impl VMState {
         )?;
         Ok(Value::from(object_ref))
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn create_avss_share_object_value(
         &mut self,
         key_name: &str,
@@ -87,13 +111,9 @@ impl VMState {
         )?;
         Ok(Value::from(object_ref))
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn is_avss_share_object(&mut self, value: &Value) -> bool {
         avss_object::is_avss_share_object(self.table_memory.as_mut(), value)
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn avss_commitment(&mut self, value: &Value, index: usize) -> VmResult<Vec<u8>> {
         Ok(avss_object::get_commitment(
             self.table_memory.as_mut(),
@@ -101,16 +121,12 @@ impl VMState {
             index,
         )?)
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn avss_key_name(&mut self, value: &Value) -> VmResult<String> {
         Ok(avss_object::get_key_name(
             self.table_memory.as_mut(),
             value,
         )?)
     }
-
-    #[cfg(feature = "avss")]
     pub(crate) fn avss_commitment_count(&mut self, value: &Value) -> VmResult<usize> {
         Ok(avss_object::get_commitment_count(
             self.table_memory.as_mut(),

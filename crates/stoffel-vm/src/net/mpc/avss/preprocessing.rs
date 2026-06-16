@@ -68,7 +68,7 @@ where
             field_kind,
             self.topology.n_parties(),
             self.topology.threshold(),
-            self.topology.party_id(),
+            self.local_identity,
         );
         let base = scope.beaver_triple();
         let k_rs = scope.random_share();
@@ -150,7 +150,7 @@ where
             field_kind,
             self.topology.n_parties(),
             self.topology.threshold(),
-            self.topology.party_id(),
+            self.local_identity,
         );
         let base = scope.beaver_triple();
         let mut to_store = Vec::new();

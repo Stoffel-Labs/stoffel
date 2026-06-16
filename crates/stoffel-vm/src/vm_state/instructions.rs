@@ -83,6 +83,18 @@ pub(super) trait InstructionRuntime {
     ) -> VmResult<InstructionOutcome>;
     fn execute_pusharg(&mut self, reg: RuntimeRegister, hooks_enabled: bool) -> VmResult<()>;
     fn execute_cmp(&mut self, lhs: RuntimeRegister, rhs: RuntimeRegister) -> VmResult<()>;
+    fn execute_lds(
+        &mut self,
+        dest: RuntimeRegister,
+        slot: usize,
+        hooks_enabled: bool,
+    ) -> VmResult<()>;
+    fn execute_sts(
+        &mut self,
+        slot: usize,
+        src: RuntimeRegister,
+        hooks_enabled: bool,
+    ) -> VmResult<()>;
 }
 
 #[cfg(test)]
@@ -172,6 +184,12 @@ impl<'state, 'instruction, R: InstructionRuntime + ?Sized>
             }
             RuntimeInstruction::Compare { lhs, rhs } => {
                 self.state.execute_cmp(*lhs, *rhs)?;
+            }
+            RuntimeInstruction::SpillLoad { dest, slot } => {
+                self.state.execute_lds(*dest, *slot, hooks_enabled)?;
+            }
+            RuntimeInstruction::SpillStore { slot, src } => {
+                self.state.execute_sts(*slot, *src, hooks_enabled)?;
             }
         }
 
@@ -280,6 +298,24 @@ impl InstructionRuntime for VMState {
 
     fn execute_cmp(&mut self, lhs: RuntimeRegister, rhs: RuntimeRegister) -> VmResult<()> {
         VMState::execute_cmp(self, lhs, rhs)
+    }
+
+    fn execute_lds(
+        &mut self,
+        dest: RuntimeRegister,
+        slot: usize,
+        hooks_enabled: bool,
+    ) -> VmResult<()> {
+        VMState::execute_lds(self, dest, slot, hooks_enabled)
+    }
+
+    fn execute_sts(
+        &mut self,
+        slot: usize,
+        src: RuntimeRegister,
+        hooks_enabled: bool,
+    ) -> VmResult<()> {
+        VMState::execute_sts(self, slot, src, hooks_enabled)
     }
 }
 
@@ -397,6 +433,12 @@ impl VMState {
             RuntimeInstruction::Compare { lhs, rhs } => {
                 self.execute_cmp(*lhs, *rhs)?;
             }
+            RuntimeInstruction::SpillLoad { dest, slot } => {
+                self.execute_lds(*dest, *slot, HOOKS_ENABLED)?;
+            }
+            RuntimeInstruction::SpillStore { slot, src } => {
+                self.execute_sts(*slot, *src, HOOKS_ENABLED)?;
+            }
         }
 
         Ok(InstructionOutcome::Continue)
@@ -513,6 +555,42 @@ impl VMState {
         Ok(())
     }
 
+    /// LDS: load a register from a spill slot.
+    ///
+    /// This is a raw, value-preserving restore: it writes the saved value straight into
+    /// the destination register slot without any clear<->secret conversion. The register
+    /// allocator can place an array/object handle (a clear value) in a register whose VR
+    /// is "secret"-typed because its *contents* are secret; routing the restore through the
+    /// normal clear/secret write path would corrupt that handle. Spilling must round-trip
+    /// the exact value, so we bypass conversion (mirroring STS below).
+    pub(super) fn execute_lds(
+        &mut self,
+        dest: RuntimeRegister,
+        slot: usize,
+        _hooks_enabled: bool,
+    ) -> VmResult<()> {
+        let value = self.current_frame()?.spill_load(slot);
+        let record = self.current_frame_mut()?;
+        Self::ensure_frame_contains_register(record, dest)?;
+        let count = record.register_count();
+        *record
+            .register_mut(dest.register_index())
+            .ok_or_else(|| Self::register_out_of_bounds(dest.index(), count))? = value;
+        Ok(())
+    }
+
+    /// STS: store a register into a spill slot (raw, value-preserving save).
+    pub(super) fn execute_sts(
+        &mut self,
+        slot: usize,
+        src: RuntimeRegister,
+        _hooks_enabled: bool,
+    ) -> VmResult<()> {
+        let value = self.current_register_value(src)?.into_value();
+        self.current_frame_mut()?.spill_store(slot, value);
+        Ok(())
+    }
+
     pub(super) fn execute_mov(
         &mut self,
         dest: RuntimeRegister,
@@ -550,11 +628,16 @@ impl VMState {
         }
 
         let result_value = match move_kind {
-            RegisterMoveKind::ClearToSecret if !matches!(src_value, Value::Share(_, _)) => {
-                self.convert_to_share(&src_value)?
-            }
+            RegisterMoveKind::ClearToSecret => match src_value {
+                Value::Share(_, _) => src_value,
+                Value::Object(_) => {
+                    let (share_type, share_data) = self.extract_share_data(&src_value)?;
+                    Value::Share(share_type, share_data)
+                }
+                _ => self.convert_to_share(&src_value)?,
+            },
             RegisterMoveKind::SecretToClear => self.reveal_share_immediate(&src_value)?,
-            RegisterMoveKind::Copy | RegisterMoveKind::ClearToSecret => src_value,
+            RegisterMoveKind::Copy => src_value,
         };
 
         self.write_mov_result(dest, src, result_value, hooks_enabled)
@@ -664,11 +747,13 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
-            Ok(runtime_value_ops::add(left, right, &|| {
-                state.share_runtime().map_err(Into::into)
-            })?)
+        let (left, right) = self.with_resolved_register_pair(src1, src2, |left, right, _| {
+            Ok((left.clone(), right.clone()))
         })?;
+        let left = self.unwrap_share_value_for_arith(left)?;
+        let right = self.unwrap_share_value_for_arith(right)?;
+        let result_value =
+            runtime_value_ops::add(&left, &right, &|| self.share_runtime().map_err(Into::into))?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
         Ok(())
@@ -844,11 +929,13 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
-            Ok(runtime_value_ops::sub(left, right, &|| {
-                state.share_runtime().map_err(Into::into)
-            })?)
+        let (left, right) = self.with_resolved_register_pair(src1, src2, |left, right, _| {
+            Ok((left.clone(), right.clone()))
         })?;
+        let left = self.unwrap_share_value_for_arith(left)?;
+        let right = self.unwrap_share_value_for_arith(right)?;
+        let result_value =
+            runtime_value_ops::sub(&left, &right, &|| self.share_runtime().map_err(Into::into))?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
         Ok(())
@@ -872,11 +959,13 @@ impl VMState {
             return Ok(());
         }
 
-        let computed = self.with_resolved_register_pair(src1, src2, |left, right, state| {
-            Ok(runtime_value_ops::mul(left, right, &|| {
-                state.share_runtime().map_err(Into::into)
-            })?)
+        let (left, right) = self.with_resolved_register_pair(src1, src2, |left, right, _| {
+            Ok((left.clone(), right.clone()))
         })?;
+        let left = self.unwrap_share_value_for_arith(left)?;
+        let right = self.unwrap_share_value_for_arith(right)?;
+        let computed =
+            runtime_value_ops::mul(&left, &right, &|| self.share_runtime().map_err(Into::into))?;
 
         self.write_current_register(dest, computed, hooks_enabled)?;
         Ok(())
@@ -900,11 +989,13 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
-            Ok(runtime_value_ops::div(left, right, &|| {
-                state.share_runtime().map_err(Into::into)
-            })?)
+        let (left, right) = self.with_resolved_register_pair(src1, src2, |left, right, _| {
+            Ok((left.clone(), right.clone()))
         })?;
+        let left = self.unwrap_share_value_for_arith(left)?;
+        let right = self.unwrap_share_value_for_arith(right)?;
+        let result_value =
+            runtime_value_ops::div(&left, &right, &|| self.share_runtime().map_err(Into::into))?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
         Ok(())
@@ -954,8 +1045,10 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, _| {
-            Ok(runtime_value_ops::bit_and(left, right)?)
+        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
+            Ok(runtime_value_ops::bit_and(left, right, &|| {
+                state.share_runtime().map_err(Into::into)
+            })?)
         })?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
@@ -980,8 +1073,10 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, _| {
-            Ok(runtime_value_ops::bit_or(left, right)?)
+        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
+            Ok(runtime_value_ops::bit_or(left, right, &|| {
+                state.share_runtime().map_err(Into::into)
+            })?)
         })?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
@@ -1006,8 +1101,10 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, _| {
-            Ok(runtime_value_ops::bit_xor(left, right)?)
+        let result_value = self.with_resolved_register_pair(src1, src2, |left, right, state| {
+            Ok(runtime_value_ops::bit_xor(left, right, &|| {
+                state.share_runtime().map_err(Into::into)
+            })?)
         })?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
@@ -1024,8 +1121,11 @@ impl VMState {
             return Ok(());
         }
 
-        let result_value =
-            self.with_resolved_register(src, |value, _| Ok(runtime_value_ops::bit_not(value)?))?;
+        let result_value = self.with_resolved_register(src, |value, state| {
+            Ok(runtime_value_ops::bit_not(value, &|| {
+                state.share_runtime().map_err(Into::into)
+            })?)
+        })?;
 
         self.write_current_register(dest, result_value, hooks_enabled)?;
         Ok(())
@@ -1346,6 +1446,24 @@ mod tests {
 
         fn execute_cmp(&mut self, _lhs: RuntimeRegister, _rhs: RuntimeRegister) -> VmResult<()> {
             Self::unexpected("execute_cmp")
+        }
+
+        fn execute_lds(
+            &mut self,
+            _dest: RuntimeRegister,
+            _slot: usize,
+            _hooks_enabled: bool,
+        ) -> VmResult<()> {
+            Self::unexpected("execute_lds")
+        }
+
+        fn execute_sts(
+            &mut self,
+            _slot: usize,
+            _src: RuntimeRegister,
+            _hooks_enabled: bool,
+        ) -> VmResult<()> {
+            Self::unexpected("execute_sts")
         }
     }
 

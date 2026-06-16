@@ -1,0 +1,52 @@
+# Integration test for compound assignment operators
+# Tests: +=, -=, *=, /=, %=
+
+# Test basic compound assignment
+var counter = 0
+counter += 10
+counter -= 3
+counter *= 2
+counter /= 2
+counter %= 5
+
+# Test in a loop - accumulator pattern
+var sum = 0
+for i in 1..11:
+  sum += i
+
+# Test in function
+def accumulate(n: int64) -> int64:
+  var total = 0
+  for i in 1..n:
+    total += i
+  return total
+
+var result = accumulate(5)
+
+# Test with expressions on RHS
+var x = 100
+x += 5 * 2
+x -= 10 / 2
+x *= 2 + 1
+
+# Test compound assignment with array elements
+var arr = [10, 20, 30]
+arr[0] += 5
+arr[1] -= 5
+arr[2] *= 2
+
+# Nested loops with compound assignment
+var matrix_sum = 0
+for row in 0..3:
+  for col in 0..3:
+    matrix_sum += row * col
+
+# Test all operators in sequence
+var value = 100
+value += 50    # 150
+value -= 25    # 125
+value *= 2     # 250
+value /= 5     # 50
+value %= 7     # 1
+
+print("Compound assignment test completed successfully!")

@@ -36,6 +36,7 @@ use crate::core_vm::VirtualMachine;
 use crate::net::client_store::ClientShareIndex;
 use crate::net::hb_engine::HoneyBadgerMpcEngine;
 use crate::tests::mpc_multiplication_integration::{
+    assign_topological_client_ids, register_topological_client_connections,
     setup_honeybadger_quic_clients, setup_honeybadger_quic_network, HoneyBadgerQuicConfig,
     RoutedNetwork,
 };
@@ -80,7 +81,7 @@ async fn test_vm_mesh_full_integration() {
 
     // Step 1: Create mesh network of MPC servers
     // Define client IDs upfront so they can be passed to server setup
-    let client_ids: Vec<ClientId> = vec![200, 201];
+    let client_ids: Vec<ClientId> = vec![0, 1];
 
     info!(
         "Step 1: Creating {} MPC servers in mesh topology...",
@@ -210,44 +211,10 @@ async fn test_vm_mesh_full_integration() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Build client derived_id → logical_client_id mapping.
-    let mut client_derived_to_logical: HashMap<usize, ClientId> = HashMap::new();
-    for client in &clients {
-        let derived = client.network.lock().await.local_derived_id();
-        client_derived_to_logical.insert(derived, client.client_id);
-    }
-
-    // Register client connections and spawn receive handlers with correct logical client IDs.
-    // The accept loop in start() tags ALL unknown connections with expected_clients[0],
-    // which is wrong for multi-client setups. We spawn explicit handlers here instead.
-    for server in servers.iter() {
-        let all_clients = server
-            .network
-            .as_ref()
-            .expect("network should be set")
-            .get_all_client_connections();
-        for (derived_id, conn) in &all_clients {
-            if let Some(&logical_id) = client_derived_to_logical.get(derived_id) {
-                if let Some(ref routed) = server.routed_network {
-                    routed.register_client(logical_id, conn.clone());
-                }
-                let txx = server.channels.clone();
-                let conn = conn.clone();
-                tokio::spawn(async move {
-                    loop {
-                        match conn.receive().await {
-                            Ok(data) => {
-                                if txx.send((logical_id, data)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                });
-            }
-        }
-    }
+    assign_topological_client_ids(&mut clients)
+        .await
+        .expect("Failed to assign topological client IDs");
+    register_topological_client_connections(&servers);
 
     // Step 5: Run preprocessing
     info!("Step 5: Running preprocessing on all servers...");
@@ -490,7 +457,7 @@ async fn test_vm_mesh_average_salary_integration() {
     let mut client_inputs = Vec::new();
     let mut expected_sum = 0i64;
     for idx in 0..client_count {
-        let client_id = 50 + idx as ClientId;
+        let client_id = idx as ClientId;
         client_ids.push(client_id);
         let salary = rng.gen_range(40_000i64..=200_000i64);
         expected_sum += salary;
@@ -602,44 +569,10 @@ async fn test_vm_mesh_average_salary_integration() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Build client derived_id → logical_client_id mapping.
-    let mut client_derived_to_logical: HashMap<usize, ClientId> = HashMap::new();
-    for client in &clients {
-        let derived = client.network.lock().await.local_derived_id();
-        client_derived_to_logical.insert(derived, client.client_id);
-    }
-
-    // Register client connections and spawn receive handlers with correct logical client IDs.
-    // The accept loop in start() tags ALL unknown connections with expected_clients[0],
-    // which is wrong for multi-client setups. We spawn explicit handlers here instead.
-    for server in servers.iter() {
-        let all_clients = server
-            .network
-            .as_ref()
-            .expect("network should be set")
-            .get_all_client_connections();
-        for (derived_id, conn) in &all_clients {
-            if let Some(&logical_id) = client_derived_to_logical.get(derived_id) {
-                if let Some(ref routed) = server.routed_network {
-                    routed.register_client(logical_id, conn.clone());
-                }
-                let txx = server.channels.clone();
-                let conn = conn.clone();
-                tokio::spawn(async move {
-                    loop {
-                        match conn.receive().await {
-                            Ok(data) => {
-                                if txx.send((logical_id, data)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                });
-            }
-        }
-    }
+    assign_topological_client_ids(&mut clients)
+        .await
+        .expect("Failed to assign topological client IDs");
+    register_topological_client_connections(&servers);
 
     info!("Running preprocessing for average test...");
     let preprocessing_handles: Vec<_> = servers
@@ -985,7 +918,7 @@ async fn test_vm_mesh_large_preprocessing() {
     };
 
     // Define client IDs before network setup (client IDs must be registered at setup time)
-    let client_ids: Vec<ClientId> = vec![30, 31];
+    let client_ids: Vec<ClientId> = vec![0, 1];
     let client_inputs: Vec<Vec<Fr>> = vec![
         vec![Fr::from(10u64)], // Client 30 input
         vec![Fr::from(20u64)], // Client 31 input
@@ -1104,44 +1037,10 @@ async fn test_vm_mesh_large_preprocessing() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Build client derived_id → logical_client_id mapping.
-    let mut client_derived_to_logical: HashMap<usize, ClientId> = HashMap::new();
-    for client in &clients {
-        let derived = client.network.lock().await.local_derived_id();
-        client_derived_to_logical.insert(derived, client.client_id);
-    }
-
-    // Register client connections and spawn receive handlers with correct logical client IDs.
-    // The accept loop in start() tags ALL unknown connections with expected_clients[0],
-    // which is wrong for multi-client setups. We spawn explicit handlers here instead.
-    for server in servers.iter() {
-        let all_clients = server
-            .network
-            .as_ref()
-            .expect("network should be set")
-            .get_all_client_connections();
-        for (derived_id, conn) in &all_clients {
-            if let Some(&logical_id) = client_derived_to_logical.get(derived_id) {
-                if let Some(ref routed) = server.routed_network {
-                    routed.register_client(logical_id, conn.clone());
-                }
-                let txx = server.channels.clone();
-                let conn = conn.clone();
-                tokio::spawn(async move {
-                    loop {
-                        match conn.receive().await {
-                            Ok(data) => {
-                                if txx.send((logical_id, data)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                });
-            }
-        }
-    }
+    assign_topological_client_ids(&mut clients)
+        .await
+        .expect("Failed to assign topological client IDs");
+    register_topological_client_connections(&servers);
 
     // Step 5: Run preprocessing (matching the exact pattern from test_vm_mesh_full_integration)
     info!("Step 5: Running preprocessing on all servers...");
@@ -1304,7 +1203,7 @@ async fn test_vm_mesh_output_client_integration() {
     let mut client_inputs = Vec::new();
     let mut expected_sum = 0i64;
     for idx in 0..client_count {
-        let client_id = 60 + idx as ClientId;
+        let client_id = idx as ClientId;
         client_ids.push(client_id);
         let salary = rng.gen_range(50_000i64..=150_000i64);
         expected_sum += salary;
@@ -1421,44 +1320,10 @@ async fn test_vm_mesh_output_client_integration() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Build client derived_id → logical_client_id mapping.
-    let mut client_derived_to_logical: HashMap<usize, ClientId> = HashMap::new();
-    for client in &clients {
-        let derived = client.network.lock().await.local_derived_id();
-        client_derived_to_logical.insert(derived, client.client_id);
-    }
-
-    // Register client connections and spawn receive handlers with correct logical client IDs.
-    // The accept loop in start() tags ALL unknown connections with expected_clients[0],
-    // which is wrong for multi-client setups. We spawn explicit handlers here instead.
-    for server in servers.iter() {
-        let all_clients = server
-            .network
-            .as_ref()
-            .expect("network should be set")
-            .get_all_client_connections();
-        for (derived_id, conn) in &all_clients {
-            if let Some(&logical_id) = client_derived_to_logical.get(derived_id) {
-                if let Some(ref routed) = server.routed_network {
-                    routed.register_client(logical_id, conn.clone());
-                }
-                let txx = server.channels.clone();
-                let conn = conn.clone();
-                tokio::spawn(async move {
-                    loop {
-                        match conn.receive().await {
-                            Ok(data) => {
-                                if txx.send((logical_id, data)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                });
-            }
-        }
-    }
+    assign_topological_client_ids(&mut clients)
+        .await
+        .expect("Failed to assign topological client IDs");
+    register_topological_client_connections(&servers);
 
     // Step 5: Run preprocessing
     info!("Step 5: Running preprocessing...");
@@ -1799,7 +1664,7 @@ async fn test_vm_mesh_matrix_average_integration() {
     );
 
     for idx in 0..client_count {
-        let client_id = 70 + idx as ClientId;
+        let client_id = idx as ClientId;
         client_ids.push(client_id);
 
         // Generate a random matrix (values between 1-100)
@@ -1934,44 +1799,10 @@ async fn test_vm_mesh_matrix_average_integration() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Build client derived_id → logical_client_id mapping.
-    let mut client_derived_to_logical: HashMap<usize, ClientId> = HashMap::new();
-    for client in &clients {
-        let derived = client.network.lock().await.local_derived_id();
-        client_derived_to_logical.insert(derived, client.client_id);
-    }
-
-    // Register client connections and spawn receive handlers with correct logical client IDs.
-    // The accept loop in start() tags ALL unknown connections with expected_clients[0],
-    // which is wrong for multi-client setups. We spawn explicit handlers here instead.
-    for server in servers.iter() {
-        let all_clients = server
-            .network
-            .as_ref()
-            .expect("network should be set")
-            .get_all_client_connections();
-        for (derived_id, conn) in &all_clients {
-            if let Some(&logical_id) = client_derived_to_logical.get(derived_id) {
-                if let Some(ref routed) = server.routed_network {
-                    routed.register_client(logical_id, conn.clone());
-                }
-                let txx = server.channels.clone();
-                let conn = conn.clone();
-                tokio::spawn(async move {
-                    loop {
-                        match conn.receive().await {
-                            Ok(data) => {
-                                if txx.send((logical_id, data)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                });
-            }
-        }
-    }
+    assign_topological_client_ids(&mut clients)
+        .await
+        .expect("Failed to assign topological client IDs");
+    register_topological_client_connections(&servers);
 
     // Step 5: Run preprocessing
     info!("Step 5: Running preprocessing...");
@@ -2395,7 +2226,7 @@ async fn test_vm_mesh_matrix_average_fixed_point_integration() {
     );
 
     for idx in 0..client_count {
-        let client_id = 80 + idx as ClientId;
+        let client_id = idx as ClientId;
         client_ids.push(client_id);
 
         // Generate random matrix with decimal values (e.g., 1.5, 42.75)
@@ -2750,44 +2581,10 @@ async fn test_vm_mesh_matrix_average_fixed_point_integration() {
     // Brief pause to ensure connections are stable
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Build client derived_id → logical_client_id mapping.
-    let mut client_derived_to_logical: HashMap<usize, ClientId> = HashMap::new();
-    for client in &clients {
-        let derived = client.network.lock().await.local_derived_id();
-        client_derived_to_logical.insert(derived, client.client_id);
-    }
-
-    // Register client connections and spawn receive handlers with correct logical client IDs.
-    // The accept loop in start() tags ALL unknown connections with expected_clients[0],
-    // which is wrong for multi-client setups. We spawn explicit handlers here instead.
-    for server in servers.iter() {
-        let all_clients = server
-            .network
-            .as_ref()
-            .expect("network should be set")
-            .get_all_client_connections();
-        for (derived_id, conn) in &all_clients {
-            if let Some(&logical_id) = client_derived_to_logical.get(derived_id) {
-                if let Some(ref routed) = server.routed_network {
-                    routed.register_client(logical_id, conn.clone());
-                }
-                let txx = server.channels.clone();
-                let conn = conn.clone();
-                tokio::spawn(async move {
-                    loop {
-                        match conn.receive().await {
-                            Ok(data) => {
-                                if txx.send((logical_id, data)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                });
-            }
-        }
-    }
+    assign_topological_client_ids(&mut clients)
+        .await
+        .expect("Failed to assign topological client IDs");
+    register_topological_client_connections(&servers);
 
     // OPTIMIZATION: Initialize input protocol for all servers in parallel
     // Each server initializes input protocol for all clients
@@ -3556,7 +3353,7 @@ async fn test_vm_mesh_bytecode_fixed_point_integration() {
     );
 
     for idx in 0..client_count {
-        let client_id = 90 + idx as ClientId;
+        let client_id = idx as ClientId;
         client_ids.push(client_id);
 
         // Generate random matrix with decimal values
@@ -3586,7 +3383,7 @@ async fn test_vm_mesh_bytecode_fixed_point_integration() {
     info!("");
     info!("=== Client Input Matrices ===");
     for (idx, matrix) in client_matrices_f64.iter().enumerate() {
-        let client_id = 90 + idx as ClientId;
+        let client_id = idx as ClientId;
         info!(
             "Client {} matrix ({}x{}):",
             client_id, MATRIX_ROWS, MATRIX_COLS
@@ -3728,44 +3525,10 @@ async fn test_vm_mesh_bytecode_fixed_point_integration() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Build client derived_id → logical_client_id mapping.
-    let mut client_derived_to_logical: HashMap<usize, ClientId> = HashMap::new();
-    for client in &clients {
-        let derived = client.network.lock().await.local_derived_id();
-        client_derived_to_logical.insert(derived, client.client_id);
-    }
-
-    // Register client connections and spawn receive handlers with correct logical client IDs.
-    // The accept loop in start() tags ALL unknown connections with expected_clients[0],
-    // which is wrong for multi-client setups. We spawn explicit handlers here instead.
-    for server in servers.iter() {
-        let all_clients = server
-            .network
-            .as_ref()
-            .expect("network should be set")
-            .get_all_client_connections();
-        for (derived_id, conn) in &all_clients {
-            if let Some(&logical_id) = client_derived_to_logical.get(derived_id) {
-                if let Some(ref routed) = server.routed_network {
-                    routed.register_client(logical_id, conn.clone());
-                }
-                let txx = server.channels.clone();
-                let conn = conn.clone();
-                tokio::spawn(async move {
-                    loop {
-                        match conn.receive().await {
-                            Ok(data) => {
-                                if txx.send((logical_id, data)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                });
-            }
-        }
-    }
+    assign_topological_client_ids(&mut clients)
+        .await
+        .expect("Failed to assign topological client IDs");
+    register_topological_client_connections(&servers);
 
     // Step 6: Run preprocessing
     info!("Step 6: Running preprocessing...");

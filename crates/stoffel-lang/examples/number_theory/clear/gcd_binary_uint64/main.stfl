@@ -1,0 +1,72 @@
+# Stein's binary GCD on uint64: division and modulo are replaced by
+# shr/shl shifts and subtraction. Common factors of two are pulled out
+# first, evens are halved, and odd pairs subtract. Verified against
+# the remainder-based Euclid.
+
+def gcd_euclid(a: uint64, b: uint64) -> uint64:
+  var x: uint64 = a
+  var y: uint64 = b
+  while y != 0u64:
+    var t: uint64 = x % y
+    x = y
+    y = t
+  return x
+
+def gcd_binary(a: uint64, b: uint64) -> uint64:
+  if a == 0u64:
+    return b
+  if b == 0u64:
+    return a
+
+  var x: uint64 = a
+  var y: uint64 = b
+
+  # Factor out the twos common to both.
+  var shift: uint64 = 0u64
+  while ((x or y) and 1u64) == 0u64:
+    x = x shr 1u64
+    y = y shr 1u64
+    shift += 1u64
+
+  # Strip remaining twos from x; they are not common.
+  while (x and 1u64) == 0u64:
+    x = x shr 1u64
+
+  while y != 0u64:
+    while (y and 1u64) == 0u64:
+      y = y shr 1u64
+    # Both odd now: order them and subtract (difference is even).
+    if x > y:
+      var t: uint64 = x
+      x = y
+      y = t
+    y = y - x
+
+  # Restore the common twos.
+  return x shl shift
+
+def main() -> int64:
+  # Knowns, including powers of two where the shifts do all the work.
+  assert gcd_binary(48u64, 18u64) == 6u64, "gcd(48, 18)"
+  assert gcd_binary(1024u64, 4096u64) == 1024u64, "pure powers of two"
+  assert gcd_binary(96u64, 36u64) == 12u64, "shared factor 4 via shifts"
+  assert gcd_binary(17u64, 13u64) == 1u64, "coprime odds"
+  assert gcd_binary(0u64, 9u64) == 9u64, "zero edge case"
+  assert gcd_binary(9u64, 0u64) == 9u64, "zero edge case flipped"
+
+  # Cross-check against Euclid over a grid including odd/even mixes.
+  var values: list[uint64] = [1u64, 2u64, 3u64, 8u64, 12u64, 30u64, 36u64, 49u64, 64u64, 75u64, 256u64, 1000u64]
+  var i: int64 = 0
+  while i < values.len():
+    var j: int64 = 0
+    while j < values.len():
+      assert gcd_binary(values[i], values[j]) == gcd_euclid(values[i], values[j]), "binary vs euclid"
+      j += 1
+    i += 1
+
+  # Large values with a known power-of-two factor.
+  assert gcd_binary(1152921504606846976u64, 768u64) == 256u64, "2^60 vs 3*2^8"
+  assert gcd_binary(18446744073709551614u64, 9223372036854775806u64) == gcd_euclid(18446744073709551614u64, 9223372036854775806u64), "near 2^64"
+
+  print("binary gcd: shift-and-subtract agrees with euclid on a 12x12 grid")
+  return 0

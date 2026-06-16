@@ -14,22 +14,23 @@ pub type ForeignFunctionPtr =
 pub(crate) enum MpcOnlineBuiltin {
     FromClear,
     FromClearInt,
+    FromClearUInt,
     FromClearFixed,
     Mul,
+    BatchMul,
     Open,
     BatchOpen,
     SendToClient,
     OutputSendToClient,
     OpenExp,
     Random,
+    RandomField,
+    RandomInt,
     OpenField,
     OpenExpCustom,
     RbcBroadcast,
     RbcReceive,
     RbcReceiveAny,
-    AbaPropose,
-    AbaResult,
-    AbaProposeAndWait,
 }
 
 impl MpcOnlineBuiltin {
@@ -37,22 +38,23 @@ impl MpcOnlineBuiltin {
         match self {
             Self::FromClear => "Share.from_clear",
             Self::FromClearInt => "Share.from_clear_int",
+            Self::FromClearUInt => "Share.from_clear_uint",
             Self::FromClearFixed => "Share.from_clear_fixed",
             Self::Mul => "Share.mul",
+            Self::BatchMul => "Share.batch_mul",
             Self::Open => "Share.open",
             Self::BatchOpen => "Share.batch_open",
             Self::SendToClient => "Share.send_to_client",
             Self::OutputSendToClient => "MpcOutput.send_to_client",
             Self::OpenExp => "Share.open_exp",
             Self::Random => "Share.random",
+            Self::RandomField => "Share.random_field",
+            Self::RandomInt => "Share.random_int",
             Self::OpenField => "Share.open_field",
             Self::OpenExpCustom => "Share.open_exp_custom",
             Self::RbcBroadcast => "Rbc.broadcast",
             Self::RbcReceive => "Rbc.receive",
             Self::RbcReceiveAny => "Rbc.receive_any",
-            Self::AbaPropose => "Aba.propose",
-            Self::AbaResult => "Aba.result",
-            Self::AbaProposeAndWait => "Aba.propose_and_wait",
         }
     }
 }

@@ -1,5 +1,5 @@
 use super::{share_fields, MpcValueError, MpcValueResult};
-use crate::value_conversions::{usize_to_vm_i64, value_to_usize};
+use crate::value_conversions::{usize_to_vm_i64, value_to_i64, value_to_usize};
 use stoffel_vm_types::core_types::{
     ArrayRef, ObjectRef, ShareData, ShareType, TableMemory, TableRef, Value,
 };
@@ -131,6 +131,17 @@ impl ShareObjectRef {
                 };
                 Ok(ShareType::try_secret_int(bit_length)?)
             }
+            Value::String(s) if s == share_fields::SECRET_UINT => {
+                let bit_length = match store
+                    .read_table_field(self.table_ref(), &field(share_fields::BIT_LENGTH))
+                    .map_err(|e| {
+                        MpcValueError::table_memory_context("failed to read Share bit length", e)
+                    })? {
+                    Some(value) => value_to_usize(&value, "bit_length")?,
+                    _ => 64,
+                };
+                Ok(ShareType::try_secret_uint(bit_length)?)
+            }
             Value::String(s) if s == share_fields::SECRET_FIXED_POINT => {
                 let k = match store
                     .read_table_field(self.table_ref(), &field(share_fields::PRECISION_K))
@@ -205,6 +216,24 @@ pub fn create_share_object_ref<M: TableMemory + ?Sized>(
                     obj,
                     field(share_fields::SHARE_TYPE),
                     Value::String(share_fields::SECRET_INT.to_string()),
+                )
+                .map_err(|e| MpcValueError::table_memory_context("failed to set Share type", e))?;
+            store
+                .set_table_field(
+                    obj,
+                    field(share_fields::BIT_LENGTH),
+                    Value::I64(usize_to_vm_i64(bit_length, "bit_length")?),
+                )
+                .map_err(|e| {
+                    MpcValueError::table_memory_context("failed to set Share bit length", e)
+                })?;
+        }
+        ShareType::SecretUInt { bit_length } => {
+            store
+                .set_table_field(
+                    obj,
+                    field(share_fields::SHARE_TYPE),
+                    Value::String(share_fields::SECRET_UINT.to_string()),
                 )
                 .map_err(|e| MpcValueError::table_memory_context("failed to set Share type", e))?;
             store
@@ -414,6 +443,77 @@ pub fn extract_homogeneous_share_array_ref<M: TableMemory + ?Sized>(
     }
 
     Ok(Some((first_ty, data)))
+}
+
+/// One element of a multiplication batch: a real share, or a clear integer
+/// scalar that can be combined with shares locally (no MPC interaction).
+#[derive(Debug, Clone)]
+pub enum ShareOrScalar {
+    Share(ShareType, ShareData),
+    Scalar(i64),
+}
+
+/// Extract a VM array whose elements are Share values or clear integers.
+/// Used by `Share.batch_mul` so share-by-public products can be computed
+/// locally instead of being rejected.
+pub fn extract_share_or_scalar_array<M: TableMemory + ?Sized>(
+    store: &mut M,
+    value: &Value,
+    context: &str,
+) -> MpcValueResult<Vec<ShareOrScalar>> {
+    let array_ref = match ArrayRef::from_value(value) {
+        Some(array_ref) => array_ref,
+        None => {
+            return Err(MpcValueError::unexpected_value(
+                context,
+                "array of Share or integer values",
+                value.clone(),
+            ));
+        }
+    };
+
+    let array = TableRef::from(array_ref);
+    let len = store.read_array_ref_len(array_ref).map_err(|e| {
+        MpcValueError::table_memory_context(format!("failed to read {context} length"), e)
+    })?;
+    let mut elements = Vec::with_capacity(len);
+
+    for i in 0..len {
+        let idx = Value::I64(usize_to_vm_i64(i, "array index")?);
+        let element = store
+            .read_table_field(array, &idx)
+            .map_err(|e| {
+                MpcValueError::table_memory_context(
+                    format!("failed to read {context} element {i}"),
+                    e,
+                )
+            })?
+            .ok_or_else(|| MpcValueError::missing_array_element(context, i))?;
+        if element == Value::Unit {
+            return Err(MpcValueError::missing_array_element(context, i));
+        }
+
+        if matches!(
+            element,
+            Value::I64(_)
+                | Value::I32(_)
+                | Value::I16(_)
+                | Value::I8(_)
+                | Value::U8(_)
+                | Value::U16(_)
+                | Value::U32(_)
+                | Value::U64(_)
+        ) {
+            let scalar = value_to_i64(&element, "share scalar")
+                .map_err(|e| MpcValueError::message(e.to_string()))?;
+            elements.push(ShareOrScalar::Scalar(scalar));
+        } else {
+            let (share_type, share_data) = extract_share_data(store, &element)?;
+            elements.push(ShareOrScalar::Share(share_type, share_data));
+        }
+    }
+
+    Ok(elements)
 }
 
 /// Check if a value is a Share object or raw `Value::Share`.

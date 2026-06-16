@@ -1,0 +1,83 @@
+# Count leading and trailing zeros of uint64 by binary descent,
+# derive floor(log2), and assert the power-of-two bracketing property.
+
+def clz(x: uint64) -> uint64:
+  if x == 0u64:
+    return 64u64
+  var n: uint64 = 0u64
+  var v: uint64 = x
+  if (v shr 32u64) == 0u64:
+    n += 32u64
+    v = v shl 32u64
+  if (v shr 48u64) == 0u64:
+    n += 16u64
+    v = v shl 16u64
+  if (v shr 56u64) == 0u64:
+    n += 8u64
+    v = v shl 8u64
+  if (v shr 60u64) == 0u64:
+    n += 4u64
+    v = v shl 4u64
+  if (v shr 62u64) == 0u64:
+    n += 2u64
+    v = v shl 2u64
+  if (v shr 63u64) == 0u64:
+    n += 1u64
+  return n
+
+def ctz(x: uint64) -> uint64:
+  if x == 0u64:
+    return 64u64
+  var n: uint64 = 0u64
+  var v: uint64 = x
+  if (v and 0xFFFFFFFFu64) == 0u64:
+    n += 32u64
+    v = v shr 32u64
+  if (v and 0xFFFFu64) == 0u64:
+    n += 16u64
+    v = v shr 16u64
+  if (v and 0xFFu64) == 0u64:
+    n += 8u64
+    v = v shr 8u64
+  if (v and 0xFu64) == 0u64:
+    n += 4u64
+    v = v shr 4u64
+  if (v and 0x3u64) == 0u64:
+    n += 2u64
+    v = v shr 2u64
+  if (v and 0x1u64) == 0u64:
+    n += 1u64
+  return n
+
+def floor_log2(x: uint64) -> uint64:
+  return 63u64 - clz(x)
+
+def main() -> int64:
+  assert clz(1u64) == 63u64, "clz(1)"
+  assert clz(0x8000000000000000u64) == 0u64, "clz of the top bit"
+  assert clz(0u64) == 64u64, "clz(0) is the word size"
+  assert ctz(1u64) == 0u64, "ctz(1)"
+  assert ctz(0x8000000000000000u64) == 63u64, "ctz of the top bit"
+  assert ctz(96u64) == 5u64, "ctz(0b1100000)"
+
+  # Bracketing: 2^floor_log2(x) <= x < 2^(floor_log2(x)+1).
+  var samples: list[uint64] = [1u64, 2u64, 3u64, 1000u64, 65536u64, 0xDEADBEEFu64, 0xFFFFFFFFFFFFFFFFu64]
+  var i: int64 = 0
+  while i < samples.len():
+    var x: uint64 = samples[i]
+    var k: uint64 = floor_log2(x)
+    var lower: uint64 = 1u64 shl k
+    assert lower <= x, "2^k must not exceed x"
+    if k < 63u64:
+      var upper: uint64 = 1u64 shl (k + 1u64)
+      assert x < upper, "x must be below 2^(k+1)"
+    # For powers of two, leading + trailing zeros account for all other bits.
+    if (x and (x - 1u64)) == 0u64:
+      assert clz(x) + ctz(x) == 63u64, "power of two has one set bit"
+    i += 1
+
+  assert floor_log2(1u64) == 0u64, "log2(1)"
+  assert floor_log2(1024u64) == 10u64, "log2(1024)"
+
+  print("clz/ctz: binary descent and log2 bracketing verified")
+  return 0

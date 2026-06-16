@@ -1,0 +1,82 @@
+# Polynomial calculus in fix64: differentiation and antidifferentiation
+# as coefficient transforms, the fundamental-theorem round trip, and a
+# definite integral that is exactly representable in binary fixed point.
+
+def differentiate(p: list[fix64]) -> list[fix64]:
+  # d/dx sum(c_i x^i) = sum(i * c_i x^(i-1)); multiply by the index.
+  var out: list[fix64] = []
+  var factor: fix64 = 1.0
+  var i: int64 = 1
+  while i < p.len():
+    out.append(p[i] * factor)
+    factor = factor + 1.0
+    i += 1
+  if out.len() == 0:
+    out.append(0.0)
+  return out
+
+def antidifferentiate(p: list[fix64], constant: fix64) -> list[fix64]:
+  # Integral coefficients c_i / (i+1), with the given integration constant.
+  var out: list[fix64] = [constant]
+  var divisor: fix64 = 1.0
+  var i: int64 = 0
+  while i < p.len():
+    out.append(p[i] / divisor)
+    divisor = divisor + 1.0
+    i += 1
+  return out
+
+def poly_eval(p: list[fix64], x: fix64) -> fix64:
+  var acc: fix64 = 0.0
+  var i: int64 = p.len() - 1
+  while i >= 0:
+    acc = acc * x + p[i]
+    i -= 1
+  return acc
+
+def fabs(x: fix64) -> fix64:
+  if x < 0.0:
+    return -x
+  return x
+
+def main() -> int64:
+  var tol: fix64 = 0.001
+
+  # p(x) = 2 + 1.5x + 0.5x^2
+  var p: list[fix64] = [2.0, 1.5, 0.5]
+
+  # p'(x) = 1.5 + x
+  var dp: list[fix64] = differentiate(p)
+  assert fabs(dp[0] - 1.5) < tol, "derivative constant term"
+  assert fabs(dp[1] - 1.0) < tol, "derivative linear term"
+
+  # Fundamental theorem round trip: integrating p' with C = p(0)
+  # recovers p coefficient by coefficient.
+  var back: list[fix64] = antidifferentiate(dp, p[0])
+  var i: int64 = 0
+  while i < p.len():
+    assert fabs(back[i] - p[i]) < tol, "antiderivative of derivative restores p"
+    i += 1
+
+  # Definite integral of p'(x) over [0, 2] is p(2) - p(0) = 7 - 2 = 5.
+  var anti: list[fix64] = antidifferentiate(dp, 0.0)
+  var integral: fix64 = poly_eval(anti, 2.0) - poly_eval(anti, 0.0)
+  assert fabs(integral - 5.0) < tol, "definite integral over [0,2]"
+
+  # Differentiation is linear: (p + p)' == 2 p', checked pointwise.
+  var double_p: list[fix64] = [4.0, 3.0, 1.0]
+  var d_double: list[fix64] = differentiate(double_p)
+  var xs: list[fix64] = [0.0, 0.5, 1.0, 2.0, -1.5]
+  i = 0
+  while i < xs.len():
+    var lhs: fix64 = poly_eval(d_double, xs[i])
+    var rhs: fix64 = poly_eval(dp, xs[i]) * 2.0
+    assert fabs(lhs - rhs) < tol, "derivative is linear"
+    i += 1
+
+  # Second derivative of the quadratic is the constant 1.
+  var ddp: list[fix64] = differentiate(dp)
+  assert fabs(ddp[0] - 1.0) < tol, "second derivative constant"
+
+  print("poly calculus: derivative, integral and linearity verified in fix64")
+  return 0

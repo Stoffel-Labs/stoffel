@@ -210,6 +210,10 @@ fn mpc_info_builtins_expose_backend_identity_and_capabilities() {
         Value::String("bls12-381-fr".to_string())
     );
     assert_eq!(
+        vm.execute_with_args("Mpc.instance_id", &[]).unwrap(),
+        Value::U64(0)
+    );
+    assert_eq!(
         vm.execute_with_args(
             "Mpc.has_capability",
             &[Value::String("open_in_exp".to_string())],
@@ -239,24 +243,19 @@ fn mpc_info_builtins_expose_backend_identity_and_capabilities() {
 }
 
 #[test]
-fn mpc_has_capability_rejects_unknown_capability_names() {
+fn mpc_has_capability_returns_false_for_unknown_capability_names() {
     let mut vm = VirtualMachine::builder()
         .with_standard_library(false)
         .with_mpc_engine(Arc::new(NoOpenExpEngine))
         .build();
 
-    let err = vm
-        .execute_with_args(
+    assert_eq!(
+        vm.execute_with_args(
             "Mpc.has_capability",
             &[Value::String("not-a-capability".to_string())],
         )
-        .expect_err("unknown capability names should be rejected");
-
-    assert_eq!(err.kind(), VirtualMachineErrorKind::ForeignFunction);
-    assert!(
-        err.to_string()
-            .contains("Unsupported MPC capability: not-a-capability"),
-        "unexpected error: {err}"
+        .unwrap(),
+        Value::Bool(false)
     );
 }
 

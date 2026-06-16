@@ -1,7 +1,7 @@
 use super::*;
 use crate::net::curve::MpcFieldKind;
 use crate::net::mpc_engine::{
-    AbaSessionId, MpcCapabilities, MpcEngine, MpcEngineConsensus, MpcEngineResult, MpcPartyId,
+    MpcCapabilities, MpcEngine, MpcEngineConsensus, MpcEngineResult, MpcPartyId,
     MpcSessionTopology, RbcSessionId,
 };
 use crate::vm_state::VMState;
@@ -121,14 +121,6 @@ impl MpcEngineConsensus for ReadyConsensusEngine {
     fn rbc_receive_any(&self, timeout_ms: u64) -> MpcEngineResult<(MpcPartyId, Vec<u8>)> {
         Ok((self.party(), timeout_ms.to_be_bytes().to_vec()))
     }
-
-    fn aba_propose(&self, value: bool) -> MpcEngineResult<AbaSessionId> {
-        Ok(AbaSessionId::new(if value { 11 } else { 22 }))
-    }
-
-    fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> MpcEngineResult<bool> {
-        Ok(session_id.id() + timeout_ms == 33)
-    }
 }
 
 #[test]
@@ -199,16 +191,6 @@ fn foreign_context_centralizes_consensus_operations() {
         context.rbc_receive_any(19).expect("receive any"),
         (MpcPartyId::new(1), 19u64.to_be_bytes().to_vec())
     );
-    assert_eq!(
-        context.aba_propose(true).expect("propose"),
-        AbaSessionId::new(11)
-    );
-    assert!(context
-        .aba_result(AbaSessionId::new(11), 22)
-        .expect("result"));
-    assert!(!context
-        .aba_propose_and_wait(false, 10)
-        .expect("propose and wait"));
 }
 
 #[test]

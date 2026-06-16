@@ -1,12 +1,12 @@
 use super::HoneyBadgerMpcEngine;
 use crate::net::curve::{MpcCurveConfig, SupportedMpcField};
 use crate::net::mpc_engine::{
-    MpcCapabilities, MpcEngine, MpcEngineClientOps, MpcEngineClientOutput, MpcEngineConsensus,
-    MpcEngineMultiplication, MpcEngineOpenInExponent, MpcEngineOperationResultExt,
-    MpcEnginePreprocPersistence, MpcEngineRandomness, MpcEngineReservation, MpcSessionTopology,
+    DurableIdentityDigest, MpcCapabilities, MpcEngine, MpcEngineClientOps, MpcEngineClientOutput,
+    MpcEngineConsensus, MpcEngineMultiplication, MpcEngineOpenInExponent,
+    MpcEngineOperationResultExt, MpcEnginePreprocPersistence, MpcEngineRandomness,
+    MpcEngineReservation, MpcSessionTopology,
 };
 use ark_ec::{CurveGroup, PrimeGroup};
-use ark_std::rand::SeedableRng;
 use std::any::TypeId;
 use std::sync::atomic::Ordering;
 use stoffel_vm_types::core_types::{
@@ -28,6 +28,10 @@ where
         self.topology
     }
 
+    fn local_identity(&self) -> DurableIdentityDigest {
+        self.local_identity
+    }
+
     fn is_ready(&self) -> bool {
         self.ready.load(Ordering::SeqCst)
     }
@@ -46,17 +50,21 @@ where
             match clear.into_parts() {
                 (ShareType::SecretInt { .. }, ClearShareValue::Integer(v)) => {
                     let secret = crate::net::curve::field_from_i64::<F>(v);
-                    let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-                    let shares = RobustShare::compute_shares(
+                    let share = RobustShare::new(
                         secret,
-                        self.topology.n_parties(),
+                        self.topology.party_id(),
                         self.topology.threshold(),
-                        None,
-                        &mut rng,
-                    )
-                    .map_err(|e| format!("compute_shares: {:?}", e))?;
-                    let my = &shares[self.topology.party_id()];
-                    Self::encode_share(my).map(ShareData::Opaque)
+                    );
+                    Self::encode_share(&share).map(ShareData::Opaque)
+                }
+                (ShareType::SecretUInt { .. }, ClearShareValue::UnsignedInteger(v)) => {
+                    let secret = crate::net::curve::field_from_u64::<F>(v);
+                    let share = RobustShare::new(
+                        secret,
+                        self.topology.party_id(),
+                        self.topology.threshold(),
+                    );
+                    Self::encode_share(&share).map(ShareData::Opaque)
                 }
                 (
                     ShareType::SecretInt {
@@ -65,32 +73,22 @@ where
                     ClearShareValue::Boolean(b),
                 ) => {
                     let secret = if b { F::from(1u64) } else { F::from(0u64) };
-                    let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-                    let shares = RobustShare::compute_shares(
+                    let share = RobustShare::new(
                         secret,
-                        self.topology.n_parties(),
+                        self.topology.party_id(),
                         self.topology.threshold(),
-                        None,
-                        &mut rng,
-                    )
-                    .map_err(|e| format!("compute_shares: {:?}", e))?;
-                    let my = &shares[self.topology.party_id()];
-                    Self::encode_share(my).map(ShareData::Opaque)
+                    );
+                    Self::encode_share(&share).map(ShareData::Opaque)
                 }
                 (ShareType::SecretFixedPoint { precision }, ClearShareValue::FixedPoint(fp)) => {
                     let scaled_value = crate::net::curve::fixed_point_float_to_i64(precision, fp)?;
                     let secret = crate::net::curve::field_from_i64(scaled_value);
-                    let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-                    let shares = RobustShare::compute_shares(
+                    let share = RobustShare::new(
                         secret,
-                        self.topology.n_parties(),
+                        self.topology.party_id(),
                         self.topology.threshold(),
-                        None,
-                        &mut rng,
-                    )
-                    .map_err(|e| format!("compute_shares: {:?}", e))?;
-                    let my = &shares[self.topology.party_id()];
-                    Self::encode_share(my).map(ShareData::Opaque)
+                    );
+                    Self::encode_share(&share).map(ShareData::Opaque)
                 }
                 _ => Err("Unsupported type for input_share".to_string()),
             }
@@ -106,26 +104,34 @@ where
         (|| -> Result<ClearShareValue, String> {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("hb-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("hb-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("hb-fixed-{}-{}", precision.k(), precision.f())
                 }
             };
 
+            let seq = self.open_registry.insert_single_next(
+                &type_key,
+                self.topology.party_id(),
+                share_bytes.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_single_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 share_bytes,
             )?;
             self.broadcast_open_registry_payload_sync(wire_message)?;
 
-            let required = 2 * self.topology.threshold() + 1;
+            let required = Self::robust_open_required_contributions(self.topology.threshold());
             let n = self.topology.n_parties();
             let t = self.topology.threshold();
 
-            self.open_registry.open_share_wait(
+            self.open_registry.open_share_at_wait(
                 self.topology.party_id(),
                 &type_key,
+                seq,
                 share_bytes,
                 required,
                 |collected| {
@@ -158,26 +164,34 @@ where
         (|| -> Result<Vec<ClearShareValue>, String> {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("hb-batch-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("hb-batch-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("hb-batch-fixed-{}-{}", precision.k(), precision.f())
                 }
             };
 
+            let seq = self.open_registry.insert_batch_next(
+                &type_key,
+                self.topology.party_id(),
+                shares.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_batch_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 shares,
             )?;
             self.broadcast_open_registry_payload_sync(wire_message)?;
 
-            let required = 2 * self.topology.threshold() + 1;
+            let required = Self::robust_open_required_contributions(self.topology.threshold());
             let n = self.topology.n_parties();
             let t = self.topology.threshold();
 
-            self.open_registry.batch_open_wait(
+            self.open_registry.batch_open_at_wait(
                 self.topology.party_id(),
                 &type_key,
+                seq,
                 shares,
                 required,
                 |collected, pos| {
@@ -226,6 +240,7 @@ where
             | MpcCapabilities::CONSENSUS
             | MpcCapabilities::RESERVATION
             | MpcCapabilities::RANDOMNESS
+            | MpcCapabilities::FIELD_OPEN
             | MpcCapabilities::PREPROC_PERSISTENCE
     }
 
@@ -250,6 +265,10 @@ where
     }
 
     fn as_randomness(&self) -> Option<&dyn MpcEngineRandomness> {
+        Some(self)
+    }
+
+    fn as_field_open(&self) -> Option<&dyn crate::net::mpc_engine::MpcEngineFieldOpen> {
         Some(self)
     }
 

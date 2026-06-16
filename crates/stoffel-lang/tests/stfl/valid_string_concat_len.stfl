@@ -1,0 +1,12 @@
+def main() -> int64:
+  var ok = 4100
+  var a = "Hello, "
+  var b = "Stoffel"
+  var c = a + b
+  if len(c) == 14:
+    ok += 1
+  if c == "Hello, Stoffel":
+    ok += 1
+  if c.len() == 14:
+    ok += 1
+  return ok

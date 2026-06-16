@@ -1,0 +1,10 @@
+# Middle module - imports base
+# This is the middle of the chain
+import base
+
+def middle_compute() -> int64:
+  var val = base_value()
+  return double(val)
+
+def triple(x: int64) -> int64:
+  return x * 3

@@ -7,7 +7,9 @@
 //! 3. Returns the public key bytes (all parties produce the same result)
 
 use stoffel_vm_types::{
-    compiled_binary::utils::{from_vm_functions, save_to_file},
+    compiled_binary::utils::{
+        from_vm_functions, load_from_file, save_to_file, try_to_vm_functions,
+    },
     core_types::Value,
     functions::VMFunction,
     instructions::Instruction,
@@ -31,9 +33,8 @@ pub fn build_avss_keygen_program() -> Vec<Instruction> {
     ]
 }
 
-/// Generate and save the AVSS keygen bytecode to the test binaries directory.
 #[test]
-fn generate_avss_keygen_bytecode() {
+fn avss_keygen_bytecode_round_trips_without_mutating_fixtures() {
     let func = VMFunction::new(
         "main".to_string(),
         vec![],
@@ -46,16 +47,13 @@ fn generate_avss_keygen_bytecode() {
 
     let binary = from_vm_functions(&[func]);
 
-    // Save to the test binaries directory
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/tests/binaries/avss_keygen.stflb");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("avss_keygen.stflb");
     save_to_file(&binary, &path).expect("failed to save avss_keygen bytecode");
 
-    // Verify we can load it back
-    let loaded =
-        stoffel_vm_types::compiled_binary::utils::load_from_file(&path).expect("failed to reload");
-    let functions = stoffel_vm_types::compiled_binary::utils::try_to_vm_functions(&loaded)
-        .expect("generated AVSS keygen bytecode should be executable");
+    let loaded = load_from_file(&path).expect("failed to reload");
+    let functions =
+        try_to_vm_functions(&loaded).expect("generated AVSS keygen bytecode should be executable");
     assert_eq!(functions.len(), 1);
     assert_eq!(functions[0].name(), "main");
     assert_eq!(functions[0].instructions().len(), 7);

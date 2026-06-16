@@ -1,0 +1,29 @@
+def gate_and(a: secret bool, b: secret bool) -> secret bool:
+  return Share.mul(a, b)
+
+def gate_not(a: secret bool) -> secret bool:
+  var one = Share.from_clear_int(1, 1)
+  return Share.sub(one, a)
+
+def gate_or(a: secret bool, b: secret bool) -> secret bool:
+  var ab: secret bool = gate_and(a, b)
+  var sum = Share.add(a, b)
+  return Share.sub(sum, ab)
+
+def gate_xor(a: secret bool, b: secret bool) -> secret bool:
+  var ab: secret bool = gate_and(a, b)
+  var sum = Share.add(a, b)
+  var two_ab = Share.mul_scalar(ab, 2)
+  return Share.sub(sum, two_ab)
+
+def circuit(x: secret bool, y: secret bool, z: secret bool) -> secret bool:
+  var left: secret bool = gate_or(gate_and(x, y), gate_not(z))
+  var right: secret bool = gate_and(x, gate_not(y))
+  return gate_xor(left, right)
+
+def main() -> bool:
+  var x: secret bool = Share.random()
+  var y: secret bool = Share.random()
+  var z: secret bool = Share.random()
+  var result: secret bool = circuit(x, y, z)
+  return result.reveal()

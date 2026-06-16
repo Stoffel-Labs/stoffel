@@ -1,0 +1,44 @@
+# Comprehensive test of ClientStore.take_share functionality
+# This demonstrates all valid usage patterns
+
+# Helper function to process multiple shares
+def combine_shares(a: Share, b: Share) -> Share:
+  return Share.add(a, b)
+
+# Function demonstrating various valid patterns
+def demonstrate_patterns() -> None:
+  # Pattern 1: Direct assignment with explicit Share type annotation
+  var share_a: Share = ClientStore.take_share(0, 0)
+
+  # Pattern 2: Inferring the Share type
+  var share_b = ClientStore.take_share(0, 1)
+
+  # Pattern 3: 'secret' keyword with explicit Share annotation
+  var share_c: Share = ClientStore.take_share(1, 0)
+
+  # Pattern 4: Using shares in computations
+  var sum: Share = Share.add(share_a, share_b)
+  var product = Share.mul(share_a, share_c)
+
+  # Pattern 5: Passing shares to functions
+  var combined: Share = combine_shares(share_a, share_b)
+
+  # Pattern 6: Reassignment to Share variable
+  var mutable_share: Share = ClientStore.take_share(2, 0)
+  mutable_share = ClientStore.take_share(2, 1)
+
+  print("All patterns validated successfully")
+
+# Entry point
+def main() -> None:
+  demonstrate_patterns()
+
+  # Additional test: Multiple shares from different clients
+  var client0_share0 = ClientStore.take_share(0, 0)
+  var client1_share0 = ClientStore.take_share(1, 0)
+  var client2_share1 = ClientStore.take_share(2, 1)
+
+  # Compute with all shares
+  var final_result: Share = Share.add(Share.add(client0_share0, client1_share0), client2_share1)
+
+  print("ClientStore comprehensive test completed")

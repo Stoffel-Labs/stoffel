@@ -4,7 +4,9 @@ use crate::net::curve::MpcFieldKind;
 use crate::net::mpc_engine::{MpcEngine, MpcSessionTopology, ShareAlgebraResult};
 use crate::net::share_runtime::MpcShareRuntime;
 use std::sync::{Arc, Mutex};
-use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType, Value};
+use stoffel_vm_types::core_types::{
+    ClearShareInput, ClearShareValue, ShareData, ShareType, Value, F64,
+};
 
 fn unavailable_runtime<'a>() -> ValueOpResult<MpcShareRuntime<'a>> {
     Err(ValueOpError::Unsupported {
@@ -79,6 +81,37 @@ fn clear_add_does_not_require_share_runtime() {
 }
 
 #[test]
+fn clear_float_arithmetic_does_not_require_share_runtime() {
+    assert_eq!(
+        add(
+            &Value::Float(F64(1.25)),
+            &Value::Float(F64(2.5)),
+            &unavailable_runtime
+        )
+        .expect("float add should be local"),
+        Value::Float(F64(3.75))
+    );
+    assert_eq!(
+        sub(
+            &Value::Float(F64(0.0)),
+            &Value::Float(F64(0.125)),
+            &unavailable_runtime
+        )
+        .expect("float sub should be local"),
+        Value::Float(F64(-0.125))
+    );
+    assert_eq!(
+        mul(
+            &Value::Float(F64(1.5)),
+            &Value::I64(2),
+            &unavailable_runtime
+        )
+        .expect("float mul should accept integer scalar"),
+        Value::Float(F64(3.0))
+    );
+}
+
+#[test]
 fn share_type_mismatch_rejects_before_backend_dispatch() {
     let err = add(
         &Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1])),
@@ -145,7 +178,41 @@ fn clear_compare_helper_handles_ordered_values() {
         try_clear_compare(&Value::Bool(true), &Value::Bool(false)).expect("bool is comparable"),
         std::cmp::Ordering::Greater
     );
-    assert!(try_clear_compare(&Value::I64(1), &Value::U64(1)).is_none());
+    assert_eq!(
+        try_clear_compare(&Value::I64(1), &Value::U64(1)).expect("mixed integers are comparable"),
+        std::cmp::Ordering::Equal
+    );
+}
+
+#[test]
+fn clear_compare_helper_handles_public_float64_values() {
+    assert_eq!(
+        try_clear_compare(&Value::Float(F64(0.0)), &Value::Float(F64(0.0)))
+            .expect("float64 equality should be comparable"),
+        std::cmp::Ordering::Equal
+    );
+    assert_eq!(
+        try_clear_compare(&Value::Float(F64(0.0)), &Value::I64(0))
+            .expect("float64 and integer literals should be comparable"),
+        std::cmp::Ordering::Equal
+    );
+    assert_eq!(
+        try_clear_compare(
+            &Value::U64(9_007_199_254_740_993),
+            &Value::Float(F64(9_007_199_254_740_992.0)),
+        )
+        .expect("large integer and float values should be comparable"),
+        std::cmp::Ordering::Greater
+    );
+    assert_eq!(
+        try_clear_compare(&Value::U64(0), &Value::Float(F64(f64::MIN_POSITIVE)))
+            .expect("zero and a tiny positive float should be comparable"),
+        std::cmp::Ordering::Less
+    );
+    assert!(
+        try_clear_compare(&Value::Float(F64(f64::NAN)), &Value::Float(F64(0.0))).is_none(),
+        "NaN remains unordered because the VM comparison flag has no unordered state"
+    );
 }
 
 #[test]
@@ -155,19 +222,101 @@ fn unsupported_secret_bit_ops_classify_any_share_type() {
         ShareData::Opaque(vec![1]),
     );
 
-    let err = bit_and(&fixed_share, &Value::Bool(true))
+    let err = bit_and(&fixed_share, &Value::Bool(true), &unavailable_runtime)
         .expect_err("secret shares need explicit bitwise protocols");
     assert!(err
         .to_string()
-        .contains("Bitwise AND is not supported on secret shares"));
+        .contains("Bitwise AND is only supported on secret bool shares"));
 
     let err = shl(&Value::I64(1), &fixed_share).expect_err("secret shift amounts are unsupported");
     assert!(err
         .to_string()
         .contains("Left shift is not supported on secret shares"));
 
-    let err = bit_not(&fixed_share).expect_err("secret bitwise NOT is unsupported");
+    let err =
+        bit_not(&fixed_share, &unavailable_runtime).expect_err("secret bitwise NOT is unsupported");
     assert!(err
         .to_string()
-        .contains("Bitwise NOT is not supported on secret shares"));
+        .contains("Bitwise NOT is only supported on secret bool shares"));
+}
+
+#[test]
+fn clear_bitwise_supports_all_integer_widths() {
+    assert_eq!(
+        bit_and(&Value::I32(12), &Value::I32(10), &unavailable_runtime).unwrap(),
+        Value::I32(8)
+    );
+    assert_eq!(
+        bit_or(&Value::U8(12), &Value::U8(10), &unavailable_runtime).unwrap(),
+        Value::U8(14)
+    );
+    assert_eq!(
+        bit_xor(&Value::I16(12), &Value::I16(10), &unavailable_runtime).unwrap(),
+        Value::I16(6)
+    );
+    assert_eq!(
+        bit_xor(&Value::U64(12), &Value::U64(10), &unavailable_runtime).unwrap(),
+        Value::U64(6)
+    );
+    assert_eq!(
+        bit_not(&Value::U8(0), &unavailable_runtime).unwrap(),
+        Value::U8(255)
+    );
+    assert_eq!(
+        bit_not(&Value::I8(0), &unavailable_runtime).unwrap(),
+        Value::I8(-1)
+    );
+    // Mixed widths still reject.
+    bit_and(&Value::I32(1), &Value::I64(1), &unavailable_runtime)
+        .expect_err("mixed-width bitwise should be a type error");
+}
+
+#[test]
+fn clear_shifts_support_all_integer_widths() {
+    assert_eq!(shl(&Value::I32(1), &Value::I32(4)).unwrap(), Value::I32(16));
+    assert_eq!(shr(&Value::U16(8), &Value::U16(2)).unwrap(), Value::U16(2));
+    assert_eq!(shl(&Value::U8(1), &Value::U8(3)).unwrap(), Value::U8(8));
+    assert_eq!(shr(&Value::I8(-16), &Value::I8(2)).unwrap(), Value::I8(-4));
+
+    // Out-of-range shift amounts error instead of wrapping.
+    shl(&Value::I8(1), &Value::I8(9)).expect_err("shift wider than the type should error");
+    shl(&Value::I64(1), &Value::I64(-1)).expect_err("negative shift amount should error");
+}
+
+#[test]
+fn clear_float_modulo_is_supported() {
+    assert_eq!(
+        modulo(&Value::Float(F64(7.5)), &Value::Float(F64(2.0))).unwrap(),
+        Value::Float(F64(1.5))
+    );
+    assert_eq!(
+        modulo(&Value::Float(F64(7.5)), &Value::I64(2)).unwrap(),
+        Value::Float(F64(1.5))
+    );
+    assert_eq!(
+        modulo(&Value::I64(7), &Value::Float(F64(2.5))).unwrap(),
+        Value::Float(F64(2.0))
+    );
+    modulo(&Value::Float(F64(1.0)), &Value::Float(F64(0.0)))
+        .expect_err("float modulo by zero should error");
+}
+
+#[test]
+fn clear_string_concat_is_supported() {
+    assert_eq!(
+        add(
+            &Value::String("foo".to_string()),
+            &Value::String("bar".to_string()),
+            &unavailable_runtime
+        )
+        .unwrap(),
+        Value::String("foobar".to_string())
+    );
+    // String with non-string still rejects.
+    add(
+        &Value::String("foo".to_string()),
+        &Value::I64(1),
+        &unavailable_runtime,
+    )
+    .expect_err("string + int should be a type error");
 }

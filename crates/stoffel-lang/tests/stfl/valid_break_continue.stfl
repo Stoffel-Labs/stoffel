@@ -1,0 +1,38 @@
+# break statement in while and for loops (desired: supported).
+def main() -> int64:
+  var ok = 6400
+  var n = 0
+  while True:
+    n += 1
+    if n == 5:
+      break
+  if n == 5:
+    ok += 1
+  var last = 0
+  for i in 0..100:
+    last = i
+    if i == 7:
+      break
+  if last == 7:
+    ok += 1
+  return ok
+# continue statement in while and for loops (desired: supported).
+def main2() -> int64:
+  var ok = 6500
+  var sum = 0
+  for i in 0..9:
+    if i % 2 == 1:
+      continue
+    sum += i
+  if sum == 20:
+    ok += 1
+  var n = 0
+  var hits = 0
+  while n < 10:
+    n += 1
+    if n % 3 != 0:
+      continue
+    hits += 1
+  if hits == 3:
+    ok += 1
+  return ok

@@ -1,15 +1,21 @@
 use super::ForeignFunctionContext;
 use crate::error::{VmError, VmResult};
 use crate::net::client_store::{ClientInputIndex, ClientOutputShareCount, ClientShareIndex};
-use crate::net::mpc_engine::{
-    AbaSessionId, MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
-};
+use crate::net::mpc_engine::{MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId};
 use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType, Value};
 use stoffelnet::network_utils::ClientId;
 
 impl<'a> ForeignFunctionContext<'a> {
     pub(crate) fn client_store_len(&self) -> usize {
         self.services.client_store_len()
+    }
+
+    pub(crate) fn input_client_count(&self) -> usize {
+        self.services.input_client_count()
+    }
+
+    pub(crate) fn output_client_count(&self) -> usize {
+        self.services.output_client_count()
     }
 
     pub(crate) fn client_id_at_index(&self, index: ClientInputIndex) -> Option<ClientId> {
@@ -69,18 +75,6 @@ impl<'a> ForeignFunctionContext<'a> {
         self.services.rbc_receive_any(timeout_ms)
     }
 
-    pub(crate) fn aba_propose(&self, value: bool) -> VmResult<AbaSessionId> {
-        self.services.aba_propose(value)
-    }
-
-    pub(crate) fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> VmResult<bool> {
-        self.services.aba_result(session_id, timeout_ms)
-    }
-
-    pub(crate) fn aba_propose_and_wait(&self, value: bool, timeout_ms: u64) -> VmResult<bool> {
-        self.services.aba_propose_and_wait(value, timeout_ms)
-    }
-
     pub(crate) fn input_share_data(&self, clear: ClearShareInput) -> VmResult<ShareData> {
         self.services.input_share_data(clear)
     }
@@ -103,6 +97,10 @@ impl<'a> ForeignFunctionContext<'a> {
 
     pub(crate) fn random_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
         self.services.random_share_data(ty)
+    }
+
+    pub(crate) fn random_integer_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
+        self.services.random_integer_share_data(ty)
     }
 
     pub(crate) fn open_share_as_field_data(
@@ -197,6 +195,16 @@ impl<'a> ForeignFunctionContext<'a> {
     ) -> VmResult<ShareData> {
         self.services
             .secret_share_mul_field_data(ty, share_data, scalar_bytes)
+    }
+
+    pub(crate) fn secret_share_add_field_data(
+        &self,
+        ty: ShareType,
+        share_data: &ShareData,
+        field_bytes: &[u8],
+    ) -> VmResult<ShareData> {
+        self.services
+            .secret_share_add_field_data(ty, share_data, field_bytes)
     }
 
     pub(crate) fn secret_share_interpolate_local(

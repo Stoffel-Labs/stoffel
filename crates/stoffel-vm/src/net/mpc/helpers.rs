@@ -2,44 +2,43 @@
 //! Minimal public API kept to avoid cross-crate trait bound conflicts.
 //! Use the MpcEngine abstraction (net::mpc_engine) to attach an engine to VMState for VM usage.
 
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "honeybadger")]
 use super::protocol_ids::derive_protocol_instance_id_u32;
-#[cfg(feature = "honeybadger")]
+use serde::{Deserialize, Serialize};
 use stoffel_vm_types::core_types::DEFAULT_FIXED_POINT_FRACTIONAL_BITS;
-#[cfg(feature = "honeybadger")]
 use stoffel_vm_types::core_types::DEFAULT_FIXED_POINT_TOTAL_BITS;
-#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::honeybadger::HoneyBadgerMPCNodeOpts;
-
-#[cfg(feature = "honeybadger")]
 const DEFAULT_MIN_PARTIES: usize = 5;
-#[cfg(feature = "honeybadger")]
 const DEFAULT_THRESHOLD: usize = 1;
-#[cfg(feature = "honeybadger")]
 const DEFAULT_SECURITY_PARAMETER_K: usize = 8;
-
-#[cfg(feature = "honeybadger")]
+const DEFAULT_PROTOCOL_TIMEOUT_SECONDS: u64 = 600;
 #[allow(dead_code)]
 fn derive_prandbit_count(n_random_shares: usize) -> usize {
     std::cmp::max(n_random_shares, DEFAULT_FIXED_POINT_FRACTIONAL_BITS)
 }
-
-#[cfg(feature = "honeybadger")]
 #[allow(dead_code)]
 fn derive_prandint_count(n_triples: usize, n_random_shares: usize) -> usize {
     std::cmp::max(n_triples.max(1), n_random_shares.max(1))
 }
-
-#[cfg(feature = "honeybadger")]
 pub fn honeybadger_protocol_instance_id(instance_id: u64) -> u32 {
     derive_protocol_instance_id_u32(b"honeybadger", instance_id)
 }
 
+pub fn honeybadger_protocol_timeout() -> std::time::Duration {
+    let seconds = std::env::var("STOFFEL_MPC_PROTOCOL_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_PROTOCOL_TIMEOUT_SECONDS);
+    std::time::Duration::from_secs(seconds)
+}
+
+/// Derive the AVSS protocol instance id from the VM session id.
+pub fn avss_protocol_instance_id(instance_id: u64) -> u32 {
+    derive_protocol_instance_id_u32(b"avss", instance_id)
+}
+
 /// Convenience for creating default node options for a n-party network.
 /// Customize n_triples / n_random_shares / instance_id as needed at callsite.
-#[cfg(feature = "honeybadger")]
 pub fn default_node_opts(
     instance_id: u64,
     n_triples: usize,
@@ -56,7 +55,8 @@ pub fn default_node_opts(
 }
 
 /// Build HoneyBadger node options, deriving ancillary preprocessing counts from existing inputs.
-#[cfg(feature = "honeybadger")]
+/// Requests no random bits / integers (use [`honeybadger_node_opts_with_truncation`] for
+/// programs that need fixed-point truncation preprocessing).
 pub fn honeybadger_node_opts(
     n_parties: usize,
     threshold: usize,
@@ -64,8 +64,33 @@ pub fn honeybadger_node_opts(
     n_random_shares: usize,
     instance_id: u64,
 ) -> Result<HoneyBadgerMPCNodeOpts, String> {
-    let n_prandbit = 0;
-    let n_prandint = 0;
+    honeybadger_node_opts_with_truncation(
+        n_parties,
+        threshold,
+        n_triples,
+        n_random_shares,
+        0,
+        0,
+        instance_id,
+    )
+}
+
+/// Build HoneyBadger node options with explicit truncation-preprocessing counts
+/// (`n_prandbit` random bits, `n_prandint` random integers) for fixed-point
+/// division/multiplication. Note: prandbit generation consumes one beaver triple
+/// and one random share per bit, so callers should already have folded that cost
+/// into `n_triples`/`n_random_shares`.
+pub fn honeybadger_node_opts_with_truncation(
+    n_parties: usize,
+    threshold: usize,
+    n_triples: usize,
+    n_random_shares: usize,
+    n_prandbit: usize,
+    n_prandint: usize,
+    instance_id: u64,
+) -> Result<HoneyBadgerMPCNodeOpts, String> {
+    validate_honeybadger_topology(n_parties, threshold)?;
+
     let l = DEFAULT_FIXED_POINT_TOTAL_BITS;
     let k = DEFAULT_SECURITY_PARAMETER_K;
 
@@ -79,9 +104,22 @@ pub fn honeybadger_node_opts(
         n_prandint,
         l,
         k,
-        std::time::Duration::from_secs(600),
+        honeybadger_protocol_timeout(),
     )
     .map_err(|e| format!("Failed to create HoneyBadger node options: {:?}", e))
+}
+
+fn validate_honeybadger_topology(n_parties: usize, threshold: usize) -> Result<(), String> {
+    let required = threshold
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| format!("HoneyBadger threshold {threshold} is too large"))?;
+    if n_parties < required {
+        return Err(format!(
+            "HoneyBadger requires n_parties ({n_parties}) >= 3 * threshold ({threshold}) + 1 ({required})"
+        ));
+    }
+    Ok(())
 }
 
 /// Network envelope used on QUIC to distinguish control messages (like handshakes)
@@ -107,7 +145,7 @@ impl NetEnvelope {
     }
 }
 
-#[cfg(all(test, feature = "honeybadger"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -115,6 +153,19 @@ mod tests {
     fn honeybadger_node_opts_accepts_full_width_vm_instance_ids() {
         honeybadger_node_opts(5, 1, 0, 0, u64::from(u32::MAX) + 1)
             .expect("full-width VM instance ids must be projected into the protocol domain");
+    }
+
+    #[test]
+    fn honeybadger_node_opts_requires_bft_topology() {
+        let err =
+            honeybadger_node_opts(3, 1, 0, 0, 1).expect_err("HoneyBadger must reject n < 3t + 1");
+        assert!(
+            err.contains("HoneyBadger requires n_parties (3) >= 3 * threshold (1) + 1 (4)"),
+            "unexpected error: {err}"
+        );
+
+        honeybadger_node_opts(4, 1, 0, 0, 1)
+            .expect("n = 3t + 1 should be accepted for HoneyBadger");
     }
 
     #[test]

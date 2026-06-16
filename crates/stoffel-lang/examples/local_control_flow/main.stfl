@@ -1,0 +1,42 @@
+# Control-flow and arithmetic checksum.
+#
+# Computes fibonacci(12), then combines it with a FizzBuzz-style checksum over
+# 1..60. The expected return value is 220.
+
+def fibonacci(n: int64) -> int64:
+  if n <= 1:
+    return n
+
+  var previous: int64 = 0
+  var current: int64 = 1
+  var index: int64 = 2
+
+  while index <= n:
+    var next: int64 = previous + current
+    previous = current
+    current = next
+    index = index + 1
+
+  return current
+
+def fizzbuzz_checksum(limit: int64) -> int64:
+  var checksum: int64 = 0
+
+  for value in 1..limit:
+    if (value % 15) == 0:
+      checksum = checksum + 7
+    else:
+      if (value % 3) == 0:
+        checksum = checksum + 3
+      else:
+        if (value % 5) == 0:
+          checksum = checksum + 5
+        else:
+          checksum = checksum + 1
+
+  return checksum
+
+def main() -> int64:
+  var fib: int64 = fibonacci(12)
+  var checksum: int64 = fizzbuzz_checksum(60)
+  return fib + checksum

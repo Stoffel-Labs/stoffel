@@ -1,19 +1,15 @@
 // src/net/mod.rs
 //! Networking module for peer-to-peer communication.
 
-#[cfg(feature = "avss")]
 pub mod avss_server;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 pub(crate) mod broadcast;
 pub mod client_store;
 pub mod curve;
 pub mod discovery;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 pub(crate) mod group_interpolation;
-#[cfg(feature = "honeybadger")]
 pub mod hb_server;
+pub mod local_runner;
 pub mod mpc;
-#[cfg(feature = "honeybadger")]
 pub mod mpc_runner;
 pub mod open_registry;
 pub use open_registry::{InstanceRegistry, OpenMessageRouter, UNKNOWN_SENDER_ID};
@@ -25,7 +21,6 @@ pub mod session;
 pub(crate) mod share_algebra;
 pub(crate) mod share_runtime;
 
-#[cfg(feature = "avss")]
 pub mod avss_engine {
     pub use super::mpc::avss::*;
 }
@@ -38,7 +33,6 @@ pub mod engine_config {
     pub use super::mpc::session_config::*;
 }
 
-#[cfg(feature = "honeybadger")]
 pub mod hb_engine {
     pub use super::mpc::honeybadger::*;
 }
@@ -147,21 +141,26 @@ pub use mpc_engine::{
 };
 
 // Re-export MPC helpers (HB-specific helpers gated)
-#[cfg(feature = "honeybadger")]
-pub use mpc::{default_node_opts, honeybadger_node_opts, honeybadger_protocol_instance_id};
+pub use mpc::{
+    avss_protocol_instance_id, default_node_opts, honeybadger_node_opts,
+    honeybadger_node_opts_with_truncation, honeybadger_protocol_instance_id,
+    honeybadger_protocol_timeout,
+};
 // Re-export HoneyBadger QUIC server
-#[cfg(feature = "honeybadger")]
 pub use hb_server::{
     spawn_receive_loops, spawn_receive_loops_split, FrHoneyBadgerQuicServer, HoneyBadgerQuicConfig,
     HoneyBadgerQuicServer, HoneyBadgerQuicServerError,
 };
+pub use local_runner::{
+    LocalClientInput, LocalCoordinatorRunOutput, LocalCoordinatorRunner,
+    LocalCoordinatorRunnerBuilder, LocalCoordinatorRunnerError, LocalCoordinatorRunnerResult,
+    LocalPartyOutput,
+};
 // Re-export MpcRunner for convenient VM+MPC orchestration
-#[cfg(feature = "honeybadger")]
 pub use mpc_runner::{
     MpcRunner, MpcRunnerBuilder, MpcRunnerConfig, MpcRunnerError, MpcRunnerResult,
 };
 // Re-export AVSS QUIC server types
-#[cfg(feature = "avss")]
 pub use avss_server::{
     AvssPublicKeyEnvelopeError, AvssQuicConfig, AvssQuicServer, Bls12381AvssServer,
     Bn254AvssServer, Curve25519AvssServer, Ed25519AvssServer, P256AvssServer, Secp256k1AvssServer,

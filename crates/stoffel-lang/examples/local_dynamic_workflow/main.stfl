@@ -1,0 +1,25 @@
+def mark_complete() -> void:
+  var message = "workflow item completed"
+  print(message)
+  return
+
+def add_event(events: list[string], event_name: string):
+  events.append(event_name)
+  return
+
+def main() -> int64:
+  var events: list[string] = []
+  events.append("created")
+  add_event(events, "scored")
+  events.append("approved")
+
+  var labels: list[string] = ["finance", "priority"]
+  labels[0] = "billing"
+
+  type(events)
+  type(labels)
+
+  var callback = create_closure("mark_complete")
+  call_closure(callback)
+
+  return len(events) + labels.len()

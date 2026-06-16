@@ -1,0 +1,17 @@
+# AVSS certificate signing key generation.
+#
+# Stores the jointly-generated CA signing key share in the local VM store on
+# first use, then reuses it on later runs.
+
+def main() -> bytes:
+  var storage_key = "ca:avss:sk:v1"
+
+  if LocalStorage.exists(storage_key):
+    discard LocalStorage.load_share(storage_key)
+  else:
+    var generated_key: secret int64 = Share.random()
+    discard LocalStorage.store(storage_key, generated_key)
+
+  var secret_key: secret int64 = LocalStorage.load(storage_key)
+  var public_key = secret_key.get_commitment(0)
+  return Crypto.point_to_sec1(public_key, Mpc.curve())

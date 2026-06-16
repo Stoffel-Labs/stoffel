@@ -1,0 +1,13 @@
+def polynomial_unbounded_or(a: list[secret bool]) -> secret bool:
+  var acc: secret bool = 1
+
+  for bit in a:
+    acc *= (1 - bit)
+
+  return 1 - acc
+
+def main(a: list[secret bool]) -> bool:
+  var or_res: secret bool = polynomial_unbounded_or(a)
+  var revealed: bool = or_res.reveal()
+  print(revealed)
+  return revealed

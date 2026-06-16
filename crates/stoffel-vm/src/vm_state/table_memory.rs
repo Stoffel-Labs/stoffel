@@ -106,4 +106,41 @@ impl VMState {
     ) -> VmResult<usize> {
         Ok(self.table_memory.push_array_ref_values(array_ref, values)?)
     }
+
+    pub(crate) fn pop_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+    ) -> VmResult<Option<Value>> {
+        Ok(self.table_memory.pop_array_ref_value(array_ref, index)?)
+    }
+
+    pub(crate) fn insert_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+        value: Value,
+    ) -> VmResult<usize> {
+        Ok(self
+            .table_memory
+            .insert_array_ref_value(array_ref, index, value)?)
+    }
+
+    pub(crate) fn replace_array_ref_values(
+        &mut self,
+        array_ref: ArrayRef,
+        values: Vec<Value>,
+    ) -> VmResult<usize> {
+        Ok(self
+            .table_memory
+            .replace_array_ref_values(array_ref, values)?)
+    }
+
+    pub(crate) fn clear_array_ref(&mut self, array_ref: ArrayRef) -> VmResult<()> {
+        Ok(self.table_memory.clear_array_ref(array_ref)?)
+    }
+
+    pub(crate) fn reverse_array_ref(&mut self, array_ref: ArrayRef) -> VmResult<()> {
+        Ok(self.table_memory.reverse_array_ref(array_ref)?)
+    }
 }

@@ -10,9 +10,7 @@ use stoffelnet::network_utils::ClientId;
 
 mod core;
 mod error;
-#[cfg(feature = "avss")]
 mod feldman;
-#[cfg(feature = "honeybadger")]
 mod robust;
 mod share;
 
@@ -29,6 +27,7 @@ pub use share::{
 #[derive(Debug, Default)]
 pub struct ClientInputStore {
     entries: RwLock<BTreeMap<ClientId, ClientInputEntry>>,
+    client_roster: RwLock<Vec<ClientId>>,
 }
 
 #[cfg(test)]

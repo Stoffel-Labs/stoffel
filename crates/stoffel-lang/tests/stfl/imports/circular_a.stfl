@@ -1,0 +1,5 @@
+# This file imports circular_b, creating a circular dependency
+import circular_b
+
+def func_a() -> int64:
+  return 1

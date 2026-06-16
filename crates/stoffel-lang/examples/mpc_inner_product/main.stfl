@@ -1,0 +1,41 @@
+# run-args: --client-input 0=1 --client-input 0=2 --client-input 0=3 --client-input 1=4 --client-input 1=5 --client-input 1=6 --expected-output-clients 2
+# Secure inner product and a linear (matrix-vector) layer.
+# dot(a,b) = sum_i a_i*b_i via one batched multiply (Share.batch_mul) then a
+# local summation. A linear layer applies dot to each matrix row. No comparisons,
+# so this is cheap: one multiply batch per dot.
+
+def vec(raw: list[int64], l: int64) -> list[Share]:
+  var out: list[Share] = []
+  var i = 0
+  while i < len(raw):
+    out.append(Share.from_clear_int(raw[i], l))
+    i = i + 1
+  return out
+
+def dot(a: list[Share], b: list[Share]) -> Share:
+  var prods = Share.batch_mul(a, b)
+  var acc = prods[0]
+  var i = 1
+  while i < len(prods):
+    acc = Share.add(acc, prods[i])
+    i = i + 1
+  return Share.retag(acc, 64)
+
+def main() -> int64:
+  var n = 3
+  var a: list[Share] = []
+  var b: list[Share] = []
+  var i = 0
+  while i < n:
+    var av: secret int64 = ClientStore.take_share(0, i)
+    var bv: secret int64 = ClientStore.take_share(1, i)
+    a.append(av)
+    b.append(bv)
+    i = i + 1
+  var d = dot(a, b)
+  if Mpc.has_capability("client-output"):
+    d.send_to_client(0)
+    d.send_to_client(1)
+  var rv = Share.open(d)
+  assert rv == 32, "dot product 32"
+  return rv

@@ -1,0 +1,42 @@
+# MPC runtime metadata and capability checks.
+
+def main() -> int64:
+  var client_count = ClientStore.get_number_clients()
+  var score: int64 = Mpc.party_id()
+  score = score + Mpc.n_parties()
+  score = score + Mpc.threshold()
+  score = score + client_count
+
+  if Mpc.is_ready():
+    score = score + 10
+
+  if Mpc.has_capability("client-input"):
+    score = score + 50
+
+  if Mpc.has_capability("client-output"):
+    score = score + 75
+
+  if Mpc.has_capability("multiplication"):
+    score = score + 100
+
+  if Mpc.has_capability("randomness"):
+    score = score + 1000
+
+  if Mpc.has_capability("open-in-exponent"):
+    score = score + 10000
+
+  if Mpc.has_capability("not-a-real-capability"):
+    score = score - 999999
+
+  discard Mpc.protocol_name()
+  discard Mpc.curve()
+  discard Mpc.field()
+  discard Mpc.instance_id()
+  discard Mpc.capabilities()
+
+  if client_count > 0 and Mpc.has_capability("client-output"):
+    var score_share = Share.from_clear(score)
+    var output_shares: list[Share] = [score_share]
+    MpcOutput.send_to_client(0, output_shares)
+
+  return score

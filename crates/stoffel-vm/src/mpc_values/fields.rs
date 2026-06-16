@@ -10,6 +10,7 @@ pub mod share_fields {
 
     pub const TYPE_VALUE: &str = "Share";
     pub const SECRET_INT: &str = "SecretInt";
+    pub const SECRET_UINT: &str = "SecretUInt";
     pub const SECRET_FIXED_POINT: &str = "SecretFixedPoint";
 }
 
@@ -20,15 +21,7 @@ pub mod rbc_fields {
     pub const TYPE_VALUE: &str = "RbcSession";
 }
 
-/// Field name constants for ABA session objects.
-pub mod aba_fields {
-    pub const TYPE: &str = "__type";
-    pub const SESSION_ID: &str = "__session_id";
-    pub const TYPE_VALUE: &str = "AbaSession";
-}
-
 /// Field name constants for AVSS share objects.
-#[cfg(feature = "avss")]
 pub mod avss_fields {
     pub const TYPE: &str = "__type";
     pub const KEY_NAME: &str = "__key_name";

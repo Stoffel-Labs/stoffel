@@ -3,7 +3,11 @@ use crate::net::curve::SupportedMpcField;
 use crate::storage::preproc::{self, PreprocBlob, PreprocKeyScope};
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_std::rand::SeedableRng;
-use std::sync::atomic::Ordering;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
 use stoffel_vm_types::core_types::{ShareData, ShareType};
 use stoffelmpc_mpc::common::PreprocessingMPCProtocol;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -18,6 +22,14 @@ fn ensure_decoded_count(label: &str, actual: usize, expected: u32) -> Result<(),
         ));
     }
     Ok(())
+}
+
+fn preprocessing_progress_interval() -> Option<Duration> {
+    std::env::var("STOFFEL_HB_PREPROCESSING_PROGRESS_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
 }
 
 impl<F, G> HoneyBadgerMpcEngine<F, G>
@@ -39,9 +51,32 @@ where
         {
             let mut node = self.clone_node().await;
             let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-            node.run_preprocessing(self.net.clone(), &mut rng)
-                .await
-                .map_err(|e| format!("Preprocessing failed: {:?}", e))?;
+            let party_id = self.topology.party_id();
+            let started = Instant::now();
+            let progress_done = Arc::new(AtomicBool::new(false));
+            let progress_handle = preprocessing_progress_interval().map(|interval| {
+                let progress_done = Arc::clone(&progress_done);
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(interval).await;
+                        if progress_done.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        eprintln!(
+                            "[hb preprocessing progress] party={} elapsed_ms={}",
+                            party_id,
+                            started.elapsed().as_millis()
+                        );
+                    }
+                })
+            });
+
+            let result = node.run_preprocessing(self.net.clone(), &mut rng).await;
+            progress_done.store(true, Ordering::SeqCst);
+            if let Some(handle) = progress_handle {
+                handle.abort();
+            }
+            result.map_err(|e| format!("Preprocessing failed: {:?}", e))?;
         }
 
         self.persist_preproc().await?;
@@ -59,14 +94,14 @@ where
             (Some(s), Some(h)) => (s, h),
             _ => return Ok(false),
         };
-        let persistent_party_id = self.persistent_party_id.load(Ordering::SeqCst);
+        let persistent_identity = self.persistent_identity();
 
         let scope = PreprocKeyScope::new(
             hash,
             F::field_kind(),
             self.topology.n_parties(),
             self.topology.threshold(),
-            persistent_party_id,
+            persistent_identity,
         );
         let base = scope.beaver_triple();
         let k_rs = scope.random_share();
@@ -81,9 +116,9 @@ where
 
         if triples.is_none() && randoms.is_none() && prandbits.is_none() && prandints.is_none() {
             let msg = format!(
-                "No preprocessing material found in store for program {} (party_id={}, n={}, t={})",
+                "No preprocessing material found in store for program {} (identity={}, n={}, t={})",
                 hex::encode(hash),
-                persistent_party_id,
+                persistent_identity,
                 self.topology.n_parties(),
                 self.topology.threshold()
             );
@@ -185,9 +220,9 @@ where
             && loaded_prandints == 0
         {
             let msg = format!(
-                "No unconsumed preprocessing material found in store for program {} (party_id={}, n={}, t={})",
+                "No unconsumed preprocessing material found in store for program {} (identity={}, n={}, t={})",
                 hex::encode(hash),
-                persistent_party_id,
+                persistent_identity,
                 self.topology.n_parties(),
                 self.topology.threshold()
             );
@@ -197,9 +232,9 @@ where
         }
 
         let msg = format!(
-            "Loaded preprocessing material from store for program {} (party_id={}, n={}, t={}, triples={}, randoms={}, prandbits={}, prandints={})",
+            "Loaded preprocessing material from store for program {} (identity={}, n={}, t={}, triples={}, randoms={}, prandbits={}, prandints={})",
             hex::encode(hash),
-            persistent_party_id,
+            persistent_identity,
             self.topology.n_parties(),
             self.topology.threshold(),
             loaded_triples,
@@ -210,11 +245,6 @@ where
         eprintln!("{msg}");
         tracing::info!("{msg}");
         Ok(true)
-    }
-
-    pub fn set_preproc_store_party_id(&self, persistent_party_id: usize) {
-        self.persistent_party_id
-            .store(persistent_party_id, Ordering::SeqCst);
     }
 
     /// Persist current preprocessing material to the store.
@@ -228,14 +258,14 @@ where
             (Some(s), Some(h)) => (s, h),
             _ => return Ok(()),
         };
-        let persistent_party_id = self.persistent_party_id.load(Ordering::SeqCst);
+        let persistent_identity = self.persistent_identity();
 
         let scope = PreprocKeyScope::new(
             hash,
             F::field_kind(),
             self.topology.n_parties(),
             self.topology.threshold(),
-            persistent_party_id,
+            persistent_identity,
         );
         let base = scope.beaver_triple();
 
@@ -303,9 +333,9 @@ where
         }
 
         let msg = format!(
-            "Persisted preprocessing material to store for program {} (party_id={}, n={}, t={}, blobs={})",
+            "Persisted preprocessing material to store for program {} (identity={}, n={}, t={}, blobs={})",
             hex::encode(hash),
-            persistent_party_id,
+            persistent_identity,
             self.topology.n_parties(),
             self.topology.threshold(),
             to_store.len()
@@ -339,6 +369,31 @@ where
         }
     }
 
+    pub(super) async fn reserve_prandint_shares(
+        &self,
+        num_shares: usize,
+        ty: ShareType,
+    ) -> Result<Vec<RobustShare<F>>, String> {
+        loop {
+            let attempt = {
+                let node = self.clone_node().await;
+                let mut prep_material = node.preprocessing_material.lock().await;
+                prep_material.take_prandint_shares(num_shares)
+            };
+
+            match attempt {
+                Ok(shares) => return Ok(shares),
+                Err(HoneyBadgerError::NotEnoughPreprocessing) => {
+                    self.regenerate_prandint_shares(num_shares, ty).await?;
+                    continue;
+                }
+                Err(other) => {
+                    return Err(format!("Failed to take PRandInt shares: {:?}", other));
+                }
+            }
+        }
+    }
+
     async fn regenerate_random_shares(&self, needed: usize) -> Result<(), String> {
         let mut node = self.clone_node().await;
         {
@@ -355,6 +410,31 @@ where
             .map_err(|e| format!("Failed to regenerate preprocessing material: {:?}", e))
     }
 
+    async fn regenerate_prandint_shares(&self, needed: usize, ty: ShareType) -> Result<(), String> {
+        let mut node = self.clone_node().await;
+        {
+            let current = node.preprocessing_material.lock().await.len().3;
+            let target = current + needed;
+            if node.params.n_prandint < target {
+                node.params.n_prandint = target;
+            }
+            if let ShareType::SecretInt { bit_length } | ShareType::SecretUInt { bit_length } = ty {
+                let target_random_bits = bit_length.min(56);
+                node.params.l = target_random_bits.saturating_sub(node.params.k);
+            }
+        }
+
+        let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
+        node.run_preprocessing(self.net.clone(), &mut rng)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to regenerate PRandInt preprocessing material: {:?}",
+                    e
+                )
+            })
+    }
+
     /// Pull one pre-generated random share from the preprocessing pool.
     /// If the pool is empty, `reserve_random_shares` auto-regenerates via
     /// the RanSha protocol over the network.
@@ -363,6 +443,15 @@ where
         _ty: ShareType,
     ) -> Result<ShareData, String> {
         let shares = self.reserve_random_shares(1).await?;
+        Self::encode_share(&shares[0]).map(ShareData::Opaque)
+    }
+
+    /// Pull one pre-generated PRandInt share from the preprocessing pool.
+    pub(super) async fn random_integer_share_async_impl(
+        &self,
+        ty: ShareType,
+    ) -> Result<ShareData, String> {
+        let shares = self.reserve_prandint_shares(1, ty).await?;
         Self::encode_share(&shares[0]).map(ShareData::Opaque)
     }
 }

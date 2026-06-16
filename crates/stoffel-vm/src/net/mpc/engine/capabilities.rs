@@ -161,7 +161,7 @@ impl MpcCapability {
             MpcCapability::Multiplication => "does not support multiplication",
             MpcCapability::EllipticCurves => "does not support elliptic curve operations",
             MpcCapability::ClientInput => "does not support client input hydration",
-            MpcCapability::Consensus => "does not support consensus (RBC/ABA)",
+            MpcCapability::Consensus => "does not support consensus (RBC)",
             MpcCapability::OpenInExponent => "does not support Share.open_exp",
             MpcCapability::Reservation => "does not support preprocessing reservation",
             MpcCapability::ClientOutput => "does not support client output delivery",

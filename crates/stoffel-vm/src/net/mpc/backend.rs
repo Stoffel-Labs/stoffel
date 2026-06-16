@@ -4,6 +4,7 @@
 
 use super::engine::{MpcCapabilities, MpcCapability};
 use std::fmt;
+use stoffel_vm_types::compiled_binary;
 
 pub type MpcBackendResult<T> = Result<T, MpcBackendError>;
 
@@ -39,12 +40,17 @@ impl From<MpcBackendError> for String {
 /// Available MPC backend implementations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MpcBackendKind {
-    #[cfg(feature = "honeybadger")]
     HoneyBadger,
-    #[cfg(feature = "avss")]
     Avss,
-    #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
-    NoBackend,
+}
+
+impl From<compiled_binary::MpcBackend> for MpcBackendKind {
+    fn from(value: compiled_binary::MpcBackend) -> Self {
+        match value {
+            compiled_binary::MpcBackend::HoneyBadger => MpcBackendKind::HoneyBadger,
+            compiled_binary::MpcBackend::Avss => MpcBackendKind::Avss,
+        }
+    }
 }
 
 impl std::str::FromStr for MpcBackendKind {
@@ -57,12 +63,8 @@ impl std::str::FromStr for MpcBackendKind {
     /// - `"avss"` or `"adkg"` -> `Avss`
     fn from_str(s: &str) -> MpcBackendResult<Self> {
         match s.trim().to_lowercase().as_str() {
-            #[cfg(feature = "honeybadger")]
             "honeybadger" | "hb" => Ok(MpcBackendKind::HoneyBadger),
-            #[cfg(feature = "avss")]
             "avss" | "adkg" => Ok(MpcBackendKind::Avss),
-            #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
-            "none" | "no-backend" => Ok(MpcBackendKind::NoBackend),
             other => Err(MpcBackendError::UnknownBackend {
                 name: other.to_string(),
                 available: Self::available_names(),
@@ -73,32 +75,14 @@ impl std::str::FromStr for MpcBackendKind {
 
 impl MpcBackendKind {
     pub fn available_names() -> Vec<&'static str> {
-        vec![
-            #[cfg(feature = "honeybadger")]
-            "honeybadger",
-            #[cfg(feature = "avss")]
-            "avss",
-            #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
-            "none",
-        ]
+        vec!["honeybadger", "avss"]
     }
 
     /// Returns the default backend.
     ///
-    /// Prefers HoneyBadger when available, falls back to AVSS.
+    /// Legacy default for callers without a compiled program manifest.
     pub fn default_backend() -> Self {
-        #[cfg(feature = "honeybadger")]
-        {
-            MpcBackendKind::HoneyBadger
-        }
-        #[cfg(all(not(feature = "honeybadger"), feature = "avss"))]
-        {
-            MpcBackendKind::Avss
-        }
-        #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
-        {
-            MpcBackendKind::NoBackend
-        }
+        MpcBackendKind::HoneyBadger
     }
 
     /// Static capability metadata for this backend family.
@@ -108,7 +92,6 @@ impl MpcBackendKind {
     /// early CLI/config validation before an engine has been constructed.
     pub fn capabilities(&self) -> MpcCapabilities {
         match self {
-            #[cfg(feature = "honeybadger")]
             MpcBackendKind::HoneyBadger => {
                 MpcCapabilities::MULTIPLICATION
                     | MpcCapabilities::OPEN_IN_EXP
@@ -119,7 +102,6 @@ impl MpcBackendKind {
                     | MpcCapabilities::RANDOMNESS
                     | MpcCapabilities::PREPROC_PERSISTENCE
             }
-            #[cfg(feature = "avss")]
             MpcBackendKind::Avss => {
                 MpcCapabilities::MULTIPLICATION
                     | MpcCapabilities::OPEN_IN_EXP
@@ -130,8 +112,6 @@ impl MpcBackendKind {
                     | MpcCapabilities::FIELD_OPEN
                     | MpcCapabilities::PREPROC_PERSISTENCE
             }
-            #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
-            MpcBackendKind::NoBackend => MpcCapabilities::empty(),
         }
     }
 
@@ -172,12 +152,8 @@ impl MpcBackendKind {
     /// Human-readable name for this backend.
     pub fn name(&self) -> &'static str {
         match self {
-            #[cfg(feature = "honeybadger")]
             MpcBackendKind::HoneyBadger => "honeybadger",
-            #[cfg(feature = "avss")]
             MpcBackendKind::Avss => "avss",
-            #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
-            MpcBackendKind::NoBackend => "none",
         }
     }
 }
@@ -188,7 +164,6 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    #[cfg(feature = "honeybadger")]
     fn test_parse_honeybadger() {
         assert_eq!(
             MpcBackendKind::from_str("honeybadger").unwrap(),
@@ -205,7 +180,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "avss")]
     fn test_parse_avss() {
         assert_eq!(
             MpcBackendKind::from_str("avss").unwrap(),
@@ -234,7 +208,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "honeybadger")]
     fn test_default_is_honeybadger() {
         assert_eq!(
             MpcBackendKind::default_backend(),
@@ -243,18 +216,18 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(any(feature = "honeybadger", feature = "avss")))]
-    fn no_backend_default_has_empty_capabilities() {
-        let backend = MpcBackendKind::default_backend();
-
-        assert_eq!(backend, MpcBackendKind::NoBackend);
-        assert_eq!(backend.name(), "none");
-        assert!(backend.capabilities().is_empty());
-        assert_eq!(MpcBackendKind::from_str("none").unwrap(), backend);
+    fn converts_compiled_binary_backend_metadata() {
+        assert_eq!(
+            MpcBackendKind::from(compiled_binary::MpcBackend::HoneyBadger),
+            MpcBackendKind::HoneyBadger
+        );
+        assert_eq!(
+            MpcBackendKind::from(compiled_binary::MpcBackend::Avss),
+            MpcBackendKind::Avss
+        );
     }
 
     #[test]
-    #[cfg(feature = "honeybadger")]
     fn test_honeybadger_capabilities() {
         let hb = MpcBackendKind::HoneyBadger;
         let capabilities = hb.capabilities();
@@ -277,7 +250,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "avss")]
     fn test_avss_capabilities() {
         let avss = MpcBackendKind::Avss;
         let capabilities = avss.capabilities();
@@ -300,7 +272,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "honeybadger")]
     fn test_honeybadger_supports_multiplication() {
         let hb = MpcBackendKind::HoneyBadger;
         assert!(hb.supports_multiplication());

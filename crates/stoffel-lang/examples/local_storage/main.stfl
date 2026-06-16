@@ -1,0 +1,29 @@
+# Persistent local storage example.
+#
+# Models a checkpointed local job cursor. The program creates or resumes a
+# cursor, reads it through both load and retrieve, then deletes the checkpoint
+# after the job is complete.
+
+def main() -> int64:
+  var key = "examples:local-storage:job-cursor"
+  var score: int64 = 0
+
+  if LocalStorage.exists(key):
+    discard LocalStorage.load(key)
+    score += 10
+  else:
+    if LocalStorage.store(key, "phase:ingested"):
+      score += 20
+
+  discard LocalStorage.retrieve(key)
+
+  if LocalStorage.exists(key):
+    score += 1
+
+  if LocalStorage.delete(key):
+    score += 100
+
+  if not LocalStorage.exists(key):
+    score += 1000
+
+  return score

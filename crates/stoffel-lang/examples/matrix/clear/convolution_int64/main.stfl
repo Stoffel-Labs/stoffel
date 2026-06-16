@@ -1,0 +1,73 @@
+# 2D convolution of an int64 grid with 3x3 kernels and zero padding.
+# A box kernel sums neighborhoods (checked at interior, edge and
+# corner) and a Laplacian-style kernel vanishes on constant regions.
+
+def convolve(grid: list[list[int64]], kernel: list[list[int64]]) -> list[list[int64]]:
+  var rows: int64 = grid.len()
+  var cols: int64 = grid[0].len()
+  var out: list[list[int64]] = []
+  var i: int64 = 0
+  while i < rows:
+    var row: list[int64] = []
+    var j: int64 = 0
+    while j < cols:
+      var acc: int64 = 0
+      var di: int64 = -1
+      while di <= 1:
+        var dj: int64 = -1
+        while dj <= 1:
+          var si: int64 = i + di
+          var sj: int64 = j + dj
+          if si >= 0 and si < rows and sj >= 0 and sj < cols:
+            acc += grid[si][sj] * kernel[di + 1][dj + 1]
+          dj += 1
+        di += 1
+      row.append(acc)
+      j += 1
+    out.append(row)
+    i += 1
+  return out
+
+def main() -> int64:
+  var grid: list[list[int64]] = [
+    [1, 2, 3, 4],
+    [5, 6, 7, 8],
+    [9, 10, 11, 12],
+    [13, 14, 15, 16]
+  ]
+
+  var box: list[list[int64]] = [[1, 1, 1], [1, 1, 1], [1, 1, 1]]
+  var summed: list[list[int64]] = convolve(grid, box)
+
+  # Interior cell (1,1): full 3x3 neighborhood of the top-left block.
+  assert summed[1][1] == 1 + 2 + 3 + 5 + 6 + 7 + 9 + 10 + 11, "interior box sum"
+  # Corner cell (0,0): only the 2x2 quadrant exists under zero padding.
+  assert summed[0][0] == 1 + 2 + 5 + 6, "corner box sum"
+  # Edge cell (0,1): a 2x3 strip.
+  assert summed[0][1] == 1 + 2 + 3 + 5 + 6 + 7, "edge box sum"
+
+  # Laplacian-style kernel: zero response on a constant image.
+  var laplace: list[list[int64]] = [[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]]
+  var flat: list[list[int64]] = [
+    [7, 7, 7, 7],
+    [7, 7, 7, 7],
+    [7, 7, 7, 7],
+    [7, 7, 7, 7]
+  ]
+  var response: list[list[int64]] = convolve(flat, laplace)
+  # Interior of a constant image gives exactly zero.
+  assert response[1][1] == 0, "laplacian vanishes on constant interior"
+  assert response[2][2] == 0, "laplacian vanishes on constant interior"
+  # The same kernel reacts strongly to an isolated spike.
+  var spike: list[list[int64]] = [
+    [0, 0, 0, 0],
+    [0, 100, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0]
+  ]
+  var reaction: list[list[int64]] = convolve(spike, laplace)
+  assert reaction[1][1] == 800, "laplacian peak on the spike"
+  assert reaction[0][0] == -100, "laplacian negative ring around the spike"
+
+  print("convolution: box sums, padding and laplacian responses verified")
+  return 0

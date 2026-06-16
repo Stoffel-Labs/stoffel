@@ -1,0 +1,63 @@
+# Linear Diophantine equations a*x + b*y = c in int64. The extended
+# Euclidean algorithm decides solvability (g = gcd(a,b) must divide c),
+# scales the Bezout pair into a particular solution, and parameterises
+# the full solution family x = x0 + t*(b/g), y = y0 - t*(a/g).
+
+def xgcd(a: int64, b: int64) -> list[int64]:
+  # Recursive extended Euclid returning [g, x, y] with a*x + b*y == g.
+  if b == 0:
+    return [a, 1, 0]
+  var sub: list[int64] = xgcd(b, a % b)
+  return [sub[0], sub[2], sub[1] - (a / b) * sub[2]]
+
+def solve(a: int64, b: int64, c: int64) -> list[int64]:
+  # Returns [1, x0, y0] when solvable, [0, 0, 0] otherwise.
+  var res: list[int64] = xgcd(a, b)
+  var g: int64 = res[0]
+  if g == 0:
+    if c == 0:
+      return [1, 0, 0]
+    return [0, 0, 0]
+  if c % g != 0:
+    return [0, 0, 0]
+  var scale: int64 = c / g
+  return [1, res[1] * scale, res[2] * scale]
+
+def main() -> int64:
+  # 240x + 46y = 14: gcd is 2, which divides 14, so solvable.
+  var s1: list[int64] = solve(240, 46, 14)
+  assert s1[0] == 1, "240x + 46y = 14 is solvable"
+  var x0: int64 = s1[1]
+  var y0: int64 = s1[2]
+  assert 240 * x0 + 46 * y0 == 14, "particular solution checks out"
+
+  # The whole family: step x by b/g and y by -a/g.
+  var g: int64 = xgcd(240, 46)[0]
+  var step_x: int64 = 46 / g
+  var step_y: int64 = 240 / g
+  var t: int64 = -5
+  while t <= 5:
+    var xt: int64 = x0 + t * step_x
+    var yt: int64 = y0 - t * step_y
+    assert 240 * xt + 46 * yt == 14, "every family member solves the equation"
+    t += 1
+
+  # Two more solvable shapes: coprime coefficients hit every c, and a
+  # homogeneous equation accepts the zero solution.
+  var s2: list[int64] = solve(17, 13, 1)
+  assert s2[0] == 1 and 17 * s2[1] + 13 * s2[2] == 1, "coprime pair reaches 1"
+  var s3: list[int64] = solve(17, 13, 100)
+  assert s3[0] == 1 and 17 * s3[1] + 13 * s3[2] == 100, "coprime pair reaches 100"
+  var s4: list[int64] = solve(6, 9, 0)
+  assert s4[0] == 1 and 6 * s4[1] + 9 * s4[2] == 0, "homogeneous equation"
+
+  # Unsolvable: gcd(6, 9) = 3 does not divide 5.
+  var s5: list[int64] = solve(6, 9, 5)
+  assert s5[0] == 0, "6x + 9y = 5 has no integer solution"
+
+  # Negative coefficients work through the same machinery.
+  var s6: list[int64] = solve(-240, 46, 14)
+  assert s6[0] == 1 and -240 * s6[1] + 46 * s6[2] == 14, "negative coefficient"
+
+  print("diophantine: particular solutions, full family and unsolvable case")
+  return 0

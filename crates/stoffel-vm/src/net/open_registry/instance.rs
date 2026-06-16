@@ -6,7 +6,7 @@ use tokio::sync::Notify;
 use stoffel_vm_types::core_types::ClearShareValue;
 
 use super::accumulators::{
-    AbaState, BatchKey, BatchOpenAccumulator, ExpKey, ExpOpenAccumulator, ExpOpenProgress,
+    BatchKey, BatchOpenAccumulator, ExpKey, ExpOpenAccumulator, ExpOpenProgress,
     ExpOpenRegistryKind, ExpOpenRequest, OpenAccumulator, OpenResult, RbcState, SingleKey,
 };
 
@@ -36,8 +36,6 @@ pub struct InstanceRegistry {
     // HB consensus
     pub rbc: Mutex<RbcState>,
     pub rbc_notify: Notify,
-    pub aba: Mutex<AbaState>,
-    pub aba_notify: Notify,
 }
 
 impl InstanceRegistry {
@@ -54,8 +52,6 @@ impl InstanceRegistry {
             exp_g2_notify: Notify::new(),
             rbc: Mutex::new(RbcState::default()),
             rbc_notify: Notify::new(),
-            aba: Mutex::new(AbaState::default()),
-            aba_notify: Notify::new(),
         }
     }
 
@@ -123,6 +119,7 @@ impl InstanceRegistry {
         &self,
         kind: ExpOpenRegistryKind,
         my_sequence: &mut Option<usize>,
+        sequence: Option<usize>,
         party_id: usize,
         share_id: usize,
         partial_point: &[u8],
@@ -135,21 +132,36 @@ impl InstanceRegistry {
         let mut reg = self.exp_registry(kind).lock();
 
         if my_sequence.is_none() {
-            let mut seq = 0usize;
-            loop {
-                let entry = reg.entry(seq).or_default();
-                if !entry.party_ids.contains(&party_id) {
-                    entry
-                        .partial_points
-                        .push((share_id, partial_point.to_vec()));
-                    entry.party_ids.push(party_id);
-                    *my_sequence = Some(seq);
-                    break;
+            let seq = match sequence {
+                Some(seq) => seq,
+                None => {
+                    let mut seq = 0usize;
+                    loop {
+                        let entry = reg.entry(seq).or_default();
+                        if !entry.party_ids.contains(&party_id) {
+                            break seq;
+                        }
+                        seq = seq.checked_add(1).ok_or_else(|| {
+                            "open-in-exponent sequence allocator overflowed".to_string()
+                        })?;
+                    }
                 }
-                seq = seq
-                    .checked_add(1)
-                    .ok_or_else(|| "open-in-exponent sequence allocator overflowed".to_string())?;
+            };
+            let entry = reg.entry(seq).or_default();
+            if let Some(pos) = entry.party_ids.iter().position(|id| *id == party_id) {
+                if entry.partial_points.get(pos) != Some(&(share_id, partial_point.to_vec())) {
+                    return Err(format!(
+                        "conflicting {:?} open-in-exponent payload for sequence {}, party {}",
+                        kind, seq, party_id
+                    ));
+                }
+            } else {
+                entry
+                    .partial_points
+                    .push((share_id, partial_point.to_vec()));
+                entry.party_ids.push(party_id);
             }
+            *my_sequence = Some(seq);
         }
 
         let seq = my_sequence.ok_or_else(|| Self::missing_exp_sequence_error(kind))?;
@@ -281,6 +293,7 @@ impl InstanceRegistry {
         match self.contribute_exp_open(
             request.kind,
             my_sequence,
+            request.sequence,
             request.party_id,
             request.share_id,
             request.partial_point,
@@ -301,7 +314,37 @@ impl InstanceRegistry {
 
     // -- single open --------------------------------------------------------
 
-    pub(super) fn insert_single(&self, type_key: &str, sender_party_id: usize, share: Vec<u8>) {
+    pub(super) fn insert_single(
+        &self,
+        seq: usize,
+        type_key: &str,
+        sender_party_id: usize,
+        share: Vec<u8>,
+    ) -> Result<(), String> {
+        let mut reg = self.single.lock();
+        let type_key = type_key.to_owned();
+        let entry = reg.entry((seq, type_key.clone())).or_default();
+        if let Some(pos) = entry.party_ids.iter().position(|id| *id == sender_party_id) {
+            if entry.shares.get(pos) == Some(&share) {
+                return Ok(());
+            }
+            return Err(format!(
+                "conflicting open_share payload for sequence {seq}, type '{type_key}', party {sender_party_id}"
+            ));
+        }
+        entry.shares.push(share);
+        entry.party_ids.push(sender_party_id);
+        drop(reg);
+        self.single_notify.notify_waiters();
+        Ok(())
+    }
+
+    pub(crate) fn insert_single_next(
+        &self,
+        type_key: &str,
+        sender_party_id: usize,
+        share: Vec<u8>,
+    ) -> Result<usize, String> {
         let mut reg = self.single.lock();
         let type_key = type_key.to_owned();
         let mut seq = 0usize;
@@ -310,12 +353,14 @@ impl InstanceRegistry {
             if !entry.party_ids.contains(&sender_party_id) {
                 entry.shares.push(share);
                 entry.party_ids.push(sender_party_id);
-                break;
+                drop(reg);
+                self.single_notify.notify_waiters();
+                return Ok(seq);
             }
-            seq += 1;
+            seq = seq
+                .checked_add(1)
+                .ok_or_else(|| "open_share sequence allocator overflowed".to_string())?;
         }
-        drop(reg);
-        self.single_notify.notify_waiters();
     }
 
     /// Contribute a single share and wait until `required` parties have contributed.
@@ -334,6 +379,7 @@ impl InstanceRegistry {
             party_id,
             type_key,
             share_bytes,
+            None,
             required,
             reconstruct,
             OpenSingleResultCodec {
@@ -359,6 +405,61 @@ impl InstanceRegistry {
             party_id,
             type_key,
             share_bytes,
+            None,
+            required,
+            reconstruct,
+            OpenSingleResultCodec {
+                wrap_result: OpenResult::Bytes,
+                unwrap_result: Self::expect_bytes_result,
+                operation: "open_share_as_field",
+            },
+        )
+    }
+
+    pub(crate) fn open_share_at_wait<R>(
+        &self,
+        party_id: usize,
+        type_key: &str,
+        sequence: usize,
+        share_bytes: &[u8],
+        required: usize,
+        reconstruct: R,
+    ) -> Result<ClearShareValue, String>
+    where
+        R: FnOnce(&[Vec<u8>]) -> Result<ClearShareValue, String>,
+    {
+        self.open_single_wait(
+            party_id,
+            type_key,
+            share_bytes,
+            Some(sequence),
+            required,
+            reconstruct,
+            OpenSingleResultCodec {
+                wrap_result: OpenResult::ClearShare,
+                unwrap_result: Self::expect_clear_share_result,
+                operation: "open_share",
+            },
+        )
+    }
+
+    pub(crate) fn open_bytes_at_wait<R>(
+        &self,
+        party_id: usize,
+        type_key: &str,
+        sequence: usize,
+        share_bytes: &[u8],
+        required: usize,
+        reconstruct: R,
+    ) -> Result<Vec<u8>, String>
+    where
+        R: FnOnce(&[Vec<u8>]) -> Result<Vec<u8>, String>,
+    {
+        self.open_single_wait(
+            party_id,
+            type_key,
+            share_bytes,
+            Some(sequence),
             required,
             reconstruct,
             OpenSingleResultCodec {
@@ -374,6 +475,7 @@ impl InstanceRegistry {
         party_id: usize,
         type_key: &str,
         share_bytes: &[u8],
+        sequence: Option<usize>,
         required: usize,
         reconstruct: R,
         codec: OpenSingleResultCodec<Wrap, Unwrap>,
@@ -397,6 +499,7 @@ impl InstanceRegistry {
                         party_id,
                         type_key.to_owned(),
                         share_bytes.to_vec(),
+                        sequence,
                         required,
                         reconstruct,
                         codec,
@@ -408,17 +511,18 @@ impl InstanceRegistry {
             party_id,
             type_key.to_owned(),
             share_bytes,
+            sequence,
             required,
             reconstruct,
             codec,
         )
     }
 
-    #[cfg(any(feature = "avss", feature = "honeybadger", test))]
-    pub(crate) async fn open_share_async<R>(
+    pub(crate) async fn open_share_at_async<R>(
         &self,
         party_id: usize,
         type_key: String,
+        sequence: usize,
         share_bytes: Vec<u8>,
         required: usize,
         reconstruct: R,
@@ -430,6 +534,7 @@ impl InstanceRegistry {
             party_id,
             type_key,
             share_bytes,
+            Some(sequence),
             required,
             reconstruct,
             OpenSingleResultCodec {
@@ -441,11 +546,11 @@ impl InstanceRegistry {
         .await
     }
 
-    #[cfg(feature = "avss")]
-    pub(crate) async fn open_bytes_async<R>(
+    pub(crate) async fn open_bytes_at_async<R>(
         &self,
         party_id: usize,
         type_key: String,
+        sequence: usize,
         share_bytes: Vec<u8>,
         required: usize,
         reconstruct: R,
@@ -457,6 +562,7 @@ impl InstanceRegistry {
             party_id,
             type_key,
             share_bytes,
+            Some(sequence),
             required,
             reconstruct,
             OpenSingleResultCodec {
@@ -473,6 +579,7 @@ impl InstanceRegistry {
         party_id: usize,
         type_key: String,
         share_bytes: Vec<u8>,
+        sequence: Option<usize>,
         required: usize,
         reconstruct: R,
         codec: OpenSingleResultCodec<Wrap, Unwrap>,
@@ -495,18 +602,35 @@ impl InstanceRegistry {
                 let mut reg = self.single.lock();
 
                 if my_sequence.is_none() {
-                    let mut seq = 0;
-                    loop {
-                        let entry = reg.entry((seq, type_key.clone())).or_default();
-                        if !entry.party_ids.contains(&party_id) {
-                            entry.shares.push(share_bytes.clone());
-                            entry.party_ids.push(party_id);
-                            my_sequence = Some(seq);
-                            inserted_local = true;
-                            break;
+                    let seq = match sequence {
+                        Some(seq) => seq,
+                        None => {
+                            let mut seq = 0usize;
+                            loop {
+                                let entry = reg.entry((seq, type_key.clone())).or_default();
+                                if !entry.party_ids.contains(&party_id) {
+                                    break seq;
+                                }
+                                seq = seq.checked_add(1).ok_or_else(|| {
+                                    "open_share sequence allocator overflowed".to_string()
+                                })?;
+                            }
                         }
-                        seq += 1;
+                    };
+                    let entry = reg.entry((seq, type_key.clone())).or_default();
+                    if let Some(pos) = entry.party_ids.iter().position(|id| *id == party_id) {
+                        if entry.shares.get(pos) != Some(&share_bytes) {
+                            return Err(format!(
+                                "conflicting local {} payload for sequence {}, type '{}'",
+                                codec.operation, seq, type_key
+                            ));
+                        }
+                    } else {
+                        entry.shares.push(share_bytes.clone());
+                        entry.party_ids.push(party_id);
+                        inserted_local = true;
                     }
+                    my_sequence = Some(seq);
                 }
 
                 let seq =
@@ -562,6 +686,7 @@ impl InstanceRegistry {
         party_id: usize,
         type_key: String,
         share_bytes: &[u8],
+        sequence: Option<usize>,
         required: usize,
         reconstruct: R,
         codec: OpenSingleResultCodec<Wrap, Unwrap>,
@@ -579,17 +704,34 @@ impl InstanceRegistry {
             let mut reg = self.single.lock();
 
             if my_sequence.is_none() {
-                let mut seq = 0;
-                loop {
-                    let entry = reg.entry((seq, type_key.clone())).or_default();
-                    if !entry.party_ids.contains(&party_id) {
-                        entry.shares.push(share_bytes.to_vec());
-                        entry.party_ids.push(party_id);
-                        my_sequence = Some(seq);
-                        break;
+                let seq = match sequence {
+                    Some(seq) => seq,
+                    None => {
+                        let mut seq = 0usize;
+                        loop {
+                            let entry = reg.entry((seq, type_key.clone())).or_default();
+                            if !entry.party_ids.contains(&party_id) {
+                                break seq;
+                            }
+                            seq = seq.checked_add(1).ok_or_else(|| {
+                                "open_share sequence allocator overflowed".to_string()
+                            })?;
+                        }
                     }
-                    seq += 1;
+                };
+                let entry = reg.entry((seq, type_key.clone())).or_default();
+                if let Some(pos) = entry.party_ids.iter().position(|id| *id == party_id) {
+                    if entry.shares.get(pos).map(Vec::as_slice) != Some(share_bytes) {
+                        return Err(format!(
+                            "conflicting local {} payload for sequence {}, type '{}'",
+                            codec.operation, seq, type_key
+                        ));
+                    }
+                } else {
+                    entry.shares.push(share_bytes.to_vec());
+                    entry.party_ids.push(party_id);
                 }
+                my_sequence = Some(seq);
             }
 
             let seq = my_sequence.ok_or_else(|| Self::missing_sequence_error(codec.operation))?;
@@ -646,49 +788,137 @@ impl InstanceRegistry {
     // -- exp open -----------------------------------------------------------
 
     /// Insert a partial point contribution for open-in-exponent.
-    pub fn insert_exp(&self, sender_party_id: usize, share_id: usize, partial_point: Vec<u8>) {
-        let mut reg = self.exp.lock();
-        let mut seq = 0usize;
-        loop {
-            let entry = reg.entry(seq).or_default();
-            if !entry.party_ids.contains(&sender_party_id) {
-                entry.partial_points.push((share_id, partial_point));
-                entry.party_ids.push(sender_party_id);
-                break;
-            }
-            seq += 1;
-        }
-        drop(reg);
-        self.exp_notify.notify_waiters();
+    pub fn insert_exp(
+        &self,
+        seq: usize,
+        sender_party_id: usize,
+        share_id: usize,
+        partial_point: Vec<u8>,
+    ) -> Result<(), String> {
+        self.insert_exp_for_kind(
+            ExpOpenRegistryKind::G1,
+            seq,
+            sender_party_id,
+            share_id,
+            partial_point,
+        )
     }
 
     /// Insert a partial point contribution for G2 open-in-exponent (AVSS).
-    pub fn insert_exp_g2(&self, sender_party_id: usize, share_id: usize, partial_point: Vec<u8>) {
-        let mut reg = self.exp_g2.lock();
+    pub fn insert_exp_g2(
+        &self,
+        seq: usize,
+        sender_party_id: usize,
+        share_id: usize,
+        partial_point: Vec<u8>,
+    ) -> Result<(), String> {
+        self.insert_exp_for_kind(
+            ExpOpenRegistryKind::G2,
+            seq,
+            sender_party_id,
+            share_id,
+            partial_point,
+        )
+    }
+
+    pub(crate) fn insert_exp_next(
+        &self,
+        kind: ExpOpenRegistryKind,
+        sender_party_id: usize,
+        share_id: usize,
+        partial_point: Vec<u8>,
+    ) -> Result<usize, String> {
+        let mut reg = self.exp_registry(kind).lock();
         let mut seq = 0usize;
         loop {
             let entry = reg.entry(seq).or_default();
             if !entry.party_ids.contains(&sender_party_id) {
                 entry.partial_points.push((share_id, partial_point));
                 entry.party_ids.push(sender_party_id);
-                break;
+                drop(reg);
+                self.notify_exp_registry(kind);
+                return Ok(seq);
             }
-            seq += 1;
+            seq = seq
+                .checked_add(1)
+                .ok_or_else(|| "open-in-exponent sequence allocator overflowed".to_string())?;
         }
+    }
+
+    fn insert_exp_for_kind(
+        &self,
+        kind: ExpOpenRegistryKind,
+        seq: usize,
+        sender_party_id: usize,
+        share_id: usize,
+        partial_point: Vec<u8>,
+    ) -> Result<(), String> {
+        let mut reg = self.exp_registry(kind).lock();
+        let entry = reg.entry(seq).or_default();
+        if let Some(pos) = entry.party_ids.iter().position(|id| *id == sender_party_id) {
+            if entry.partial_points.get(pos) == Some(&(share_id, partial_point.clone())) {
+                return Ok(());
+            }
+            return Err(format!(
+                "conflicting {:?} open-in-exponent payload for sequence {}, party {}",
+                kind, seq, sender_party_id
+            ));
+        }
+        entry.partial_points.push((share_id, partial_point));
+        entry.party_ids.push(sender_party_id);
         drop(reg);
-        self.exp_g2_notify.notify_waiters();
+        self.notify_exp_registry(kind);
+        Ok(())
     }
 
     // -- batch open ---------------------------------------------------------
 
     pub(super) fn insert_batch(
         &self,
+        seq: usize,
         type_key: &str,
         sender_party_id: usize,
         shares: Vec<Vec<u8>>,
-    ) {
+    ) -> Result<(), String> {
         if shares.is_empty() {
-            return;
+            return Ok(());
+        }
+        let batch_size = shares.len();
+        let mut reg = self.batch.lock();
+        let type_key = type_key.to_owned();
+        let entry = reg
+            .entry((seq, type_key.clone(), batch_size))
+            .or_insert_with(|| BatchOpenAccumulator::new(batch_size));
+        if let Some(pos) = entry.party_ids.iter().position(|id| *id == sender_party_id) {
+            let existing: Vec<_> = entry
+                .shares_per_position
+                .iter()
+                .filter_map(|shares_at_pos| shares_at_pos.get(pos).cloned())
+                .collect();
+            if existing == shares {
+                return Ok(());
+            }
+            return Err(format!(
+                "conflicting batch_open_shares payload for sequence {seq}, type '{type_key}', party {sender_party_id}"
+            ));
+        }
+        for (pos, share_bytes) in shares.into_iter().enumerate() {
+            entry.shares_per_position[pos].push(share_bytes);
+        }
+        entry.party_ids.push(sender_party_id);
+        drop(reg);
+        self.batch_notify.notify_waiters();
+        Ok(())
+    }
+
+    pub(crate) fn insert_batch_next(
+        &self,
+        type_key: &str,
+        sender_party_id: usize,
+        shares: Vec<Vec<u8>>,
+    ) -> Result<usize, String> {
+        if shares.is_empty() {
+            return Ok(0);
         }
         let batch_size = shares.len();
         let mut reg = self.batch.lock();
@@ -703,12 +933,14 @@ impl InstanceRegistry {
                     entry.shares_per_position[pos].push(share_bytes);
                 }
                 entry.party_ids.push(sender_party_id);
-                break;
+                drop(reg);
+                self.batch_notify.notify_waiters();
+                return Ok(seq);
             }
-            seq += 1;
+            seq = seq
+                .checked_add(1)
+                .ok_or_else(|| "batch_open_shares sequence allocator overflowed".to_string())?;
         }
-        drop(reg);
-        self.batch_notify.notify_waiters();
     }
 
     /// Batch variant of [`open_share_wait`].
@@ -746,6 +978,49 @@ impl InstanceRegistry {
             party_id,
             type_key.to_owned(),
             shares,
+            None,
+            required,
+            reconstruct_one,
+        )
+    }
+
+    pub(crate) fn batch_open_at_wait<R>(
+        &self,
+        party_id: usize,
+        type_key: &str,
+        sequence: usize,
+        shares: &[Vec<u8>],
+        required: usize,
+        reconstruct_one: R,
+    ) -> Result<Vec<ClearShareValue>, String>
+    where
+        R: Fn(&[Vec<u8>], usize) -> Result<ClearShareValue, String>,
+    {
+        if shares.is_empty() {
+            return Ok(vec![]);
+        }
+        if required == 0 {
+            return Err("batch_open_shares requires at least one contribution".to_string());
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                return tokio::task::block_in_place(|| {
+                    handle.block_on(self.batch_open_at_async(
+                        party_id,
+                        type_key.to_owned(),
+                        Some(sequence),
+                        shares.to_vec(),
+                        required,
+                        reconstruct_one,
+                    ))
+                });
+            }
+        }
+        self.batch_open_poll(
+            party_id,
+            type_key.to_owned(),
+            shares,
+            Some(sequence),
             required,
             reconstruct_one,
         )
@@ -755,6 +1030,22 @@ impl InstanceRegistry {
         &self,
         party_id: usize,
         type_key: String,
+        shares: Vec<Vec<u8>>,
+        required: usize,
+        reconstruct_one: R,
+    ) -> Result<Vec<ClearShareValue>, String>
+    where
+        R: Fn(&[Vec<u8>], usize) -> Result<ClearShareValue, String>,
+    {
+        self.batch_open_at_async(party_id, type_key, None, shares, required, reconstruct_one)
+            .await
+    }
+
+    pub(crate) async fn batch_open_at_async<R>(
+        &self,
+        party_id: usize,
+        type_key: String,
+        sequence: Option<usize>,
         shares: Vec<Vec<u8>>,
         required: usize,
         reconstruct_one: R,
@@ -775,22 +1066,46 @@ impl InstanceRegistry {
                 let mut reg = self.batch.lock();
 
                 if my_sequence.is_none() {
-                    let mut seq = 0;
-                    loop {
-                        let entry = reg
-                            .entry((seq, type_key.clone(), batch_size))
-                            .or_insert_with(|| BatchOpenAccumulator::new(batch_size));
-                        if !entry.party_ids.contains(&party_id) {
-                            for (pos, share_bytes) in shares.iter().enumerate() {
-                                entry.shares_per_position[pos].push(share_bytes.clone());
+                    let seq = match sequence {
+                        Some(seq) => seq,
+                        None => {
+                            let mut seq = 0usize;
+                            loop {
+                                let entry = reg
+                                    .entry((seq, type_key.clone(), batch_size))
+                                    .or_insert_with(|| BatchOpenAccumulator::new(batch_size));
+                                if !entry.party_ids.contains(&party_id) {
+                                    break seq;
+                                }
+                                seq = seq.checked_add(1).ok_or_else(|| {
+                                    "batch_open_shares sequence allocator overflowed".to_string()
+                                })?;
                             }
-                            entry.party_ids.push(party_id);
-                            my_sequence = Some(seq);
-                            inserted_local = true;
-                            break;
                         }
-                        seq += 1;
+                    };
+                    let entry = reg
+                        .entry((seq, type_key.clone(), batch_size))
+                        .or_insert_with(|| BatchOpenAccumulator::new(batch_size));
+                    if let Some(pos) = entry.party_ids.iter().position(|id| *id == party_id) {
+                        let existing: Vec<_> = entry
+                            .shares_per_position
+                            .iter()
+                            .filter_map(|shares_at_pos| shares_at_pos.get(pos).cloned())
+                            .collect();
+                        if existing != shares {
+                            return Err(format!(
+                                "conflicting local batch_open_shares payload for sequence {}, type '{}'",
+                                seq, type_key
+                            ));
+                        }
+                    } else {
+                        for (pos, share_bytes) in shares.iter().enumerate() {
+                            entry.shares_per_position[pos].push(share_bytes.clone());
+                        }
+                        entry.party_ids.push(party_id);
+                        inserted_local = true;
                     }
+                    my_sequence = Some(seq);
                 }
 
                 let seq =
@@ -855,6 +1170,7 @@ impl InstanceRegistry {
         party_id: usize,
         type_key: String,
         shares: &[Vec<u8>],
+        sequence: Option<usize>,
         required: usize,
         reconstruct_one: R,
     ) -> Result<Vec<ClearShareValue>, String>
@@ -869,21 +1185,47 @@ impl InstanceRegistry {
             let mut reg = self.batch.lock();
 
             if my_sequence.is_none() {
-                let mut seq = 0;
-                loop {
-                    let entry = reg
-                        .entry((seq, type_key.clone(), batch_size))
-                        .or_insert_with(|| BatchOpenAccumulator::new(batch_size));
-                    if !entry.party_ids.contains(&party_id) {
-                        for (pos, share_bytes) in shares.iter().enumerate() {
-                            entry.shares_per_position[pos].push(share_bytes.clone());
+                let seq = match sequence {
+                    Some(seq) => seq,
+                    None => {
+                        let mut seq = 0usize;
+                        loop {
+                            let entry = reg
+                                .entry((seq, type_key.clone(), batch_size))
+                                .or_insert_with(|| BatchOpenAccumulator::new(batch_size));
+                            if !entry.party_ids.contains(&party_id) {
+                                break seq;
+                            }
+                            seq = seq.checked_add(1).ok_or_else(|| {
+                                "batch_open_shares sequence allocator overflowed".to_string()
+                            })?;
                         }
-                        entry.party_ids.push(party_id);
-                        my_sequence = Some(seq);
-                        break;
                     }
-                    seq += 1;
+                };
+                let entry = reg
+                    .entry((seq, type_key.clone(), batch_size))
+                    .or_insert_with(|| BatchOpenAccumulator::new(batch_size));
+                if let Some(pos) = entry.party_ids.iter().position(|id| *id == party_id) {
+                    let existing: Vec<_> = entry
+                        .shares_per_position
+                        .iter()
+                        .filter_map(|shares_at_pos| shares_at_pos.get(pos).cloned())
+                        .collect();
+                    if existing.iter().map(Vec::as_slice).collect::<Vec<_>>()
+                        != shares.iter().map(Vec::as_slice).collect::<Vec<_>>()
+                    {
+                        return Err(format!(
+                            "conflicting local batch_open_shares payload for sequence {}, type '{}'",
+                            seq, type_key
+                        ));
+                    }
+                } else {
+                    for (pos, share_bytes) in shares.iter().enumerate() {
+                        entry.shares_per_position[pos].push(share_bytes.clone());
+                    }
+                    entry.party_ids.push(party_id);
                 }
+                my_sequence = Some(seq);
             }
 
             let seq =

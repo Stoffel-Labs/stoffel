@@ -1,0 +1,871 @@
+Compiling tests/valid_for_loop.stoffel...
+--- Tokens ---
+[TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 1, column: 1 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 2, column: 1 } }, TokenInfo { kind: Keyword("proc"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 3, column: 1 } }, TokenInfo { kind: Identifier("main"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 3, column: 6 } }, TokenInfo { kind: LParen, location: SourceLocation { file: "valid_for_loop.stoffel", line: 3, column: 10 } }, TokenInfo { kind: RParen, location: SourceLocation { file: "valid_for_loop.stoffel", line: 3, column: 11 } }, TokenInfo { kind: Assign, location: SourceLocation { file: "valid_for_loop.stoffel", line: 3, column: 13 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 3, column: 14 } }, TokenInfo { kind: Indent, location: SourceLocation { file: "valid_for_loop.stoffel", line: 4, column: 3 } }, TokenInfo { kind: Keyword("let"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 4, column: 3 } }, TokenInfo { kind: Identifier("total"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 4, column: 7 } }, TokenInfo { kind: Assign, location: SourceLocation { file: "valid_for_loop.stoffel", line: 4, column: 13 } }, TokenInfo { kind: IntLiteral(0), location: SourceLocation { file: "valid_for_loop.stoffel", line: 4, column: 15 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 4, column: 16 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 5, column: 1 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 6, column: 3 } }, TokenInfo { kind: Keyword("for"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 7, column: 3 } }, TokenInfo { kind: Identifier("i"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 7, column: 7 } }, TokenInfo { kind: Keyword("in"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 7, column: 9 } }, TokenInfo { kind: IntLiteral(0), location: SourceLocation { file: "valid_for_loop.stoffel", line: 7, column: 12 } }, TokenInfo { kind: Operator(".."), location: SourceLocation { file: "valid_for_loop.stoffel", line: 7, column: 14 } }, TokenInfo { kind: IntLiteral(4), location: SourceLocation { file: "valid_for_loop.stoffel", line: 7, column: 17 } }, TokenInfo { kind: Colon, location: SourceLocation { file: "valid_for_loop.stoffel", line: 7, column: 18 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 7, column: 19 } }, TokenInfo { kind: Indent, location: SourceLocation { file: "valid_for_loop.stoffel", line: 8, column: 5 } }, TokenInfo { kind: Keyword("if"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 8, column: 5 } }, TokenInfo { kind: Identifier("i"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 8, column: 8 } }, TokenInfo { kind: Operator("<"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 8, column: 11 } }, TokenInfo { kind: IntLiteral(2), location: SourceLocation { file: "valid_for_loop.stoffel", line: 8, column: 12 } }, TokenInfo { kind: Colon, location: SourceLocation { file: "valid_for_loop.stoffel", line: 8, column: 13 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 8, column: 14 } }, TokenInfo { kind: Indent, location: SourceLocation { file: "valid_for_loop.stoffel", line: 9, column: 7 } }, TokenInfo { kind: Keyword("let"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 9, column: 7 } }, TokenInfo { kind: Identifier("doubled"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 9, column: 11 } }, TokenInfo { kind: Assign, location: SourceLocation { file: "valid_for_loop.stoffel", line: 9, column: 19 } }, TokenInfo { kind: Identifier("i"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 9, column: 21 } }, TokenInfo { kind: Operator("+"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 9, column: 24 } }, TokenInfo { kind: Identifier("i"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 9, column: 25 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 9, column: 26 } }, TokenInfo { kind: Keyword("discard"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 10, column: 7 } }, TokenInfo { kind: Identifier("doubled"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 10, column: 15 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 10, column: 22 } }, TokenInfo { kind: Dedent, location: SourceLocation { file: "valid_for_loop.stoffel", line: 11, column: 5 } }, TokenInfo { kind: Keyword("else"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 11, column: 5 } }, TokenInfo { kind: Colon, location: SourceLocation { file: "valid_for_loop.stoffel", line: 11, column: 9 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 11, column: 10 } }, TokenInfo { kind: Indent, location: SourceLocation { file: "valid_for_loop.stoffel", line: 12, column: 7 } }, TokenInfo { kind: Keyword("let"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 12, column: 7 } }, TokenInfo { kind: Identifier("tmp"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 12, column: 11 } }, TokenInfo { kind: Assign, location: SourceLocation { file: "valid_for_loop.stoffel", line: 12, column: 15 } }, TokenInfo { kind: Identifier("i"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 12, column: 17 } }, TokenInfo { kind: Operator("*"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 12, column: 20 } }, TokenInfo { kind: IntLiteral(2), location: SourceLocation { file: "valid_for_loop.stoffel", line: 12, column: 21 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 12, column: 22 } }, TokenInfo { kind: Keyword("discard"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 13, column: 7 } }, TokenInfo { kind: Identifier("tmp"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 13, column: 15 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 13, column: 18 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 14, column: 1 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 15, column: 3 } }, TokenInfo { kind: Dedent, location: SourceLocation { file: "valid_for_loop.stoffel", line: 16, column: 3 } }, TokenInfo { kind: Dedent, location: SourceLocation { file: "valid_for_loop.stoffel", line: 16, column: 3 } }, TokenInfo { kind: Keyword("while"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 16, column: 3 } }, TokenInfo { kind: Identifier("total"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 16, column: 9 } }, TokenInfo { kind: Operator("<"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 16, column: 16 } }, TokenInfo { kind: IntLiteral(10), location: SourceLocation { file: "valid_for_loop.stoffel", line: 16, column: 17 } }, TokenInfo { kind: Colon, location: SourceLocation { file: "valid_for_loop.stoffel", line: 16, column: 19 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 16, column: 20 } }, TokenInfo { kind: Indent, location: SourceLocation { file: "valid_for_loop.stoffel", line: 17, column: 5 } }, TokenInfo { kind: Identifier("total"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 17, column: 5 } }, TokenInfo { kind: Assign, location: SourceLocation { file: "valid_for_loop.stoffel", line: 17, column: 11 } }, TokenInfo { kind: Identifier("total"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 17, column: 13 } }, TokenInfo { kind: Operator("+"), location: SourceLocation { file: "valid_for_loop.stoffel", line: 17, column: 20 } }, TokenInfo { kind: IntLiteral(1), location: SourceLocation { file: "valid_for_loop.stoffel", line: 17, column: 21 } }, TokenInfo { kind: Newline, location: SourceLocation { file: "valid_for_loop.stoffel", line: 17, column: 22 } }, TokenInfo { kind: Dedent, location: SourceLocation { file: "valid_for_loop.stoffel", line: 18, column: 1 } }, TokenInfo { kind: Dedent, location: SourceLocation { file: "valid_for_loop.stoffel", line: 18, column: 1 } }, TokenInfo { kind: Eof, location: SourceLocation { file: "valid_for_loop.stoffel", line: 18, column: 1 } }]
+--------------
+--- Initial AST ---
+FunctionDefinition {
+    name: Some(
+        "main",
+    ),
+    parameters: [],
+    return_type: None,
+    body: Block(
+        [
+            VariableDeclaration {
+                name: "total",
+                type_annotation: None,
+                value: Some(
+                    Literal(
+                        Int(
+                            0,
+                        ),
+                    ),
+                ),
+                is_mutable: false,
+                is_secret: false,
+                location: SourceLocation {
+                    file: "valid_for_loop.stoffel",
+                    line: 4,
+                    column: 3,
+                },
+            },
+            ForLoop {
+                variables: [
+                    "i",
+                ],
+                iterable: BinaryOperation {
+                    op: "..",
+                    left: Literal(
+                        Int(
+                            0,
+                        ),
+                    ),
+                    right: Literal(
+                        Int(
+                            4,
+                        ),
+                    ),
+                    location: SourceLocation {
+                        file: "valid_for_loop.stoffel",
+                        line: 7,
+                        column: 14,
+                    },
+                },
+                body: Block(
+                    [
+                        IfExpression {
+                            condition: BinaryOperation {
+                                op: "<",
+                                left: Identifier(
+                                    "i",
+                                    SourceLocation {
+                                        file: "valid_for_loop.stoffel",
+                                        line: 8,
+                                        column: 8,
+                                    },
+                                ),
+                                right: Literal(
+                                    Int(
+                                        2,
+                                    ),
+                                ),
+                                location: SourceLocation {
+                                    file: "valid_for_loop.stoffel",
+                                    line: 8,
+                                    column: 11,
+                                },
+                            },
+                            then_branch: Block(
+                                [
+                                    VariableDeclaration {
+                                        name: "doubled",
+                                        type_annotation: None,
+                                        value: Some(
+                                            BinaryOperation {
+                                                op: "+",
+                                                left: Identifier(
+                                                    "i",
+                                                    SourceLocation {
+                                                        file: "valid_for_loop.stoffel",
+                                                        line: 9,
+                                                        column: 21,
+                                                    },
+                                                ),
+                                                right: Identifier(
+                                                    "i",
+                                                    SourceLocation {
+                                                        file: "valid_for_loop.stoffel",
+                                                        line: 9,
+                                                        column: 25,
+                                                    },
+                                                ),
+                                                location: SourceLocation {
+                                                    file: "valid_for_loop.stoffel",
+                                                    line: 9,
+                                                    column: 24,
+                                                },
+                                            },
+                                        ),
+                                        is_mutable: false,
+                                        is_secret: false,
+                                        location: SourceLocation {
+                                            file: "valid_for_loop.stoffel",
+                                            line: 9,
+                                            column: 7,
+                                        },
+                                    },
+                                    DiscardStatement {
+                                        expression: Identifier(
+                                            "doubled",
+                                            SourceLocation {
+                                                file: "valid_for_loop.stoffel",
+                                                line: 10,
+                                                column: 15,
+                                            },
+                                        ),
+                                        location: SourceLocation {
+                                            file: "valid_for_loop.stoffel",
+                                            line: 10,
+                                            column: 7,
+                                        },
+                                    },
+                                ],
+                            ),
+                            else_branch: Some(
+                                Block(
+                                    [
+                                        VariableDeclaration {
+                                            name: "tmp",
+                                            type_annotation: None,
+                                            value: Some(
+                                                BinaryOperation {
+                                                    op: "*",
+                                                    left: Identifier(
+                                                        "i",
+                                                        SourceLocation {
+                                                            file: "valid_for_loop.stoffel",
+                                                            line: 12,
+                                                            column: 17,
+                                                        },
+                                                    ),
+                                                    right: Literal(
+                                                        Int(
+                                                            2,
+                                                        ),
+                                                    ),
+                                                    location: SourceLocation {
+                                                        file: "valid_for_loop.stoffel",
+                                                        line: 12,
+                                                        column: 20,
+                                                    },
+                                                },
+                                            ),
+                                            is_mutable: false,
+                                            is_secret: false,
+                                            location: SourceLocation {
+                                                file: "valid_for_loop.stoffel",
+                                                line: 12,
+                                                column: 7,
+                                            },
+                                        },
+                                        DiscardStatement {
+                                            expression: Identifier(
+                                                "tmp",
+                                                SourceLocation {
+                                                    file: "valid_for_loop.stoffel",
+                                                    line: 13,
+                                                    column: 15,
+                                                },
+                                            ),
+                                            location: SourceLocation {
+                                                file: "valid_for_loop.stoffel",
+                                                line: 13,
+                                                column: 7,
+                                            },
+                                        },
+                                    ],
+                                ),
+                            ),
+                        },
+                    ],
+                ),
+                location: SourceLocation {
+                    file: "valid_for_loop.stoffel",
+                    line: 7,
+                    column: 3,
+                },
+            },
+            WhileLoop {
+                condition: BinaryOperation {
+                    op: "<",
+                    left: Identifier(
+                        "total",
+                        SourceLocation {
+                            file: "valid_for_loop.stoffel",
+                            line: 16,
+                            column: 9,
+                        },
+                    ),
+                    right: Literal(
+                        Int(
+                            10,
+                        ),
+                    ),
+                    location: SourceLocation {
+                        file: "valid_for_loop.stoffel",
+                        line: 16,
+                        column: 16,
+                    },
+                },
+                body: Block(
+                    [
+                        Assignment {
+                            target: Identifier(
+                                "total",
+                                SourceLocation {
+                                    file: "valid_for_loop.stoffel",
+                                    line: 17,
+                                    column: 5,
+                                },
+                            ),
+                            value: BinaryOperation {
+                                op: "+",
+                                left: Identifier(
+                                    "total",
+                                    SourceLocation {
+                                        file: "valid_for_loop.stoffel",
+                                        line: 17,
+                                        column: 13,
+                                    },
+                                ),
+                                right: Literal(
+                                    Int(
+                                        1,
+                                    ),
+                                ),
+                                location: SourceLocation {
+                                    file: "valid_for_loop.stoffel",
+                                    line: 17,
+                                    column: 20,
+                                },
+                            },
+                            location: SourceLocation {
+                                file: "valid_for_loop.stoffel",
+                                line: 17,
+                                column: 5,
+                            },
+                        },
+                    ],
+                ),
+                location: SourceLocation {
+                    file: "valid_for_loop.stoffel",
+                    line: 16,
+                    column: 3,
+                },
+            },
+        ],
+    ),
+    is_secret: false,
+    pragmas: [],
+    location: SourceLocation {
+        file: "valid_for_loop.stoffel",
+        line: 3,
+        column: 1,
+    },
+    node_id: 0,
+}
+-------------------
+--- Transformed AST (UFCS) ---
+FunctionDefinition {
+    name: Some(
+        "main",
+    ),
+    parameters: [],
+    return_type: None,
+    body: Block(
+        [
+            VariableDeclaration {
+                name: "total",
+                type_annotation: None,
+                value: Some(
+                    Literal(
+                        Int(
+                            0,
+                        ),
+                    ),
+                ),
+                is_mutable: false,
+                is_secret: false,
+                location: SourceLocation {
+                    file: "valid_for_loop.stoffel",
+                    line: 4,
+                    column: 3,
+                },
+            },
+            ForLoop {
+                variables: [
+                    "i",
+                ],
+                iterable: BinaryOperation {
+                    op: "..",
+                    left: Literal(
+                        Int(
+                            0,
+                        ),
+                    ),
+                    right: Literal(
+                        Int(
+                            4,
+                        ),
+                    ),
+                    location: SourceLocation {
+                        file: "valid_for_loop.stoffel",
+                        line: 7,
+                        column: 14,
+                    },
+                },
+                body: Block(
+                    [
+                        IfExpression {
+                            condition: BinaryOperation {
+                                op: "<",
+                                left: Identifier(
+                                    "i",
+                                    SourceLocation {
+                                        file: "valid_for_loop.stoffel",
+                                        line: 8,
+                                        column: 8,
+                                    },
+                                ),
+                                right: Literal(
+                                    Int(
+                                        2,
+                                    ),
+                                ),
+                                location: SourceLocation {
+                                    file: "valid_for_loop.stoffel",
+                                    line: 8,
+                                    column: 11,
+                                },
+                            },
+                            then_branch: Block(
+                                [
+                                    VariableDeclaration {
+                                        name: "doubled",
+                                        type_annotation: None,
+                                        value: Some(
+                                            BinaryOperation {
+                                                op: "+",
+                                                left: Identifier(
+                                                    "i",
+                                                    SourceLocation {
+                                                        file: "valid_for_loop.stoffel",
+                                                        line: 9,
+                                                        column: 21,
+                                                    },
+                                                ),
+                                                right: Identifier(
+                                                    "i",
+                                                    SourceLocation {
+                                                        file: "valid_for_loop.stoffel",
+                                                        line: 9,
+                                                        column: 25,
+                                                    },
+                                                ),
+                                                location: SourceLocation {
+                                                    file: "valid_for_loop.stoffel",
+                                                    line: 9,
+                                                    column: 24,
+                                                },
+                                            },
+                                        ),
+                                        is_mutable: false,
+                                        is_secret: false,
+                                        location: SourceLocation {
+                                            file: "valid_for_loop.stoffel",
+                                            line: 9,
+                                            column: 7,
+                                        },
+                                    },
+                                    DiscardStatement {
+                                        expression: Identifier(
+                                            "doubled",
+                                            SourceLocation {
+                                                file: "valid_for_loop.stoffel",
+                                                line: 10,
+                                                column: 15,
+                                            },
+                                        ),
+                                        location: SourceLocation {
+                                            file: "valid_for_loop.stoffel",
+                                            line: 10,
+                                            column: 7,
+                                        },
+                                    },
+                                ],
+                            ),
+                            else_branch: Some(
+                                Block(
+                                    [
+                                        VariableDeclaration {
+                                            name: "tmp",
+                                            type_annotation: None,
+                                            value: Some(
+                                                BinaryOperation {
+                                                    op: "*",
+                                                    left: Identifier(
+                                                        "i",
+                                                        SourceLocation {
+                                                            file: "valid_for_loop.stoffel",
+                                                            line: 12,
+                                                            column: 17,
+                                                        },
+                                                    ),
+                                                    right: Literal(
+                                                        Int(
+                                                            2,
+                                                        ),
+                                                    ),
+                                                    location: SourceLocation {
+                                                        file: "valid_for_loop.stoffel",
+                                                        line: 12,
+                                                        column: 20,
+                                                    },
+                                                },
+                                            ),
+                                            is_mutable: false,
+                                            is_secret: false,
+                                            location: SourceLocation {
+                                                file: "valid_for_loop.stoffel",
+                                                line: 12,
+                                                column: 7,
+                                            },
+                                        },
+                                        DiscardStatement {
+                                            expression: Identifier(
+                                                "tmp",
+                                                SourceLocation {
+                                                    file: "valid_for_loop.stoffel",
+                                                    line: 13,
+                                                    column: 15,
+                                                },
+                                            ),
+                                            location: SourceLocation {
+                                                file: "valid_for_loop.stoffel",
+                                                line: 13,
+                                                column: 7,
+                                            },
+                                        },
+                                    ],
+                                ),
+                            ),
+                        },
+                    ],
+                ),
+                location: SourceLocation {
+                    file: "valid_for_loop.stoffel",
+                    line: 7,
+                    column: 3,
+                },
+            },
+            WhileLoop {
+                condition: BinaryOperation {
+                    op: "<",
+                    left: Identifier(
+                        "total",
+                        SourceLocation {
+                            file: "valid_for_loop.stoffel",
+                            line: 16,
+                            column: 9,
+                        },
+                    ),
+                    right: Literal(
+                        Int(
+                            10,
+                        ),
+                    ),
+                    location: SourceLocation {
+                        file: "valid_for_loop.stoffel",
+                        line: 16,
+                        column: 16,
+                    },
+                },
+                body: Block(
+                    [
+                        Assignment {
+                            target: Identifier(
+                                "total",
+                                SourceLocation {
+                                    file: "valid_for_loop.stoffel",
+                                    line: 17,
+                                    column: 5,
+                                },
+                            ),
+                            value: BinaryOperation {
+                                op: "+",
+                                left: Identifier(
+                                    "total",
+                                    SourceLocation {
+                                        file: "valid_for_loop.stoffel",
+                                        line: 17,
+                                        column: 13,
+                                    },
+                                ),
+                                right: Literal(
+                                    Int(
+                                        1,
+                                    ),
+                                ),
+                                location: SourceLocation {
+                                    file: "valid_for_loop.stoffel",
+                                    line: 17,
+                                    column: 20,
+                                },
+                            },
+                            location: SourceLocation {
+                                file: "valid_for_loop.stoffel",
+                                line: 17,
+                                column: 5,
+                            },
+                        },
+                    ],
+                ),
+                location: SourceLocation {
+                    file: "valid_for_loop.stoffel",
+                    line: 16,
+                    column: 3,
+                },
+            },
+        ],
+    ),
+    is_secret: false,
+    pragmas: [],
+    location: SourceLocation {
+        file: "valid_for_loop.stoffel",
+        line: 3,
+        column: 1,
+    },
+    node_id: 0,
+}
+------------------------------
+--- Analyzed AST (Semantic Check) ---
+FunctionDefinition {
+    name: Some(
+        "main",
+    ),
+    parameters: [],
+    return_type: None,
+    body: Block(
+        [
+            VariableDeclaration {
+                name: "total",
+                type_annotation: None,
+                value: Some(
+                    Literal(
+                        Int(
+                            0,
+                        ),
+                    ),
+                ),
+                is_mutable: false,
+                is_secret: false,
+                location: SourceLocation {
+                    file: "valid_for_loop.stoffel",
+                    line: 4,
+                    column: 3,
+                },
+            },
+            ForLoop {
+                variables: [
+                    "i",
+                ],
+                iterable: BinaryOperation {
+                    op: "..",
+                    left: Literal(
+                        Int(
+                            0,
+                        ),
+                    ),
+                    right: Literal(
+                        Int(
+                            4,
+                        ),
+                    ),
+                    location: SourceLocation {
+                        file: "valid_for_loop.stoffel",
+                        line: 7,
+                        column: 14,
+                    },
+                },
+                body: Block(
+                    [
+                        IfExpression {
+                            condition: BinaryOperation {
+                                op: "<",
+                                left: Identifier(
+                                    "i",
+                                    SourceLocation {
+                                        file: "valid_for_loop.stoffel",
+                                        line: 8,
+                                        column: 8,
+                                    },
+                                ),
+                                right: Literal(
+                                    Int(
+                                        2,
+                                    ),
+                                ),
+                                location: SourceLocation {
+                                    file: "valid_for_loop.stoffel",
+                                    line: 8,
+                                    column: 11,
+                                },
+                            },
+                            then_branch: Block(
+                                [
+                                    VariableDeclaration {
+                                        name: "doubled",
+                                        type_annotation: None,
+                                        value: Some(
+                                            BinaryOperation {
+                                                op: "+",
+                                                left: Identifier(
+                                                    "i",
+                                                    SourceLocation {
+                                                        file: "valid_for_loop.stoffel",
+                                                        line: 9,
+                                                        column: 21,
+                                                    },
+                                                ),
+                                                right: Identifier(
+                                                    "i",
+                                                    SourceLocation {
+                                                        file: "valid_for_loop.stoffel",
+                                                        line: 9,
+                                                        column: 25,
+                                                    },
+                                                ),
+                                                location: SourceLocation {
+                                                    file: "valid_for_loop.stoffel",
+                                                    line: 9,
+                                                    column: 24,
+                                                },
+                                            },
+                                        ),
+                                        is_mutable: false,
+                                        is_secret: false,
+                                        location: SourceLocation {
+                                            file: "valid_for_loop.stoffel",
+                                            line: 9,
+                                            column: 7,
+                                        },
+                                    },
+                                    DiscardStatement {
+                                        expression: Identifier(
+                                            "doubled",
+                                            SourceLocation {
+                                                file: "valid_for_loop.stoffel",
+                                                line: 10,
+                                                column: 15,
+                                            },
+                                        ),
+                                        location: SourceLocation {
+                                            file: "valid_for_loop.stoffel",
+                                            line: 10,
+                                            column: 7,
+                                        },
+                                    },
+                                ],
+                            ),
+                            else_branch: Some(
+                                Block(
+                                    [
+                                        VariableDeclaration {
+                                            name: "tmp",
+                                            type_annotation: None,
+                                            value: Some(
+                                                BinaryOperation {
+                                                    op: "*",
+                                                    left: Identifier(
+                                                        "i",
+                                                        SourceLocation {
+                                                            file: "valid_for_loop.stoffel",
+                                                            line: 12,
+                                                            column: 17,
+                                                        },
+                                                    ),
+                                                    right: Literal(
+                                                        Int(
+                                                            2,
+                                                        ),
+                                                    ),
+                                                    location: SourceLocation {
+                                                        file: "valid_for_loop.stoffel",
+                                                        line: 12,
+                                                        column: 20,
+                                                    },
+                                                },
+                                            ),
+                                            is_mutable: false,
+                                            is_secret: false,
+                                            location: SourceLocation {
+                                                file: "valid_for_loop.stoffel",
+                                                line: 12,
+                                                column: 7,
+                                            },
+                                        },
+                                        DiscardStatement {
+                                            expression: Identifier(
+                                                "tmp",
+                                                SourceLocation {
+                                                    file: "valid_for_loop.stoffel",
+                                                    line: 13,
+                                                    column: 15,
+                                                },
+                                            ),
+                                            location: SourceLocation {
+                                                file: "valid_for_loop.stoffel",
+                                                line: 13,
+                                                column: 7,
+                                            },
+                                        },
+                                    ],
+                                ),
+                            ),
+                        },
+                    ],
+                ),
+                location: SourceLocation {
+                    file: "valid_for_loop.stoffel",
+                    line: 7,
+                    column: 3,
+                },
+            },
+            WhileLoop {
+                condition: BinaryOperation {
+                    op: "<",
+                    left: Identifier(
+                        "total",
+                        SourceLocation {
+                            file: "valid_for_loop.stoffel",
+                            line: 16,
+                            column: 9,
+                        },
+                    ),
+                    right: Literal(
+                        Int(
+                            10,
+                        ),
+                    ),
+                    location: SourceLocation {
+                        file: "valid_for_loop.stoffel",
+                        line: 16,
+                        column: 16,
+                    },
+                },
+                body: Block(
+                    [
+                        Assignment {
+                            target: Identifier(
+                                "total",
+                                SourceLocation {
+                                    file: "valid_for_loop.stoffel",
+                                    line: 17,
+                                    column: 5,
+                                },
+                            ),
+                            value: BinaryOperation {
+                                op: "+",
+                                left: Identifier(
+                                    "total",
+                                    SourceLocation {
+                                        file: "valid_for_loop.stoffel",
+                                        line: 17,
+                                        column: 13,
+                                    },
+                                ),
+                                right: Literal(
+                                    Int(
+                                        1,
+                                    ),
+                                ),
+                                location: SourceLocation {
+                                    file: "valid_for_loop.stoffel",
+                                    line: 17,
+                                    column: 20,
+                                },
+                            },
+                            location: SourceLocation {
+                                file: "valid_for_loop.stoffel",
+                                line: 17,
+                                column: 5,
+                            },
+                        },
+                    ],
+                ),
+                location: SourceLocation {
+                    file: "valid_for_loop.stoffel",
+                    line: 16,
+                    column: 3,
+                },
+            },
+        ],
+    ),
+    is_secret: false,
+    pragmas: [],
+    location: SourceLocation {
+        file: "valid_for_loop.stoffel",
+        line: 3,
+        column: 1,
+    },
+    node_id: 0,
+}
+-------------------------------------
+Compilation successful!
+
+--- Generated Bytecode ---
+Main Chunk:
+  Constants: [Int(0), Int(4), Int(2), Bool(false), Bool(true), Int(1), Unit, Int(10)]
+  Instructions:
+0000: LDI(5, 0)
+0001: LDI(0, 0)
+0002: LDI(4, 4)
+0003: MOV(3, 0)
+0004: CMP(3, 4)
+0005: JMPGT("for_end_4")
+0006: LDI(0, 2)
+0007: CMP(3, 0)
+0008: JMPLT("cmp_true_8")
+0009: LDI(1, false)
+0010: JMP("cmp_end_8")
+0011: LDI(1, true)
+0012: LDI(0, false)
+0013: CMP(1, 0)
+0014: JMPEQ("else_14")
+0015: ADD(0, 3, 3)
+0016: MOV(2, 0)
+0017: JMP("end_if_14")
+0018: LDI(1, 2)
+0019: MUL(0, 3, 1)
+0020: MOV(2, 0)
+0021: LDI(0, 1)
+0022: ADD(3, 3, 0)
+0023: MOV(0, 4)
+0024: JMP("for_start_4")
+0025: LDI(0, ())
+0026: LDI(0, 10)
+0027: CMP(5, 0)
+0028: JMPLT("cmp_true_28")
+0029: LDI(1, false)
+0030: JMP("cmp_end_28")
+0031: LDI(1, true)
+0032: LDI(0, false)
+0033: CMP(1, 0)
+0034: JMPEQ("loop_end_26")
+0035: LDI(1, 1)
+0036: ADD(0, 5, 1)
+0037: MOV(5, 0)
+0038: JMP("loop_start_26")
+0039: LDI(0, ())
+  Labels: {"cmp_end_8": 12, "cmp_true_8": 11, "end_if_14": 21, "else_14": 18, "loop_start_26": 26, "cmp_true_28": 31, "for_end_4": 25, "cmp_end_28": 32, "loop_end_26": 39, "for_start_4": 4}
+------------------------

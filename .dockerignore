@@ -27,6 +27,7 @@ target/
 .env.*
 !.env.example
 .docker-cache/
+.cargo/config.toml
 
 # OS files
 .DS_Store

@@ -21,6 +21,15 @@ pub(super) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
         share_from_clear(ctx, Some(ShareType::try_secret_int(bit_length)?))
     })?;
 
+    vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::FromClearUInt, |ctx| {
+        let bit_length = {
+            let args = ctx.named_args("Share.from_clear_uint");
+            args.require_min(2, "2 arguments: value, bit_length")?;
+            args.usize(1, "bit_length")?
+        };
+        share_from_clear(ctx, Some(ShareType::try_secret_uint(bit_length)?))
+    })?;
+
     vm.try_register_mpc_online_foreign_function(MpcOnlineBuiltin::FromClearFixed, |ctx| {
         let (k, f) = {
             let args = ctx.named_args("Share.from_clear_fixed");

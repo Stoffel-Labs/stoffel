@@ -21,6 +21,9 @@
 x-stoffel-build: &stoffel-build
   context: .
   dockerfile: Dockerfile
+  additional_contexts:
+    coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#feature/no-feature-gates-and-multi-type-awareness}"
+    network: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#feature/robust-identity-based-on-cert}"
 
 x-party-common: &party-common
   build: *stoffel-build
@@ -62,6 +65,9 @@ services:
     build:
       context: .
       dockerfile: docker/coordinator.Dockerfile
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#feature/no-feature-gates-and-multi-type-awareness}"
+        network: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#feature/robust-identity-based-on-cert}"
     container_name: stoffel-coordinator-reserve-index
     hostname: coordinator
     command:

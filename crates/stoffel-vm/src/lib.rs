@@ -26,8 +26,8 @@ pub use net::client_store::{
     ClientOutputShareCountError, ClientShare, ClientShareIndex,
 };
 pub use net::mpc_engine::{
-    MpcEngineIdentity, MpcInstanceId, MpcPartyCount, MpcPartyId, MpcRuntimeInfo,
-    MpcSessionTopology, MpcSessionTopologyError, MpcThreshold,
+    DurableIdentityDigest, MpcEngineIdentity, MpcInstanceId, MpcPartyCount, MpcPartyId,
+    MpcRuntimeInfo, MpcSessionTopology, MpcSessionTopologyError, MpcThreshold,
 };
 pub use output::{StdoutOutputSink, VmOutputError, VmOutputResult, VmOutputSink};
 pub use stoffel_vm_types::{core_types, functions, instructions};

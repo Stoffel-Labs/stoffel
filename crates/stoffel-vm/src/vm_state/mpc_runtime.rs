@@ -4,14 +4,13 @@ use crate::net::client_store::{
     ClientShare, ClientShareIndex,
 };
 use crate::net::mpc_engine::{
-    AbaSessionId, MpcEngine, MpcEngineConsensus, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
+    MpcEngine, MpcEngineConsensus, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
 };
 use crate::net::reveal_batcher::{RevealBatcher, RevealedRegister};
 use crate::net::share_runtime::MpcShareRuntime;
 use crate::reveal_destination::{FrameDepth, RevealDestination};
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ShareData, ShareType, Value};
-#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelnet::network_utils::ClientId;
 
@@ -29,10 +28,6 @@ pub(super) struct ClientShareRequest {
 impl ClientShareRequest {
     pub(super) const fn new(requested_type: ShareType) -> Self {
         Self { requested_type }
-    }
-
-    pub(super) fn default_secret_int() -> Self {
-        Self::new(ShareType::default_secret_int())
     }
 
     const fn requested_type(self) -> ShareType {
@@ -135,24 +130,6 @@ impl MpcRuntimeState {
             .map_mpc_backend_err("rbc_receive_any")
     }
 
-    pub(super) fn aba_propose(&self, value: bool) -> VmResult<AbaSessionId> {
-        self.consensus_ops()?
-            .aba_propose(value)
-            .map_mpc_backend_err("aba_propose")
-    }
-
-    pub(super) fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> VmResult<bool> {
-        self.consensus_ops()?
-            .aba_result(session_id, timeout_ms)
-            .map_mpc_backend_err("aba_result")
-    }
-
-    pub(super) fn aba_propose_and_wait(&self, value: bool, timeout_ms: u64) -> VmResult<bool> {
-        self.consensus_ops()?
-            .aba_propose_and_wait(value, timeout_ms)
-            .map_mpc_backend_err("aba_propose_and_wait")
-    }
-
     pub(super) fn hydrate_client_inputs(&self) -> VmResult<ClientInputHydrationCount> {
         let engine = self.ready_engine()?;
 
@@ -172,9 +149,23 @@ impl MpcRuntimeState {
         self.client_store.len()
     }
 
-    #[cfg(feature = "honeybadger")]
+    pub(super) fn input_client_count(&self) -> usize {
+        self.client_store.input_client_count()
+    }
+
+    pub(super) fn output_client_count(&self) -> usize {
+        self.client_store.output_client_count()
+    }
+
     pub(super) fn client_store(&self) -> Arc<ClientInputStore> {
         Arc::clone(&self.client_store)
+    }
+
+    pub(super) fn set_client_roster<I>(&self, clients: I)
+    where
+        I: IntoIterator<Item = ClientId>,
+    {
+        self.client_store.set_client_roster(clients);
     }
 
     pub(super) fn client_id_at_index(&self, index: ClientInputIndex) -> Option<ClientId> {
@@ -203,8 +194,6 @@ impl MpcRuntimeState {
     {
         self.client_store.replace_client_shares(inputs)
     }
-
-    #[cfg(feature = "honeybadger")]
     pub(super) fn try_store_client_input<F>(
         &self,
         client_id: ClientId,
@@ -218,7 +207,20 @@ impl MpcRuntimeState {
             .try_store_client_input(client_id, shares)?)
     }
 
-    #[cfg(feature = "avss")]
+    pub(super) fn try_store_client_input_with_types<F>(
+        &self,
+        client_id: ClientId,
+        shares: Vec<RobustShare<F>>,
+        share_types: &[ShareType],
+    ) -> VmResult<usize>
+    where
+        F: ark_ff::FftField,
+    {
+        Ok(self
+            .client_store
+            .try_store_client_input_with_types(client_id, shares, share_types)?)
+    }
+
     pub(super) fn try_store_client_input_feldman<F, G>(
         &self,
         client_id: ClientId,
@@ -233,7 +235,20 @@ impl MpcRuntimeState {
             .try_store_client_input_feldman(client_id, shares)?)
     }
 
-    #[cfg(feature = "honeybadger")]
+    pub(super) fn try_store_client_input_feldman_with_types<F, G>(
+        &self,
+        client_id: ClientId,
+        shares: Vec<stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare<F, G>>,
+        share_types: &[ShareType],
+    ) -> VmResult<usize>
+    where
+        F: ark_ff::FftField + ark_ff::PrimeField,
+        G: ark_ec::CurveGroup<ScalarField = F>,
+    {
+        Ok(self
+            .client_store
+            .try_store_client_input_feldman_with_types(client_id, shares, share_types)?)
+    }
     pub(super) fn try_replace_client_input<F, I>(&self, inputs: I) -> VmResult<usize>
     where
         F: ark_ff::FftField,
@@ -241,8 +256,6 @@ impl MpcRuntimeState {
     {
         Ok(self.client_store.try_replace_client_input(inputs)?)
     }
-
-    #[cfg(feature = "honeybadger")]
     pub(super) fn client_share<F>(
         &self,
         client_id: ClientId,
@@ -279,6 +292,21 @@ impl MpcRuntimeState {
             None => requested_type,
         };
 
+        Ok(Value::Share(share_type, share.into_data()))
+    }
+
+    pub(super) fn client_share_inferred_or_default(
+        &self,
+        client_id: ClientId,
+        index: ClientShareIndex,
+    ) -> VmResult<Value> {
+        let share = self
+            .client_store
+            .get_client_share_data(client_id, index)
+            .ok_or(VmError::ClientShareNotFound { client_id, index })?;
+        let share_type = share
+            .share_type()
+            .unwrap_or_else(ShareType::default_secret_int);
         Ok(Value::Share(share_type, share.into_data()))
     }
 

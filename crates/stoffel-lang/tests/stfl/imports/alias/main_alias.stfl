@@ -1,0 +1,7 @@
+# Main file using import with alias
+import math_lib as m
+
+def main() -> int64:
+  var sum = add(10, 20)
+  var product = multiply(sum, 2)
+  return product

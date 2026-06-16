@@ -1,4 +1,4 @@
-use super::HoneyBadgerMpcEngine;
+use super::{HoneyBadgerClientOutputRecord, HoneyBadgerMpcEngine};
 use crate::net::client_store::{
     ClientInputHydrationCount, ClientInputStore, ClientOutputShareCount,
 };
@@ -161,9 +161,18 @@ where
             ));
         }
 
+        {
+            let mut capture = self.client_output_capture.lock().await;
+            if let Some(records) = capture.as_mut() {
+                records.push(HoneyBadgerClientOutputRecord { client_id, shares });
+                return Ok(());
+            }
+        }
+
+        let transport_client_id = self.client_output_transport_id(client_id).await;
         let node = self.clone_node().await;
         node.output
-            .init(client_id, shares, input_len, self.net.clone())
+            .init(transport_client_id, shares, input_len, self.net.clone())
             .await
             .map_err(|e| format!("OutputServer.init failed: {:?}", e))
     }

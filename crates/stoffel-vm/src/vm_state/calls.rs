@@ -5,8 +5,9 @@ use crate::foreign_functions::{
     ForeignFunctionContext, ForeignFunctionError, MpcOnlineBuiltin,
 };
 use crate::mpc_values::clear_share_input;
+use crate::mpc_values::share_object::{self, ShareOrScalar};
 use crate::net::client_store::ClientOutputShareCount;
-use crate::net::mpc_engine::{AbaSessionId, MpcExponentGenerator, MpcPartyId};
+use crate::net::mpc_engine::{MpcExponentGenerator, MpcPartyId};
 use crate::net::share_runtime::ensure_matching_share_data_format;
 use crate::program::{CallTarget, VmCallTarget};
 use crate::runtime_hooks::{HookCallTarget, HookEvent};
@@ -18,7 +19,9 @@ use crate::vm_state::mpc_operation::{
 };
 use smallvec::SmallVec;
 use std::sync::Arc;
-use stoffel_vm_types::core_types::{Closure, ShareType, Upvalue, Value};
+use stoffel_vm_types::core_types::{
+    Closure, ObjectRef, ShareData, ShareType, TableRef, Upvalue, Value,
+};
 use stoffel_vm_types::instructions::Instruction;
 use stoffel_vm_types::registers::RegisterIndex;
 
@@ -63,6 +66,11 @@ struct DrainedCallArgs {
     values: SmallVec<[Value; 8]>,
 }
 
+struct ResolvedCallTarget {
+    name: String,
+    target: CallTarget,
+}
+
 impl DrainedCallArgs {
     fn new(checkpoint: CallStackCheckpoint, values: SmallVec<[Value; 8]>) -> Self {
         Self { checkpoint, values }
@@ -105,7 +113,9 @@ impl VMState {
         function_name: &str,
         hooks_enabled: bool,
     ) -> VmResult<InstructionOutcome> {
-        let function = self.call_target(function_name)?;
+        let resolved = self.resolve_call_target(function_name)?;
+        let function_name = resolved.name;
+        let function = resolved.target;
 
         match function {
             CallTarget::Vm(target) => {
@@ -150,7 +160,7 @@ impl VMState {
                 if arg_count == 0 {
                     let checkpoint = CallStackCheckpoint::new(self.call_stack.len());
                     let outcome = self.call_foreign_function_internal(
-                        function_name,
+                        &function_name,
                         foreign_func.as_ref(),
                         &[],
                         hooks_enabled,
@@ -162,7 +172,7 @@ impl VMState {
                 } else {
                     let args = self.drain_call_args(hooks_enabled)?;
                     let outcome = match self.call_foreign_function_internal(
-                        function_name,
+                        &function_name,
                         foreign_func.as_ref(),
                         args.as_slice(),
                         hooks_enabled,
@@ -206,6 +216,98 @@ impl VMState {
         let target = self.program.call_target(function_name)?;
         self.last_call_target = Some((Arc::from(function_name), target.clone()));
         Ok(target)
+    }
+
+    fn resolve_call_target(&mut self, function_name: &str) -> VmResult<ResolvedCallTarget> {
+        if let Some((receiver_type, method_name)) = function_name.split_once('.') {
+            if self
+                .program
+                .method_target_name(receiver_type, method_name)
+                .is_some()
+            {
+                let Some(receiver) = self.current_frame()?.stack().first().cloned() else {
+                    return Err(VmError::MethodCallRequiresReceiver {
+                        method: function_name.to_owned(),
+                    });
+                };
+                let actual = self.runtime_type_name(&receiver)?;
+                if actual != receiver_type {
+                    return Err(VmError::MethodReceiverTypeMismatch {
+                        method: method_name.to_owned(),
+                        expected: receiver_type.to_owned(),
+                        actual,
+                    });
+                }
+            }
+
+            return Ok(ResolvedCallTarget {
+                name: function_name.to_owned(),
+                target: self.call_target(function_name)?,
+            });
+        }
+
+        // Program-defined functions and registered builtins take precedence:
+        // a user function named `sub` must stay callable even though `sub`
+        // is also a method name in the registry (UFCS: x.f(y) == f(x, y)).
+        let direct_err = match self.call_target(function_name) {
+            Ok(target) => {
+                return Ok(ResolvedCallTarget {
+                    name: function_name.to_owned(),
+                    target,
+                });
+            }
+            Err(error) => error,
+        };
+
+        if self
+            .program
+            .receiver_types_for_method(function_name)
+            .is_some()
+        {
+            let Some(receiver) = self.current_frame()?.stack().first().cloned() else {
+                return Err(VmError::MethodCallRequiresReceiver {
+                    method: function_name.to_owned(),
+                });
+            };
+            let actual = self.runtime_type_name(&receiver)?;
+
+            if let Some(canonical_name) = self
+                .program
+                .method_target_name(&actual, function_name)
+                .map(str::to_owned)
+            {
+                return Ok(ResolvedCallTarget {
+                    name: canonical_name.clone(),
+                    target: self.program.call_target(&canonical_name)?,
+                });
+            }
+
+            return Err(VmError::MethodNotFound {
+                method: function_name.to_owned(),
+                receiver_type: actual,
+            });
+        }
+
+        Err(direct_err)
+    }
+
+    fn runtime_type_name(&mut self, value: &Value) -> VmResult<String> {
+        if let Some(object_ref) = ObjectRef::from_value(value) {
+            let type_field = self.table_memory.read_table_field(
+                TableRef::from(object_ref),
+                &Value::String("__type".to_owned()),
+            )?;
+            if let Some(Value::String(type_name)) = type_field {
+                return Ok(type_name);
+            }
+            return Ok("object".to_owned());
+        }
+
+        Ok(match value {
+            Value::Share(_, _) => "Share",
+            other => other.type_name(),
+        }
+        .to_owned())
     }
 
     fn prepare_vm_entry_call(
@@ -289,7 +391,8 @@ impl VMState {
         function_name: &str,
         hooks_enabled: bool,
     ) -> VmResult<Option<PendingMpcOperation>> {
-        let CallTarget::Foreign(foreign_func) = self.call_target(function_name)? else {
+        let CallTarget::Foreign(foreign_func) = self.resolve_call_target(function_name)?.target
+        else {
             return Ok(None);
         };
         let Some(builtin) = foreign_func.mpc_online_builtin_kind() else {
@@ -333,6 +436,49 @@ impl VMState {
         ))
     }
 
+    /// Clear integer operands that can scale a share locally.
+    fn clear_integer_scalar(value: &Value) -> Option<i64> {
+        match value {
+            Value::I64(v) => Some(*v),
+            Value::I32(v) => Some(i64::from(*v)),
+            Value::I16(v) => Some(i64::from(*v)),
+            Value::I8(v) => Some(i64::from(*v)),
+            Value::U8(v) => Some(i64::from(*v)),
+            Value::U16(v) => Some(i64::from(*v)),
+            Value::U32(v) => Some(i64::from(*v)),
+            Value::U64(v) => i64::try_from(*v).ok(),
+            _ => None,
+        }
+    }
+
+    /// If one operand is a share and the other a clear integer, compute the
+    /// product as a local scaling (no multiplication triple needed).
+    fn try_local_scalar_mul(
+        &mut self,
+        left: &Value,
+        right: &Value,
+    ) -> ForeignFunctionCallbackResult<Option<PendingMpcBuiltinOperation>> {
+        let (share_value, scalar) = match (
+            Self::clear_integer_scalar(left),
+            Self::clear_integer_scalar(right),
+        ) {
+            (None, Some(scalar)) => (left, scalar),
+            (Some(scalar), None) => (right, scalar),
+            _ => return Ok(None),
+        };
+        if !share_object::is_share_object(self.table_memory.as_mut(), share_value) {
+            return Ok(None);
+        }
+        let (share_type, share_data) = self.extract_share_data(share_value)?;
+        let share_data = self
+            .share_runtime()?
+            .mul_scalar_data(share_type, &share_data, scalar)?;
+        Ok(Some(PendingMpcBuiltinOperation::LocalShare {
+            share_type,
+            share_data,
+        }))
+    }
+
     fn foreign_callback_failed(
         function: &'static str,
         source: ForeignFunctionCallbackError,
@@ -366,6 +512,14 @@ impl VMState {
                     clear_share_input(&clear_value, Some(ShareType::try_secret_int(bit_length)?))?;
                 Ok(PendingMpcBuiltinOperation::InputShare { clear })
             }
+            MpcOnlineBuiltin::FromClearUInt => {
+                args.require_min(2, "2 arguments: value, bit_length")?;
+                let clear_value = args.cloned(0)?;
+                let bit_length = args.usize(1, "bit_length")?;
+                let clear =
+                    clear_share_input(&clear_value, Some(ShareType::try_secret_uint(bit_length)?))?;
+                Ok(PendingMpcBuiltinOperation::InputShare { clear })
+            }
             MpcOnlineBuiltin::FromClearFixed => {
                 args.require_min(3, "3 arguments: value, total_bits, frac_bits")?;
                 let clear_value = args.cloned(0)?;
@@ -381,11 +535,112 @@ impl VMState {
                 args.require_min(2, "2 arguments: share1, share2")?;
                 let left = args.cloned(0)?;
                 let right = args.cloned(1)?;
+                // A share multiplied by a clear integer is a local scaling;
+                // no multiplication triple or MPC round is needed.
+                if let Some(operation) = self.try_local_scalar_mul(&left, &right)? {
+                    return Ok(operation);
+                }
                 let (share_type, left_data, right_data) =
                     self.extract_matching_share_pair(&left, &right, "Share.mul")?;
                 ensure_matching_share_data_format("async_multiply_share", &left_data, &right_data)?;
                 Ok(PendingMpcBuiltinOperation::Mul {
                     share_type,
+                    left_data,
+                    right_data,
+                })
+            }
+            MpcOnlineBuiltin::BatchMul => {
+                args.require_exact(2, "2 arguments: lefts_array, rights_array")?;
+                let lefts_arg = args.cloned(0)?;
+                let rights_arg = args.cloned(1)?;
+                let lefts =
+                    self.extract_share_or_scalar_array(&lefts_arg, "Share.batch_mul lefts_array")?;
+                let rights = self
+                    .extract_share_or_scalar_array(&rights_arg, "Share.batch_mul rights_array")?;
+
+                if lefts.is_empty() && rights.is_empty() {
+                    return Ok(PendingMpcBuiltinOperation::BatchMul {
+                        share_type: ShareType::default_secret_int(),
+                        left_data: Vec::new(),
+                        right_data: Vec::new(),
+                    });
+                }
+                if lefts.len() != rights.len() {
+                    return Err("Share.batch_mul requires arrays with the same length".into());
+                }
+
+                // Pairs with a clear integer operand are local scalings and
+                // are computed immediately; only share-by-share pairs go to
+                // the engine.
+                let mut share_type: Option<ShareType> = None;
+                let mut precomputed: Vec<Option<ShareData>> = Vec::with_capacity(lefts.len());
+                let mut left_data: Vec<ShareData> = Vec::new();
+                let mut right_data: Vec<ShareData> = Vec::new();
+
+                let mut require_type = |ty: ShareType| -> Result<(), ForeignFunctionCallbackError> {
+                    match share_type {
+                        None => {
+                            share_type = Some(ty);
+                            Ok(())
+                        }
+                        Some(existing) if existing == ty => Ok(()),
+                        Some(_) => {
+                            Err("Share.batch_mul requires arrays with matching share types".into())
+                        }
+                    }
+                };
+
+                let mut local_products: Vec<(usize, ShareType, ShareData, i64)> = Vec::new();
+                for (index, (left, right)) in lefts.into_iter().zip(rights.into_iter()).enumerate()
+                {
+                    match (left, right) {
+                        (ShareOrScalar::Share(lt, ld), ShareOrScalar::Share(rt, rd)) => {
+                            require_type(lt)?;
+                            require_type(rt)?;
+                            ensure_matching_share_data_format(
+                                "async_batch_multiply_share",
+                                &ld,
+                                &rd,
+                            )?;
+                            precomputed.push(None);
+                            left_data.push(ld);
+                            right_data.push(rd);
+                        }
+                        (ShareOrScalar::Share(ty, data), ShareOrScalar::Scalar(scalar))
+                        | (ShareOrScalar::Scalar(scalar), ShareOrScalar::Share(ty, data)) => {
+                            require_type(ty)?;
+                            precomputed.push(None); // placeholder, filled below
+                            local_products.push((index, ty, data, scalar));
+                        }
+                        (ShareOrScalar::Scalar(_), ShareOrScalar::Scalar(_)) => {
+                            return Err(
+                                "Share.batch_mul requires at least one share per pair".into()
+                            );
+                        }
+                    }
+                }
+
+                for (index, ty, data, scalar) in local_products {
+                    let scaled = self.share_runtime()?.mul_scalar_data(ty, &data, scalar)?;
+                    precomputed[index] = Some(scaled);
+                }
+
+                let share_type =
+                    share_type.expect("non-empty batch always sees at least one share");
+
+                if precomputed.iter().all(Option::is_none) {
+                    // Pure share-by-share batch: keep the original operation
+                    // shape (and its effect accounting).
+                    return Ok(PendingMpcBuiltinOperation::BatchMul {
+                        share_type,
+                        left_data,
+                        right_data,
+                    });
+                }
+
+                Ok(PendingMpcBuiltinOperation::BatchMulMixed {
+                    share_type,
+                    precomputed,
                     left_data,
                     right_data,
                 })
@@ -484,9 +739,18 @@ impl VMState {
                     generator_bytes,
                 })
             }
-            MpcOnlineBuiltin::Random => Ok(PendingMpcBuiltinOperation::Random {
-                share_type: ShareType::default_secret_int(),
-            }),
+            MpcOnlineBuiltin::Random | MpcOnlineBuiltin::RandomField => {
+                Ok(PendingMpcBuiltinOperation::Random {
+                    share_type: ShareType::default_secret_int(),
+                })
+            }
+            MpcOnlineBuiltin::RandomInt => {
+                args.require_exact(1, "1 argument: bit_length")?;
+                let bit_length = args.usize(0, "bit_length")?;
+                Ok(PendingMpcBuiltinOperation::RandomInt {
+                    share_type: ShareType::try_secret_int(bit_length)?,
+                })
+            }
             MpcOnlineBuiltin::OpenField => {
                 args.require_exact(1, "1 argument: share")?;
                 let share_value = args.cloned(0)?;
@@ -526,26 +790,6 @@ impl VMState {
                 args.require_exact(1, "1 argument: timeout_ms")?;
                 let timeout_ms = args.u64(0, "timeout_ms")?;
                 Ok(PendingMpcBuiltinOperation::RbcReceiveAny { timeout_ms })
-            }
-            MpcOnlineBuiltin::AbaPropose => {
-                args.require_exact(1, "1 argument: value (bool)")?;
-                let value = args.bool(0, "value")?;
-                Ok(PendingMpcBuiltinOperation::AbaPropose { value })
-            }
-            MpcOnlineBuiltin::AbaResult => {
-                args.require_min(2, "2 arguments: session_id, timeout_ms")?;
-                let session_id = args.u64(0, "session_id")?;
-                let timeout_ms = args.u64(1, "timeout_ms")?;
-                Ok(PendingMpcBuiltinOperation::AbaResult {
-                    session_id: AbaSessionId::new(session_id),
-                    timeout_ms,
-                })
-            }
-            MpcOnlineBuiltin::AbaProposeAndWait => {
-                args.require_min(2, "2 arguments: value (bool), timeout_ms")?;
-                let value = args.bool(0, "value")?;
-                let timeout_ms = args.u64(1, "timeout_ms")?;
-                Ok(PendingMpcBuiltinOperation::AbaProposeAndWait { value, timeout_ms })
             }
         }
     }

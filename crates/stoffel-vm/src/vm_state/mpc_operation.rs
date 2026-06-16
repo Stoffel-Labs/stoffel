@@ -1,14 +1,14 @@
 use super::{CompletedVmEffect, VMState};
 use crate::error::{MpcBackendResultExt, VmError, VmResult};
+use crate::foreign_functions::ForeignFunctionError;
 use crate::mpc_values::clear_share_input;
 use crate::net::client_store::ClientOutputShareCount;
-use crate::net::mpc_engine::{
-    AbaSessionId, AsyncMpcEngine, MpcEngine, MpcExponentGroup, MpcPartyId,
-};
+use crate::net::curve::clear_share_value_to_vm_value;
+use crate::net::mpc_engine::{AsyncMpcEngine, MpcEngine, MpcExponentGroup, MpcPartyId};
 use crate::net::share_runtime::ensure_matching_share_data_format;
 use crate::runtime_hooks::{HookCallTarget, HookEvent};
 use crate::runtime_instruction::{RuntimeBinaryOp, RuntimeInstruction, RuntimeRegister};
-use crate::runtime_value_ops::matching_share_pair;
+use crate::runtime_value_ops::{bool_or_data, bool_xor_data, matching_share_pair};
 use crate::value_conversions::{u64_to_vm_i64, usize_to_vm_i64};
 use stoffel_vm_types::core_types::{
     ClearShareInput, ClearShareValue, ShareData, ShareType, TableRef, Value,
@@ -24,6 +24,13 @@ pub(super) enum PendingMpcOperation {
         dest: RuntimeRegister,
     },
     Multiply {
+        share_type: ShareType,
+        left_data: ShareData,
+        right_data: ShareData,
+        dest: RuntimeRegister,
+    },
+    BooleanBit {
+        op: RuntimeBinaryOp,
         share_type: ShareType,
         left_data: ShareData,
         right_data: ShareData,
@@ -50,7 +57,16 @@ pub(super) enum CompletedMpcOperation {
         share_data: ShareData,
         dest: RuntimeRegister,
     },
+    BooleanBit {
+        op: RuntimeBinaryOp,
+        share_type: ShareType,
+        left_data: ShareData,
+        right_data: ShareData,
+        product_data: ShareData,
+        dest: RuntimeRegister,
+    },
     Open {
+        share_type: ShareType,
         value: ClearShareValue,
         src: RuntimeRegister,
         dest: RuntimeRegister,
@@ -77,10 +93,14 @@ impl PendingMpcBuiltinCall {
             operation,
         }
     }
+
+    pub(crate) const fn operation(&self) -> &PendingMpcBuiltinOperation {
+        &self.operation
+    }
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum PendingMpcBuiltinOperation {
+pub(crate) enum PendingMpcBuiltinOperation {
     InputShare {
         clear: ClearShareInput,
     },
@@ -88,6 +108,27 @@ pub(super) enum PendingMpcBuiltinOperation {
         share_type: ShareType,
         left_data: ShareData,
         right_data: ShareData,
+    },
+    BatchMul {
+        share_type: ShareType,
+        left_data: Vec<ShareData>,
+        right_data: Vec<ShareData>,
+    },
+    /// A share already combined with a public scalar locally; completes
+    /// without any MPC interaction.
+    LocalShare {
+        share_type: ShareType,
+        share_data: ShareData,
+    },
+    /// Batch multiplication where some pairs were share-by-public-scalar
+    /// products computed locally (`precomputed[i] == Some(data)`), and the
+    /// remaining `None` slots are filled, in order, from the engine batch
+    /// over `left_data`/`right_data`.
+    BatchMulMixed {
+        share_type: ShareType,
+        precomputed: Vec<Option<ShareData>>,
+        left_data: Vec<ShareData>,
+        right_data: Vec<ShareData>,
     },
     Open {
         share_type: ShareType,
@@ -111,6 +152,9 @@ pub(super) enum PendingMpcBuiltinOperation {
     Random {
         share_type: ShareType,
     },
+    RandomInt {
+        share_type: ShareType,
+    },
     OpenField {
         share_type: ShareType,
         share_data: ShareData,
@@ -130,17 +174,6 @@ pub(super) enum PendingMpcBuiltinOperation {
     RbcReceiveAny {
         timeout_ms: u64,
     },
-    AbaPropose {
-        value: bool,
-    },
-    AbaResult {
-        session_id: AbaSessionId,
-        timeout_ms: u64,
-    },
-    AbaProposeAndWait {
-        value: bool,
-        timeout_ms: u64,
-    },
 }
 
 #[derive(Debug)]
@@ -157,7 +190,18 @@ pub(super) enum CompletedMpcBuiltinResult {
         share_type: ShareType,
         share_data: ShareData,
     },
-    BatchOpen(Vec<ClearShareValue>),
+    ShareValue {
+        share_type: ShareType,
+        share_data: ShareData,
+    },
+    ShareValues {
+        share_type: ShareType,
+        share_data: Vec<ShareData>,
+    },
+    BatchOpen {
+        share_type: ShareType,
+        values: Vec<ClearShareValue>,
+    },
     ByteArray(Vec<u8>),
     RbcReceiveAny {
         party_id: MpcPartyId,
@@ -216,6 +260,40 @@ impl PendingMpcOperation {
         }))
     }
 
+    fn boolean_bit_share(
+        op: RuntimeBinaryOp,
+        dest: RuntimeRegister,
+        left: Value,
+        right: Value,
+    ) -> VmResult<Option<PendingMpcOperation>> {
+        let operation = match op {
+            RuntimeBinaryOp::BitAnd => "AND",
+            RuntimeBinaryOp::BitOr => "OR",
+            RuntimeBinaryOp::BitXor => "XOR",
+            _ => return Ok(None),
+        };
+        let Some(pair) = matching_share_pair(operation, &left, &right)? else {
+            return Ok(None);
+        };
+
+        if pair.share_type != ShareType::boolean() {
+            return Ok(None);
+        }
+
+        ensure_matching_share_data_format(
+            "async_boolean_bit_share",
+            pair.left_data,
+            pair.right_data,
+        )?;
+        Ok(Some(PendingMpcOperation::BooleanBit {
+            op,
+            share_type: pair.share_type,
+            left_data: pair.left_data.clone(),
+            right_data: pair.right_data.clone(),
+            dest,
+        }))
+    }
+
     pub(super) async fn execute_async<E: AsyncMpcEngine + ?Sized>(
         self,
         engine: &E,
@@ -253,6 +331,27 @@ impl PendingMpcOperation {
                     dest,
                 })
             }
+            PendingMpcOperation::BooleanBit {
+                op,
+                share_type,
+                left_data,
+                right_data,
+                dest,
+            } => {
+                let product_data = engine
+                    .multiply_share_async(share_type, left_data.as_bytes(), right_data.as_bytes())
+                    .await
+                    .map_mpc_backend_err("async_boolean_bit_share")?;
+
+                Ok(CompletedMpcOperation::BooleanBit {
+                    op,
+                    share_type,
+                    left_data,
+                    right_data,
+                    product_data,
+                    dest,
+                })
+            }
             PendingMpcOperation::Open {
                 share_type,
                 share_data,
@@ -264,7 +363,12 @@ impl PendingMpcOperation {
                     .await
                     .map_mpc_backend_err("async_open_share")?;
 
-                Ok(CompletedMpcOperation::Open { value, src, dest })
+                Ok(CompletedMpcOperation::Open {
+                    share_type,
+                    value,
+                    src,
+                    dest,
+                })
             }
             PendingMpcOperation::BuiltinCall(call) => Ok(CompletedMpcOperation::BuiltinCall(
                 call.execute_async(engine).await?,
@@ -282,7 +386,7 @@ impl PendingMpcOperation {
 
         match self {
             PendingMpcOperation::Input { .. } => {}
-            PendingMpcOperation::Multiply { .. } => {
+            PendingMpcOperation::Multiply { .. } | PendingMpcOperation::BooleanBit { .. } => {
                 engine
                     .multiplication_ops()
                     .map_mpc_backend_err("multiplication_ops")?;
@@ -326,6 +430,71 @@ impl PendingMpcBuiltinCall {
                     share_data,
                 }
             }
+            PendingMpcBuiltinOperation::BatchMul {
+                share_type,
+                left_data,
+                right_data,
+            } => {
+                let pairs: Vec<(Vec<u8>, Vec<u8>)> = left_data
+                    .iter()
+                    .zip(right_data.iter())
+                    .map(|(left, right)| (left.as_bytes().to_vec(), right.as_bytes().to_vec()))
+                    .collect();
+                let share_data = engine
+                    .batch_multiply_share_async(share_type, &pairs)
+                    .await
+                    .map_mpc_backend_err("async_batch_multiply_share")?;
+                CompletedMpcBuiltinResult::ShareValues {
+                    share_type,
+                    share_data,
+                }
+            }
+            PendingMpcBuiltinOperation::LocalShare {
+                share_type,
+                share_data,
+            } => CompletedMpcBuiltinResult::ShareObject {
+                share_type,
+                share_data,
+            },
+            PendingMpcBuiltinOperation::BatchMulMixed {
+                share_type,
+                precomputed,
+                left_data,
+                right_data,
+            } => {
+                let engine_results = if left_data.is_empty() {
+                    Vec::new()
+                } else {
+                    let pairs: Vec<(Vec<u8>, Vec<u8>)> = left_data
+                        .iter()
+                        .zip(right_data.iter())
+                        .map(|(left, right)| (left.as_bytes().to_vec(), right.as_bytes().to_vec()))
+                        .collect();
+                    engine
+                        .batch_multiply_share_async(share_type, &pairs)
+                        .await
+                        .map_mpc_backend_err("async_batch_multiply_share")?
+                };
+
+                let mut engine_results = engine_results.into_iter();
+                let mut share_data = Vec::with_capacity(precomputed.len());
+                for slot in precomputed {
+                    match slot {
+                        Some(data) => share_data.push(data),
+                        None => share_data.push(engine_results.next().ok_or_else(|| {
+                            VmError::ForeignFunction(ForeignFunctionError::CallbackFailed {
+                                function: "Share.batch_mul".to_owned(),
+                                source: "engine returned fewer batch products than requested"
+                                    .into(),
+                            })
+                        })?),
+                    }
+                }
+                CompletedMpcBuiltinResult::ShareValues {
+                    share_type,
+                    share_data,
+                }
+            }
             PendingMpcBuiltinOperation::Open {
                 share_type,
                 share_data,
@@ -334,7 +503,7 @@ impl PendingMpcBuiltinCall {
                     .open_share_async(share_type, share_data.as_bytes())
                     .await
                     .map_mpc_backend_err("async_open_share")?;
-                CompletedMpcBuiltinResult::Value(value.into_vm_value())
+                CompletedMpcBuiltinResult::Value(clear_share_value_to_vm_value(share_type, value))
             }
             PendingMpcBuiltinOperation::BatchOpen {
                 share_type,
@@ -348,7 +517,7 @@ impl PendingMpcBuiltinCall {
                     .batch_open_shares_async(share_type, &share_bytes)
                     .await
                     .map_mpc_backend_err("async_batch_open_shares")?;
-                CompletedMpcBuiltinResult::BatchOpen(values)
+                CompletedMpcBuiltinResult::BatchOpen { share_type, values }
             }
             PendingMpcBuiltinOperation::SendToClient {
                 client_id,
@@ -384,6 +553,16 @@ impl PendingMpcBuiltinCall {
                     .await
                     .map_mpc_backend_err("async_random_share")?;
                 CompletedMpcBuiltinResult::ShareObject {
+                    share_type,
+                    share_data,
+                }
+            }
+            PendingMpcBuiltinOperation::RandomInt { share_type } => {
+                let share_data = engine
+                    .random_integer_share_async(share_type)
+                    .await
+                    .map_mpc_backend_err("async_random_integer_share")?;
+                CompletedMpcBuiltinResult::ShareValue {
                     share_type,
                     share_data,
                 }
@@ -442,36 +621,6 @@ impl PendingMpcBuiltinCall {
                     .map_mpc_backend_err("async_rbc_receive_any")?;
                 CompletedMpcBuiltinResult::RbcReceiveAny { party_id, message }
             }
-            PendingMpcBuiltinOperation::AbaPropose { value } => {
-                let session_id = engine
-                    .async_consensus_ops()
-                    .map_mpc_backend_err("async_consensus_ops")?
-                    .aba_propose_async(value)
-                    .await
-                    .map_mpc_backend_err("async_aba_propose")?;
-                CompletedMpcBuiltinResult::Value(session_id_value(session_id.id())?)
-            }
-            PendingMpcBuiltinOperation::AbaResult {
-                session_id,
-                timeout_ms,
-            } => {
-                let result = engine
-                    .async_consensus_ops()
-                    .map_mpc_backend_err("async_consensus_ops")?
-                    .aba_result_async(session_id, timeout_ms)
-                    .await
-                    .map_mpc_backend_err("async_aba_result")?;
-                CompletedMpcBuiltinResult::Value(Value::Bool(result))
-            }
-            PendingMpcBuiltinOperation::AbaProposeAndWait { value, timeout_ms } => {
-                let result = engine
-                    .async_consensus_ops()
-                    .map_mpc_backend_err("async_consensus_ops")?
-                    .aba_propose_and_wait_async(value, timeout_ms)
-                    .await
-                    .map_mpc_backend_err("async_aba_propose_and_wait")?;
-                CompletedMpcBuiltinResult::Value(Value::Bool(result))
-            }
         };
 
         Ok(CompletedMpcBuiltinCall {
@@ -484,10 +633,19 @@ impl PendingMpcBuiltinCall {
     fn ensure_engine_can_execute<E: AsyncMpcEngine + ?Sized>(&self, engine: &E) -> VmResult<()> {
         match &self.operation {
             PendingMpcBuiltinOperation::InputShare { .. } => {}
-            PendingMpcBuiltinOperation::Mul { .. } => {
+            PendingMpcBuiltinOperation::LocalShare { .. } => {}
+            PendingMpcBuiltinOperation::Mul { .. }
+            | PendingMpcBuiltinOperation::BatchMul { .. } => {
                 engine
                     .multiplication_ops()
                     .map_mpc_backend_err("multiplication_ops")?;
+            }
+            PendingMpcBuiltinOperation::BatchMulMixed { left_data, .. } => {
+                if !left_data.is_empty() {
+                    engine
+                        .multiplication_ops()
+                        .map_mpc_backend_err("multiplication_ops")?;
+                }
             }
             PendingMpcBuiltinOperation::Open { .. }
             | PendingMpcBuiltinOperation::BatchOpen { .. } => {}
@@ -507,6 +665,11 @@ impl PendingMpcBuiltinCall {
                     .randomness_ops()
                     .map_mpc_backend_err("randomness_ops")?;
             }
+            PendingMpcBuiltinOperation::RandomInt { .. } => {
+                engine
+                    .randomness_ops()
+                    .map_mpc_backend_err("randomness_ops")?;
+            }
             PendingMpcBuiltinOperation::OpenField { .. } => {
                 engine
                     .field_open_ops()
@@ -514,10 +677,7 @@ impl PendingMpcBuiltinCall {
             }
             PendingMpcBuiltinOperation::RbcBroadcast { .. }
             | PendingMpcBuiltinOperation::RbcReceive { .. }
-            | PendingMpcBuiltinOperation::RbcReceiveAny { .. }
-            | PendingMpcBuiltinOperation::AbaPropose { .. }
-            | PendingMpcBuiltinOperation::AbaResult { .. }
-            | PendingMpcBuiltinOperation::AbaProposeAndWait { .. } => {
+            | PendingMpcBuiltinOperation::RbcReceiveAny { .. } => {
                 engine
                     .async_consensus_ops()
                     .map_mpc_backend_err("async_consensus_ops")?;
@@ -577,6 +737,16 @@ impl VMState {
                 let (left, right) = self.resolve_register_pair(*lhs, *rhs)?.into_values();
                 PendingMpcOperation::multiply_share(*dest, left, right)
             }
+            RuntimeInstruction::Binary {
+                op:
+                    op @ (RuntimeBinaryOp::BitAnd | RuntimeBinaryOp::BitOr | RuntimeBinaryOp::BitXor),
+                dest,
+                lhs,
+                rhs,
+            } => {
+                let (left, right) = self.resolve_register_pair(*lhs, *rhs)?.into_values();
+                PendingMpcOperation::boolean_bit_share(*op, *dest, left, right)
+            }
             RuntimeInstruction::Call { function } => {
                 self.plan_async_mpc_builtin_call(function, hooks_enabled)
             }
@@ -595,8 +765,8 @@ impl VMState {
 
         if configured_identity != async_identity {
             return Err(VmError::AsyncMpcEngineMismatch {
-                runtime: async_identity,
-                configured: configured_identity,
+                runtime: Box::new(async_identity),
+                configured: Box::new(configured_identity),
             });
         }
 
@@ -647,8 +817,56 @@ impl VMState {
                 )?;
                 Ok(())
             }
-            CompletedMpcOperation::Open { value, src, dest } => {
-                self.write_mov_result(dest, src, value.into_vm_value(), hooks_enabled)?;
+            CompletedMpcOperation::BooleanBit {
+                op,
+                share_type,
+                left_data,
+                right_data,
+                product_data,
+                dest,
+            } => {
+                let share_runtime = || self.share_runtime().map_err(Into::into);
+                let share_data = match op {
+                    RuntimeBinaryOp::BitAnd => product_data,
+                    RuntimeBinaryOp::BitOr => bool_or_data(
+                        &share_runtime,
+                        share_type,
+                        &left_data,
+                        &right_data,
+                        &product_data,
+                    )?,
+                    RuntimeBinaryOp::BitXor => bool_xor_data(
+                        &share_runtime,
+                        share_type,
+                        &left_data,
+                        &right_data,
+                        &product_data,
+                    )?,
+                    _ => {
+                        return Err(VmError::Message(
+                            "completed boolean bit operation used a non-bitwise opcode".to_string(),
+                        ))
+                    }
+                };
+                self.write_current_register(
+                    dest,
+                    Value::Share(share_type, share_data),
+                    hooks_enabled,
+                )?;
+                Ok(())
+            }
+            CompletedMpcOperation::Open {
+                share_type,
+                value,
+                src,
+                dest,
+            } => {
+                self.write_mov_result(
+                    dest,
+                    src,
+                    clear_share_value_to_vm_value(share_type, value),
+                    hooks_enabled,
+                )?;
                 Ok(())
             }
             CompletedMpcOperation::BuiltinCall(call) => {
@@ -680,10 +898,26 @@ impl VMState {
                     .id();
                 self.create_share_object_value(share_type, share_data, party_id)
             }
-            CompletedMpcBuiltinResult::BatchOpen(values) => {
+            CompletedMpcBuiltinResult::ShareValue {
+                share_type,
+                share_data,
+            } => Ok(Value::Share(share_type, share_data)),
+            CompletedMpcBuiltinResult::ShareValues {
+                share_type,
+                share_data,
+            } => {
+                let shares: Vec<Value> = share_data
+                    .into_iter()
+                    .map(|share_data| Value::Share(share_type, share_data))
+                    .collect();
+                let result_ref = self.create_array_ref(shares.len())?;
+                self.push_array_ref_values(result_ref, &shares)?;
+                Ok(Value::from(result_ref))
+            }
+            CompletedMpcBuiltinResult::BatchOpen { share_type, values } => {
                 let revealed: Vec<Value> = values
                     .into_iter()
-                    .map(ClearShareValue::into_vm_value)
+                    .map(|value| clear_share_value_to_vm_value(share_type, value))
                     .collect();
                 let result_ref = self.create_array_ref(revealed.len())?;
                 self.push_array_ref_values(result_ref, &revealed)?;

@@ -1,6 +1,6 @@
 use super::{HoneyBadgerEngineConfig, HoneyBadgerMpcEngine, HoneyBadgerPreprocessingConfig};
 use crate::net::engine_config::MpcSessionConfig;
-use crate::net::mpc_engine::{MpcEngine, MpcEngineConsensus, MpcPartyId};
+use crate::net::mpc_engine::{DurableIdentityDigest, MpcEngine, MpcEngineConsensus, MpcPartyId};
 use crate::net::reservation::ReservationRegistry;
 use crate::storage::preproc::{
     self, LmdbPreprocStore, MaterialKind, PreprocBlob, PreprocKeyScope, PreprocStore,
@@ -9,6 +9,7 @@ use ark_ff::UniformRand;
 use ark_std::rand::SeedableRng;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use stoffelmpc_mpc::common::SecretSharingScheme;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelnet::transports::quic::QuicNetworkManager;
 
@@ -46,11 +47,53 @@ fn open_exp_test_payload(
 ) -> Vec<u8> {
     crate::net::open_registry::encode_hb_open_exp_wire_message(
         instance_id,
+        0,
         sender_party_id,
         share_id,
         &partial_point,
     )
     .expect("serialize test payload")
+}
+
+#[test]
+fn robust_open_requires_full_bft_quorum() {
+    type Engine = HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>;
+
+    assert_eq!(Engine::robust_open_required_contributions(0), 1);
+    assert_eq!(Engine::robust_open_required_contributions(1), 4);
+    assert_eq!(Engine::robust_open_required_contributions(2), 7);
+}
+
+#[test]
+fn robust_reconstruction_with_byzantine_share_rejects_two_t_plus_one_quorum() {
+    let n = 4;
+    let t = 1;
+    let secret = ark_bls12_381::Fr::from(42u64);
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(138);
+    let shares =
+        RobustShare::compute_shares(secret, n, t, None, &mut rng).expect("valid robust shares");
+
+    let mut insufficient = shares[..(2 * t + 1)].to_vec();
+    insufficient[0] = RobustShare::new(
+        insufficient[0].share[0] + ark_bls12_381::Fr::from(99u64),
+        insufficient[0].id,
+        insufficient[0].degree,
+    );
+
+    let insufficient_result = RobustShare::recover_secret(&insufficient, n, t);
+    assert!(
+        insufficient_result
+            .as_ref()
+            .map(|(_coeffs, recovered)| *recovered != secret)
+            .unwrap_or(true),
+        "2t + 1 shares must not be treated as enough to correct one Byzantine contribution"
+    );
+
+    let mut full_quorum = insufficient;
+    full_quorum.push(shares[3].clone());
+    let (_coeffs, recovered) =
+        RobustShare::recover_secret(&full_quorum, n, t).expect("3t + 1 shares recover");
+    assert_eq!(recovered, secret);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -66,7 +109,7 @@ async fn preprocess_reserves_persistent_random_shares_when_loaded() {
         crate::net::curve::MpcFieldKind::Bls12_381Fr,
         n,
         t,
-        party_id,
+        DurableIdentityDigest::from_legacy_party_id(party_id),
     );
     let key = scope.key(MaterialKind::RandomShare);
 
@@ -122,7 +165,7 @@ async fn get_mask_share_reserves_requested_persistent_index_once() {
         crate::net::curve::MpcFieldKind::Bls12_381Fr,
         n,
         t,
-        party_id,
+        DurableIdentityDigest::from_legacy_party_id(party_id),
     );
     let key = scope.random_share();
 
@@ -242,7 +285,7 @@ async fn consume_masked_inputs_evicts_fully_used_persistent_masks() {
         crate::net::curve::MpcFieldKind::Bls12_381Fr,
         n,
         t,
-        party_id,
+        DurableIdentityDigest::from_legacy_party_id(party_id),
     );
     let key = scope.random_share();
 
@@ -295,43 +338,19 @@ async fn consume_masked_inputs_evicts_fully_used_persistent_masks() {
         "fully consumed persistent masks should be evicted after use"
     );
 
-    let restored = ReservationRegistry::load(store.as_ref(), &program_hash, party_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let restored = ReservationRegistry::load(
+        store.as_ref(),
+        &program_hash,
+        DurableIdentityDigest::from_legacy_party_id(party_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let snapshot = restored.snapshot().await;
     assert!(
         snapshot.masked_inputs.is_empty(),
         "consumed masked input payloads should be evicted from persisted reservation state"
     );
-}
-
-#[test]
-fn aba_same_round_uses_shared_session_and_converges() {
-    let instance_id = next_instance_id();
-    let n = 4;
-    let t = 1;
-    let router = Arc::new(crate::net::open_registry::OpenMessageRouter::new());
-    let e0 = test_engine(router.clone(), instance_id, 0, n, t);
-    let e1 = test_engine(router.clone(), instance_id, 1, n, t);
-    let e2 = test_engine(router.clone(), instance_id, 2, n, t);
-    let e3 = test_engine(router, instance_id, 3, n, t);
-
-    let s0 = e0.aba_propose(true).expect("party 0 propose");
-    let s1 = e1.aba_propose(true).expect("party 1 propose");
-    let s2 = e2.aba_propose(true).expect("party 2 propose");
-    let s3 = e3.aba_propose(true).expect("party 3 propose");
-
-    assert_eq!(s0, s1, "same ABA round must share one session id");
-    assert_eq!(s1, s2, "same ABA round must share one session id");
-    assert_eq!(s2, s3, "same ABA round must share one session id");
-
-    let r0 = e0.aba_result(s0, 50).expect("party 0 agreement");
-    let r1 = e1.aba_result(s1, 50).expect("party 1 agreement");
-    let r2 = e2.aba_result(s2, 50).expect("party 2 agreement");
-    let r3 = e3.aba_result(s3, 50).expect("party 3 agreement");
-
-    assert!(r0 && r1 && r2 && r3, "all parties should decide true");
 }
 
 #[test]

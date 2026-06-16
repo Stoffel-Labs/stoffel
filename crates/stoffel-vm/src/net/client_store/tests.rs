@@ -1,15 +1,10 @@
 use super::*;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use ark_bls12_381::Fr;
-#[cfg(feature = "avss")]
 use ark_bls12_381::G1Projective as G1;
 use std::num::NonZeroUsize;
 use stoffel_vm_types::core_types::{ShareData, ShareType};
-#[cfg(feature = "avss")]
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
-#[cfg(any(feature = "honeybadger", feature = "avss"))]
 use stoffelmpc_mpc::common::SecretSharingScheme;
-#[cfg(feature = "honeybadger")]
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 
 #[test]
@@ -35,7 +30,6 @@ fn client_output_share_count_rejects_zero() {
 }
 
 #[test]
-#[cfg(feature = "honeybadger")]
 fn test_store_and_retrieve() {
     let store = ClientInputStore::new();
     let client_id = 42;
@@ -57,7 +51,6 @@ fn test_store_and_retrieve() {
 }
 
 #[test]
-#[cfg(feature = "honeybadger")]
 fn replace_client_input_replaces_existing_entries() {
     let store = ClientInputStore::new();
     let mut rng = ark_std::test_rng();
@@ -81,7 +74,6 @@ fn replace_client_input_replaces_existing_entries() {
 }
 
 #[test]
-#[cfg(feature = "honeybadger")]
 fn test_get_specific_share() {
     let store = ClientInputStore::new();
     let client_id = 99;
@@ -99,7 +91,6 @@ fn test_get_specific_share() {
 }
 
 #[test]
-#[cfg(feature = "avss")]
 fn test_store_and_retrieve_feldman() {
     let store = ClientInputStore::new();
     let client_id = 55;
@@ -156,6 +147,62 @@ fn test_list_and_clear() {
     store.clear();
     assert_eq!(store.len(), 0);
     assert!(store.is_empty());
+}
+
+#[test]
+fn client_roster_counts_output_only_clients() {
+    let store = ClientInputStore::new();
+
+    store.set_client_roster([2, 0, 1]);
+
+    assert_eq!(store.len(), 3);
+    assert_eq!(store.input_client_count(), 0);
+    assert_eq!(store.output_client_count(), 3);
+    assert_eq!(store.client_id_at(ClientInputIndex::new(0)), Some(0));
+    assert_eq!(store.client_id_at(ClientInputIndex::new(1)), Some(1));
+    assert_eq!(store.client_id_at(ClientInputIndex::new(2)), Some(2));
+    assert_eq!(
+        store.get_client_share_data(0, ClientShareIndex::new(0)),
+        None
+    );
+}
+
+#[test]
+fn stored_inputs_extend_client_roster_in_sorted_order() {
+    let store = ClientInputStore::new();
+
+    store.set_client_roster([2]);
+    store.store_client_input_bytes(0, vec![vec![7]]);
+
+    assert_eq!(store.len(), 2);
+    assert_eq!(store.input_client_count(), 1);
+    assert_eq!(store.output_client_count(), 2);
+    assert_eq!(store.client_ids(), vec![0, 2]);
+    assert_eq!(store.client_id_at(ClientInputIndex::new(0)), Some(0));
+    assert_eq!(store.client_id_at(ClientInputIndex::new(1)), Some(2));
+}
+
+#[test]
+fn replacing_inputs_preserves_output_only_roster_slots() {
+    let store = ClientInputStore::new();
+
+    store.set_client_roster([2]);
+    store.replace_client_shares([(0, vec![ClientShare::untyped_bytes(vec![7])])]);
+
+    assert_eq!(store.len(), 2);
+    assert_eq!(store.input_client_count(), 1);
+    assert_eq!(store.output_client_count(), 2);
+    assert_eq!(store.client_ids(), vec![0, 2]);
+    assert_eq!(
+        store
+            .get_client_share_data(0, ClientShareIndex::new(0))
+            .map(|share| share.bytes().to_vec()),
+        Some(vec![7])
+    );
+    assert_eq!(
+        store.get_client_share_data(2, ClientShareIndex::new(0)),
+        None
+    );
 }
 
 #[test]

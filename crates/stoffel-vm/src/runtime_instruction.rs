@@ -186,6 +186,14 @@ pub(crate) enum RuntimeInstruction {
         lhs: RuntimeRegister,
         rhs: RuntimeRegister,
     },
+    SpillLoad {
+        dest: RuntimeRegister,
+        slot: usize,
+    },
+    SpillStore {
+        slot: usize,
+        src: RuntimeRegister,
+    },
 }
 
 /// VM function lowered for runtime dispatch.
@@ -254,7 +262,7 @@ impl RuntimeFunction {
         let index = instruction_pointer.index();
         self.instructions
             .get(index)
-            .ok_or_else(|| VmError::InstructionOutOfBounds { index })
+            .ok_or(VmError::InstructionOutOfBounds { index })
     }
 }
 
@@ -406,6 +414,14 @@ fn lower_instruction(
         ResolvedInstruction::CMP(lhs, rhs) => RuntimeInstruction::Compare {
             lhs: reg(vm_function, lhs)?,
             rhs: reg(vm_function, rhs)?,
+        },
+        ResolvedInstruction::LDS(dest, slot) => RuntimeInstruction::SpillLoad {
+            dest: reg(vm_function, dest)?,
+            slot,
+        },
+        ResolvedInstruction::STS(slot, src) => RuntimeInstruction::SpillStore {
+            slot,
+            src: reg(vm_function, src)?,
         },
     })
 }

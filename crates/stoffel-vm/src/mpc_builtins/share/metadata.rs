@@ -5,11 +5,31 @@ use crate::VirtualMachineResult;
 use stoffel_vm_types::core_types::{ObjectRef, ShareType, Value};
 
 pub(super) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
-    vm.try_register_typed_foreign_function("Share.get_type", share_get_type)?;
-    vm.try_register_typed_foreign_function("Share.get_party_id", share_get_party_id)?;
-    vm.try_register_typed_foreign_function("Share.get_commitment", share_get_commitment)?;
-    vm.try_register_typed_foreign_function("Share.commitment_count", share_commitment_count)?;
-    vm.try_register_typed_foreign_function("Share.has_commitments", share_has_commitments)?;
+    vm.try_register_typed_foreign_method("Share", "get_type", "Share.get_type", share_get_type)?;
+    vm.try_register_typed_foreign_method(
+        "Share",
+        "get_party_id",
+        "Share.get_party_id",
+        share_get_party_id,
+    )?;
+    vm.try_register_typed_foreign_method(
+        "Share",
+        "get_commitment",
+        "Share.get_commitment",
+        share_get_commitment,
+    )?;
+    vm.try_register_typed_foreign_method(
+        "Share",
+        "commitment_count",
+        "Share.commitment_count",
+        share_commitment_count,
+    )?;
+    vm.try_register_typed_foreign_method(
+        "Share",
+        "has_commitments",
+        "Share.has_commitments",
+        share_has_commitments,
+    )?;
     Ok(())
 }
 
@@ -23,6 +43,7 @@ fn share_get_type(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackRes
     let ty = ctx.get_share_type(&share_value)?;
     let type_str = match ty {
         ShareType::SecretInt { .. } => "SecretInt",
+        ShareType::SecretUInt { .. } => "SecretUInt",
         ShareType::SecretFixedPoint { .. } => "SecretFixedPoint",
     };
 

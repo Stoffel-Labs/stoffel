@@ -1,0 +1,28 @@
+# This is a single-line comment
+
+# Literals
+var an_int = 42
+var a_float = 123.456 # Fixed point representation
+var a_string = "Hello, Stoffel!"
+var is_true = True
+var is_false = False
+var nothing = None
+
+# Variable Declarations
+var immutable_val = 100 # Inferred type
+var mutable_val = "change me" # Inferred type
+
+var typed_int: int64 = 5
+var typed_string: string = "initial"
+
+var no_initial_value: int64 # Requires type annotation
+var mutable_no_initial: string # Requires type annotation
+
+# Assignments
+mutable_val = "changed"
+mutable_no_initial = "assigned now"
+
+# Simple expression statement (assuming function calls are expressions)
+# print("End of basic tests") # Requires function call parsing
+
+# No entry point; this is a basic language feature sample

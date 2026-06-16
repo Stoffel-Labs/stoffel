@@ -13,16 +13,24 @@
 //! This module is designed to be portable and can be copied directly to the compiler
 //! codebase without modification.
 
-use crate::core_types::{F64, Value};
+use crate::core_types::{F64, FixedPointPrecision, ShareType, Value};
 use crate::functions::{FunctionError, VMFunction};
 use crate::instructions::{Instruction, ReducedOpcode};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
 // Magic bytes that identify a StoffelVM bytecode file
 pub const MAGIC_BYTES: &[u8; 4] = b"STFL";
 // Current bytecode format version
-pub const FORMAT_VERSION: u16 = 1;
+// v9: added LDS/STS spill-slot instructions
+pub const FORMAT_VERSION: u16 = 9;
+pub const CLIENT_IO_MANIFEST_FORMAT_VERSION: u16 = 2;
+pub const MPC_BACKEND_MANIFEST_FORMAT_VERSION: u16 = 3;
+pub const MPC_CURVE_MANIFEST_FORMAT_VERSION: u16 = 4;
+pub const FUNCTION_TYPE_METADATA_FORMAT_VERSION: u16 = 5;
+/// Version at which the client IO manifest carries a `PreprocessingDemand`.
+pub const PREPROCESSING_DEMAND_MANIFEST_FORMAT_VERSION: u16 = 8;
 
 const MAX_BINARY_COLLECTION_LEN: usize = 1_000_000;
 const MAX_BINARY_STRING_BYTES: usize = 16 * 1024 * 1024;
@@ -57,6 +65,13 @@ pub type BinaryResult<T> = Result<T, BinaryError>;
 
 fn invalid_data(message: impl Into<String>) -> BinaryError {
     BinaryError::InvalidData(message.into())
+}
+
+fn normalized_parameter_types(function: &CompiledFunction) -> Vec<FunctionType> {
+    let mut parameter_types = function.parameter_types.clone();
+    parameter_types.resize(function.parameters.len(), FunctionType::Unknown);
+    parameter_types.truncate(function.parameters.len());
+    parameter_types
 }
 
 fn usize_to_u16(value: usize, field: &str) -> BinaryResult<u16> {
@@ -105,10 +120,22 @@ fn read_u16<R: Read>(reader: &mut R) -> BinaryResult<u16> {
     Ok(u16::from_le_bytes(bytes))
 }
 
+fn read_u8<R: Read>(reader: &mut R) -> BinaryResult<u8> {
+    let mut bytes = [0u8; 1];
+    reader.read_exact(&mut bytes)?;
+    Ok(bytes[0])
+}
+
 fn read_u32<R: Read>(reader: &mut R) -> BinaryResult<u32> {
     let mut bytes = [0u8; 4];
     reader.read_exact(&mut bytes)?;
     Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u64<R: Read>(reader: &mut R) -> BinaryResult<u64> {
+    let mut bytes = [0u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 
 fn read_usize_u32<R: Read>(reader: &mut R, field: &str) -> BinaryResult<usize> {
@@ -181,6 +208,172 @@ pub struct CompiledBinary {
     pub constants: Vec<Value>,
     /// Functions in the program
     pub functions: Vec<CompiledFunction>,
+    /// VM-backed client input/output schema metadata.
+    pub client_io_manifest: ClientIoManifest,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientIoManifest {
+    pub mpc_backend: MpcBackend,
+    pub mpc_curve: MpcCurve,
+    pub clients: Vec<ClientIoSchema>,
+    /// Static estimate of the MPC preprocessing material the program consumes,
+    /// emitted by the compiler so the runtime can pre-generate enough up front.
+    /// `#[serde(default)]` keeps older binaries (without this field) loadable.
+    #[serde(default)]
+    pub preprocessing_demand: PreprocessingDemand,
+}
+
+/// Compiler estimate of preprocessing material a program consumes, used to size
+/// the runtime preprocessing pass. Counts are *static estimates* weighted by
+/// literal loop bounds; `dynamic` flags that the true demand may exceed the
+/// estimate (e.g. data-dependent loops, recursion, or runtime-sized batches),
+/// so the runtime should also be ready to top up on the fly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreprocessingDemand {
+    /// Beaver triples — one per secret*secret multiplication.
+    pub triples: u64,
+    /// Random shares — masks for inputs/reveals and triple generation.
+    pub randoms: u64,
+    /// Random bits — `frac_bits` per secret fixed-point division (truncation).
+    pub prandbits: u64,
+    /// Random integers — one per secret fixed-point division (truncation).
+    pub prandints: u64,
+    /// True when the static estimate may undercount (data-dependent loops,
+    /// recursion, or runtime-sized batch operations).
+    pub dynamic: bool,
+}
+
+impl PreprocessingDemand {
+    /// Add another op's demand, saturating.
+    pub fn add(&mut self, triples: u64, randoms: u64, prandbits: u64, prandints: u64) {
+        self.triples = self.triples.saturating_add(triples);
+        self.randoms = self.randoms.saturating_add(randoms);
+        self.prandbits = self.prandbits.saturating_add(prandbits);
+        self.prandints = self.prandints.saturating_add(prandints);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientIoSchema {
+    pub client_slot: u64,
+    pub inputs: Vec<ShareType>,
+    pub outputs: Vec<ShareType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FunctionType {
+    Int { signed: bool, bits: u8 },
+    Float,
+    Fixed { bits: u8 },
+    String,
+    Bool,
+    Nil,
+    Void,
+    Secret(Box<FunctionType>),
+    List(Box<FunctionType>),
+    Dict(Box<FunctionType>, Box<FunctionType>),
+    Object(String),
+    Generic(String, Vec<FunctionType>),
+    TypeVar(String),
+    Unknown,
+}
+
+impl FunctionType {
+    pub fn int64() -> Self {
+        Self::Int {
+            signed: true,
+            bits: 64,
+        }
+    }
+
+    pub fn uint64() -> Self {
+        Self::Int {
+            signed: false,
+            bits: 64,
+        }
+    }
+
+    pub fn fix64() -> Self {
+        Self::Fixed { bits: 64 }
+    }
+
+    pub fn fix32() -> Self {
+        Self::Fixed { bits: 32 }
+    }
+
+    pub fn underlying_type(&self) -> &FunctionType {
+        match self {
+            FunctionType::Secret(inner) => inner.underlying_type(),
+            _ => self,
+        }
+    }
+
+    pub fn is_unknown_like(&self) -> bool {
+        matches!(
+            self.underlying_type(),
+            FunctionType::Unknown | FunctionType::TypeVar(_) | FunctionType::Generic(_, _)
+        )
+    }
+}
+
+impl Default for FunctionType {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl std::fmt::Display for FunctionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FunctionType::Int { signed, bits } => {
+                if *signed {
+                    write!(f, "int{bits}")
+                } else {
+                    write!(f, "uint{bits}")
+                }
+            }
+            FunctionType::Float => f.write_str("float"),
+            FunctionType::Fixed { bits } => write!(f, "fix{bits}"),
+            FunctionType::String => f.write_str("string"),
+            FunctionType::Bool => f.write_str("bool"),
+            FunctionType::Nil => f.write_str("None"),
+            FunctionType::Void => f.write_str("void"),
+            FunctionType::Secret(inner) => write!(f, "secret {inner}"),
+            FunctionType::List(inner) => write!(f, "list[{inner}]"),
+            FunctionType::Dict(key, value) => write!(f, "dict[{key}, {value}]"),
+            FunctionType::Object(name) | FunctionType::TypeVar(name) => f.write_str(name),
+            FunctionType::Generic(name, params) => {
+                write!(f, "{name}[")?;
+                for (index, param) in params.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{param}")?;
+                }
+                f.write_str("]")
+            }
+            FunctionType::Unknown => f.write_str("<unknown>"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MpcBackend {
+    #[default]
+    HoneyBadger,
+    Avss,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MpcCurve {
+    #[default]
+    Bls12_381,
+    Bn254,
+    Curve25519,
+    Ed25519,
+    Secp256k1,
+    Secp256r1,
 }
 
 /// Represents a compiled function in the program
@@ -194,6 +387,10 @@ pub struct CompiledFunction {
     pub register_count: usize,
     /// Parameter names
     pub parameters: Vec<String>,
+    /// Source-level parameter types, if present in bytecode metadata.
+    pub parameter_types: Vec<FunctionType>,
+    /// Source-level return type, if present in bytecode metadata.
+    pub return_type: FunctionType,
     /// Upvalue names (for closures)
     pub upvalues: Vec<String>,
     /// Parent function name (for nested functions)
@@ -243,6 +440,9 @@ pub enum CompiledInstruction {
     PUSHARG(usize), // PUSHARG r1
     // Comparison
     CMP(usize, usize), // CMP r1, r2
+    // Spill-slot access
+    LDS(usize, usize), // LDS r1, slot
+    STS(usize, usize), // STS slot, r1
 }
 
 impl Default for CompiledBinary {
@@ -258,6 +458,7 @@ impl CompiledBinary {
             version: FORMAT_VERSION,
             constants: Vec::new(),
             functions: Vec::new(),
+            client_io_manifest: ClientIoManifest::default(),
         }
     }
 
@@ -374,6 +575,8 @@ impl CompiledBinary {
                 Instruction::RET(reg) => CompiledInstruction::RET(*reg),
                 Instruction::PUSHARG(reg) => CompiledInstruction::PUSHARG(*reg),
                 Instruction::CMP(reg1, reg2) => CompiledInstruction::CMP(*reg1, *reg2),
+                Instruction::LDS(reg, slot) => CompiledInstruction::LDS(*reg, *slot),
+                Instruction::STS(slot, reg) => CompiledInstruction::STS(*slot, *reg),
             };
 
             compiled_instructions.push(compiled);
@@ -384,6 +587,8 @@ impl CompiledBinary {
             name: vm_function.name().to_string(),
             register_count: vm_function.register_count(),
             parameters: vm_function.parameters().to_vec(),
+            parameter_types: vec![FunctionType::Unknown; vm_function.parameters().len()],
+            return_type: FunctionType::Unknown,
             upvalues: vm_function.upvalues().to_vec(),
             parent: vm_function.parent().map(str::to_owned),
             labels: vm_function.labels().clone(),
@@ -427,6 +632,8 @@ impl CompiledBinary {
             CompiledInstruction::RET(reg) => Instruction::RET(*reg),
             CompiledInstruction::PUSHARG(reg) => Instruction::PUSHARG(*reg),
             CompiledInstruction::CMP(reg1, reg2) => Instruction::CMP(*reg1, *reg2),
+            CompiledInstruction::LDS(reg, slot) => Instruction::LDS(*reg, *slot),
+            CompiledInstruction::STS(slot, reg) => Instruction::STS(*slot, *reg),
         })
     }
 
@@ -552,6 +759,97 @@ impl CompiledBinary {
             self.serialize_function(function, writer)?;
         }
 
+        if self.version >= CLIENT_IO_MANIFEST_FORMAT_VERSION {
+            Self::serialize_client_io_manifest(
+                &self.client_io_manifest,
+                self.version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION,
+                self.version >= MPC_CURVE_MANIFEST_FORMAT_VERSION,
+                self.version >= PREPROCESSING_DEMAND_MANIFEST_FORMAT_VERSION,
+                writer,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn serialize_client_io_manifest<W: Write>(
+        manifest: &ClientIoManifest,
+        include_backend: bool,
+        include_curve: bool,
+        include_demand: bool,
+        writer: &mut W,
+    ) -> BinaryResult<()> {
+        if include_backend {
+            Self::serialize_mpc_backend(manifest.mpc_backend, writer)?;
+        }
+        if include_curve {
+            Self::serialize_mpc_curve(manifest.mpc_curve, writer)?;
+        }
+        write_usize_as_u32(writer, manifest.clients.len(), "client IO schema count")?;
+        for client in &manifest.clients {
+            writer.write_all(&client.client_slot.to_le_bytes())?;
+            write_usize_as_u32(writer, client.inputs.len(), "client IO input count")?;
+            for share_type in &client.inputs {
+                Self::serialize_share_type(*share_type, writer)?;
+            }
+            write_usize_as_u32(writer, client.outputs.len(), "client IO output count")?;
+            for share_type in &client.outputs {
+                Self::serialize_share_type(*share_type, writer)?;
+            }
+        }
+        if include_demand {
+            let demand = &manifest.preprocessing_demand;
+            writer.write_all(&demand.triples.to_le_bytes())?;
+            writer.write_all(&demand.randoms.to_le_bytes())?;
+            writer.write_all(&demand.prandbits.to_le_bytes())?;
+            writer.write_all(&demand.prandints.to_le_bytes())?;
+            writer.write_all(&[u8::from(demand.dynamic)])?;
+        }
+        Ok(())
+    }
+
+    fn serialize_mpc_backend<W: Write>(backend: MpcBackend, writer: &mut W) -> BinaryResult<()> {
+        let tag = match backend {
+            MpcBackend::HoneyBadger => 0u8,
+            MpcBackend::Avss => 1u8,
+        };
+        writer.write_all(&[tag])?;
+        Ok(())
+    }
+
+    fn serialize_mpc_curve<W: Write>(curve: MpcCurve, writer: &mut W) -> BinaryResult<()> {
+        let tag = match curve {
+            MpcCurve::Bls12_381 => 0u8,
+            MpcCurve::Bn254 => 1u8,
+            MpcCurve::Curve25519 => 2u8,
+            MpcCurve::Ed25519 => 3u8,
+            MpcCurve::Secp256k1 => 4u8,
+            MpcCurve::Secp256r1 => 5u8,
+        };
+        writer.write_all(&[tag])?;
+        Ok(())
+    }
+
+    fn serialize_share_type<W: Write>(share_type: ShareType, writer: &mut W) -> BinaryResult<()> {
+        match share_type {
+            ShareType::SecretInt { bit_length } => {
+                writer.write_all(&[0u8])?;
+                write_usize_as_u32(writer, bit_length, "SecretInt bit length")?;
+            }
+            ShareType::SecretUInt { bit_length } => {
+                writer.write_all(&[2u8])?;
+                write_usize_as_u32(writer, bit_length, "SecretUInt bit length")?;
+            }
+            ShareType::SecretFixedPoint { precision } => {
+                writer.write_all(&[1u8])?;
+                write_usize_as_u32(writer, precision.total_bits(), "fixed-point total bits")?;
+                write_usize_as_u32(
+                    writer,
+                    precision.fractional_bits(),
+                    "fixed-point fractional bits",
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -654,6 +952,14 @@ impl CompiledBinary {
         for param in &function.parameters {
             write_len_prefixed_str_u16(writer, param, "parameter name length")?;
         }
+        if self.version >= FUNCTION_TYPE_METADATA_FORMAT_VERSION {
+            let parameter_types = normalized_parameter_types(function);
+            write_usize_as_u16(writer, parameter_types.len(), "parameter type count")?;
+            for ty in &parameter_types {
+                Self::serialize_function_type(ty, writer)?;
+            }
+            Self::serialize_function_type(&function.return_type, writer)?;
+        }
 
         // Write upvalues
         write_usize_as_u16(writer, function.upvalues.len(), "upvalue count")?;
@@ -682,6 +988,56 @@ impl CompiledBinary {
             self.serialize_instruction(instruction, writer)?;
         }
 
+        Ok(())
+    }
+
+    fn serialize_function_type<W: Write>(ty: &FunctionType, writer: &mut W) -> BinaryResult<()> {
+        match ty {
+            FunctionType::Int { signed, bits } => {
+                writer.write_all(&[0u8])?;
+                writer.write_all(&[*signed as u8, *bits])?;
+            }
+            FunctionType::Float => writer.write_all(&[1u8])?,
+            FunctionType::Fixed { bits: 64 } => writer.write_all(&[13u8])?,
+            FunctionType::Fixed { bits } => {
+                writer.write_all(&[14u8])?;
+                writer.write_all(&[*bits])?;
+            }
+            FunctionType::String => writer.write_all(&[2u8])?,
+            FunctionType::Bool => writer.write_all(&[3u8])?,
+            FunctionType::Nil => writer.write_all(&[4u8])?,
+            FunctionType::Void => writer.write_all(&[5u8])?,
+            FunctionType::Secret(inner) => {
+                writer.write_all(&[6u8])?;
+                Self::serialize_function_type(inner, writer)?;
+            }
+            FunctionType::List(inner) => {
+                writer.write_all(&[7u8])?;
+                Self::serialize_function_type(inner, writer)?;
+            }
+            FunctionType::Dict(key, value) => {
+                writer.write_all(&[8u8])?;
+                Self::serialize_function_type(key, writer)?;
+                Self::serialize_function_type(value, writer)?;
+            }
+            FunctionType::Object(name) => {
+                writer.write_all(&[9u8])?;
+                write_len_prefixed_str_u16(writer, name, "function type object name length")?;
+            }
+            FunctionType::Generic(name, params) => {
+                writer.write_all(&[10u8])?;
+                write_len_prefixed_str_u16(writer, name, "function generic type name length")?;
+                write_usize_as_u16(writer, params.len(), "function generic parameter count")?;
+                for param in params {
+                    Self::serialize_function_type(param, writer)?;
+                }
+            }
+            FunctionType::TypeVar(name) => {
+                writer.write_all(&[11u8])?;
+                write_len_prefixed_str_u16(writer, name, "function type variable name length")?;
+            }
+            FunctionType::Unknown => writer.write_all(&[12u8])?,
+        }
         Ok(())
     }
 
@@ -821,6 +1177,16 @@ impl CompiledBinary {
                 write_usize_as_u32(writer, *reg1, "CMP left register")?;
                 write_usize_as_u32(writer, *reg2, "CMP right register")?;
             }
+            CompiledInstruction::LDS(reg, slot) => {
+                writer.write_all(&[ReducedOpcode::LDS as u8])?;
+                write_usize_as_u32(writer, *reg, "LDS register")?;
+                write_usize_as_u32(writer, *slot, "LDS slot")?;
+            }
+            CompiledInstruction::STS(slot, reg) => {
+                writer.write_all(&[ReducedOpcode::STS as u8])?;
+                write_usize_as_u32(writer, *slot, "STS slot")?;
+                write_usize_as_u32(writer, *reg, "STS register")?;
+            }
         }
 
         Ok(())
@@ -866,15 +1232,155 @@ impl CompiledBinary {
         let mut functions = Vec::new();
         reserve_vec(&mut functions, function_count, "function count")?;
         for _ in 0..function_count {
-            let function = Self::deserialize_function(reader)?;
+            let function = Self::deserialize_function(reader, version)?;
             functions.push(function);
         }
+
+        let client_io_manifest = if version >= CLIENT_IO_MANIFEST_FORMAT_VERSION {
+            Self::deserialize_client_io_manifest(
+                reader,
+                version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION,
+                version >= MPC_CURVE_MANIFEST_FORMAT_VERSION,
+                version >= PREPROCESSING_DEMAND_MANIFEST_FORMAT_VERSION,
+            )?
+        } else {
+            ClientIoManifest::default()
+        };
 
         Ok(CompiledBinary {
             version,
             constants,
             functions,
+            client_io_manifest,
         })
+    }
+
+    fn deserialize_client_io_manifest<R: Read>(
+        reader: &mut R,
+        has_backend: bool,
+        has_curve: bool,
+        has_demand: bool,
+    ) -> BinaryResult<ClientIoManifest> {
+        let mpc_backend = if has_backend {
+            Self::deserialize_mpc_backend(reader)?
+        } else {
+            MpcBackend::default()
+        };
+        let mpc_curve = if has_curve {
+            Self::deserialize_mpc_curve(reader)?
+        } else {
+            MpcCurve::default()
+        };
+        let client_count =
+            read_u32_len_bounded(reader, "client IO schema count", MAX_BINARY_COLLECTION_LEN)?;
+        let mut clients = Vec::new();
+        reserve_vec(&mut clients, client_count, "client IO schema count")?;
+        for _ in 0..client_count {
+            let client_slot = read_u64(reader)?;
+            let input_count =
+                read_u32_len_bounded(reader, "client IO input count", MAX_BINARY_COLLECTION_LEN)?;
+            let mut inputs = Vec::new();
+            reserve_vec(&mut inputs, input_count, "client IO input count")?;
+            for _ in 0..input_count {
+                inputs.push(Self::deserialize_share_type(reader)?);
+            }
+
+            let output_count =
+                read_u32_len_bounded(reader, "client IO output count", MAX_BINARY_COLLECTION_LEN)?;
+            let mut outputs = Vec::new();
+            reserve_vec(&mut outputs, output_count, "client IO output count")?;
+            for _ in 0..output_count {
+                outputs.push(Self::deserialize_share_type(reader)?);
+            }
+
+            clients.push(ClientIoSchema {
+                client_slot,
+                inputs,
+                outputs,
+            });
+        }
+        let preprocessing_demand = if has_demand {
+            PreprocessingDemand {
+                triples: read_u64(reader)?,
+                randoms: read_u64(reader)?,
+                prandbits: read_u64(reader)?,
+                prandints: read_u64(reader)?,
+                dynamic: read_u8(reader)? != 0,
+            }
+        } else {
+            PreprocessingDemand::default()
+        };
+        Ok(ClientIoManifest {
+            mpc_backend,
+            mpc_curve,
+            clients,
+            preprocessing_demand,
+        })
+    }
+
+    fn deserialize_mpc_backend<R: Read>(reader: &mut R) -> BinaryResult<MpcBackend> {
+        let mut tag = [0u8; 1];
+        reader.read_exact(&mut tag)?;
+        match tag[0] {
+            0 => Ok(MpcBackend::HoneyBadger),
+            1 => Ok(MpcBackend::Avss),
+            tag => Err(invalid_data(format!(
+                "unknown MPC backend tag {tag} in IO manifest"
+            ))),
+        }
+    }
+
+    fn deserialize_mpc_curve<R: Read>(reader: &mut R) -> BinaryResult<MpcCurve> {
+        let mut tag = [0u8; 1];
+        reader.read_exact(&mut tag)?;
+        match tag[0] {
+            0 => Ok(MpcCurve::Bls12_381),
+            1 => Ok(MpcCurve::Bn254),
+            2 => Ok(MpcCurve::Curve25519),
+            3 => Ok(MpcCurve::Ed25519),
+            4 => Ok(MpcCurve::Secp256k1),
+            5 => Ok(MpcCurve::Secp256r1),
+            tag => Err(invalid_data(format!(
+                "unknown MPC curve tag {tag} in IO manifest"
+            ))),
+        }
+    }
+
+    fn deserialize_share_type<R: Read>(reader: &mut R) -> BinaryResult<ShareType> {
+        let mut type_tag = [0u8; 1];
+        reader.read_exact(&mut type_tag)?;
+        match type_tag[0] {
+            0 => {
+                let bit_length = read_usize_u32(reader, "SecretInt bit length")?;
+                ShareType::try_secret_int(bit_length).map_err(|error| {
+                    invalid_data(format!(
+                        "invalid SecretInt metadata in IO manifest: {error}"
+                    ))
+                })
+            }
+            2 => {
+                let bit_length = read_usize_u32(reader, "SecretUInt bit length")?;
+                ShareType::try_secret_uint(bit_length).map_err(|error| {
+                    invalid_data(format!(
+                        "invalid SecretUInt metadata in IO manifest: {error}"
+                    ))
+                })
+            }
+            1 => {
+                let total_bits = read_usize_u32(reader, "fixed-point total bits")?;
+                let fractional_bits = read_usize_u32(reader, "fixed-point fractional bits")?;
+                let precision =
+                    FixedPointPrecision::try_new(total_bits, fractional_bits).map_err(|error| {
+                        invalid_data(format!(
+                            "invalid SecretFixedPoint metadata in IO manifest: {error}"
+                        ))
+                    })?;
+                Ok(ShareType::SecretFixedPoint { precision })
+            }
+            tag => Err(invalid_data(format!(
+                "unknown ShareType tag {tag} in IO manifest"
+            ))),
+        }
     }
 
     /// Deserializes a value from a reader
@@ -966,7 +1472,10 @@ impl CompiledBinary {
     /// # Returns
     ///
     /// A result containing the deserialized function or an error
-    fn deserialize_function<R: Read>(reader: &mut R) -> BinaryResult<CompiledFunction> {
+    fn deserialize_function<R: Read>(
+        reader: &mut R,
+        version: u16,
+    ) -> BinaryResult<CompiledFunction> {
         // Read function name
         let name = read_len_prefixed_string_u16(
             reader,
@@ -990,6 +1499,29 @@ impl CompiledBinary {
             )?;
             parameters.push(param);
         }
+        let (parameter_types, return_type) = if version >= FUNCTION_TYPE_METADATA_FORMAT_VERSION {
+            let type_count = usize::from(read_u16(reader)?);
+            if type_count != parameters.len() {
+                return Err(invalid_data(format!(
+                    "function '{}' declares {} parameter name(s) but {} parameter type(s)",
+                    name,
+                    parameters.len(),
+                    type_count
+                )));
+            }
+            let mut parameter_types = Vec::new();
+            reserve_vec(&mut parameter_types, type_count, "parameter type count")?;
+            for _ in 0..type_count {
+                parameter_types.push(Self::deserialize_function_type(reader)?);
+            }
+            let return_type = Self::deserialize_function_type(reader)?;
+            (parameter_types, return_type)
+        } else {
+            (
+                vec![FunctionType::Unknown; parameters.len()],
+                FunctionType::Unknown,
+            )
+        };
 
         // Read upvalues
         let upvalue_count = usize::from(read_u16(reader)?);
@@ -1057,10 +1589,81 @@ impl CompiledBinary {
             name,
             register_count,
             parameters,
+            parameter_types,
+            return_type,
             upvalues,
             parent,
             labels,
             instructions,
+        })
+    }
+
+    fn deserialize_function_type<R: Read>(reader: &mut R) -> BinaryResult<FunctionType> {
+        let mut tag = [0u8; 1];
+        reader.read_exact(&mut tag)?;
+        Ok(match tag[0] {
+            0 => {
+                let mut data = [0u8; 2];
+                reader.read_exact(&mut data)?;
+                let bits = data[1];
+                if bits == 0 {
+                    return Err(invalid_data(
+                        "integer function type bit width must be non-zero",
+                    ));
+                }
+                FunctionType::Int {
+                    signed: data[0] != 0,
+                    bits,
+                }
+            }
+            1 => FunctionType::Float,
+            13 => FunctionType::Fixed { bits: 64 },
+            2 => FunctionType::String,
+            3 => FunctionType::Bool,
+            4 => FunctionType::Nil,
+            5 => FunctionType::Void,
+            6 => FunctionType::Secret(Box::new(Self::deserialize_function_type(reader)?)),
+            7 => FunctionType::List(Box::new(Self::deserialize_function_type(reader)?)),
+            8 => FunctionType::Dict(
+                Box::new(Self::deserialize_function_type(reader)?),
+                Box::new(Self::deserialize_function_type(reader)?),
+            ),
+            9 => FunctionType::Object(read_len_prefixed_string_u16(
+                reader,
+                "function type object name length",
+                "Invalid UTF-8 in function type object name",
+            )?),
+            10 => {
+                let name = read_len_prefixed_string_u16(
+                    reader,
+                    "function generic type name length",
+                    "Invalid UTF-8 in function generic type name",
+                )?;
+                let param_count = usize::from(read_u16(reader)?);
+                let mut params = Vec::new();
+                reserve_vec(&mut params, param_count, "function generic parameter count")?;
+                for _ in 0..param_count {
+                    params.push(Self::deserialize_function_type(reader)?);
+                }
+                FunctionType::Generic(name, params)
+            }
+            11 => FunctionType::TypeVar(read_len_prefixed_string_u16(
+                reader,
+                "function type variable name length",
+                "Invalid UTF-8 in function type variable name",
+            )?),
+            12 => FunctionType::Unknown,
+            14 => {
+                let mut bits = [0u8; 1];
+                reader.read_exact(&mut bits)?;
+                if bits[0] == 0 {
+                    return Err(invalid_data(
+                        "fixed-point function type bit width must be non-zero",
+                    ));
+                }
+                FunctionType::Fixed { bits: bits[0] }
+            }
+            tag => return Err(invalid_data(format!("unknown function type tag {tag}"))),
         })
     }
 
@@ -1247,6 +1850,16 @@ impl CompiledBinary {
 
                 Ok(CompiledInstruction::CMP(reg1, reg2))
             }
+            x if x == ReducedOpcode::LDS as u8 => {
+                let reg = read_usize_u32(reader, "LDS register")?;
+                let slot = read_usize_u32(reader, "LDS slot")?;
+                Ok(CompiledInstruction::LDS(reg, slot))
+            }
+            x if x == ReducedOpcode::STS as u8 => {
+                let slot = read_usize_u32(reader, "STS slot")?;
+                let reg = read_usize_u32(reader, "STS register")?;
+                Ok(CompiledInstruction::STS(slot, reg))
+            }
             _ => Err(BinaryError::InvalidData(format!(
                 "Unknown opcode: {}",
                 opcode
@@ -1350,14 +1963,135 @@ mod tests {
         bytes
     }
 
+    fn binary_header_with_version(version: u16) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC_BYTES);
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes
+    }
+
     fn append_empty_function_prefix(bytes: &mut Vec<u8>) {
         bytes.extend_from_slice(&4u16.to_le_bytes());
         bytes.extend_from_slice(b"main");
         bytes.extend_from_slice(&0u16.to_le_bytes()); // register count
         bytes.extend_from_slice(&0u16.to_le_bytes()); // parameters
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // parameter types
+        bytes.push(12); // return type: Unknown
         bytes.extend_from_slice(&0u16.to_le_bytes()); // upvalues
         bytes.push(0); // no parent
         bytes.extend_from_slice(&0u16.to_le_bytes()); // labels
+    }
+
+    #[test]
+    fn bytecode_v2_client_io_manifest_round_trips() {
+        let mut binary = CompiledBinary::new();
+        binary.client_io_manifest = ClientIoManifest {
+            mpc_backend: MpcBackend::Avss,
+            mpc_curve: MpcCurve::Ed25519,
+            clients: vec![
+                ClientIoSchema {
+                    client_slot: 7,
+                    inputs: vec![
+                        ShareType::secret_int(64),
+                        ShareType::boolean(),
+                        ShareType::secret_fixed_point_from_bits(96, 24),
+                    ],
+                    outputs: vec![
+                        ShareType::secret_fixed_point_from_bits(128, 32),
+                        ShareType::secret_int(16),
+                    ],
+                },
+                ClientIoSchema {
+                    client_slot: 9,
+                    inputs: vec![],
+                    outputs: vec![ShareType::boolean()],
+                },
+            ],
+            preprocessing_demand: PreprocessingDemand::default(),
+        };
+
+        let mut buffer = Vec::new();
+        binary.serialize(&mut buffer).unwrap();
+
+        let deserialized = CompiledBinary::deserialize(&mut Cursor::new(&buffer)).unwrap();
+        assert_eq!(deserialized.version, FORMAT_VERSION);
+        assert_eq!(deserialized.client_io_manifest, binary.client_io_manifest);
+    }
+
+    #[test]
+    fn bytecode_v2_client_io_manifest_defaults_to_honeybadger_backend() {
+        let mut bytes = binary_header_with_version(2);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // constants
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // functions
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // client schemas
+
+        let deserialized = CompiledBinary::deserialize(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(deserialized.version, 2);
+        assert_eq!(
+            deserialized.client_io_manifest.mpc_backend,
+            MpcBackend::HoneyBadger
+        );
+        assert_eq!(
+            deserialized.client_io_manifest.mpc_curve,
+            MpcCurve::Bls12_381
+        );
+        assert!(deserialized.client_io_manifest.clients.is_empty());
+    }
+
+    #[test]
+    fn bytecode_v3_avss_manifest_defaults_to_bls12381_curve() {
+        let mut bytes = binary_header_with_version(3);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // constants
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // functions
+        bytes.push(1); // avss backend
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // client schemas
+
+        let deserialized = CompiledBinary::deserialize(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(deserialized.version, 3);
+        assert_eq!(
+            deserialized.client_io_manifest.mpc_backend,
+            MpcBackend::Avss
+        );
+        assert_eq!(
+            deserialized.client_io_manifest.mpc_curve,
+            MpcCurve::Bls12_381
+        );
+        assert!(deserialized.client_io_manifest.clients.is_empty());
+    }
+
+    #[test]
+    fn bytecode_v1_deserializes_with_empty_client_io_manifest() {
+        let mut bytes = binary_header_with_version(1);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // constants
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // functions
+
+        let deserialized = CompiledBinary::deserialize(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(deserialized.version, 1);
+        assert_eq!(
+            deserialized.client_io_manifest.mpc_backend,
+            MpcBackend::HoneyBadger
+        );
+        assert!(deserialized.client_io_manifest.clients.is_empty());
+    }
+
+    #[test]
+    fn deserialize_rejects_invalid_share_type_metadata() {
+        let mut bytes = binary_header();
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // constants
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // functions
+        bytes.push(0); // HoneyBadger backend
+        bytes.push(0); // BLS12-381 curve
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // client schemas
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // client slot
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // inputs
+        bytes.push(0); // SecretInt
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // invalid bit length
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // outputs
+
+        assert_invalid_data(
+            CompiledBinary::deserialize(&mut Cursor::new(bytes)),
+            "invalid SecretInt metadata",
+        );
     }
 
     #[test]
@@ -1518,11 +2252,14 @@ mod tests {
                 name: "main".to_string(),
                 register_count: 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
                 instructions: vec![CompiledInstruction::LDI(0, 0)],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         assert_invalid_data(
@@ -1540,11 +2277,14 @@ mod tests {
                 name: "main".to_string(),
                 register_count: 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
                 instructions: vec![CompiledInstruction::LDI(usize::MAX, 0)],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         assert_invalid_data(
@@ -1567,11 +2307,14 @@ mod tests {
                 name: "main".to_string(),
                 register_count: 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
                 instructions: vec![CompiledInstruction::LDI(0, 0)],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let _ = binary.to_vm_functions();
@@ -1587,11 +2330,14 @@ mod tests {
                 name: "main".to_string(),
                 register_count: 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
                 instructions: vec![CompiledInstruction::LDI(usize::MAX, 0)],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let _ = binary.to_vm_functions();
@@ -1647,6 +2393,39 @@ mod tests {
     }
 
     #[test]
+    fn bytecode_v7_function_type_metadata_round_trips() {
+        let mut binary = CompiledBinary::new();
+        binary.functions.push(CompiledFunction {
+            name: "main".to_string(),
+            register_count: 3,
+            parameters: vec!["a".to_string(), "n".to_string()],
+            parameter_types: vec![
+                FunctionType::List(Box::new(FunctionType::List(
+                    Box::new(FunctionType::int64()),
+                ))),
+                FunctionType::Secret(Box::new(FunctionType::fix32())),
+            ],
+            return_type: FunctionType::List(Box::new(FunctionType::fix32())),
+            upvalues: vec![],
+            parent: None,
+            labels: HashMap::new(),
+            instructions: vec![CompiledInstruction::RET(0)],
+        });
+
+        let mut buffer = Vec::new();
+        binary.serialize(&mut buffer).unwrap();
+
+        let deserialized = CompiledBinary::deserialize(&mut Cursor::new(&buffer)).unwrap();
+        let function = &deserialized.functions[0];
+        assert_eq!(deserialized.version, FORMAT_VERSION);
+        assert_eq!(
+            function.parameter_types,
+            binary.functions[0].parameter_types
+        );
+        assert_eq!(function.return_type, binary.functions[0].return_type);
+    }
+
+    #[test]
     fn serialize_deserialize_preserves_negative_i8_constants() {
         let function = VMFunction::new(
             "signed_byte".to_string(),
@@ -1683,11 +2462,14 @@ mod tests {
                 name: "oversized_register_frame".to_string(),
                 register_count: usize::from(u16::MAX) + 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
                 instructions: vec![],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let mut buffer = Vec::new();
@@ -1703,11 +2485,14 @@ mod tests {
                 name: "x".repeat(usize::from(u16::MAX) + 1),
                 register_count: 0,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
                 instructions: vec![],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let mut buffer = Vec::new();
@@ -1727,11 +2512,14 @@ mod tests {
                 name: "oversized_operand".to_string(),
                 register_count: 1,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
                 instructions: vec![CompiledInstruction::RET(oversized_operand)],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let mut buffer = Vec::new();
@@ -1754,11 +2542,14 @@ mod tests {
                 name: "oversized_label_offset".to_string(),
                 register_count: 0,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels,
                 instructions: vec![],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let mut buffer = Vec::new();
@@ -1832,6 +2623,8 @@ mod tests {
         bytes.extend_from_slice(b"main");
         bytes.extend_from_slice(&0u16.to_le_bytes()); // register count
         bytes.extend_from_slice(&0u16.to_le_bytes()); // parameters
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // parameter types
+        bytes.push(12); // return type: Unknown
         bytes.extend_from_slice(&0u16.to_le_bytes()); // upvalues
         bytes.push(2); // invalid parent flag
 
@@ -1913,6 +2706,8 @@ mod tests {
                 name: "uses_secret_bank".to_string(),
                 register_count: 2,
                 parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
                 upvalues: vec![],
                 parent: None,
                 labels: HashMap::new(),
@@ -1921,6 +2716,7 @@ mod tests {
                     CompiledInstruction::RET(16),
                 ],
             }],
+            client_io_manifest: ClientIoManifest::default(),
         };
 
         let vm_functions = binary.to_vm_functions();

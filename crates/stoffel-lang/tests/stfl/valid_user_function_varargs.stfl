@@ -1,0 +1,8 @@
+def total(*xs) -> int64:
+  var sum = 0
+  for x in xs:
+    sum += x
+  return sum
+
+def main() -> int64:
+  return total(1, 2, 3) + total()

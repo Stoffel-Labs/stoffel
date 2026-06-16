@@ -1,10 +1,7 @@
 use super::VirtualMachine;
-#[cfg(feature = "honeybadger")]
 use crate::net::client_store::ClientInputStore;
 use crate::net::client_store::ClientShare;
-#[cfg(feature = "honeybadger")]
 use crate::net::client_store::ClientShareIndex;
-#[cfg(feature = "honeybadger")]
 use crate::net::mpc_engine::AsyncMpcEngine;
 use crate::net::mpc_engine::{MpcEngine, MpcRuntimeInfo};
 use crate::VirtualMachineResult;
@@ -37,7 +34,14 @@ impl VirtualMachine {
         self.state.clear_client_inputs();
     }
 
-    #[cfg(feature = "honeybadger")]
+    /// Replace the VM-facing known client roster used by `ClientStore`.
+    pub fn set_client_roster<I>(&self, clients: I)
+    where
+        I: IntoIterator<Item = stoffelnet::network_utils::ClientId>,
+    {
+        self.state.set_client_roster(clients);
+    }
+
     pub(crate) fn client_input_store_for_async_engine<E: AsyncMpcEngine + ?Sized>(
         &self,
         engine: &E,
@@ -77,7 +81,6 @@ impl VirtualMachine {
     }
 
     /// Store HoneyBadger client shares through the VM boundary.
-    #[cfg(feature = "honeybadger")]
     pub fn try_store_client_input<F>(
         &self,
         client_id: stoffelnet::network_utils::ClientId,
@@ -91,6 +94,23 @@ impl VirtualMachine {
         Ok(self.state.try_store_client_input(client_id, shares)?)
     }
 
+    /// Store HoneyBadger client shares with per-input manifest share types.
+    pub fn try_store_client_input_with_types<F>(
+        &self,
+        client_id: stoffelnet::network_utils::ClientId,
+        shares: Vec<
+            stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare<F>,
+        >,
+        share_types: &[ShareType],
+    ) -> VirtualMachineResult<usize>
+    where
+        F: ark_ff::FftField,
+    {
+        Ok(self
+            .state
+            .try_store_client_input_with_types(client_id, shares, share_types)?)
+    }
+
     /// Replace all client inputs with HoneyBadger client shares.
     ///
     /// This is the HoneyBadger-specific hydration boundary for code that still
@@ -99,7 +119,6 @@ impl VirtualMachine {
     ///
     /// Prefer [`VirtualMachine::replace_client_shares`] when the caller already
     /// has backend-neutral VM share payloads.
-    #[cfg(feature = "honeybadger")]
     pub fn try_replace_client_inputs<F, I>(&self, inputs: I) -> VirtualMachineResult<usize>
     where
         F: ark_ff::FftField,
@@ -118,7 +137,6 @@ impl VirtualMachine {
     }
 
     /// Retrieve a HoneyBadger client share through the VM boundary.
-    #[cfg(feature = "honeybadger")]
     pub fn client_share<F>(
         &self,
         client_id: stoffelnet::network_utils::ClientId,
@@ -131,7 +149,6 @@ impl VirtualMachine {
     }
 
     /// Store AVSS Feldman client shares through the VM boundary.
-    #[cfg(feature = "avss")]
     pub fn try_store_client_input_feldman<F, G>(
         &self,
         client_id: stoffelnet::network_utils::ClientId,
@@ -144,6 +161,22 @@ impl VirtualMachine {
         Ok(self
             .state
             .try_store_client_input_feldman(client_id, shares)?)
+    }
+
+    /// Store AVSS Feldman client shares with per-input manifest share types.
+    pub fn try_store_client_input_feldman_with_types<F, G>(
+        &self,
+        client_id: stoffelnet::network_utils::ClientId,
+        shares: Vec<stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare<F, G>>,
+        share_types: &[ShareType],
+    ) -> VirtualMachineResult<usize>
+    where
+        F: ark_ff::FftField + ark_ff::PrimeField,
+        G: ark_ec::CurveGroup<ScalarField = F>,
+    {
+        Ok(self
+            .state
+            .try_store_client_input_feldman_with_types(client_id, shares, share_types)?)
     }
 
     /// Hydrate client inputs from the configured MPC backend into the VM store.
@@ -188,7 +221,6 @@ impl VirtualMachine {
     /// This keeps AVSS setup code independent of the concrete table-memory
     /// backend, which matters for ORAM-style memory implementations where reads
     /// and writes must stay behind VM-owned semantic operations.
-    #[cfg(feature = "avss")]
     pub fn create_avss_share_object(
         &mut self,
         key_name: &str,
@@ -205,19 +237,16 @@ impl VirtualMachine {
     }
 
     /// Check whether a VM value is an AVSS share object.
-    #[cfg(feature = "avss")]
     pub fn is_avss_share_object(&mut self, value: &Value) -> bool {
         self.state.is_avss_share_object(value)
     }
 
     /// Read the key name stored on an AVSS share object.
-    #[cfg(feature = "avss")]
     pub fn avss_key_name(&mut self, value: &Value) -> VirtualMachineResult<String> {
         Ok(self.state.avss_key_name(value)?)
     }
 
     /// Read a serialized commitment from an AVSS share object.
-    #[cfg(feature = "avss")]
     pub fn avss_commitment(
         &mut self,
         value: &Value,
@@ -227,7 +256,6 @@ impl VirtualMachine {
     }
 
     /// Read the number of commitments stored on an AVSS share object.
-    #[cfg(feature = "avss")]
     pub fn avss_commitment_count(&mut self, value: &Value) -> VirtualMachineResult<usize> {
         Ok(self.state.avss_commitment_count(value)?)
     }

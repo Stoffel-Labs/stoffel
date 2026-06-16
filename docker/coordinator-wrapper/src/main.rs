@@ -14,6 +14,7 @@ use stoffel_mpc_coordinator::off_chain::{
 use stoffel_mpc_coordinator::rpc::RPCServerConnection;
 use stoffel_mpc_coordinator::{Round, ShareBound};
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
+use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use tokio::sync::Mutex;
 use x509_parser::prelude::*;
 
@@ -47,6 +48,9 @@ struct Args {
     #[arg(long, default_value = "secp256k1")]
     mpc_curve: String,
 
+    #[arg(long, default_value = "honeybadger")]
+    mpc_backend: String,
+
     #[arg(long, default_value = "0.0.0.0")]
     bind_addr: String,
 
@@ -55,7 +59,7 @@ struct Args {
 }
 
 #[derive(Clone)]
-struct AvssCoordinatorConnection<F, S>
+struct CoordinatorConnection<F, S>
 where
     F: FftField,
     S: ShareBound<F>,
@@ -64,7 +68,7 @@ where
     _phantom: PhantomData<(F, S)>,
 }
 
-impl<F, S> RPCServerConnection for AvssCoordinatorConnection<F, S>
+impl<F, S> RPCServerConnection for CoordinatorConnection<F, S>
 where
     F: FftField,
     S: ShareBound<F>,
@@ -87,7 +91,7 @@ where
 }
 
 #[async_trait]
-impl<F, S> StoffelCoordinatorRPCServer for AvssCoordinatorConnection<F, S>
+impl<F, S> StoffelCoordinatorRPCServer for CoordinatorConnection<F, S>
 where
     F: FftField,
     S: ShareBound<F>,
@@ -148,7 +152,23 @@ async fn start_for_curve<F, G>(args: Args)
 where
     F: FftField,
     G: CurveGroup<ScalarField = F>,
+    RobustShare<F>: ShareBound<F>,
     FeldmanShamirShare<F, G>: ShareBound<F>,
+{
+    match args.mpc_backend.as_str() {
+        "honeybadger" | "hb" => start_with_share::<F, RobustShare<F>>(args).await,
+        "avss" => start_with_share::<F, FeldmanShamirShare<F, G>>(args).await,
+        other => {
+            eprintln!("unsupported --mpc-backend '{other}'");
+            std::process::exit(2);
+        }
+    }
+}
+
+async fn start_with_share<F, S>(args: Args)
+where
+    F: FftField,
+    S: ShareBound<F>,
 {
     let hash: [u8; 32] = hex::decode(&args.hash)
         .expect("invalid hash")
@@ -169,9 +189,7 @@ where
         output_client_keys,
     );
 
-    let coord = OffChainCoordinatorServer::<
-        AvssCoordinatorConnection<F, FeldmanShamirShare<F, G>>,
-    >::start_coord(
+    let coord = OffChainCoordinatorServer::<CoordinatorConnection<F, S>>::start_coord(
         server_state,
         &args.bind_addr,
         args.port,

@@ -1,9 +1,10 @@
 use super::AvssMpcEngine;
 use crate::net::curve::{MpcCurveConfig, SupportedMpcField};
 use crate::net::mpc_engine::{
-    MpcCapabilities, MpcEngine, MpcEngineClientOps, MpcEngineClientOutput, MpcEngineFieldOpen,
-    MpcEngineMultiplication, MpcEngineOpenInExponent, MpcEngineOperationResultExt,
-    MpcEnginePreprocPersistence, MpcEngineRandomness, MpcSessionTopology,
+    DurableIdentityDigest, MpcCapabilities, MpcEngine, MpcEngineClientOps, MpcEngineClientOutput,
+    MpcEngineFieldOpen, MpcEngineMultiplication, MpcEngineOpenInExponent,
+    MpcEngineOperationResultExt, MpcEnginePreprocPersistence, MpcEngineRandomness,
+    MpcSessionTopology,
 };
 use ark_ec::CurveGroup;
 use ark_std::rand::SeedableRng;
@@ -33,6 +34,9 @@ where
         match clear.into_parts() {
             (ShareType::SecretInt { .. }, ClearShareValue::Integer(v)) => {
                 Ok(Self::field_from_i64(v))
+            }
+            (ShareType::SecretUInt { .. }, ClearShareValue::UnsignedInteger(v)) => {
+                Ok(crate::net::curve::field_from_u64::<F>(v))
             }
             (
                 ShareType::SecretInt {
@@ -189,6 +193,10 @@ where
         self.topology
     }
 
+    fn local_identity(&self) -> DurableIdentityDigest {
+        self.local_identity
+    }
+
     fn is_ready(&self) -> bool {
         self.ready.load(Ordering::SeqCst)
     }
@@ -221,13 +229,20 @@ where
         (|| -> Result<ClearShareValue, String> {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-fixed-{}-{}", precision.k(), precision.f())
                 }
             };
 
+            let seq = self.open_registry.insert_single_next(
+                &type_key,
+                self.topology.party_id(),
+                share_bytes.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_single_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 share_bytes,
@@ -238,9 +253,10 @@ where
             let t = self.topology.threshold();
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
-            self.open_registry.open_share_wait(
+            self.open_registry.open_share_at_wait(
                 self.topology.party_id(),
                 &type_key,
+                seq,
                 share_bytes,
                 required,
                 |collected| {
@@ -266,13 +282,20 @@ where
         (|| -> Result<Vec<ClearShareValue>, String> {
             let type_key = match ty {
                 ShareType::SecretInt { bit_length } => format!("avss-batch-int-{bit_length}"),
+                ShareType::SecretUInt { bit_length } => format!("avss-batch-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
                     format!("avss-batch-fixed-{}-{}", precision.k(), precision.f())
                 }
             };
 
+            let seq = self.open_registry.insert_batch_next(
+                &type_key,
+                self.topology.party_id(),
+                shares.to_vec(),
+            )?;
             let wire_message = crate::net::open_registry::encode_batch_share_wire_message(
                 self.topology.instance_id(),
+                seq,
                 &type_key,
                 self.topology.party_id(),
                 shares,
@@ -283,9 +306,10 @@ where
             let t = self.topology.threshold();
             let required = Self::byzantine_open_contribution_count(n, t)?;
 
-            self.open_registry.batch_open_wait(
+            self.open_registry.batch_open_at_wait(
                 self.topology.party_id(),
                 &type_key,
+                seq,
                 shares,
                 required,
                 |collected, pos| {

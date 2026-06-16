@@ -1,8 +1,6 @@
 use crate::error::VmResult;
 use crate::net::client_store::{ClientInputIndex, ClientOutputShareCount, ClientShareIndex};
-use crate::net::mpc_engine::{
-    AbaSessionId, MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId,
-};
+use crate::net::mpc_engine::{MpcExponentGroup, MpcPartyId, MpcRuntimeInfo, RbcSessionId};
 use crate::output::VmOutputResult;
 use crate::runtime_hooks::HookEvent;
 use crate::vm_state::VMState;
@@ -145,6 +143,26 @@ pub(crate) trait ForeignTableMemoryServices {
     fn set_table_field(&mut self, table_ref: TableRef, key: Value, value: Value) -> VmResult<()>;
 
     fn push_array_ref_values(&mut self, array_ref: ArrayRef, values: &[Value]) -> VmResult<usize>;
+
+    fn pop_array_ref_value(&mut self, array_ref: ArrayRef, index: usize)
+        -> VmResult<Option<Value>>;
+
+    fn insert_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+        value: Value,
+    ) -> VmResult<usize>;
+
+    fn replace_array_ref_values(
+        &mut self,
+        array_ref: ArrayRef,
+        values: Vec<Value>,
+    ) -> VmResult<usize>;
+
+    fn clear_array_ref(&mut self, array_ref: ArrayRef) -> VmResult<()>;
+
+    fn reverse_array_ref(&mut self, array_ref: ArrayRef) -> VmResult<()>;
 }
 
 impl ForeignTableMemoryServices for VMState {
@@ -195,6 +213,39 @@ impl ForeignTableMemoryServices for VMState {
     fn push_array_ref_values(&mut self, array_ref: ArrayRef, values: &[Value]) -> VmResult<usize> {
         VMState::push_array_ref_values(self, array_ref, values)
     }
+
+    fn pop_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+    ) -> VmResult<Option<Value>> {
+        VMState::pop_array_ref_value(self, array_ref, index)
+    }
+
+    fn insert_array_ref_value(
+        &mut self,
+        array_ref: ArrayRef,
+        index: usize,
+        value: Value,
+    ) -> VmResult<usize> {
+        VMState::insert_array_ref_value(self, array_ref, index, value)
+    }
+
+    fn replace_array_ref_values(
+        &mut self,
+        array_ref: ArrayRef,
+        values: Vec<Value>,
+    ) -> VmResult<usize> {
+        VMState::replace_array_ref_values(self, array_ref, values)
+    }
+
+    fn clear_array_ref(&mut self, array_ref: ArrayRef) -> VmResult<()> {
+        VMState::clear_array_ref(self, array_ref)
+    }
+
+    fn reverse_array_ref(&mut self, array_ref: ArrayRef) -> VmResult<()> {
+        VMState::reverse_array_ref(self, array_ref)
+    }
 }
 
 pub(crate) trait ForeignLocalStorageServices {
@@ -228,6 +279,10 @@ impl ForeignLocalStorageServices for VMState {
 pub(crate) trait ForeignMpcServices {
     fn client_store_len(&self) -> usize;
 
+    fn input_client_count(&self) -> usize;
+
+    fn output_client_count(&self) -> usize;
+
     fn client_id_at_index(&self, index: ClientInputIndex) -> Option<ClientId>;
 
     fn load_client_share(
@@ -258,12 +313,6 @@ pub(crate) trait ForeignMpcServices {
 
     fn rbc_receive_any(&self, timeout_ms: u64) -> VmResult<(MpcPartyId, Vec<u8>)>;
 
-    fn aba_propose(&self, value: bool) -> VmResult<AbaSessionId>;
-
-    fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> VmResult<bool>;
-
-    fn aba_propose_and_wait(&self, value: bool, timeout_ms: u64) -> VmResult<bool>;
-
     fn input_share_data(&self, clear: ClearShareInput) -> VmResult<ShareData>;
 
     fn open_share_data(&self, ty: ShareType, share_data: &ShareData) -> VmResult<ClearShareValue>;
@@ -275,6 +324,8 @@ pub(crate) trait ForeignMpcServices {
     ) -> VmResult<Vec<ClearShareValue>>;
 
     fn random_share_data(&self, ty: ShareType) -> VmResult<ShareData>;
+
+    fn random_integer_share_data(&self, ty: ShareType) -> VmResult<ShareData>;
 
     fn open_share_as_field_data(&self, ty: ShareType, share_data: &ShareData) -> VmResult<Vec<u8>>;
 
@@ -337,6 +388,13 @@ pub(crate) trait ForeignMpcServices {
         scalar_bytes: &[u8],
     ) -> VmResult<ShareData>;
 
+    fn secret_share_add_field_data(
+        &self,
+        ty: ShareType,
+        share_data: &ShareData,
+        field_bytes: &[u8],
+    ) -> VmResult<ShareData>;
+
     fn secret_share_interpolate_local(
         &self,
         ty: ShareType,
@@ -347,6 +405,14 @@ pub(crate) trait ForeignMpcServices {
 impl ForeignMpcServices for VMState {
     fn client_store_len(&self) -> usize {
         VMState::client_store_len(self)
+    }
+
+    fn input_client_count(&self) -> usize {
+        VMState::input_client_count(self)
+    }
+
+    fn output_client_count(&self) -> usize {
+        VMState::output_client_count(self)
     }
 
     fn client_id_at_index(&self, index: ClientInputIndex) -> Option<ClientId> {
@@ -395,18 +461,6 @@ impl ForeignMpcServices for VMState {
         VMState::rbc_receive_any(self, timeout_ms)
     }
 
-    fn aba_propose(&self, value: bool) -> VmResult<AbaSessionId> {
-        VMState::aba_propose(self, value)
-    }
-
-    fn aba_result(&self, session_id: AbaSessionId, timeout_ms: u64) -> VmResult<bool> {
-        VMState::aba_result(self, session_id, timeout_ms)
-    }
-
-    fn aba_propose_and_wait(&self, value: bool, timeout_ms: u64) -> VmResult<bool> {
-        VMState::aba_propose_and_wait(self, value, timeout_ms)
-    }
-
     fn input_share_data(&self, clear: ClearShareInput) -> VmResult<ShareData> {
         VMState::input_share_data(self, clear)
     }
@@ -425,6 +479,10 @@ impl ForeignMpcServices for VMState {
 
     fn random_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
         VMState::random_share_data(self, ty)
+    }
+
+    fn random_integer_share_data(&self, ty: ShareType) -> VmResult<ShareData> {
+        VMState::random_integer_share_data(self, ty)
     }
 
     fn open_share_as_field_data(&self, ty: ShareType, share_data: &ShareData) -> VmResult<Vec<u8>> {
@@ -508,6 +566,15 @@ impl ForeignMpcServices for VMState {
         VMState::secret_share_mul_field_data(self, ty, share_data, scalar_bytes)
     }
 
+    fn secret_share_add_field_data(
+        &self,
+        ty: ShareType,
+        share_data: &ShareData,
+        field_bytes: &[u8],
+    ) -> VmResult<ShareData> {
+        VMState::secret_share_add_field_data(self, ty, share_data, field_bytes)
+    }
+
     fn secret_share_interpolate_local(
         &self,
         ty: ShareType,
@@ -543,17 +610,9 @@ pub(crate) trait ForeignShareObjectServices {
         share_data: ShareData,
         party_id: usize,
     ) -> VmResult<Value>;
-
-    #[cfg(feature = "avss")]
     fn is_avss_share_object(&mut self, value: &Value) -> bool;
-
-    #[cfg(feature = "avss")]
     fn avss_commitment(&mut self, value: &Value, index: usize) -> VmResult<Vec<u8>>;
-
-    #[cfg(feature = "avss")]
     fn avss_key_name(&mut self, value: &Value) -> VmResult<String>;
-
-    #[cfg(feature = "avss")]
     fn avss_commitment_count(&mut self, value: &Value) -> VmResult<usize>;
 }
 
@@ -595,23 +654,15 @@ impl ForeignShareObjectServices for VMState {
     ) -> VmResult<Value> {
         VMState::create_share_object_value(self, share_type, share_data, party_id)
     }
-
-    #[cfg(feature = "avss")]
     fn is_avss_share_object(&mut self, value: &Value) -> bool {
         VMState::is_avss_share_object(self, value)
     }
-
-    #[cfg(feature = "avss")]
     fn avss_commitment(&mut self, value: &Value, index: usize) -> VmResult<Vec<u8>> {
         VMState::avss_commitment(self, value, index)
     }
-
-    #[cfg(feature = "avss")]
     fn avss_key_name(&mut self, value: &Value) -> VmResult<String> {
         VMState::avss_key_name(self, value)
     }
-
-    #[cfg(feature = "avss")]
     fn avss_commitment_count(&mut self, value: &Value) -> VmResult<usize> {
         VMState::avss_commitment_count(self, value)
     }

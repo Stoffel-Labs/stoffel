@@ -1,0 +1,139 @@
+# run-args: --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=0 --expected-output-clients 1
+# One federated SGD step for logistic regression.
+#
+# The servers hold the global weight vector w as secret shares. A client
+# contributes one private training row (features x, label y). We compute
+#   z    = w . x                       (inner product)
+#   pred = clamp(2 + z, 0, 4)          (sigmoid approx in a scale of 4: 1.0 == 4,
+#                                        so the linearization 1/2 + z/4 needs no
+#                                        secret division)
+#   err  = pred - 4*y
+#   w_j  = w_j - err * x_j             (gradient step, lr = 1)
+# and return the updated weights to the client. Everything stays secret-shared;
+# only the comparison inside clamp uses the carry-based secure comparison.
+
+def random_bit() -> Share:
+  while True:
+    var r = Share.random_field()
+    var r_squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(r_squared):
+      continue
+    var r_prime_inv = Field.inverse(Field.sqrt(r_squared))
+    var two_inv = Field.inverse(Field.from_int(2))
+    var c = Share.mul_field(r, r_prime_inv)
+    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
+    return Share.retag(a, 1)
+
+def pow2(i: int64) -> int64:
+  var p = 1
+  var k = 0
+  while k < i:
+    p = p * 2
+    k = k + 1
+  return p
+
+def combine_bits(bits: list[Share], n: int64) -> Share:
+  var acc = Share.mul_scalar(bits[0], 1)
+  var i = 1
+  while i < n:
+    acc = Share.add(acc, Share.mul_scalar(bits[i], pow2(i)))
+    i = i + 1
+  return Share.retag(acc, 64)
+
+# Secret-shared [a < b] for a, b in [0, 2^l): masked reveal + carry chain.
+def less_than(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  var z = Share.add_scalar(Share.sub(a, b), pow2(l))
+  var rbits: list[Share] = []
+  var i = 0
+  while i < (l + 1):
+    rbits.append(random_bit())
+    i = i + 1
+  var r_low = combine_bits(rbits, l + 1)
+  var r_high = Share.retag(Share.random_int(kappa), 64)
+  var r = Share.add(r_low, Share.mul_scalar(r_high, pow2(l + 1)))
+  var c = Share.open(Share.retag(Share.add(Share.retag(z, 64), r), 64))
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < l:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    if ci == 0:
+      borrow = Share.retag(Share.sub(Share.add(ri, borrow), rb), 1)
+    else:
+      borrow = Share.retag(rb, 1)
+    i = i + 1
+  var cl = (c shr l) and 1
+  var rl = rbits[l]
+  var rlb = Share.mul(rl, borrow)
+  var zl = Share.sub(Share.add(rl, borrow), Share.mul_scalar(rlb, 2))
+  if cl == 1:
+    zl = Share.sub(Share.from_clear_int(1, 1), zl)
+  return Share.sub(Share.from_clear_int(1, 1), Share.retag(zl, 1))
+
+# Oblivious select: returns a if cond==1 else b.  b + cond*(a-b), one multiply.
+def select(cond: Share, a: Share, b: Share) -> Share:
+  # cond in {0,1}; a, b arbitrary integer shares. Retag to a common width so
+  # Share.mul accepts the (1-bit cond) x (wide diff) product.
+  var d = Share.retag(Share.sub(a, b), 64)
+  var c = Share.retag(cond, 64)
+  return Share.add(Share.retag(b, 64), Share.mul(c, d))
+
+def minimum(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  return select(less_than(a, b, l, kappa), a, b)
+
+def maximum(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  return select(less_than(a, b, l, kappa), b, a)
+
+# [a == b] = NOT(a<b) AND NOT(b<a)
+def equal(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  var lt = less_than(a, b, l, kappa)
+  var gt = less_than(b, a, l, kappa)
+  var nlt = Share.sub(Share.from_clear_int(1, 1), lt)
+  var ngt = Share.sub(Share.from_clear_int(1, 1), gt)
+  return Share.mul(nlt, ngt)
+
+
+def main() -> int64:
+  var l = 16
+  var kappa = 8
+  var d = 32                                # feature dimension
+
+  # Global model weights (secret), initialized here from public constants.
+  # Literal-bound `for` loops let the compiler provision exactly d triples for
+  # each pass of d secret multiplications.
+  var w: list[Share] = []
+  for wi in 0..32:
+    w.append(Share.from_clear_int(1, 64))
+
+  # Client's private training row: d features then a {0,1} label.
+  var x: list[Share] = []
+  for xi in 0..32:
+    x.append(ClientStore.take_share(0, xi))
+  var y: secret int64 = ClientStore.take_share(0, 32)
+
+  # z = w . x
+  var z = Share.from_clear_int(0, 64)
+  for zi in 0..32:
+    z = Share.add(z, Share.mul(Share.retag(w[zi], 64), Share.retag(x[zi], 64)))
+
+  var v = Share.add_scalar(z, 2)                       # 2 + z
+  var lo = Share.from_clear_int(0, 64)
+  var hi = Share.from_clear_int(4, 64)
+  var pred = minimum(maximum(v, lo, l, kappa), hi, l, kappa)   # clamp to [0,4]
+
+  var y4 = Share.mul_scalar(Share.retag(y, 64), 4)
+  var err = Share.sub(Share.retag(pred, 64), y4)       # pred - 4y
+
+  # gradient step: w_j <- w_j - err * x_j
+  var w_new: list[Share] = []
+  for gi in 0..32:
+    var g = Share.mul(Share.retag(err, 64), Share.retag(x[gi], 64))
+    w_new.append(Share.sub(Share.retag(w[gi], 64), g))
+
+  if Mpc.has_capability("client-output"):
+    w_new[0].send_to_client(0)
+
+  var r0 = Share.open(Share.retag(w_new[0], 64))
+  assert r0 == -3, "w0: 1 - (clamp(2+32,0,4) - 4*0)*1 = 1 - 4 = -3"
+  return r0

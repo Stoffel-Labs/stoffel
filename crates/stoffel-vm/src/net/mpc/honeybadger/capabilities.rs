@@ -5,11 +5,13 @@ use crate::net::client_store::{
 use crate::net::curve::SupportedMpcField;
 use crate::net::mpc_engine::{
     AsyncMpcEngine, AsyncMpcEngineClientOps, MpcEngine, MpcEngineClientOps, MpcEngineClientOutput,
-    MpcEngineMultiplication, MpcEngineOpenInExponent, MpcEngineOperationResultExt,
-    MpcEnginePreprocPersistence, MpcEngineRandomness, MpcEngineResult,
+    MpcEngineError, MpcEngineFieldOpen, MpcEngineMultiplication, MpcEngineOpenInExponent,
+    MpcEngineOperationResultExt, MpcEnginePreprocPersistence, MpcEngineRandomness, MpcEngineResult,
+    MpcExponentGroup,
 };
 use crate::storage::preproc::PreprocStore;
 use ark_ec::{CurveGroup, PrimeGroup};
+use std::any::TypeId;
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType};
 use stoffelnet::network_utils::ClientId;
@@ -27,6 +29,20 @@ where
     ) -> MpcEngineResult<ShareData> {
         crate::net::try_block_on_current(self.multiply_share_async(ty, left, right))
             .map_mpc_engine_operation("multiply_share")
+    }
+
+    fn divide_fixed_by_constant(
+        &self,
+        ty: ShareType,
+        share_bytes: &[u8],
+        divisor_scaled: i64,
+    ) -> MpcEngineResult<ShareData> {
+        crate::net::try_block_on_current(self.divide_fixed_by_constant_async(
+            ty,
+            share_bytes,
+            divisor_scaled,
+        ))
+        .map_mpc_engine_operation("divide_fixed_by_constant")
     }
 }
 
@@ -58,6 +74,11 @@ where
         crate::net::try_block_on_current(self.random_share_async_impl(ty))
             .map_mpc_engine_operation("random_share")
     }
+
+    fn random_integer_share(&self, ty: ShareType) -> MpcEngineResult<ShareData> {
+        crate::net::try_block_on_current(self.random_integer_share_async_impl(ty))
+            .map_mpc_engine_operation("random_integer_share")
+    }
 }
 
 impl<F, G> MpcEngineOpenInExponent for HoneyBadgerMpcEngine<F, G>
@@ -73,6 +94,48 @@ where
     ) -> MpcEngineResult<Vec<u8>> {
         self.open_share_in_exp_impl(ty, share_bytes, generator_bytes)
             .map_mpc_engine_operation("open_share_in_exp")
+    }
+
+    fn supports_exponent_group(&self, group: MpcExponentGroup) -> bool {
+        match group {
+            MpcExponentGroup::Bls12381G2 => TypeId::of::<F>() == TypeId::of::<ark_bls12_381::Fr>(),
+            _ => self.native_exponent_group() == group,
+        }
+    }
+
+    fn open_share_in_exp_group(
+        &self,
+        group: MpcExponentGroup,
+        ty: ShareType,
+        share_bytes: &[u8],
+        generator_bytes: &[u8],
+    ) -> MpcEngineResult<Vec<u8>> {
+        if !self.supports_exponent_group(group) {
+            return Err(MpcEngineError::operation_failed(
+                "open_share_in_exp_group",
+                group.unsupported_error(self.protocol_name()),
+            ));
+        }
+
+        let result = match group {
+            MpcExponentGroup::Bls12381G2 => {
+                self.open_share_in_exp_bls12381_g2_impl(share_bytes, generator_bytes)
+            }
+            _ => self.open_share_in_exp_impl(ty, share_bytes, generator_bytes),
+        };
+
+        result.map_mpc_engine_operation("open_share_in_exp_group")
+    }
+}
+
+impl<F, G> MpcEngineFieldOpen for HoneyBadgerMpcEngine<F, G>
+where
+    F: SupportedMpcField,
+    G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
+{
+    fn open_share_as_field(&self, ty: ShareType, share_bytes: &[u8]) -> MpcEngineResult<Vec<u8>> {
+        crate::net::try_block_on_current(self.open_share_as_field_async_impl(ty, share_bytes))
+            .map_mpc_engine_operation("open_share_as_field")
     }
 }
 
@@ -127,6 +190,27 @@ where
             .map_mpc_engine_operation("async_multiply_share")
     }
 
+    async fn divide_fixed_by_constant_async(
+        &self,
+        ty: ShareType,
+        share_bytes: &[u8],
+        divisor_scaled: i64,
+    ) -> MpcEngineResult<ShareData> {
+        HoneyBadgerMpcEngine::divide_fixed_by_constant_async(self, ty, share_bytes, divisor_scaled)
+            .await
+            .map_mpc_engine_operation("async_divide_fixed_by_constant")
+    }
+
+    async fn batch_multiply_share_async(
+        &self,
+        ty: ShareType,
+        pairs: &[(Vec<u8>, Vec<u8>)],
+    ) -> MpcEngineResult<Vec<ShareData>> {
+        HoneyBadgerMpcEngine::batch_multiply_share_async(self, ty, pairs)
+            .await
+            .map_mpc_engine_operation("async_batch_multiply_share")
+    }
+
     async fn open_share_async(
         &self,
         ty: ShareType,
@@ -164,6 +248,22 @@ where
             .map_mpc_engine_operation("async_random_share")
     }
 
+    async fn random_integer_share_async(&self, ty: ShareType) -> MpcEngineResult<ShareData> {
+        self.random_integer_share_async_impl(ty)
+            .await
+            .map_mpc_engine_operation("async_random_integer_share")
+    }
+
+    async fn open_share_as_field_async(
+        &self,
+        ty: ShareType,
+        share_bytes: &[u8],
+    ) -> MpcEngineResult<Vec<u8>> {
+        self.open_share_as_field_async_impl(ty, share_bytes)
+            .await
+            .map_mpc_engine_operation("async_open_share_as_field")
+    }
+
     async fn open_share_in_exp_async(
         &self,
         ty: ShareType,
@@ -173,6 +273,34 @@ where
         self.open_share_in_exp_async_impl(ty, share_bytes, generator_bytes)
             .await
             .map_mpc_engine_operation("async_open_share_in_exp")
+    }
+
+    async fn open_share_in_exp_group_async(
+        &self,
+        group: MpcExponentGroup,
+        ty: ShareType,
+        share_bytes: &[u8],
+        generator_bytes: &[u8],
+    ) -> MpcEngineResult<Vec<u8>> {
+        if !self.supports_exponent_group(group) {
+            return Err(MpcEngineError::operation_failed(
+                "async_open_share_in_exp_group",
+                group.unsupported_error(self.protocol_name()),
+            ));
+        }
+
+        let result = match group {
+            MpcExponentGroup::Bls12381G2 => {
+                self.open_share_in_exp_bls12381_g2_async_impl(share_bytes, generator_bytes)
+                    .await
+            }
+            _ => {
+                self.open_share_in_exp_async_impl(ty, share_bytes, generator_bytes)
+                    .await
+            }
+        };
+
+        result.map_mpc_engine_operation("async_open_share_in_exp_group")
     }
 }
 

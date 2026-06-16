@@ -1,0 +1,124 @@
+# Bitwise AND/OR/XOR and logical right shift on two secret integers.
+#
+# Bit-decompose each operand once (see mpc_bit_decomposition), apply the gate
+# per bit (AND = a*b, OR = a+b-ab, XOR = a+b-2ab), and recombine. Right shift
+# by a public k is truncation (drop the low k bits). Results are checked
+# against the language clear bitwise operators. kappa is small for speed.
+
+def random_bit() -> Share:
+  while True:
+    var r = Share.random_field()
+    var r_squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(r_squared):
+      continue
+    var r_prime_inv = Field.inverse(Field.sqrt(r_squared))
+    var two_inv = Field.inverse(Field.from_int(2))
+    var c = Share.mul_field(r, r_prime_inv)
+    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
+    return Share.retag(a, 1)
+
+def pow2(i: int64) -> int64:
+  var p = 1
+  var k = 0
+  while k < i:
+    p = p * 2
+    k = k + 1
+  return p
+
+def combine_bits(bits: list[Share], n: int64) -> Share:
+  var acc = Share.mul_scalar(bits[0], 1)
+  var i = 1
+  while i < n:
+    acc = Share.add(acc, Share.mul_scalar(bits[i], pow2(i)))
+    i = i + 1
+  return Share.retag(acc, 64)
+
+# --- bit-decomposition (see mpc_bit_decomposition) ---
+def bit_decompose(a: Share, l: int64, kappa: int64) -> list[Share]:
+  var m = l + kappa
+  var n = m + 1
+  var rbits: list[Share] = []
+  var i = 0
+  while i < m:
+    rbits.append(random_bit())
+    i = i + 1
+  while i < n:
+    rbits.append(Share.from_clear_int(0, 1))
+    i = i + 1
+  var r = combine_bits(rbits, n)
+  var c = Share.open(Share.retag(Share.add(Share.retag(a, 64), r), 64))
+  var abits: list[Share] = []
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < n:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    var xorrb = Share.sub(Share.add(ri, borrow), Share.mul_scalar(rb, 2))
+    var ai = borrow
+    var nb = borrow
+    if ci == 0:
+      ai = xorrb
+      nb = Share.sub(Share.add(ri, borrow), rb)
+    else:
+      ai = Share.sub(Share.from_clear_int(1, 1), xorrb)
+      nb = rb
+    abits.append(Share.retag(ai, 1))
+    borrow = Share.retag(nb, 1)
+    i = i + 1
+  return abits
+
+# bitwise ops on two l-bit secrets: decompose each, gate per bit, recombine.
+def band(ab: list[Share], bb: list[Share], l: int64) -> Share:
+  var bits: list[Share] = []
+  var i = 0
+  while i < l:
+    bits.append(Share.mul(ab[i], bb[i]))                                  # a_i AND b_i
+    i = i + 1
+  return combine_bits(bits, l)
+
+def bor(ab: list[Share], bb: list[Share], l: int64) -> Share:
+  var bits: list[Share] = []
+  var i = 0
+  while i < l:
+    var prod = Share.mul(ab[i], bb[i])
+    bits.append(Share.sub(Share.add(ab[i], bb[i]), prod))                 # a + b - ab
+    i = i + 1
+  return combine_bits(bits, l)
+
+def bxor(ab: list[Share], bb: list[Share], l: int64) -> Share:
+  var bits: list[Share] = []
+  var i = 0
+  while i < l:
+    var prod = Share.mul(ab[i], bb[i])
+    bits.append(Share.sub(Share.add(ab[i], bb[i]), Share.mul_scalar(prod, 2)))  # a + b - 2ab
+    i = i + 1
+  return combine_bits(bits, l)
+
+# logical right shift by public k = truncation = floor(a / 2^k): drop low k bits.
+def shr_bits(ab: list[Share], k: int64, l: int64) -> Share:
+  var bits: list[Share] = []
+  var i = k
+  while i < l:
+    bits.append(ab[i])
+    i = i + 1
+  return combine_bits(bits, l - k)
+
+def main() -> int64:
+  var l = 8
+  var kappa = 8
+  var av = 22
+  var bv = 13
+  var a = Share.from_clear_int(av, l)
+  var b = Share.from_clear_int(bv, l)
+  var ab = bit_decompose(a, l, kappa)
+  var bb = bit_decompose(b, l, kappa)
+  var rand = Share.open(Share.retag(band(ab, bb, l), 64))
+  var ror = Share.open(Share.retag(bor(ab, bb, l), 64))
+  var rxor = Share.open(Share.retag(bxor(ab, bb, l), 64))
+  var rshr = Share.open(Share.retag(shr_bits(ab, 2, l), 64))
+  assert rand == (av and bv), "AND"
+  assert ror == (av or bv), "OR"
+  assert rxor == (av xor bv), "XOR"
+  assert rshr == (av shr 2), "SHR"
+  return 1
