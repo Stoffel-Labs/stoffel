@@ -721,7 +721,9 @@ impl CodeGenerator {
 
     fn record_client_io_call(&mut self, function_name: &str, arguments: &[AstNode]) {
         match function_name {
-            "ClientStore.take_share" | "ClientStore.take_share_fixed" => {
+            "ClientStore.take_share"
+            | "ClientStore.take_share_fixed"
+            | "ClientStore.take_share_bool" => {
                 // The client slot may be a literal, a loop variable (records every
                 // client in the loop range), or a clear-int constant.
                 let Some(client_slots) = self.input_ordinals_for_node(arguments.first()) else {
@@ -732,6 +734,9 @@ impl CodeGenerator {
                 };
                 let share_type = if function_name == "ClientStore.take_share_fixed" {
                     ShareType::default_secret_fixed_point()
+                } else if function_name == "ClientStore.take_share_bool" {
+                    // `secret bool` is a 1-bit secret integer share.
+                    ShareType::try_secret_int(1).unwrap_or_else(|_| ShareType::default_secret_int())
                 } else {
                     ShareType::default_secret_int()
                 };

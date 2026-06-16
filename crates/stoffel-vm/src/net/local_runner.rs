@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ark_bls12_381::{Fr, G1Projective};
-use ark_ff::PrimeField;
+use ark_ff::{BigInteger, PrimeField};
 use stoffel_mpc_coordinator::off_chain::{
     node_rpc::NodeRPCClient as OffChainNodeRPCClient, InputAssignment, InputSlotAssignment,
     OffChainCoordinatorClient, OffChainCoordinatorServer,
@@ -72,6 +72,8 @@ pub struct LocalCoordinatorRunner {
     auth_token: String,
     client_inputs: Vec<LocalClientInput>,
     expected_clients: Option<usize>,
+    /// Per-client number of output values to receive via `send_to_client`.
+    client_output_counts: std::collections::HashMap<u64, u64>,
 }
 
 impl LocalCoordinatorRunner {
@@ -93,6 +95,7 @@ impl LocalCoordinatorRunner {
                 auth_token: DEFAULT_AUTH_TOKEN.to_owned(),
                 client_inputs: Vec::new(),
                 expected_clients: None,
+                client_output_counts: std::collections::HashMap::new(),
             },
         }
     }
@@ -114,7 +117,10 @@ impl LocalCoordinatorRunner {
             .map(|identity| public_key_from_cert(&identity.cert_der))
             .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?;
         let known_client_inputs = self.known_client_inputs();
-        let local_clients = write_client_identities(temp.path(), &known_client_inputs)?;
+        let mut local_clients = write_client_identities(temp.path(), &known_client_inputs)?;
+        for client in local_clients.iter_mut() {
+            client.output_count = self.output_count_for_slot(client.client_slot);
+        }
         let client_bindings = local_clients
             .iter()
             .map(|client| Ok((client.client_slot, public_key_from_cert(&client.cert_der)?)))
@@ -231,8 +237,11 @@ impl LocalCoordinatorRunner {
                 .await
             }
         };
+        let mut client_outputs = Vec::new();
         for result in client_results {
-            result?;
+            if let Some(record) = result? {
+                client_outputs.push(record);
+            }
         }
 
         let outputs = futures::future::join_all(
@@ -265,6 +274,7 @@ impl LocalCoordinatorRunner {
         Ok(LocalCoordinatorRunOutput {
             combined_output,
             party_outputs,
+            client_outputs,
         })
     }
 
@@ -411,6 +421,22 @@ impl LocalCoordinatorRunner {
             }
         }
         Ok(())
+    }
+
+    /// Number of output values a client receives via `send_to_client`: an
+    /// explicit override if provided, else the statically recorded count from
+    /// the program's client-IO manifest.
+    fn output_count_for_slot(&self, client_slot: u64) -> u64 {
+        if let Some(count) = self.client_output_counts.get(&client_slot) {
+            return *count;
+        }
+        self.binary
+            .client_io_manifest
+            .clients
+            .iter()
+            .find(|schema| schema.client_slot == client_slot)
+            .map(|schema| schema.outputs.len() as u64)
+            .unwrap_or(0)
     }
 
     fn known_client_inputs(&self) -> Vec<LocalClientInput> {
@@ -682,6 +708,14 @@ impl LocalCoordinatorRunnerBuilder {
         self
     }
 
+    /// Override the number of output values a client receives via
+    /// `send_to_client`. When unset, the count is taken from the program's
+    /// client-IO manifest (the statically recorded output schema).
+    pub fn client_output_count(mut self, client_slot: u64, count: u64) -> Self {
+        self.runner.client_output_counts.insert(client_slot, count);
+        self
+    }
+
     pub fn build(self) -> LocalCoordinatorRunnerResult<LocalCoordinatorRunner> {
         self.runner.validate()?;
         Ok(self.runner)
@@ -714,10 +748,19 @@ impl LocalClientInput {
     }
 }
 
+/// A client's reconstructed output values, received via `send_to_client` and
+/// reconstructed by the off-chain client (not a public reveal to the nodes).
+#[derive(Debug, Clone)]
+pub struct ClientOutputRecord {
+    pub client_slot: u64,
+    pub values: Vec<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalCoordinatorRunOutput {
     pub combined_output: String,
     pub party_outputs: Vec<LocalPartyOutput>,
+    pub client_outputs: Vec<ClientOutputRecord>,
 }
 
 impl LocalCoordinatorRunOutput {
@@ -796,6 +839,8 @@ struct LocalClientIdentity {
     cert_der: Vec<u8>,
     reserved_index_start: u64,
     client_slot: u64,
+    /// Number of output values this client receives via `send_to_client`.
+    output_count: u64,
 }
 
 async fn run_honeybadger_offchain_client(
@@ -805,7 +850,7 @@ async fn run_honeybadger_offchain_client(
     timestamp: u64,
     threshold: usize,
     timeout: Duration,
-) -> LocalCoordinatorRunnerResult<()> {
+) -> LocalCoordinatorRunnerResult<Option<ClientOutputRecord>> {
     tokio::time::timeout(timeout, async move {
         eprintln!(
             "[local-client {}] starting off-chain coordinator input submission",
@@ -827,7 +872,7 @@ async fn run_honeybadger_offchain_client(
                 coord_port,
                 timestamp,
                 threshold as u64,
-                0,
+                client.output_count,
                 client.cert_der.clone(),
                 std::fs::read(&client.key_path)?,
             )
@@ -874,10 +919,39 @@ async fn run_honeybadger_offchain_client(
             "[local-client {}] input submission complete",
             client.client_slot
         );
-        Ok(())
+
+        if client.output_count == 0 {
+            return Ok(None);
+        }
+
+        eprintln!(
+            "[local-client {}] obtaining {} client output value(s)",
+            client.client_slot, client.output_count
+        );
+        let output_values: Vec<Fr> = coord.obtain_outputs().await?;
+        eprintln!(
+            "[local-client {}] received {} client output value(s)",
+            client.client_slot,
+            output_values.len()
+        );
+        let values = output_values.iter().map(fr_to_u64).collect::<Vec<_>>();
+        Ok(Some(ClientOutputRecord {
+            client_slot: client.client_slot,
+            values,
+        }))
     })
     .await
     .map_err(|_| LocalCoordinatorRunnerError::Timeout(timeout))?
+}
+
+/// Reduce a field element to its low 64 bits (exact for the small values —
+/// bits, bytes — that client outputs carry in these examples).
+fn fr_to_u64(value: &Fr) -> u64 {
+    let bytes = value.into_bigint().to_bytes_le();
+    let mut buf = [0u8; 8];
+    let n = bytes.len().min(8);
+    buf[..n].copy_from_slice(&bytes[..n]);
+    u64::from_le_bytes(buf)
 }
 
 async fn run_avss_offchain_client(
@@ -887,7 +961,7 @@ async fn run_avss_offchain_client(
     timestamp: u64,
     threshold: usize,
     timeout: Duration,
-) -> LocalCoordinatorRunnerResult<()> {
+) -> LocalCoordinatorRunnerResult<Option<ClientOutputRecord>> {
     tokio::time::timeout(timeout, async move {
         eprintln!(
             "[local-client {}] starting AVSS off-chain coordinator input submission",
@@ -951,7 +1025,9 @@ async fn run_avss_offchain_client(
             "[local-client {}] AVSS input submission complete",
             client.client_slot
         );
-        Ok(())
+        // AVSS client-output reconstruction is not yet wired into the local
+        // runner; HoneyBadger is the path exercised by the client-IO examples.
+        Ok(None)
     })
     .await
     .map_err(|_| LocalCoordinatorRunnerError::Timeout(timeout))?
@@ -1172,6 +1248,7 @@ fn write_client_identities(
                 key_path,
                 cert_der,
                 reserved_index_start,
+                output_count: 0,
             })
         })
         .collect()

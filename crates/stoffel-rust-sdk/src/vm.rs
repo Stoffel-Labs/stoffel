@@ -95,11 +95,34 @@ pub(crate) struct LocalExecutionOptions {
     pub(crate) timeout: Option<Duration>,
 }
 
+/// A client's reconstructed output values, received via `send_to_client` and
+/// reconstructed by the off-chain client — the actual client-side result, not
+/// a public reveal to the compute nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalClientOutput {
+    pub client_slot: u64,
+    pub values: Vec<u64>,
+}
+
 pub(crate) async fn execute_local_with_options(
     runtime: &StoffelRuntime,
     function_name: &str,
     options: LocalExecutionOptions,
 ) -> Result<Vec<Value>> {
+    let (returned, _program_output, _client_outputs) =
+        execute_local_capturing_with_options(runtime, function_name, options).await?;
+    Ok(returned)
+}
+
+/// Like [`execute_local_with_options`] but also returns the program's printed
+/// output (everything the program emitted via `print`, with the VM's internal
+/// `Program returned:` markers stripped). Used to surface client-facing results
+/// that a returned aggregate (e.g. a `list`) only exposes as an opaque handle.
+pub(crate) async fn execute_local_capturing_with_options(
+    runtime: &StoffelRuntime,
+    function_name: &str,
+    options: LocalExecutionOptions,
+) -> Result<(Vec<Value>, String, Vec<LocalClientOutput>)> {
     if runtime.program().function(function_name).is_none() {
         return Err(Error::FunctionNotFound(function_name.to_owned()));
     }
@@ -173,7 +196,8 @@ pub(crate) async fn execute_local_with_options(
         .await
         .map_err(|error| Error::Computation(error.to_string()))?;
 
-    forward_local_program_output(&output);
+    let program_output = local_program_output(&output);
+    print!("{program_output}");
 
     let returned = output.consistent_returned_values().map_err(|error| {
         Error::Computation(format!(
@@ -181,20 +205,28 @@ pub(crate) async fn execute_local_with_options(
             output.combined_output
         ))
     })?;
-    returned
+    let values = returned
         .iter()
         .map(|value| parse_runner_return_value(value))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    let client_outputs = output
+        .client_outputs
+        .iter()
+        .map(|record| LocalClientOutput {
+            client_slot: record.client_slot,
+            values: record.values.clone(),
+        })
+        .collect();
+    Ok((values, program_output, client_outputs))
 }
 
-fn forward_local_program_output(output: &stoffel_vm::net::LocalCoordinatorRunOutput) {
+/// The first party's printed program output, with `Program returned:` markers
+/// removed. Empty when no party produced output.
+fn local_program_output(output: &stoffel_vm::net::LocalCoordinatorRunOutput) -> String {
     let Some(first_party) = output.party_outputs.first() else {
-        return;
+        return String::new();
     };
-    let program_output = local_program_output_without_return_markers(&first_party.stdout);
-    if !program_output.is_empty() {
-        print!("{program_output}");
-    }
+    local_program_output_without_return_markers(&first_party.stdout)
 }
 
 fn local_program_output_without_return_markers(stdout: &str) -> String {

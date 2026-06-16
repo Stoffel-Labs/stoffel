@@ -427,6 +427,50 @@ impl Stoffel {
         vm::execute_local(&runtime, &entry).await
     }
 
+    /// Execute `main` locally and also return the program's printed output.
+    ///
+    /// Useful when the result a client cares about is emitted with `print`
+    /// (e.g. a 16-byte cipher block) rather than returned as a scalar — a
+    /// returned aggregate such as a `list` only comes back as an opaque handle.
+    pub async fn execute_local_capturing_output(self) -> Result<(Vec<Value>, String)> {
+        self.execute_local_function_capturing_output("main").await
+    }
+
+    /// Execute a named function locally and also return its printed output.
+    #[tracing::instrument(skip_all, fields(function = name))]
+    pub async fn execute_local_function_capturing_output(
+        self,
+        name: &str,
+    ) -> Result<(Vec<Value>, String)> {
+        let (runtime, entry) = self.build_for_local_execution(name)?;
+        let (values, program_output, _client_outputs) =
+            vm::execute_local_capturing_with_options(&runtime, &entry, Default::default()).await?;
+        Ok((values, program_output))
+    }
+
+    /// Execute `main` locally and return the **client outputs** delivered via
+    /// `send_to_client`, reconstructed by the off-chain client (alongside the
+    /// VM return values). This is the value a client actually receives — not a
+    /// public reveal to the compute nodes.
+    pub async fn execute_local_capturing_client_outputs(
+        self,
+    ) -> Result<(Vec<Value>, Vec<vm::LocalClientOutput>)> {
+        self.execute_local_function_capturing_client_outputs("main")
+            .await
+    }
+
+    /// Named-function variant of [`Self::execute_local_capturing_client_outputs`].
+    #[tracing::instrument(skip_all, fields(function = name))]
+    pub async fn execute_local_function_capturing_client_outputs(
+        self,
+        name: &str,
+    ) -> Result<(Vec<Value>, Vec<vm::LocalClientOutput>)> {
+        let (runtime, entry) = self.build_for_local_execution(name)?;
+        let (values, _program_output, client_outputs) =
+            vm::execute_local_capturing_with_options(&runtime, &entry, Default::default()).await?;
+        Ok((values, client_outputs))
+    }
+
     /// Execute locally using real MPC nodes with an explicit coordinator timeout.
     #[tracing::instrument(skip_all)]
     pub async fn execute_local_with_timeout(self, timeout: Duration) -> Result<Vec<Value>> {
