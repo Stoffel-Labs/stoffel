@@ -131,6 +131,7 @@ pub struct Stoffel {
     inputs: Vec<(String, Value)>,
     client_inputs: Vec<(u64, Vec<Value>)>,
     expected_clients: Option<usize>,
+    client_output_counts: std::collections::HashMap<u64, u64>,
     compiler_options: CompilationOptions,
 }
 
@@ -312,6 +313,16 @@ impl Stoffel {
         self
     }
 
+    /// Provide the number of output values a client receives via
+    /// `send_to_client`, for the local simulator. This is a **fallback**: when
+    /// the program statically declares the client's outputs (recorded in the
+    /// client-IO manifest), that count is used instead. Needed only when the
+    /// program sends to a slot the compiler cannot resolve statically.
+    pub fn client_output_count(mut self, client_slot: u64, count: u64) -> Self {
+        self.client_output_counts.insert(client_slot, count);
+        self
+    }
+
     /// Attach explicit network configuration.
     pub fn network_config(mut self, config: NetworkConfig) -> Self {
         self.network_config = Some(config);
@@ -390,7 +401,7 @@ impl Stoffel {
         if let Some(config) = &self.network_config {
             validate_program_network_config(&program, config)?;
         }
-        Ok(StoffelRuntime::new(
+        let mut runtime = StoffelRuntime::new(
             program,
             Some(mpc_config),
             self.network_config,
@@ -398,7 +409,9 @@ impl Stoffel {
             self.inputs,
             self.client_inputs,
             self.expected_clients,
-        ))
+        );
+        runtime.set_client_output_counts(self.client_output_counts);
+        Ok(runtime)
     }
 
     /// Validate attached coordinator client inputs against compiled program metadata.
@@ -539,6 +552,7 @@ impl Stoffel {
             inputs: Vec::new(),
             client_inputs: Vec::new(),
             expected_clients: None,
+            client_output_counts: std::collections::HashMap::new(),
             compiler_options: CompilationOptions::default(),
         }
     }

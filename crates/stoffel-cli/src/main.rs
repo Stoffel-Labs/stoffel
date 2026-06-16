@@ -308,6 +308,11 @@ struct RunArgs {
         allow_hyphen_values = true
     )]
     expected_output_clients: Option<usize>,
+    /// Number of output values a client receives via `send_to_client`
+    /// (`SLOT=COUNT`), for the local simulator. Fallback used only when the
+    /// program does not statically declare the client's outputs. Repeatable.
+    #[arg(long = "client-output-count", value_name = "SLOT=COUNT", value_parser = parse_client_output_count_arg)]
+    client_output_counts: Vec<(u64, u64)>,
     /// Run on the local MPC simulator. This is the default unless --network or --config is set.
     #[arg(long)]
     local: bool,
@@ -879,6 +884,20 @@ async fn run(args: RunArgs) -> Result<()> {
     let mut builder = apply_run_inputs(run_source.builder, &inputs, &client_inputs)?;
     if let Some(expected_output_clients) = args.expected_output_clients {
         builder = builder.expected_output_clients(expected_output_clients);
+    }
+    // Stoffel.toml `[mpc.client_output_counts]` fallback (the --client-output-count
+    // flag below overrides it, and statically declared program outputs win at run).
+    if let Ok(project) = Project::discover(build.path.as_deref()) {
+        if let Some(counts) = &project.config().mpc.client_output_counts {
+            for (slot, count) in counts {
+                if let Ok(slot) = slot.parse::<u64>() {
+                    builder = builder.client_output_count(slot, *count);
+                }
+            }
+        }
+    }
+    for (slot, count) in &args.client_output_counts {
+        builder = builder.client_output_count(*slot, *count);
     }
     if let Some(path) = args.runner {
         builder = builder.local_runner_path(path);
@@ -2812,6 +2831,21 @@ fn parse_u64_arg(raw: &str) -> std::result::Result<u64, String> {
     }
     raw.parse::<u64>()
         .map_err(|_| format!("invalid value '{raw}'; use 0 or a positive whole number"))
+}
+
+fn parse_client_output_count_arg(raw: &str) -> std::result::Result<(u64, u64), String> {
+    let (slot, count) = raw
+        .split_once('=')
+        .ok_or_else(|| format!("expected SLOT=COUNT, got '{raw}'"))?;
+    let slot = slot
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("invalid client slot '{slot}'; use a whole number"))?;
+    let count = count
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("invalid output count '{count}'; use a whole number"))?;
+    Ok((slot, count))
 }
 
 fn parse_positive_usize_arg(raw: &str) -> std::result::Result<usize, String> {

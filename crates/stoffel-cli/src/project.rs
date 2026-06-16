@@ -49,6 +49,10 @@ pub struct MpcConfig {
     pub parties: Option<usize>,
     pub threshold: Option<usize>,
     pub instance_id: Option<u64>,
+    /// Per-client output value counts for the local simulator, keyed by client
+    /// slot (e.g. `[mpc.client_output_counts]` with `0 = 128`). A fallback used
+    /// only when the program does not statically declare the client's outputs.
+    pub client_output_counts: Option<std::collections::HashMap<String, u64>>,
 }
 
 impl Default for MpcConfig {
@@ -59,6 +63,7 @@ impl Default for MpcConfig {
             parties: Some(5),
             threshold: Some(1),
             instance_id: None,
+            client_output_counts: None,
         }
     }
 }

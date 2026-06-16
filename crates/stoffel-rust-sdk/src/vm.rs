@@ -187,6 +187,9 @@ pub(crate) async fn execute_local_capturing_with_options(
     if let Some(expected_clients) = runtime.configured_expected_clients() {
         runner = runner.expected_output_clients(expected_clients);
     }
+    for (client_slot, count) in runtime.client_output_counts() {
+        runner = runner.client_output_count(*client_slot, *count);
+    }
     runner = runner.client_inputs(local_client_inputs);
 
     let output = runner

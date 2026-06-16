@@ -37,6 +37,10 @@ pub struct StoffelRuntime {
     inputs: Vec<(String, Value)>,
     client_inputs: Vec<(u64, Vec<Value>)>,
     expected_clients: Option<usize>,
+    /// Developer-supplied per-client output counts, used by the local runner as
+    /// a fallback only when the program does not statically declare outputs for
+    /// a client (otherwise the manifest count wins).
+    client_output_counts: std::collections::HashMap<u64, u64>,
 }
 
 impl StoffelRuntime {
@@ -57,7 +61,21 @@ impl StoffelRuntime {
             inputs,
             client_inputs,
             expected_clients,
+            client_output_counts: std::collections::HashMap::new(),
         }
+    }
+
+    /// Set developer-supplied per-client output counts (CLI / Stoffel.toml).
+    pub(crate) fn set_client_output_counts(
+        &mut self,
+        counts: std::collections::HashMap<u64, u64>,
+    ) {
+        self.client_output_counts = counts;
+    }
+
+    /// Developer-supplied per-client output counts (local-runner fallback).
+    pub(crate) fn client_output_counts(&self) -> &std::collections::HashMap<u64, u64> {
+        &self.client_output_counts
     }
 
     pub fn program(&self) -> &Program {
