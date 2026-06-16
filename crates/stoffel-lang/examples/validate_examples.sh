@@ -10,6 +10,7 @@ NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://githu
 OUT_DIR="${STOFFEL_EXAMPLES_OUT:-${EXAMPLES_DIR}/dist}"
 RUN_DOCKER_MPC=0
 RUN_HOST_MPC=0
+RUN_LOCAL_MPC=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -19,12 +20,18 @@ for arg in "$@"; do
     --host-mpc)
       RUN_HOST_MPC=1
       ;;
+    --local-mpc)
+      RUN_LOCAL_MPC=1
+      ;;
     -h|--help)
       cat <<'USAGE'
-Usage: examples/validate_examples.sh [--docker-mpc] [--host-mpc]
+Usage: examples/validate_examples.sh [--docker-mpc] [--host-mpc] [--local-mpc]
 
 Compiles every examples/**/main.stfl program to examples/dist.
 Runs local-only examples through StoffelVM.
+--local-mpc runs every example project (each dir with a Stoffel.toml) through
+  `stoffel run` against the in-process local 5-party simulator, using the
+  `# run-args:` header in each main.stfl, and reports PASS/FAIL/TIMEOUT.
 Optionally runs an MPC smoke test either through Docker Compose or through
 five local StoffelVM host processes.
 
@@ -38,6 +45,7 @@ Environment:
   STOFFEL_PROGRAM_NAME   Compiled binary to run in docker compose
   STOFFEL_MPC_BACKEND    honeybadger or avss
   STOFFEL_MPC_CURVE      bls12-381, secp256k1, p-256, etc.
+  STOFFEL_LOCAL_MPC_TIMEOUT  per-example timeout in seconds for --local-mpc (default 120)
 USAGE
       exit 0
       ;;
@@ -207,6 +215,67 @@ fi
 if [ "$RUN_HOST_MPC" -eq 1 ]; then
   echo "Running host-process MPC example..."
   "${EXAMPLES_DIR}/run_mpc_local.sh"
+fi
+
+LOCAL_MPC_FAILED=0
+if [ "$RUN_LOCAL_MPC" -eq 1 ]; then
+  echo "Running every example project through 'stoffel run' (local 5-party simulator)..."
+  CLI="${WORKSPACE_DIR}/target/debug/stoffel"
+  if [ ! -x "$CLI" ]; then
+    echo "Building stoffel CLI..."
+    cargo build --quiet --manifest-path "${WORKSPACE_DIR}/Cargo.toml" -p stoffel-cli
+  fi
+  CAP="${STOFFEL_LOCAL_MPC_TIMEOUT:-120}"
+  lm_pass=0
+  lm_fail=0
+  lm_timeout=0
+  lm_failures=()
+  while IFS= read -r toml; do
+    proj="$(dirname "$toml")"
+    rel="${proj#${EXAMPLES_DIR}/}"
+    args=""
+    if [ -f "${proj}/main.stfl" ]; then
+      hdr="$(grep -m1 '^# run-args:' "${proj}/main.stfl" || true)"
+      args="${hdr#\# run-args:}"
+    fi
+    log="$(mktemp "${TMPDIR:-/tmp}/stoffel-localmpc.XXXXXX")"
+    # shellcheck disable=SC2086
+    ( "$CLI" run "$proj" $args >"$log" 2>&1; echo "RC=$?" >>"$log" ) &
+    waited=0
+    while [ "$waited" -lt "$CAP" ]; do
+      grep -q '^RC=' "$log" 2>/dev/null && break
+      sleep 2
+      waited=$((waited + 2))
+    done
+    if grep -q '^RC=' "$log" 2>/dev/null; then
+      rc="$(grep '^RC=' "$log" | tail -1 | cut -d= -f2)"
+      if [ "$rc" = "0" ]; then
+        lm_pass=$((lm_pass + 1))
+        echo "  PASS    ${rel} (${waited}s)"
+      else
+        lm_fail=$((lm_fail + 1))
+        lm_failures+=("FAIL    ${rel} (rc=${rc})")
+        echo "  FAIL    ${rel} (rc=${rc})"
+      fi
+    else
+      lm_timeout=$((lm_timeout + 1))
+      lm_failures+=("TIMEOUT ${rel} (>${CAP}s)")
+      pkill -f "$CLI run $proj" 2>/dev/null || true
+      echo "  TIMEOUT ${rel} (>${CAP}s)"
+    fi
+    rm -f "$log"
+  done < <(find "$EXAMPLES_DIR" -name Stoffel.toml | sort)
+  echo "Local MPC run summary: PASS=${lm_pass} FAIL=${lm_fail} TIMEOUT=${lm_timeout}"
+  if [ "${#lm_failures[@]}" -gt 0 ]; then
+    echo "Examples that did not pass:"
+    printf '  %s\n' "${lm_failures[@]}"
+    LOCAL_MPC_FAILED=1
+  fi
+fi
+
+if [ "$LOCAL_MPC_FAILED" -ne 0 ]; then
+  echo "Example validation FAILED (see local MPC failures above)."
+  exit 1
 fi
 
 echo "Example validation complete."
