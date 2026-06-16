@@ -47,5 +47,6 @@ pub use crate::types::{
     GeneratedProgramManifest, GroupElement, MaskIndex, PartyId, PublicKey, Round, Share,
     TypedClientInputs, TypedClientOutputs, Value, ValueSummary,
 };
+pub use crate::vm::LocalClientOutput;
 pub use crate::FunctionType;
 pub use crate::Stoffel;

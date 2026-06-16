@@ -111,6 +111,7 @@ pub use types::{
     GeneratedProgramManifest, GroupElement, MaskIndex, PartyId, PublicKey, Round, Share,
     TypedClientInputs, TypedClientOutputs, Value, ValueSummary,
 };
+pub use vm::LocalClientOutput;
 
 #[derive(Debug, Clone)]
 enum ProgramSource {

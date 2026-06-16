@@ -32,17 +32,6 @@ fn bits_lsb_first(hex: &str) -> Vec<bool> {
     bits
 }
 
-/// Reassemble a 16-byte block from 128 client-output bits (LSB-first per byte).
-fn block_from_bits(bits: &[u64]) -> Vec<u8> {
-    let mut bytes = vec![0u8; 16];
-    for (idx, bit) in bits.iter().enumerate() {
-        if *bit != 0 {
-            bytes[idx / 8] |= 1 << (idx % 8);
-        }
-    }
-    bytes
-}
-
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> stoffel::Result<()> {
     let plaintext = bits_lsb_first(PLAINTEXT_HEX);
@@ -62,7 +51,10 @@ async fn main() -> stoffel::Result<()> {
         .await?;
 
     // The ciphertext is what client 0 actually RECEIVES via send_to_client,
-    // reconstructed off the output shares — never revealed to the nodes.
+    // reconstructed off the output shares — never revealed to the nodes. The
+    // SDK decodes each output through the program's client-IO manifest, so the
+    // 128 secret bits come back as typed `Value::Bool`s; `bytes()` packs them
+    // LSB-first back into the 16-byte block.
     let client0 = client_outputs
         .iter()
         .find(|o| o.client_slot == 0)
@@ -73,7 +65,7 @@ async fn main() -> stoffel::Result<()> {
         "expected 128 output bits, got {}",
         client0.values.len()
     );
-    let bytes = block_from_bits(&client0.values);
+    let bytes = client0.bytes();
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
 
     println!("client-received ciphertext = {hex}");
