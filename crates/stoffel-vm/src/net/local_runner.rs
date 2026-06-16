@@ -427,15 +427,25 @@ impl LocalCoordinatorRunner {
     /// explicit override if provided, else the statically recorded count from
     /// the program's client-IO manifest.
     fn output_count_for_slot(&self, client_slot: u64) -> u64 {
-        if let Some(count) = self.client_output_counts.get(&client_slot) {
-            return *count;
-        }
-        self.binary
+        // Prefer the statically recorded output count from the client-IO
+        // manifest. Only when the program does not statically declare outputs
+        // for this client (e.g. it sends to a parameterized slot) do we fall
+        // back to a developer-provided count (SDK builder / `stoffel run
+        // --outputs` / Stoffel.toml), threaded in via `client_output_counts`.
+        let manifest_count = self
+            .binary
             .client_io_manifest
             .clients
             .iter()
             .find(|schema| schema.client_slot == client_slot)
             .map(|schema| schema.outputs.len() as u64)
+            .unwrap_or(0);
+        if manifest_count > 0 {
+            return manifest_count;
+        }
+        self.client_output_counts
+            .get(&client_slot)
+            .copied()
             .unwrap_or(0)
     }
 

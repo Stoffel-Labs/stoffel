@@ -665,19 +665,6 @@ def reveal_block(block: list[list[secret bool]]) -> list[int64]:
 # `slot` fed in at position `idx`; the value never appears in the clear to any
 # MPC party.
 
-def take_client_byte(client_slot: int64, byte_index: int64) -> list[secret bool]:
-  var byte_bits: list[secret bool] = []
-  for bit_index in 0..8:
-    var bit: secret bool = ClientStore.take_share_bool(client_slot, byte_index * 8 + bit_index)
-    byte_bits.append(bit)
-  return byte_bits
-
-def take_client_block(client_slot: int64) -> list[list[secret bool]]:
-  var block: list[list[secret bool]] = []
-  for byte_index in 0..16:
-    block.append(take_client_byte(client_slot, byte_index))
-  return block
-
 # --- AES-128 decryption (inverse cipher) ----------------------------------
 #
 # The forward S-box is `aes_sbox(x) = Affine(GFInverse(x))`. The AES affine map
@@ -797,12 +784,6 @@ def public_block(values: list[int64]) -> list[list[secret bool]]:
   return block
 
 # Read the `block_index`-th 16-byte block of a client's secret input (slot).
-def take_client_block_n(client_slot: int64, block_index: int64) -> list[list[secret bool]]:
-  var block: list[list[secret bool]] = []
-  for byte_index in 0..16:
-    block.append(take_client_byte(client_slot, block_index * 16 + byte_index))
-  return block
-
 # --- CTR -------------------------------------------------------------------
 # keystream_i = AES_enc(counter_i, key);  out_i = data_i XOR keystream_i.
 # Encryption and decryption are the same operation, so one function serves both.

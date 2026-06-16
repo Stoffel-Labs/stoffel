@@ -262,6 +262,20 @@ impl CodeGenerator {
         }
     }
 
+    /// Warn that a client-I/O call could not be recorded in the client-IO
+    /// manifest because its client slot is not statically resolvable (e.g. a
+    /// function parameter rather than a literal/loop-variable/constant). Such
+    /// calls still work at runtime, but generated bindings and the local
+    /// runner's output-count detection will be incomplete for that client.
+    fn warn_unrecorded_client_io(function_name: &str, kind: &str) {
+        eprintln!(
+            "warning: client {kind} call `{function_name}` uses a client slot that \
+             cannot be resolved statically; it is omitted from the client-IO manifest, \
+             so generated bindings and local-runner output-count detection will be \
+             incomplete for it. Use a literal, loop-variable, or constant client slot."
+        );
+    }
+
     /// Statically known element count of a `Share.batch_mul` operand, when the
     /// compiler can determine it: a list literal, or a list variable whose
     /// secret-share appends were tracked (e.g. built in a literal-bound loop).
@@ -727,6 +741,7 @@ impl CodeGenerator {
                 // The client slot may be a literal, a loop variable (records every
                 // client in the loop range), or a clear-int constant.
                 let Some(client_slots) = self.input_ordinals_for_node(arguments.first()) else {
+                    Self::warn_unrecorded_client_io(function_name, "input");
                     return;
                 };
                 let Some(input_ordinals) = self.input_ordinals_for_node(arguments.get(1)) else {
@@ -753,6 +768,7 @@ impl CodeGenerator {
             }
             "MpcOutput.send_to_client" => {
                 let Some(client_slots) = self.input_ordinals_for_node(arguments.first()) else {
+                    Self::warn_unrecorded_client_io(function_name, "output");
                     return;
                 };
                 if let Some(value) = arguments.get(1) {
@@ -767,6 +783,7 @@ impl CodeGenerator {
             }
             "send_to_client" => {
                 let Some(client_slots) = self.input_ordinals_for_node(arguments.get(1)) else {
+                    Self::warn_unrecorded_client_io(function_name, "output");
                     return;
                 };
                 let share_type = arguments
