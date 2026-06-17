@@ -67,8 +67,9 @@ fn init_creates_default_project() {
     assert!(temp.path().join("hello/Stoffel.toml").exists());
     assert!(temp.path().join("hello/src/main.stfl").exists());
     assert!(temp.path().join("hello/Cargo.toml").exists());
+    assert!(temp.path().join("hello/build.rs").exists());
     assert!(temp.path().join("hello/src/main.rs").exists());
-    assert!(temp.path().join("hello/src/stoffel_bindings.rs").exists());
+    assert!(!temp.path().join("hello/src/stoffel_bindings.rs").exists());
     let program = fs::read_to_string(temp.path().join("hello/src/main.stfl")).unwrap();
     assert!(program.contains("def gate_and(a: secret bool, b: secret bool) -> secret bool"));
     assert!(program.contains("var x: secret bool = Share.random()"));
@@ -76,14 +77,16 @@ fn init_creates_default_project() {
     let cargo_toml = fs::read_to_string(temp.path().join("hello/Cargo.toml")).unwrap();
     assert!(cargo_toml.contains("stoffel-rust-sdk"));
     assert!(cargo_toml.contains("stoffel = { package = \"stoffel-rust-sdk\""));
-    assert!(!cargo_toml.contains("[build-dependencies]"));
+    assert!(cargo_toml.contains("[build-dependencies]"));
+    assert!(cargo_toml.contains("stoffel-bindgen"));
+    let build_rs = fs::read_to_string(temp.path().join("hello/build.rs")).unwrap();
+    assert!(build_rs.contains("generate_bindings_from_source"));
+    assert!(build_rs.contains("src/main.stfl"));
     let main_rs = fs::read_to_string(temp.path().join("hello/src/main.rs")).unwrap();
     assert!(main_rs.contains("mod stoffel_bindings"));
+    assert!(main_rs.contains("include!(concat!(env!(\"OUT_DIR\")"));
     assert!(main_rs.contains("stoffel_bindings::ProgramManifest"));
     assert!(!main_rs.contains("with_inputs"));
-    let bindings = fs::read_to_string(temp.path().join("hello/src/stoffel_bindings.rs")).unwrap();
-    assert!(bindings.contains("impl stoffel::GeneratedProgramManifest for ProgramManifest"));
-    assert!(bindings.contains("MpcBackend::HoneyBadger"));
     let readme = fs::read_to_string(temp.path().join("hello/README.md")).unwrap();
     assert!(readme.contains("stoffel check"));
     assert!(readme.contains("stoffel run"));
@@ -110,6 +113,8 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
         .parent()
         .expect("CLI crate lives under crates/")
         .join("stoffel-rust-sdk");
+    let crates_dir = sdk_path.parent().expect("SDK crate lives under crates/");
+    let bindgen_path = crates_dir.join("stoffel-bindgen");
     let cargo_toml_path = project.join("Cargo.toml");
     let cargo_toml = fs::read_to_string(&cargo_toml_path)
         .unwrap()
@@ -119,6 +124,18 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
                 "stoffel = {{ package = \"stoffel-rust-sdk\", path = \"{}\" }}",
                 sdk_path.display()
             ),
+        )
+        .replace(
+            "stoffel-bindgen = { git = \"https://github.com/Stoffel-Labs/StoffelVM\" }",
+            &format!("stoffel-bindgen = {{ path = \"{}\" }}", bindgen_path.display()),
+        )
+        + &format!(
+            "\n[patch.\"https://github.com/Stoffel-Labs/StoffelVM\"]\nstoffel-bindgen = {{ path = \"{}\" }}\nstoffellang = {{ path = \"{}\" }}\nstoffel-rust-sdk = {{ path = \"{}\" }}\nstoffel-vm = {{ path = \"{}\" }}\nstoffel-vm-types = {{ path = \"{}\" }}\n",
+            bindgen_path.display(),
+            crates_dir.join("stoffel-lang").display(),
+            sdk_path.display(),
+            crates_dir.join("stoffel-vm").display(),
+            crates_dir.join("stoffel-vm-types").display(),
         );
     fs::write(&cargo_toml_path, cargo_toml).unwrap();
 

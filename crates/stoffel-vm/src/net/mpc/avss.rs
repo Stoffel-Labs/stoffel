@@ -44,7 +44,20 @@ mod shares;
 mod tests;
 pub use config::AvssEngineConfig;
 pub use operations::AvssOperations;
+pub type Bls12381AvssField = ark_bls12_381::Fr;
+pub type Bls12381AvssGroup = ark_bls12_381::G1Projective;
+pub type Bls12381AvssShare = FeldmanShamirShare<Bls12381AvssField, Bls12381AvssGroup>;
 use session_ids::{field_from_usize, protocol_instance_id_u32, usize_seed, AvssSessionIds};
+
+pub fn decode_bls12381_avss_field(bytes: &[u8]) -> Result<Bls12381AvssField, String> {
+    use ark_ff::PrimeField;
+    use ark_serialize::CanonicalDeserialize;
+
+    match Bls12381AvssField::deserialize_compressed(bytes) {
+        Ok(value) => Ok(value),
+        Err(_) => Ok(Bls12381AvssField::from_be_bytes_mod_order(bytes)),
+    }
+}
 
 // ============================================================================
 

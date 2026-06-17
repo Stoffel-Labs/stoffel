@@ -152,7 +152,7 @@ pub use hb_server::{
     HoneyBadgerQuicServer, HoneyBadgerQuicServerError,
 };
 pub use local_runner::{
-    LocalClientInput, LocalCoordinatorRunOutput, LocalCoordinatorRunner,
+    ClientOutputRecord, LocalClientInput, LocalCoordinatorRunOutput, LocalCoordinatorRunner,
     LocalCoordinatorRunnerBuilder, LocalCoordinatorRunnerError, LocalCoordinatorRunnerResult,
     LocalPartyOutput,
 };

@@ -9,7 +9,6 @@ pub use crate::client::{
     ClientBuilder, ClientState, ClientSummary, ComputationHandle, ComputationStatus,
     ComputationSummary, OffChainClientConfig, OffChainClientConfigBuilder, StoffelClient,
 };
-pub use crate::codegen::{generate_bindings, generate_bindings_with_config, BindingsConfig};
 pub use crate::compiler::CompilationOptions;
 pub use crate::config::{
     Curve, MpcConfig, MpcConfigBuilder, MpcConfigSummary, MpcSection, NetworkConfig,
@@ -44,8 +43,11 @@ pub use crate::server::{
 };
 pub use crate::types::{
     ClientId, ClientInputValue, ClientOutputValue, ClientValueType, FieldElement,
-    GeneratedProgramManifest, GroupElement, MaskIndex, PartyId, PublicKey, Round, Share,
-    TypedClientInputs, TypedClientOutputs, Value, ValueSummary,
+    GeneratedProgramManifest, GroupElement, MaskIndex, PartyId, ProgramArgs, PublicKey, Round,
+    Share, TypedClientInputs, TypedClientOutputs, Value, ValueSummary,
 };
+pub use crate::vm::LocalClientOutput;
 pub use crate::FunctionType;
+pub use crate::LoadableProgram;
 pub use crate::Stoffel;
+pub use stoffel_vm_types::core_types::ShareType;

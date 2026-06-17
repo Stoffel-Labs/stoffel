@@ -665,19 +665,6 @@ def reveal_block(block: list[list[secret bool]]) -> list[int64]:
 # `slot` fed in at position `idx`; the value never appears in the clear to any
 # MPC party.
 
-def take_client_byte(client_slot: int64, byte_index: int64) -> list[secret bool]:
-  var byte_bits: list[secret bool] = []
-  for bit_index in 0..8:
-    var bit: secret bool = ClientStore.take_share_bool(client_slot, byte_index * 8 + bit_index)
-    byte_bits.append(bit)
-  return byte_bits
-
-def take_client_block(client_slot: int64) -> list[list[secret bool]]:
-  var block: list[list[secret bool]] = []
-  for byte_index in 0..16:
-    block.append(take_client_byte(client_slot, byte_index))
-  return block
-
 # --- AES-128 decryption (inverse cipher) ----------------------------------
 #
 # The forward S-box is `aes_sbox(x) = Affine(GFInverse(x))`. The AES affine map
@@ -797,12 +784,6 @@ def public_block(values: list[int64]) -> list[list[secret bool]]:
   return block
 
 # Read the `block_index`-th 16-byte block of a client's secret input (slot).
-def take_client_block_n(client_slot: int64, block_index: int64) -> list[list[secret bool]]:
-  var block: list[list[secret bool]] = []
-  for byte_index in 0..16:
-    block.append(take_client_byte(client_slot, block_index * 16 + byte_index))
-  return block
-
 # --- CTR -------------------------------------------------------------------
 # keystream_i = AES_enc(counter_i, key);  out_i = data_i XOR keystream_i.
 # Encryption and decryption are the same operation, so one function serves both.
@@ -831,48 +812,98 @@ def increment_counter_block(counter: list[list[secret bool]]) -> list[list[secre
     carry = increment_counter_byte_carry(counter[byte_index], carry)
   return out
 
-def ctr_crypt(blocks: list[list[list[secret bool]]], key: list[list[secret bool]], initial_counter: list[list[secret bool]]) -> list[list[list[secret bool]]]:
+def ctr_crypt(blocks: list[list[list[secret bool]]], round_key: list[list[secret bool]], initial_counter: list[list[secret bool]]) -> list[list[list[secret bool]]]:
   var out: list[list[list[secret bool]]] = []
   var counter = initial_counter
   for i in 0..blocks.len():
-    var keystream = aes128_encrypt(counter, key)
+    var keystream = aes128_encrypt_rk(counter, round_key)
     out.append(bytes_xor(blocks[i], keystream))
     counter = increment_counter_block(counter)
   return out
 
 # --- CBC -------------------------------------------------------------------
 # C_0 = AES_enc(P_0 XOR IV, key);  C_i = AES_enc(P_i XOR C_{i-1}, key).
-def cbc_encrypt(blocks: list[list[list[secret bool]]], round_key: list[list[secret bool]], iv: list[list[secret bool]]) -> list[list[list[secret bool]]]:
+def cbc_encrypt(blocks: list[list[list[secret bool]]], key: list[list[secret bool]], iv: list[list[secret bool]]) -> list[list[list[secret bool]]]:
   var out: list[list[list[secret bool]]] = []
   var prev = iv
   for i in 0..blocks.len():
-    var c = aes128_encrypt_rk(bytes_xor(blocks[i], prev), round_key)
+    var c = aes128_encrypt(bytes_xor(blocks[i], prev), key)
     out.append(c)
     prev = c
   return out
 
 # P_0 = AES_dec(C_0, key) XOR IV;  P_i = AES_dec(C_i, key) XOR C_{i-1}.
-def cbc_decrypt(cts: list[list[list[secret bool]]], round_key: list[list[secret bool]], iv: list[list[secret bool]]) -> list[list[list[secret bool]]]:
+def cbc_decrypt(cts: list[list[list[secret bool]]], key: list[list[secret bool]], iv: list[list[secret bool]]) -> list[list[list[secret bool]]]:
   var out: list[list[list[secret bool]]] = []
   var prev = iv
   for i in 0..cts.len():
-    out.append(bytes_xor(aes128_decrypt_rk(cts[i], round_key), prev))
+    out.append(bytes_xor(aes128_decrypt(cts[i], key), prev))
     prev = cts[i]
   return out
 
-def main() -> list[int64]:
-  # Slot 1 = threshold key; slot 0 = 2 secret plaintext blocks.
-  # NIST SP 800-38A AES-128 CBC vector (key 2b7e1516..., IV 000102...0f).
-  var key = take_client_block(1)
-  # Expand the threshold key schedule once and reuse it for every block / direction.
-  var round_key = key_expansion(key)
-  var plaintext = [take_client_block_n(0, 0), take_client_block_n(0, 1)]
-  var iv = public_block([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
 
-  var ct = cbc_encrypt(plaintext, round_key, iv)
-  print(reveal_block(ct[0]))
-  print(reveal_block(ct[1]))
-  var pt = cbc_decrypt(ct, round_key, iv)
-  print(reveal_block(pt[0]))
-  print(reveal_block(pt[1]))
-  return reveal_block(pt[1])
+# --- Client-I/O entry point ------------------------------------------------
+# Reshape a flat little-endian 128-bit list into 16 bytes x 8 bits.
+def bits_to_block(bits: list[secret bool]) -> list[list[secret bool]]:
+  var block: list[list[secret bool]] = []
+  for byte_index in 0..16:
+    var byte_bits: list[secret bool] = []
+    for bit_index in 0..8:
+      byte_bits.append(bits[byte_index * 8 + bit_index])
+    block.append(byte_bits)
+  return block
+
+def send_block_to_client0(block: list[list[secret bool]]) -> int64:
+  var out_bits: list[secret bool] = []
+  for byte_index in 0..16:
+    for bit_index in 0..8:
+      out_bits.append(block[byte_index][bit_index])
+  MpcOutput.send_to_client(0, out_bits)
+  return 128
+
+# AES-128 CBC encryption for one block with full client I/O:
+#   client slot 0 (data owner): one secret plaintext block (16 bytes / 128 bits)
+#   client slot 1 (key holder): the 128-bit AES key
+# Inputs are read at LITERAL client slots and the output is sent at a LITERAL
+# slot, so the client-IO manifest statically records all inputs and 128 outputs
+# for client 0. The 128-bit ciphertext is delivered ONLY to client 0 via
+# send_to_client and is never opened, so the compute nodes never learn it. The
+# SDK harness validates the client-received value against the NIST SP 800-38A
+# CBC vector C0 = 7649abac8119b246cee98e9b12e9197d.
+def encrypt() -> int64:
+  var plaintext_bits: list[secret bool] = []
+  for i in 0..128:
+    plaintext_bits.append(ClientStore.take_share_bool(0, i))
+  var key_bits: list[secret bool] = []
+  for j in 0..128:
+    key_bits.append(ClientStore.take_share_bool(1, j))
+
+  var plaintext = bits_to_block(plaintext_bits)
+  var key = bits_to_block(key_bits)
+  var iv = public_block([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+  var ct = cbc_encrypt([plaintext], key, iv)
+
+  # Deliver the 128 ciphertext bits to client 0 (literal slot); nothing opened.
+  return send_block_to_client0(ct[0])
+
+# AES-128 CBC decryption for one block with full client I/O:
+#   client slot 0 (data owner): one secret ciphertext block (16 bytes / 128 bits)
+#   client slot 1 (key holder): the 128-bit AES key
+# The plaintext is delivered only to client 0 via send_to_client and is never opened.
+def decrypt() -> int64:
+  var ciphertext_bits: list[secret bool] = []
+  for i in 0..128:
+    ciphertext_bits.append(ClientStore.take_share_bool(0, i))
+  var key_bits: list[secret bool] = []
+  for j in 0..128:
+    key_bits.append(ClientStore.take_share_bool(1, j))
+
+  var ciphertext = bits_to_block(ciphertext_bits)
+  var key = bits_to_block(key_bits)
+  var iv = public_block([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+  var plaintext = cbc_decrypt([ciphertext], key, iv)
+
+  return send_block_to_client0(plaintext[0])
+
+def main() -> int64:
+  return encrypt()

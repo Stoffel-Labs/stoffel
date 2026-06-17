@@ -12,21 +12,21 @@ use crate::config::MpcBackend;
 use crate::error::{Error, Result};
 use crate::runtime::StoffelRuntime;
 use crate::types::Value;
-use stoffel_vm_types::core_types::{TableRef, Value as VmValue};
+use stoffel_vm_types::core_types::{ShareType, TableRef, Value as VmValue};
 
 pub fn execute_clear(runtime: &StoffelRuntime, function_name: &str) -> Result<Vec<Value>> {
     let args = runtime.input_values_for_function(function_name)?;
     execute_clear_with_sdk_args(runtime, function_name, &args)
 }
 
-fn execute_clear_with_sdk_args(
+pub(crate) fn execute_clear_with_sdk_args(
     runtime: &StoffelRuntime,
     function_name: &str,
     args: &[Value],
 ) -> Result<Vec<Value>> {
-    if runtime.program().function(function_name).is_none() {
-        return Err(Error::FunctionNotFound(function_name.to_owned()));
-    }
+    runtime
+        .program()
+        .validate_function_args(function_name, args)?;
 
     let mut vm = stoffel_vm::core_vm::VirtualMachine::try_new()
         .map_err(|error| Error::Computation(error.to_string()))?;
@@ -59,7 +59,15 @@ pub fn execute_clear_with_args(
     function_name: &str,
     args: &[stoffel_vm_types::core_types::Value],
 ) -> Result<Vec<Value>> {
-    if runtime.program().function(function_name).is_none() {
+    let sdk_args = args
+        .iter()
+        .filter_map(|value| Value::from_vm_value(value.clone()))
+        .collect::<Vec<_>>();
+    if sdk_args.len() == args.len() {
+        runtime
+            .program()
+            .validate_function_args(function_name, &sdk_args)?;
+    } else if runtime.program().function(function_name).is_none() {
         return Err(Error::FunctionNotFound(function_name.to_owned()));
     }
 
@@ -95,11 +103,91 @@ pub(crate) struct LocalExecutionOptions {
     pub(crate) timeout: Option<Duration>,
 }
 
+/// A client's reconstructed output values, received via `send_to_client` and
+/// reconstructed by the off-chain client — the actual client-side result, not
+/// a public reveal to the compute nodes.
+///
+/// `values` are decoded through the loaded program's client-IO manifest, so a
+/// 1-bit secret int comes back as [`Value::Bool`], a wider secret int as
+/// [`Value::I64`], an unsigned secret int as [`Value::U64`], and a fixed-point
+/// share as [`Value::Float`]. Output positions the manifest does not describe
+/// (e.g. a developer-specified count with no static schema) fall back to
+/// [`Value::U64`]. The untyped reconstructed field values remain available via
+/// `raw` for callers that need them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalClientOutput {
+    pub client_slot: u64,
+    pub values: Vec<Value>,
+    pub raw: Vec<u64>,
+}
+
+impl LocalClientOutput {
+    /// Pack boolean outputs into bytes, LSB-first within each byte (output bit
+    /// `i` becomes bit `i % 8` of byte `i / 8`). This is the inverse of the
+    /// LSB-first bit layout AES and other bit-decomposed circuits use, so a
+    /// 128-bit ciphertext block round-trips straight back to its 16 bytes.
+    ///
+    /// Non-boolean outputs are treated as set when non-zero; the trailing
+    /// partial byte (when the output count is not a multiple of 8) is
+    /// zero-padded in its high bits.
+    pub fn bytes(&self) -> Vec<u8> {
+        let mut out = vec![0u8; self.values.len().div_ceil(8)];
+        for (index, value) in self.values.iter().enumerate() {
+            if value_is_set(value) {
+                out[index / 8] |= 1 << (index % 8);
+            }
+        }
+        out
+    }
+
+    /// The outputs as booleans (non-zero ⇒ `true`), in order.
+    pub fn bools(&self) -> Vec<bool> {
+        self.values.iter().map(value_is_set).collect()
+    }
+}
+
+fn value_is_set(value: &Value) -> bool {
+    match value {
+        Value::Bool(bit) => *bit,
+        Value::I64(value) => *value != 0,
+        Value::U64(value) => *value != 0,
+        _ => false,
+    }
+}
+
+/// Decode one reconstructed field value into a typed SDK [`Value`] using the
+/// share type the manifest declared for that output position.
+fn decode_client_output_value(raw: u64, share_type: ShareType) -> Value {
+    match share_type {
+        ShareType::SecretInt { bit_length: 1 } => Value::Bool(raw != 0),
+        ShareType::SecretInt { .. } => Value::I64(raw as i64),
+        ShareType::SecretUInt { .. } => Value::U64(raw),
+        ShareType::SecretFixedPoint { precision } => {
+            let scale = (1u128 << precision.fractional_bits()) as f64;
+            Value::Float((raw as i64) as f64 / scale)
+        }
+    }
+}
+
 pub(crate) async fn execute_local_with_options(
     runtime: &StoffelRuntime,
     function_name: &str,
     options: LocalExecutionOptions,
 ) -> Result<Vec<Value>> {
+    let (returned, _program_output, _client_outputs) =
+        execute_local_capturing_with_options(runtime, function_name, options).await?;
+    Ok(returned)
+}
+
+/// Like [`execute_local_with_options`] but also returns the program's printed
+/// output (everything the program emitted via `print`, with the VM's internal
+/// `Program returned:` markers stripped). Used to surface client-facing results
+/// that a returned aggregate (e.g. a `list`) only exposes as an opaque handle.
+pub(crate) async fn execute_local_capturing_with_options(
+    runtime: &StoffelRuntime,
+    function_name: &str,
+    options: LocalExecutionOptions,
+) -> Result<(Vec<Value>, String, Vec<LocalClientOutput>)> {
     if runtime.program().function(function_name).is_none() {
         return Err(Error::FunctionNotFound(function_name.to_owned()));
     }
@@ -164,6 +252,9 @@ pub(crate) async fn execute_local_with_options(
     if let Some(expected_clients) = runtime.configured_expected_clients() {
         runner = runner.expected_output_clients(expected_clients);
     }
+    for (client_slot, count) in runtime.client_output_counts() {
+        runner = runner.client_output_count(*client_slot, *count);
+    }
     runner = runner.client_inputs(local_client_inputs);
 
     let output = runner
@@ -173,7 +264,8 @@ pub(crate) async fn execute_local_with_options(
         .await
         .map_err(|error| Error::Computation(error.to_string()))?;
 
-    forward_local_program_output(&output);
+    let program_output = local_program_output(&output);
+    print!("{program_output}");
 
     let returned = output.consistent_returned_values().map_err(|error| {
         Error::Computation(format!(
@@ -181,20 +273,47 @@ pub(crate) async fn execute_local_with_options(
             output.combined_output
         ))
     })?;
-    returned
+    let values = returned
         .iter()
         .map(|value| parse_runner_return_value(value))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    let manifest = runtime.program().client_io_manifest();
+    let client_outputs = output
+        .client_outputs
+        .iter()
+        .map(|record| {
+            let output_types = manifest
+                .clients
+                .iter()
+                .find(|client| client.client_slot == record.client_slot)
+                .map(|client| client.outputs.as_slice())
+                .unwrap_or(&[]);
+            let typed = record
+                .values
+                .iter()
+                .enumerate()
+                .map(|(index, &raw)| match output_types.get(index) {
+                    Some(share_type) => decode_client_output_value(raw, *share_type),
+                    None => Value::U64(raw),
+                })
+                .collect();
+            LocalClientOutput {
+                client_slot: record.client_slot,
+                values: typed,
+                raw: record.values.clone(),
+            }
+        })
+        .collect();
+    Ok((values, program_output, client_outputs))
 }
 
-fn forward_local_program_output(output: &stoffel_vm::net::LocalCoordinatorRunOutput) {
+/// The first party's printed program output, with `Program returned:` markers
+/// removed. Empty when no party produced output.
+fn local_program_output(output: &stoffel_vm::net::LocalCoordinatorRunOutput) -> String {
     let Some(first_party) = output.party_outputs.first() else {
-        return;
+        return String::new();
     };
-    let program_output = local_program_output_without_return_markers(&first_party.stdout);
-    if !program_output.is_empty() {
-        print!("{program_output}");
-    }
+    local_program_output_without_return_markers(&first_party.stdout)
 }
 
 fn local_program_output_without_return_markers(stdout: &str) -> String {

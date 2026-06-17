@@ -510,6 +510,13 @@ impl Program {
             .ok_or_else(|| Error::FunctionNotFound(function_name.to_owned()))?;
         function.validate_inputs(inputs)
     }
+
+    pub fn validate_function_args(&self, function_name: &str, args: &[Value]) -> Result<()> {
+        let function = self
+            .function(function_name)
+            .ok_or_else(|| Error::FunctionNotFound(function_name.to_owned()))?;
+        function.validate_args(args)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -651,6 +658,34 @@ impl<'a> FunctionMetadata<'a> {
                         .position(|name| name == parameter)
                         .unwrap_or(usize::MAX),
                 )
+                .unwrap_or(&FunctionType::Unknown);
+            validate_value_against_function_type(parameter, value, ty)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_args(&self, args: &[Value]) -> Result<()> {
+        let expected = self.arg_count();
+        let actual = args.len();
+        if actual != expected {
+            return Err(Error::InvalidInput(format!(
+                "function '{}' expects {expected} argument(s), got {actual}",
+                self.name()
+            )));
+        }
+
+        for (index, value) in args.iter().enumerate() {
+            let parameter = self
+                .0
+                .parameters
+                .get(index)
+                .map(String::as_str)
+                .unwrap_or("argument");
+            let ty = self
+                .0
+                .parameter_types
+                .get(index)
                 .unwrap_or(&FunctionType::Unknown);
             validate_value_against_function_type(parameter, value, ty)?;
         }

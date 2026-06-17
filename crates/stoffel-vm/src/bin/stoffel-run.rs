@@ -39,7 +39,7 @@ use stoffel_vm_types::compiled_binary::{
     CompiledBinary, MpcCurve, MPC_BACKEND_MANIFEST_FORMAT_VERSION,
     MPC_CURVE_MANIFEST_FORMAT_VERSION,
 };
-use stoffel_vm_types::core_types::{ShareType, Value};
+use stoffel_vm_types::core_types::{ShareType, TableRef, Value};
 use stoffelmpc_mpc::avss_mpc::{AvssMPCClient, AvssSessionId};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
@@ -830,11 +830,123 @@ fn print_vm_result(vm: &mut VirtualMachine, result: Value) {
                 let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
                 println!("Program returned: byte[{}] 0x{}", bytes.len(), hex);
             } else {
-                println!("Program returned: {:?}", result);
+                println!("Program returned: {}", format_vm_value(vm, &result, 4));
             }
         }
-        _ => println!("Program returned: {:?}", result),
+        _ => println!("Program returned: {}", format_vm_value(vm, &result, 4)),
     }
+}
+
+fn format_vm_value(vm: &mut VirtualMachine, value: &Value, max_depth: usize) -> String {
+    let mut active_tables = HashSet::new();
+    format_vm_value_inner(vm, value, max_depth, &mut active_tables)
+}
+
+fn format_vm_value_inner(
+    vm: &mut VirtualMachine,
+    value: &Value,
+    max_depth: usize,
+    active_tables: &mut HashSet<TableRef>,
+) -> String {
+    match value {
+        Value::I64(i) => i.to_string(),
+        Value::I32(i) => i.to_string(),
+        Value::I16(i) => i.to_string(),
+        Value::I8(i) => i.to_string(),
+        Value::U64(i) => i.to_string(),
+        Value::U32(i) => i.to_string(),
+        Value::U16(i) => i.to_string(),
+        Value::U8(i) => i.to_string(),
+        Value::Float(fp) => fp.0.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::String(s) => format!("\"{}\"", s),
+        Value::Unit => "()".to_string(),
+        Value::Closure(c) => format!("Function({})", c.function_id()),
+        Value::Foreign(foreign_ref) => format!("Foreign({})", foreign_ref.id()),
+        Value::Share(share_type, _) => format!("Share({:?})", share_type),
+        Value::Array(array_ref) => {
+            let table_ref = TableRef::from(*array_ref);
+            if !active_tables.insert(table_ref) {
+                return format!("Array({}) <cycle>", array_ref.id());
+            }
+            let formatted = format_vm_array(vm, *array_ref, max_depth, active_tables);
+            active_tables.remove(&table_ref);
+            formatted
+        }
+        Value::Object(object_ref) => {
+            let table_ref = TableRef::from(*object_ref);
+            if !active_tables.insert(table_ref) {
+                return format!("Object({}) <cycle>", object_ref.id());
+            }
+            let formatted = format_vm_object(vm, *object_ref, max_depth, active_tables);
+            active_tables.remove(&table_ref);
+            formatted
+        }
+    }
+}
+
+fn format_vm_array(
+    vm: &mut VirtualMachine,
+    array_ref: stoffel_vm_types::core_types::ArrayRef,
+    max_depth: usize,
+    active_tables: &mut HashSet<TableRef>,
+) -> String {
+    let len = match vm.read_array_len(array_ref) {
+        Ok(len) => len,
+        Err(error) => return format!("Array({}) <error: {}>", array_ref.id(), error),
+    };
+    if max_depth == 0 {
+        return format!("[...{} elements]", len);
+    }
+
+    let display_count = len.min(64);
+    let mut parts = Vec::with_capacity(display_count);
+    for index in 0..display_count {
+        let key = Value::I64(index as i64);
+        let value = match vm.read_table_field(TableRef::from(array_ref), &key) {
+            Ok(Some(value)) => value,
+            Ok(None) => Value::Unit,
+            Err(error) => {
+                parts.push(format!("<error: {}>", error));
+                continue;
+            }
+        };
+        parts.push(format_vm_value_inner(
+            vm,
+            &value,
+            max_depth - 1,
+            active_tables,
+        ));
+    }
+
+    if len > display_count {
+        format!("[{}, ...({} more)]", parts.join(", "), len - display_count)
+    } else {
+        format!("[{}]", parts.join(", "))
+    }
+}
+
+fn format_vm_object(
+    vm: &mut VirtualMachine,
+    object_ref: stoffel_vm_types::core_types::ObjectRef,
+    max_depth: usize,
+    active_tables: &mut HashSet<TableRef>,
+) -> String {
+    let entries = match vm.read_object_entries(object_ref, 64) {
+        Ok(entries) => entries,
+        Err(error) => return format!("Object({}) <error: {}>", object_ref.id(), error),
+    };
+    if max_depth == 0 {
+        return format!("{{...{} fields}}", entries.len());
+    }
+
+    let mut parts = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        let key = format_vm_value_inner(vm, &key, max_depth - 1, active_tables);
+        let value = format_vm_value_inner(vm, &value, max_depth - 1, active_tables);
+        parts.push(format!("{}: {}", key, value));
+    }
+    format!("{{{}}}", parts.join(", "))
 }
 fn coordinator_output_share_bytes(vm: &mut VirtualMachine, result: &Value) -> Option<Vec<u8>> {
     vm.read_share_object(result)
@@ -2382,6 +2494,8 @@ where
     let (preprocessing_ready_tx, mut preprocessing_ready_rx) = mpsc::channel::<usize>(n);
     tokio::spawn(async move {
         let mut msg_count = 0u64;
+        let trace_messages = std::env::var("STOFFEL_RUN_TRACE_MESSAGES")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
         loop {
             tokio::select! {
                 Some((sender_id, raw_msg)) = server_rx.recv() => {
@@ -2396,7 +2510,7 @@ where
                     }
 
                     msg_count += 1;
-                    if msg_count <= 5 || msg_count.is_multiple_of(1000) {
+                    if trace_messages && (msg_count <= 5 || msg_count.is_multiple_of(1000)) {
                         eprintln!(
                             "[party {}] Processing message #{} from sender {} ({} bytes)",
                             process_party_id, msg_count, sender_id, raw_msg.len()

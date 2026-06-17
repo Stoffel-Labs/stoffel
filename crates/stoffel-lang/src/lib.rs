@@ -23,6 +23,8 @@ pub mod suggestions;
 pub mod symbol_table;
 pub mod ufcs;
 
+pub use stoffel_vm_types;
+
 // Re-export the main compiler functions and types for easy access
 pub use binary_converter::{convert_to_binary, save_to_file};
 pub use bytecode::{CompiledProgram, Constant};

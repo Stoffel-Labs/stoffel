@@ -7,7 +7,6 @@ edition = "2021"
 
 [lib]
 name = "stoffellang"
-crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }

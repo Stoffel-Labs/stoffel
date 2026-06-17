@@ -612,9 +612,7 @@ where
     }
 
     /// Convert a FeldmanShamirShare into a `ShareData::Feldman` with extracted commitments.
-    pub(super) fn share_to_share_data(
-        share: &FeldmanShamirShare<F, G>,
-    ) -> Result<ShareData, String> {
+    pub fn share_to_share_data(share: &FeldmanShamirShare<F, G>) -> Result<ShareData, String> {
         let data = Self::encode_feldman_share(share)?;
 
         let commitments = share

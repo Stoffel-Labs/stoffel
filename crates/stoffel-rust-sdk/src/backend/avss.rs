@@ -10,9 +10,7 @@ use crate::backend::Backend;
 use crate::config::{Curve, MpcBackend};
 use crate::error::{Error, Result};
 use crate::types::{FieldElement, GroupElement, PublicKey, Share};
-use ark_bls12_381::{Fr as Bls12381Fr, G1Projective as Bls12381G1};
-use ark_ff::PrimeField;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use stoffel_vm::net::mpc::avss::{decode_bls12381_avss_field, Bls12381AvssShare};
 use stoffel_vm::net::mpc_engine::AsyncMpcEngine;
 use stoffel_vm_types::core_types::ShareType;
 
@@ -207,37 +205,22 @@ impl AvssEngine {
     }
 }
 
-fn bls12381_share_to_sdk(
-    key_name: &str,
-    share: &stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare<Bls12381Fr, Bls12381G1>,
-) -> Result<Share> {
-    Ok(Share::feldman(
-        key_name,
-        encode_compressed(share)?,
-        share
-            .commitments
-            .iter()
-            .map(encode_compressed)
-            .collect::<Result<Vec<_>>>()?,
-    ))
+fn bls12381_share_to_sdk(key_name: &str, share: &Bls12381AvssShare) -> Result<Share> {
+    let data = stoffel_vm::net::avss_engine::Bls12381AvssMpcEngine::share_to_share_data(share)
+        .map_err(Error::Computation)?;
+    match data {
+        stoffel_vm_types::core_types::ShareData::Feldman { data, commitments } => {
+            Ok(Share::feldman(key_name, data, commitments))
+        }
+        stoffel_vm_types::core_types::ShareData::Opaque(data) => Ok(Share::opaque(key_name, data)),
+    }
 }
 
-fn encode_compressed(value: &impl CanonicalSerialize) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    value
-        .serialize_compressed(&mut bytes)
-        .map_err(|error| Error::Computation(error.to_string()))?;
-    Ok(bytes)
-}
-
-fn decode_bls12381_field(bytes: &[u8]) -> Result<Bls12381Fr> {
+fn decode_bls12381_field(bytes: &[u8]) -> Result<stoffel_vm::net::mpc::avss::Bls12381AvssField> {
     if bytes.is_empty() {
         return Err(Error::InvalidInput(
             "BLS12-381 field element bytes cannot be empty".to_owned(),
         ));
     }
-    match Bls12381Fr::deserialize_compressed(bytes) {
-        Ok(value) => Ok(value),
-        Err(_) => Ok(Bls12381Fr::from_be_bytes_mod_order(bytes)),
-    }
+    decode_bls12381_avss_field(bytes).map_err(Error::Computation)
 }

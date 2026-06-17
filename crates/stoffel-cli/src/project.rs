@@ -49,6 +49,10 @@ pub struct MpcConfig {
     pub parties: Option<usize>,
     pub threshold: Option<usize>,
     pub instance_id: Option<u64>,
+    /// Per-client output value counts for the local simulator, keyed by client
+    /// slot (e.g. `[mpc.client_output_counts]` with `0 = 128`). A fallback used
+    /// only when the program does not statically declare the client's outputs.
+    pub client_output_counts: Option<std::collections::HashMap<String, u64>>,
 }
 
 impl Default for MpcConfig {
@@ -59,6 +63,7 @@ impl Default for MpcConfig {
             parties: Some(5),
             threshold: Some(1),
             instance_id: None,
+            client_output_counts: None,
         }
     }
 }
@@ -430,11 +435,11 @@ fn init_stoffel_project(path: &Path) -> Result<()> {
     write_new(path.join(CONFIG_FILE), &default_config_text(name.clone()))?;
     write_new(path.join("src/main.stfl"), default_stoffel_program_text())?;
     write_new(path.join("Cargo.toml"), &default_cargo_toml_text(&name))?;
-    write_new(path.join("src/main.rs"), default_main_rs_text())?;
     write_new(
-        path.join("src/stoffel_bindings.rs"),
-        default_bindings_rs_text(),
+        path.join("build.rs"),
+        &default_build_rs_text("src/main.stfl"),
     )?;
+    write_new(path.join("src/main.rs"), default_main_rs_text())?;
     write_new(
         path.join("README.md"),
         &format!(
@@ -490,13 +495,17 @@ fn init_rust_project(path: &Path) -> Result<()> {
     write_new(
         path.join("Cargo.toml"),
         &format!(
-            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n",
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n\n[build-dependencies]\nstoffel-bindgen = {{ git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\n",
             project_name(path)
         ),
     )?;
     write_new(
+        path.join("build.rs"),
+        &default_build_rs_text("stoffel/src/program.stfl"),
+    )?;
+    write_new(
         path.join("src/main.rs"),
-        "use stoffel::prelude::*;\n\n#[tokio::main]\nasync fn main() -> stoffel::Result<()> {\n    let result = Stoffel::compile(include_str!(\"../stoffel/src/program.stfl\"))?\n        .parties(5)\n        .threshold(1)\n        .with_inputs(&[(\"a\", 40_i64), (\"b\", 2_i64)])\n        .execute_local()\n        .await?;\n    println!(\"{}\", result[0]);\n    Ok(())\n}\n",
+        "use stoffel::prelude::*;\n\n#[allow(dead_code, unused_mut, unused_variables)]\nmod stoffel_bindings {\n    include!(concat!(env!(\"OUT_DIR\"), \"/stoffel_bindings.rs\"));\n}\n\n#[tokio::main]\nasync fn main() -> stoffel::Result<()> {\n    let result = Stoffel::compile_file(\"stoffel/src/program.stfl\")?\n        .manifest::<stoffel_bindings::ProgramManifest>()\n        .parties(5)\n        .threshold(1)\n        .with_inputs(&[(\"a\", 40_i64), (\"b\", 2_i64)])\n        .execute_local()\n        .await?;\n    println!(\"{}\", result[0]);\n    Ok(())\n}\n",
     )?;
     write_new(
         path.join("README.md"),
@@ -922,16 +931,18 @@ fn default_stoffel_program_text() -> &'static str {
 
 fn default_cargo_toml_text(name: &str) -> String {
     format!(
-        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n"
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n\n[build-dependencies]\nstoffel-bindgen = {{ git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\n"
+    )
+}
+
+fn default_build_rs_text(program_path: &str) -> String {
+    format!(
+        "use std::path::PathBuf;\n\nfn main() -> std::result::Result<(), Box<dyn std::error::Error>> {{\n    println!(\"cargo:rerun-if-changed={program_path}\");\n\n    let out_file = PathBuf::from(std::env::var(\"OUT_DIR\")?).join(\"stoffel_bindings.rs\");\n    stoffel_bindgen::generate_bindings_from_source(\n        \"{program_path}\",\n        out_file,\n        stoffel_bindgen::BindingsConfig::default(),\n    )?;\n\n    Ok(())\n}}\n"
     )
 }
 
 fn default_main_rs_text() -> &'static str {
-    "use stoffel::prelude::*;\n\nmod stoffel_bindings;\n\n#[tokio::main]\nasync fn main() -> stoffel::Result<()> {\n    let _manifest = stoffel_bindings::ProgramManifest;\n    let result = Stoffel::compile_file(\"src/main.stfl\")?\n        .parties(5)\n        .threshold(1)\n        // Load named function inputs from JSON, CSV, or TXT when your program takes parameters.\n        // Examples:\n        //   inputs.json: {\"a\": 40, \"b\": 2}\n        //   inputs.csv:  a,b\\n40,2\n        //   inputs.txt:  a=40\\nb=2\n        // .with_input_file(\"inputs.json\")?\n        // Load ClientStore values for no-argument MPC programs with:\n        // .with_client_input_file(\"client-inputs.json\")?\n        .execute_local()\n        .await?;\n\n    println!(\"{}\", result[0]);\n    Ok(())\n}\n"
-}
-
-fn default_bindings_rs_text() -> &'static str {
-    "// This file is generated by stoffel::generate_bindings. Regenerate it after changing the program's ClientStore IO.\n\npub struct ProgramManifest;\nimpl stoffel::GeneratedProgramManifest for ProgramManifest {\n    const BACKEND: stoffel::MpcBackend = stoffel::MpcBackend::HoneyBadger;\n\n    fn client_input_types(client_slot: u64) -> Option<&'static [stoffel::ClientValueType]> {\n        match client_slot {\n            _ => None,\n        }\n    }\n\n    fn client_output_types(client_slot: u64) -> Option<&'static [stoffel::ClientValueType]> {\n        match client_slot {\n            _ => None,\n        }\n    }\n}\n\n// The default program does not declare ClientStore IO.\n"
+    "use stoffel::prelude::*;\n\n#[allow(dead_code, unused_mut, unused_variables)]\nmod stoffel_bindings {\n    include!(concat!(env!(\"OUT_DIR\"), \"/stoffel_bindings.rs\"));\n}\n\n#[tokio::main]\nasync fn main() -> stoffel::Result<()> {\n    let result = Stoffel::compile_file(\"src/main.stfl\")?\n        .manifest::<stoffel_bindings::ProgramManifest>()\n        .parties(5)\n        .threshold(1)\n        // Load named function inputs from JSON, CSV, or TXT when your program takes parameters.\n        // Examples:\n        //   inputs.json: {\"a\": 40, \"b\": 2}\n        //   inputs.csv:  a,b\\n40,2\n        //   inputs.txt:  a=40\\nb=2\n        // .with_input_file(\"inputs.json\")?\n        // Load ClientStore values for no-argument MPC programs with:\n        // .with_client_input_file(\"client-inputs.json\")?\n        .execute_local()\n        .await?;\n\n    println!(\"{}\", result[0]);\n    Ok(())\n}\n"
 }
 
 fn config_text(name: String, source: &str) -> String {
