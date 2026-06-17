@@ -14,7 +14,7 @@ use crate::config::{
 use crate::error::{Error, Result};
 use crate::program::{BytecodeSummary, Program, ProgramSummary};
 use crate::server::ServerBuilder;
-use crate::types::Value;
+use crate::types::{ProgramArgs, Value};
 use crate::vm;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -66,10 +66,7 @@ impl StoffelRuntime {
     }
 
     /// Set developer-supplied per-client output counts (CLI / Stoffel.toml).
-    pub(crate) fn set_client_output_counts(
-        &mut self,
-        counts: std::collections::HashMap<u64, u64>,
-    ) {
+    pub(crate) fn set_client_output_counts(&mut self, counts: std::collections::HashMap<u64, u64>) {
         self.client_output_counts = counts;
     }
 
@@ -364,6 +361,27 @@ impl StoffelRuntime {
 
     pub fn execute_clear_function(&self, name: &str) -> Result<Vec<Value>> {
         vm::execute_clear(self, name)
+    }
+
+    /// Execute a named function with positional SDK values.
+    ///
+    /// This is the direct, local cleartext execution path for a loaded or
+    /// compiled program. Arguments are validated against the function metadata
+    /// stored in the binary before the VM is invoked.
+    pub fn execute<A>(&self, name: &str, args: A) -> Result<Vec<Value>>
+    where
+        A: ProgramArgs,
+    {
+        let args = args.into_values();
+        vm::execute_clear_with_sdk_args(self, name, &args)
+    }
+
+    /// Execute `main` with positional SDK values.
+    pub fn execute_main<A>(&self, args: A) -> Result<Vec<Value>>
+    where
+        A: ProgramArgs,
+    {
+        self.execute("main", args)
     }
 
     /// Execute the runtime's `main` entrypoint using the local coordinator runner.

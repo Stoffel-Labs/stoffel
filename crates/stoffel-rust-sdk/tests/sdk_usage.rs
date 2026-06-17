@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use stoffel::prelude::*;
+use stoffel_bindgen::{generate_bindings, BindingsConfig};
 use stoffel_vm_types::compiled_binary::{ClientIoManifest, ClientIoSchema, CompiledBinary};
 use stoffel_vm_types::core_types::ShareType;
 use tempfile::tempdir;
@@ -124,7 +125,7 @@ fn crate_root_reexports_common_reference_sdk_types() {
     assert!(type_name::<stoffel::MpcSection>().contains("MpcSection"));
     assert!(type_name::<stoffel::PreprocessingConfig>().contains("PreprocessingConfig"));
     assert!(type_name::<stoffel::ClientState>().contains("ClientState"));
-    assert!(type_name::<stoffel::BindingsConfig>().contains("BindingsConfig"));
+    assert!(type_name::<BindingsConfig>().contains("BindingsConfig"));
     assert!(type_name::<stoffel::ClientValueType>().contains("ClientValueType"));
     assert!(type_name::<stoffel::ServerState>().contains("ServerState"));
     assert!(type_name::<stoffel::HealthStatus>().contains("HealthStatus"));
@@ -150,6 +151,67 @@ fn crate_root_reexports_common_reference_sdk_types() {
 }
 
 #[test]
+fn load_program_executes_loaded_bytecode_with_positional_args() -> stoffel::Result<()> {
+    let runtime = Stoffel::compile(CLEAR_ADD_SOURCE)?.build()?;
+    let bytecode = runtime.to_bytecode()?;
+
+    let program = Stoffel::load_program(bytecode)?;
+    let result = program.execute("main", (40_i64, 2_i64))?;
+
+    assert_eq!(result, vec![Value::I64(42)]);
+    Ok(())
+}
+
+#[test]
+fn load_program_accepts_compiled_program_and_path() -> stoffel::Result<()> {
+    let runtime = Stoffel::compile(CLEAR_ADD_SOURCE)?.build()?;
+    let program = runtime.program().clone();
+
+    let loaded = Stoffel::load_program(program)?;
+    assert_eq!(
+        loaded.execute("main", (5_i64, 7_i64))?,
+        vec![Value::I64(12)]
+    );
+
+    let temp = tempdir()?;
+    let bytecode_path = temp.path().join("program.stflb");
+    runtime.save_bytecode(&bytecode_path)?;
+    let loaded_from_path = Stoffel::load_program(bytecode_path.as_path())?;
+    assert_eq!(
+        loaded_from_path.execute("main", (3_i64, 4_i64))?,
+        vec![Value::I64(7)]
+    );
+    Ok(())
+}
+
+#[test]
+fn execute_supports_zero_and_single_argument_calls() -> stoffel::Result<()> {
+    let no_args = Stoffel::compile("def main() -> int64:\n  return 42")?.build()?;
+    assert_eq!(no_args.execute("main", ())?, vec![Value::I64(42)]);
+
+    let single_arg =
+        Stoffel::compile("def main(value: int64) -> int64:\n  return value + 1")?.build()?;
+    assert_eq!(single_arg.execute("main", 41_i64)?, vec![Value::I64(42)]);
+    Ok(())
+}
+
+#[test]
+fn execute_validates_positional_argument_shape_against_binary_metadata() -> stoffel::Result<()> {
+    let program = Stoffel::compile(CLEAR_ADD_SOURCE)?.build()?;
+
+    let missing = program.execute("main", 40_i64).unwrap_err().to_string();
+    assert!(missing.contains("expects 2 argument(s), got 1"));
+
+    let wrong_type = program
+        .execute("main", ("forty", 2_i64))
+        .unwrap_err()
+        .to_string();
+    assert!(wrong_type.contains("input 'a' expects"));
+    assert!(wrong_type.contains("got string"));
+    Ok(())
+}
+
+#[test]
 fn generate_bindings_emits_typed_client_io_from_stflb_manifest() -> stoffel::Result<()> {
     let runtime = Stoffel::compile(
         r#"
@@ -166,7 +228,7 @@ def main() -> int64:
     let bindings_path = temp.path().join("stoffel_bindings.rs");
     runtime.program().save_bytecode(&bytecode_path)?;
 
-    generate_bindings(&bytecode_path, &bindings_path)?;
+    generate_bindings(&bytecode_path, &bindings_path).expect("bindings should generate");
     let generated = std::fs::read_to_string(bindings_path)?;
 
     assert!(generated.contains("pub struct Client0Inputs"));
@@ -186,13 +248,31 @@ def main() -> int64:
 }
 
 #[test]
-fn generate_bindings_emits_unsigned_secret_io_as_u64() -> stoffel::Result<()> {
+fn generate_bindings_preserves_secret_integer_widths() -> stoffel::Result<()> {
     let mut binary = CompiledBinary::new();
     binary.client_io_manifest = ClientIoManifest {
         clients: vec![ClientIoSchema {
             client_slot: 0,
-            inputs: vec![ShareType::secret_uint(64)],
-            outputs: vec![ShareType::secret_uint(64)],
+            inputs: vec![
+                ShareType::secret_int(8),
+                ShareType::secret_int(16),
+                ShareType::secret_int(32),
+                ShareType::secret_int(64),
+                ShareType::secret_uint(8),
+                ShareType::secret_uint(16),
+                ShareType::secret_uint(32),
+                ShareType::secret_uint(64),
+            ],
+            outputs: vec![
+                ShareType::secret_int(8),
+                ShareType::secret_int(16),
+                ShareType::secret_int(32),
+                ShareType::secret_int(64),
+                ShareType::secret_uint(8),
+                ShareType::secret_uint(16),
+                ShareType::secret_uint(32),
+                ShareType::secret_uint(64),
+            ],
         }],
         ..Default::default()
     };
@@ -202,11 +282,16 @@ fn generate_bindings_emits_unsigned_secret_io_as_u64() -> stoffel::Result<()> {
     let bindings_path = temp.path().join("stoffel_bindings.rs");
     program.save_bytecode(&bytecode_path)?;
 
-    generate_bindings(&bytecode_path, &bindings_path)?;
+    generate_bindings(&bytecode_path, &bindings_path).expect("bindings should generate");
     let generated = std::fs::read_to_string(bindings_path)?;
 
-    assert!(generated.contains("pub input_0: u64"));
-    assert!(generated.contains("pub output_0: u64"));
+    for (ordinal, rust_type) in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(generated.contains(&format!("pub input_{ordinal}: {rust_type}")));
+        assert!(generated.contains(&format!("pub output_{ordinal}: {rust_type}")));
+    }
     assert!(generated.contains("stoffel::ClientValueType::Integer"));
     Ok(())
 }
@@ -235,7 +320,7 @@ fn generated_bindings_type_check_federated_average_example() -> stoffel::Result<
     let bytecode_path = temp.path().join("mpc_client_federated_average.stflb");
     let bindings_path = temp.path().join("stoffel_bindings.rs");
     runtime.program().save_bytecode(&bytecode_path)?;
-    generate_bindings(&bytecode_path, &bindings_path)?;
+    generate_bindings(&bytecode_path, &bindings_path).expect("bindings should generate");
     let generated = std::fs::read_to_string(&bindings_path)?;
     assert!(generated.contains("pub struct Client0Inputs"));
     assert!(generated.contains("pub struct ProgramManifest"));
@@ -1665,7 +1750,7 @@ def main() -> int64:
     .expected_output_clients(2)
     .build()?;
 
-    assert_eq!(runtime.program().minimum_expected_clients(), 0);
+    assert_eq!(runtime.program().minimum_expected_clients(), 1);
     assert_eq!(runtime.configured_expected_clients(), Some(2));
     runtime.validate_client_inputs()?;
     Ok(())

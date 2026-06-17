@@ -776,8 +776,8 @@ def aes128_decrypt(block: list[list[secret bool]], key: list[list[secret bool]])
 # ===========================================================================
 # Modes of operation (CTR and CBC) over the single-block AES primitive.
 #
-# IV / nonce / counter blocks are PUBLIC values; only the plaintext and the key
-# are secret. Block XOR (`bytes_xor`) is linear, so the modes add no extra
+# IV / nonce / counter blocks are PUBLIC values; only the plaintext and key are
+# secret. Block XOR (`bytes_xor`) is linear, so CBC/CTR chaining adds no extra
 # multiplication rounds beyond the underlying AES block calls.
 # ===========================================================================
 
@@ -806,11 +806,38 @@ def take_client_block_n(client_slot: int64, block_index: int64) -> list[list[sec
 # --- CTR -------------------------------------------------------------------
 # keystream_i = AES_enc(counter_i, key);  out_i = data_i XOR keystream_i.
 # Encryption and decryption are the same operation, so one function serves both.
-def ctr_crypt(blocks: list[list[list[secret bool]]], key: list[list[secret bool]], counters: list[list[list[secret bool]]]) -> list[list[list[secret bool]]]:
+def increment_counter_byte(byte: list[secret bool], carry_in: secret bool) -> list[secret bool]:
+  var out: list[secret bool] = []
+  var carry = carry_in
+  for bit_index in 0..8:
+    out.append(gate_xor(byte[bit_index], carry))
+    carry = gate_and(byte[bit_index], carry)
+  return out
+
+def increment_counter_byte_carry(byte: list[secret bool], carry_in: secret bool) -> secret bool:
+  var carry = carry_in
+  for bit_index in 0..8:
+    carry = gate_and(byte[bit_index], carry)
+  return carry
+
+# Increment the 128-bit counter as a big-endian integer: byte 15 carries into
+# byte 14, matching NIST SP 800-38A CTR vectors.
+def increment_counter_block(counter: list[list[secret bool]]) -> list[list[secret bool]]:
+  var out: list[list[secret bool]] = []
+  var carry = Share.from_clear_int(1, 1)
+  for offset in 0..16:
+    var byte_index = 15 - offset
+    out.insert(0, increment_counter_byte(counter[byte_index], carry))
+    carry = increment_counter_byte_carry(counter[byte_index], carry)
+  return out
+
+def ctr_crypt(blocks: list[list[list[secret bool]]], key: list[list[secret bool]], initial_counter: list[list[secret bool]]) -> list[list[list[secret bool]]]:
   var out: list[list[list[secret bool]]] = []
+  var counter = initial_counter
   for i in 0..blocks.len():
-    var keystream = aes128_encrypt(counters[i], key)
+    var keystream = aes128_encrypt(counter, key)
     out.append(bytes_xor(blocks[i], keystream))
+    counter = increment_counter_block(counter)
   return out
 
 # --- CBC -------------------------------------------------------------------
@@ -834,7 +861,7 @@ def cbc_decrypt(cts: list[list[list[secret bool]]], round_key: list[list[secret 
   return out
 
 def main() -> list[int64]:
-  # Slot 1 = threshold key (secret-shared); slot 0 = 2 secret plaintext blocks.
+  # Slot 1 = threshold key; slot 0 = 2 secret plaintext blocks.
   # NIST SP 800-38A AES-128 CBC vector (key 2b7e1516..., IV 000102...0f).
   var key = take_client_block(1)
   # Expand the threshold key schedule once and reuse it for every block / direction.

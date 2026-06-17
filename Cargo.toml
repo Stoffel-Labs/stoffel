@@ -1,10 +1,12 @@
 [workspace]
 members = [
     "crates/stoffel-cli",
+    "crates/stoffel-bindgen",
     "crates/stoffel-lang",
     "crates/stoffel-rust-sdk",
     "crates/stoffel-vm",
     "crates/stoffel-vm-types",
+    "crates/stoffel-lang/examples/mpc_aes128_cbc_client_io",
 ]
 resolver = "2"
 exclude = [

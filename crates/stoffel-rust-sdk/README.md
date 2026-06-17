@@ -168,7 +168,7 @@ execute:
 ```rust
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = std::env::var("OUT_DIR")?;
-    stoffel::generate_bindings(
+    stoffel_bindgen::generate_bindings(
         "program.stflb",
         format!("{out_dir}/stoffel_bindings.rs"),
     )?;

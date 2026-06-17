@@ -1,35 +1,40 @@
-# MPC AES-128 CBC: Client Input + Client Output
+# MPC AES-128 CBC: Rust Client-IO Example
 
-A full client-I/O AES-128 CBC encryption of one block over MPC, validated
-end-to-end through the Rust SDK:
+A standalone Rust SDK example, in the shape produced by `stoffel init`, that
+validates AES-128 CBC encryption and decryption of one block over MPC.
 
 - **Client 0 (data owner)** supplies a secret plaintext block (128 secret bits)
-  as client input.
+  for `encrypt`, or a secret ciphertext block for `decrypt`.
 - **Client 1 (key holder)** supplies the 128-bit AES key as client input.
 - The public CBC IV (NIST 000102..0f) is built in the program.
-- The 128-bit ciphertext is delivered **only to client 0** via `send_to_client`.
-  It is **never opened/revealed**, so the compute nodes never learn it — the
-  client reconstructs it from the output shares it receives.
+- The 128-bit result is delivered **only to client 0** via `send_to_client`.
+  `encrypt` sends the secret ciphertext block; `decrypt` sends the recovered
+  secret plaintext block. Neither result is opened/revealed to the compute
+  nodes.
 
-Inputs are read and the output is sent at **literal client slots**, so the
-client-IO manifest statically records 128 inputs per client and 128 outputs for
-client 0; the local runner reads the output count from the manifest (no manual
-count needed).
+Inputs are read at **literal client slots**, so the client-IO manifest records
+128 inputs for client 0 and 128 inputs for client 1. The Rust harness declares
+client 0 as an output-capable client and supplies `client_output_count(0, 128)`
+because both entrypoints route their output through a shared helper.
 
 ## Run + validate through the Rust SDK
 
-The SDK harness feeds the NIST SP 800-38A plaintext and key as secret client
-inputs, runs the program in the local 5-party simulator, and reconstructs the
-**client-received** ciphertext (via the off-chain client's `obtain_outputs`,
-not a public reveal), asserting it equals the NIST vector `C0 = 7649abac8119b246cee98e9b12e9197d`:
+The Rust harness feeds the NIST SP 800-38A plaintext/ciphertext and key as
+secret client inputs, runs both entrypoints in the local 5-party runner, and
+reconstructs only the **client-received** output shares:
+
+```sh
+STOFFEL_RUN_BIN=../../../../target/release/stoffel-run cargo run --release
+```
+
+From the repository root, the same example can be run with:
 
 ```sh
 STOFFEL_RUN_BIN=target/release/stoffel-run \
-  cargo run --release -p stoffel-rust-sdk --example aes_cbc_client_io
+  cargo run --release --manifest-path crates/stoffel-lang/examples/mpc_aes128_cbc_client_io/Cargo.toml
 ```
 
-The harness uses
-`Stoffel::compile_file(...).expected_output_clients(2)
-.with_client_input(0, plaintext_bits).with_client_input(1, key_bits)
-.execute_local_capturing_client_outputs()` — the new SDK entry point that
-returns the reconstructed client outputs.
+The harness asserts:
+
+- `encrypt(6bc1bee22e409f96e93d7e117393172a) == 7649abac8119b246cee98e9b12e9197d`
+- `decrypt(7649abac8119b246cee98e9b12e9197d) == 6bc1bee22e409f96e93d7e117393172a`

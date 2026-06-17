@@ -19,14 +19,14 @@ pub fn execute_clear(runtime: &StoffelRuntime, function_name: &str) -> Result<Ve
     execute_clear_with_sdk_args(runtime, function_name, &args)
 }
 
-fn execute_clear_with_sdk_args(
+pub(crate) fn execute_clear_with_sdk_args(
     runtime: &StoffelRuntime,
     function_name: &str,
     args: &[Value],
 ) -> Result<Vec<Value>> {
-    if runtime.program().function(function_name).is_none() {
-        return Err(Error::FunctionNotFound(function_name.to_owned()));
-    }
+    runtime
+        .program()
+        .validate_function_args(function_name, args)?;
 
     let mut vm = stoffel_vm::core_vm::VirtualMachine::try_new()
         .map_err(|error| Error::Computation(error.to_string()))?;
@@ -59,7 +59,15 @@ pub fn execute_clear_with_args(
     function_name: &str,
     args: &[stoffel_vm_types::core_types::Value],
 ) -> Result<Vec<Value>> {
-    if runtime.program().function(function_name).is_none() {
+    let sdk_args = args
+        .iter()
+        .filter_map(|value| Value::from_vm_value(value.clone()))
+        .collect::<Vec<_>>();
+    if sdk_args.len() == args.len() {
+        runtime
+            .program()
+            .validate_function_args(function_name, &sdk_args)?;
+    } else if runtime.program().function(function_name).is_none() {
         return Err(Error::FunctionNotFound(function_name.to_owned()));
     }
 

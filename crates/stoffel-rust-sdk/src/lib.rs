@@ -46,7 +46,6 @@
 
 pub mod backend;
 pub mod client;
-pub mod codegen;
 pub mod compiler;
 pub mod config;
 pub mod consensus;
@@ -74,7 +73,6 @@ pub use client::{
     ClientBuilder, ClientState, ClientSummary, ComputationHandle, ComputationStatus,
     ComputationSummary, OffChainClientConfig, OffChainClientConfigBuilder, StoffelClient,
 };
-pub use codegen::{generate_bindings, generate_bindings_with_config, BindingsConfig};
 pub use compiler::CompilationOptions;
 pub use config::{
     Curve, MpcConfig, MpcConfigBuilder, MpcConfigSummary, MpcSection, NetworkConfig,
@@ -106,10 +104,11 @@ pub use server::{
     StoffelServer,
 };
 pub use stoffel_vm_types::compiled_binary::FunctionType;
+pub use stoffel_vm_types::core_types::ShareType;
 pub use types::{
     ClientId, ClientInputValue, ClientOutputValue, ClientValueType, FieldElement,
-    GeneratedProgramManifest, GroupElement, MaskIndex, PartyId, PublicKey, Round, Share,
-    TypedClientInputs, TypedClientOutputs, Value, ValueSummary,
+    GeneratedProgramManifest, GroupElement, MaskIndex, PartyId, ProgramArgs, PublicKey, Round,
+    Share, TypedClientInputs, TypedClientOutputs, Value, ValueSummary,
 };
 pub use vm::LocalClientOutput;
 
@@ -118,6 +117,54 @@ enum ProgramSource {
     Source { source: String, filename: String },
     File { path: std::path::PathBuf },
     Bytecode(Vec<u8>),
+    Program(Program),
+}
+
+/// Inputs accepted by [`Stoffel::load_program`].
+pub trait LoadableProgram {
+    fn load_program(self) -> Result<Program>;
+}
+
+impl LoadableProgram for Program {
+    fn load_program(self) -> Result<Program> {
+        Ok(self)
+    }
+}
+
+impl LoadableProgram for &Program {
+    fn load_program(self) -> Result<Program> {
+        Ok(self.clone())
+    }
+}
+
+impl LoadableProgram for &[u8] {
+    fn load_program(self) -> Result<Program> {
+        Program::from_bytecode(self)
+    }
+}
+
+impl LoadableProgram for Vec<u8> {
+    fn load_program(self) -> Result<Program> {
+        Program::from_bytecode(&self)
+    }
+}
+
+impl LoadableProgram for &Path {
+    fn load_program(self) -> Result<Program> {
+        Program::from_bytecode_file(self)
+    }
+}
+
+impl LoadableProgram for PathBuf {
+    fn load_program(self) -> Result<Program> {
+        Program::from_bytecode_file(self)
+    }
+}
+
+impl LoadableProgram for &PathBuf {
+    fn load_program(self) -> Result<Program> {
+        Program::from_bytecode_file(self)
+    }
 }
 
 /// SDK entry point and builder.
@@ -163,6 +210,30 @@ impl Stoffel {
     pub fn load_file(path: impl AsRef<Path>) -> Result<Self> {
         let bytecode = std::fs::read(path)?;
         Self::load(&bytecode)
+    }
+
+    /// Load an executable program directly from bytecode, a bytecode path, or
+    /// an already constructed [`Program`].
+    ///
+    /// ```
+    /// use stoffel::prelude::*;
+    ///
+    /// # fn main() -> stoffel::Result<()> {
+    /// let bytecode = Stoffel::compile(
+    ///     "def main(a: int64, b: int64) -> int64:\n  return a + b",
+    /// )?
+    /// .build()?
+    /// .to_bytecode()?;
+    ///
+    /// let program = Stoffel::load_program(bytecode)?;
+    /// let result = program.execute("main", (40_i64, 2_i64))?;
+    ///
+    /// assert_eq!(result[0].as_i64(), Some(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn load_program(program: impl LoadableProgram) -> Result<StoffelRuntime> {
+        Self::from_source(ProgramSource::Program(program.load_program()?)).build()
     }
 
     /// Set the number of MPC parties. Default is 5.
@@ -384,6 +455,16 @@ impl Stoffel {
                 }
                 program
             }
+            ProgramSource::Program(program) => {
+                let bytecode_backend =
+                    backend_from_bytecode(program.bytecode_backend(), program.bytecode_curve())?;
+                if backend_explicit {
+                    validate_bytecode_backend(&program, mpc_config.backend)?;
+                } else {
+                    mpc_config.backend = bytecode_backend;
+                }
+                program
+            }
         };
         validate_bytecode_backend(&program, mpc_config.backend)?;
         if program.is_empty() {
@@ -482,6 +563,42 @@ impl Stoffel {
         let (runtime, entry) = self.build_for_local_execution(name)?;
         let (values, _program_output, client_outputs) =
             vm::execute_local_capturing_with_options(&runtime, &entry, Default::default()).await?;
+        Ok((values, client_outputs))
+    }
+
+    /// Execute `main` locally with an explicit timeout and return reconstructed
+    /// client outputs delivered via `send_to_client`.
+    pub async fn execute_local_capturing_client_outputs_with_timeout(
+        self,
+        timeout: Duration,
+    ) -> Result<(Vec<Value>, Vec<vm::LocalClientOutput>)> {
+        self.execute_local_function_capturing_client_outputs_with_timeout("main", timeout)
+            .await
+    }
+
+    /// Named-function variant of
+    /// [`Self::execute_local_capturing_client_outputs_with_timeout`].
+    #[tracing::instrument(skip_all, fields(function = name))]
+    pub async fn execute_local_function_capturing_client_outputs_with_timeout(
+        self,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<(Vec<Value>, Vec<vm::LocalClientOutput>)> {
+        if timeout.is_zero() {
+            return Err(Error::Configuration(
+                "local network timeout must be greater than zero".to_owned(),
+            ));
+        }
+        let (runtime, entry) = self.build_for_local_execution(name)?;
+        let (values, _program_output, client_outputs) = vm::execute_local_capturing_with_options(
+            &runtime,
+            &entry,
+            vm::LocalExecutionOptions {
+                runner_path: None,
+                timeout: Some(timeout),
+            },
+        )
+        .await?;
         Ok((values, client_outputs))
     }
 
@@ -670,7 +787,7 @@ fn local_source_parameter_types(
     let source = match source {
         ProgramSource::Source { source, .. } => source.clone(),
         ProgramSource::File { path } => std::fs::read_to_string(path)?,
-        ProgramSource::Bytecode(_) => return Ok(None),
+        ProgramSource::Bytecode(_) | ProgramSource::Program(_) => return Ok(None),
     };
     Ok(parse_function_parameter_types(&source, function_name))
 }

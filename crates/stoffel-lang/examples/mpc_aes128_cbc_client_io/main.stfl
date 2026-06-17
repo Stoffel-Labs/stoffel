@@ -763,8 +763,8 @@ def aes128_decrypt(block: list[list[secret bool]], key: list[list[secret bool]])
 # ===========================================================================
 # Modes of operation (CTR and CBC) over the single-block AES primitive.
 #
-# IV / nonce / counter blocks are PUBLIC values; only the plaintext and the key
-# are secret. Block XOR (`bytes_xor`) is linear, so the modes add no extra
+# IV / nonce / counter blocks are PUBLIC values; only the plaintext and key are
+# secret. Block XOR (`bytes_xor`) is linear, so CBC/CTR chaining adds no extra
 # multiplication rounds beyond the underlying AES block calls.
 # ===========================================================================
 
@@ -787,11 +787,38 @@ def public_block(values: list[int64]) -> list[list[secret bool]]:
 # --- CTR -------------------------------------------------------------------
 # keystream_i = AES_enc(counter_i, key);  out_i = data_i XOR keystream_i.
 # Encryption and decryption are the same operation, so one function serves both.
-def ctr_crypt(blocks: list[list[list[secret bool]]], round_key: list[list[secret bool]], counters: list[list[list[secret bool]]]) -> list[list[list[secret bool]]]:
+def increment_counter_byte(byte: list[secret bool], carry_in: secret bool) -> list[secret bool]:
+  var out: list[secret bool] = []
+  var carry = carry_in
+  for bit_index in 0..8:
+    out.append(gate_xor(byte[bit_index], carry))
+    carry = gate_and(byte[bit_index], carry)
+  return out
+
+def increment_counter_byte_carry(byte: list[secret bool], carry_in: secret bool) -> secret bool:
+  var carry = carry_in
+  for bit_index in 0..8:
+    carry = gate_and(byte[bit_index], carry)
+  return carry
+
+# Increment the 128-bit counter as a big-endian integer: byte 15 carries into
+# byte 14, matching NIST SP 800-38A CTR vectors.
+def increment_counter_block(counter: list[list[secret bool]]) -> list[list[secret bool]]:
+  var out: list[list[secret bool]] = []
+  var carry = Share.from_clear_int(1, 1)
+  for offset in 0..16:
+    var byte_index = 15 - offset
+    out.insert(0, increment_counter_byte(counter[byte_index], carry))
+    carry = increment_counter_byte_carry(counter[byte_index], carry)
+  return out
+
+def ctr_crypt(blocks: list[list[list[secret bool]]], round_key: list[list[secret bool]], initial_counter: list[list[secret bool]]) -> list[list[list[secret bool]]]:
   var out: list[list[list[secret bool]]] = []
+  var counter = initial_counter
   for i in 0..blocks.len():
-    var keystream = aes128_encrypt_rk(counters[i], round_key)
+    var keystream = aes128_encrypt_rk(counter, round_key)
     out.append(bytes_xor(blocks[i], keystream))
+    counter = increment_counter_block(counter)
   return out
 
 # --- CBC -------------------------------------------------------------------
@@ -826,16 +853,24 @@ def bits_to_block(bits: list[secret bool]) -> list[list[secret bool]]:
     block.append(byte_bits)
   return block
 
-# AES-128 CBC for one block with full client I/O:
+def send_block_to_client0(block: list[list[secret bool]]) -> int64:
+  var out_bits: list[secret bool] = []
+  for byte_index in 0..16:
+    for bit_index in 0..8:
+      out_bits.append(block[byte_index][bit_index])
+  MpcOutput.send_to_client(0, out_bits)
+  return 128
+
+# AES-128 CBC encryption for one block with full client I/O:
 #   client slot 0 (data owner): one secret plaintext block (16 bytes / 128 bits)
 #   client slot 1 (key holder): the 128-bit AES key
-# IV is public (NIST 000102..0f). Inputs are read at LITERAL client slots and the
-# output is sent at a LITERAL slot, so the client-IO manifest statically records
-# 128 inputs per client and 128 outputs for client 0. The 128-bit ciphertext is
-# delivered ONLY to client 0 via send_to_client and is never opened, so the
-# compute nodes never learn it. The SDK harness validates the client-received
-# value against the NIST SP 800-38A CBC vector C0 = 7649abac8119b246cee98e9b12e9197d.
-def main() -> int64:
+# Inputs are read at LITERAL client slots and the output is sent at a LITERAL
+# slot, so the client-IO manifest statically records all inputs and 128 outputs
+# for client 0. The 128-bit ciphertext is delivered ONLY to client 0 via
+# send_to_client and is never opened, so the compute nodes never learn it. The
+# SDK harness validates the client-received value against the NIST SP 800-38A
+# CBC vector C0 = 7649abac8119b246cee98e9b12e9197d.
+def encrypt() -> int64:
   var plaintext_bits: list[secret bool] = []
   for i in 0..128:
     plaintext_bits.append(ClientStore.take_share_bool(0, i))
@@ -849,10 +884,26 @@ def main() -> int64:
   var ct = cbc_encrypt([plaintext], key, iv)
 
   # Deliver the 128 ciphertext bits to client 0 (literal slot); nothing opened.
-  var out_bits: list[secret bool] = []
-  for byte_index in 0..16:
-    for bit_index in 0..8:
-      var bit: secret bool = ct[0][byte_index][bit_index]
-      out_bits.append(bit)
-  MpcOutput.send_to_client(0, out_bits)
-  return 128
+  return send_block_to_client0(ct[0])
+
+# AES-128 CBC decryption for one block with full client I/O:
+#   client slot 0 (data owner): one secret ciphertext block (16 bytes / 128 bits)
+#   client slot 1 (key holder): the 128-bit AES key
+# The plaintext is delivered only to client 0 via send_to_client and is never opened.
+def decrypt() -> int64:
+  var ciphertext_bits: list[secret bool] = []
+  for i in 0..128:
+    ciphertext_bits.append(ClientStore.take_share_bool(0, i))
+  var key_bits: list[secret bool] = []
+  for j in 0..128:
+    key_bits.append(ClientStore.take_share_bool(1, j))
+
+  var ciphertext = bits_to_block(ciphertext_bits)
+  var key = bits_to_block(key_bits)
+  var iv = public_block([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+  var plaintext = cbc_decrypt([ciphertext], key, iv)
+
+  return send_block_to_client0(plaintext[0])
+
+def main() -> int64:
+  return encrypt()

@@ -59,6 +59,17 @@ RUN --mount=type=ssh \
         cargo build --release --package stoffel-vm --bin stoffel-run; \
     fi
 
+# Compile the AES-128 secret-bit circuit example into VM bytecode for compose runs.
+RUN cargo build --release --package stoffellang && \
+    mkdir -p /build/crates/stoffel-lang/examples/mpc_aes128_circuit/target && \
+    /build/target/release/stoffellang \
+      --binary \
+      --opt-level 2 \
+      --mpc-backend honeybadger \
+      --mpc-curve bls12-381 \
+      --output /build/crates/stoffel-lang/examples/mpc_aes128_circuit/target/mpc_aes128_circuit.stflb \
+      /build/crates/stoffel-lang/examples/mpc_aes128_circuit/main.stfl
+
 # ============================================================================
 # Stage 2: Runtime
 # ============================================================================
@@ -90,6 +101,7 @@ COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/threshold_eddsa_
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/threshold_bls_bls12381.stflb /app/programs/threshold_bls_bls12381.stflb
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/threshold_ecdsa_secp256k1.stflb /app/programs/threshold_ecdsa_secp256k1.stflb
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/threshold_ecdsa_p256.stflb /app/programs/threshold_ecdsa_p256.stflb
+COPY --from=builder /build/crates/stoffel-lang/examples/mpc_aes128_circuit/target/mpc_aes128_circuit.stflb /app/programs/mpc_aes128_circuit.stflb
 
 # Copy pre-generated certificates for coordinator identity
 COPY ids /app/ids
@@ -102,7 +114,7 @@ RUN chmod +x /app/entrypoint.sh
 ENV STOFFEL_BIND_ADDR="0.0.0.0:9000"
 ENV STOFFEL_N_PARTIES="5"
 ENV STOFFEL_THRESHOLD="1"
-ENV STOFFEL_PROGRAM="/app/programs/matrix_average_fixed_point.stflb"
+ENV STOFFEL_PROGRAM="/app/programs/mpc_aes128_circuit.stflb"
 ENV STOFFEL_ENTRY="main"
 ENV STOFFEL_ROLE="party"
 ENV STOFFEL_PARTY_ID="0"

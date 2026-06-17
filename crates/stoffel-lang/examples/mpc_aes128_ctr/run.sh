@@ -4,7 +4,6 @@
 #
 #   Client slot 0 (data owner): 2 secret plaintext blocks (32 bytes, 256 bits)
 #   Client slot 1 (key holder): the 128-bit AES key (threshold key)
-#   Public (built in main): CBC IV and the CTR counter blocks
 #
 # NIST SP 800-38A AES-128 vectors:
 #   Key       : 2b7e151628aed2a6abf7158809cf4f3c
@@ -37,7 +36,7 @@ emit_bits() {
   done
 }
 
-# Slot 0 supplies 256 bits (2 plaintext blocks) and slot 1 only 128 (the key).
+# Slot 0 supplies 256 bits (2 plaintext blocks), and slot 1 supplies the key.
 # Clients may provide different numbers of inputs — the local runner pads the
 # shorter client internally — so no manual padding is needed here.
 ARGS="$(emit_bits 0 "$PLAINTEXT_HEX")$(emit_bits 1 "$KEY_HEX")"

@@ -74,7 +74,24 @@ pub trait TypedClientOutputs: Sized {
     fn value_types() -> Vec<ClientValueType>;
 }
 
-/// Generated program metadata emitted by `stoffel::generate_bindings`.
+/// Positional arguments for direct program execution.
+///
+/// Rust does not support variadic methods, so the SDK accepts `()`, one scalar
+/// value, or tuples of scalar values:
+///
+/// ```
+/// # use stoffel::prelude::*;
+/// # fn example(program: &StoffelRuntime) -> stoffel::Result<()> {
+/// let result = program.execute("main", (40_i64, 2_i64))?;
+/// # let _ = result;
+/// # Ok(())
+/// # }
+/// ```
+pub trait ProgramArgs {
+    fn into_values(self) -> Vec<Value>;
+}
+
+/// Generated program metadata emitted by `stoffel-bindgen`.
 ///
 /// This marker trait lets application code carry the bytecode manifest's
 /// backend, curve, and client IO shape at the Rust type level. Builders can use
@@ -462,26 +479,107 @@ macro_rules! try_from_value_copy {
     };
 }
 
-try_from_value_copy!(i64, I64, "i64");
-try_from_value_copy!(u64, U64, "u64");
-try_from_value_copy!(bool, Bool, "bool");
 try_from_value_copy!(f64, Float, "float");
 
-impl ClientOutputValue for i64 {
-    const VALUE_TYPE: ClientValueType = ClientValueType::Integer;
+macro_rules! try_from_signed_integer_value {
+    ($($target:ty),* $(,)?) => {
+        $(
+            impl TryFrom<Value> for $target {
+                type Error = Error;
 
-    fn try_from_sdk_value(value: Value) -> Result<Self> {
-        i64::try_from(value)
+                fn try_from(value: Value) -> Result<Self> {
+                    <$target>::try_from(&value)
+                }
+            }
+
+            impl TryFrom<&Value> for $target {
+                type Error = Error;
+
+                fn try_from(value: &Value) -> Result<Self> {
+                    match value {
+                        Value::I64(value) => <$target>::try_from(*value).map_err(|_| {
+                            Error::InvalidInput(format!("{value} is out of range for {}", stringify!($target)))
+                        }),
+                        Value::U64(value) => <$target>::try_from(*value).map_err(|_| {
+                            Error::InvalidInput(format!("{value} is out of range for {}", stringify!($target)))
+                        }),
+                        actual => Err(value_type_error(stringify!($target), actual)),
+                    }
+                }
+            }
+        )*
+    };
+}
+
+macro_rules! try_from_unsigned_integer_value {
+    ($($target:ty),* $(,)?) => {
+        $(
+            impl TryFrom<Value> for $target {
+                type Error = Error;
+
+                fn try_from(value: Value) -> Result<Self> {
+                    <$target>::try_from(&value)
+                }
+            }
+
+            impl TryFrom<&Value> for $target {
+                type Error = Error;
+
+                fn try_from(value: &Value) -> Result<Self> {
+                    match value {
+                        Value::U64(value) => <$target>::try_from(*value).map_err(|_| {
+                            Error::InvalidInput(format!("{value} is out of range for {}", stringify!($target)))
+                        }),
+                        Value::I64(value) => <$target>::try_from(*value).map_err(|_| {
+                            Error::InvalidInput(format!("{value} is out of range for {}", stringify!($target)))
+                        }),
+                        actual => Err(value_type_error(stringify!($target), actual)),
+                    }
+                }
+            }
+        )*
+    };
+}
+
+try_from_signed_integer_value!(i8, i16, i32, i64);
+try_from_unsigned_integer_value!(u8, u16, u32, u64);
+
+impl TryFrom<Value> for bool {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        bool::try_from(&value)
     }
 }
 
-impl ClientOutputValue for u64 {
-    const VALUE_TYPE: ClientValueType = ClientValueType::Integer;
+impl TryFrom<&Value> for bool {
+    type Error = Error;
 
-    fn try_from_sdk_value(value: Value) -> Result<Self> {
-        u64::try_from(value)
+    fn try_from(value: &Value) -> Result<Self> {
+        match value {
+            Value::Bool(value) => Ok(*value),
+            Value::U64(0) | Value::I64(0) => Ok(false),
+            Value::U64(1) | Value::I64(1) => Ok(true),
+            actual => Err(value_type_error("bool or integer 0/1", actual)),
+        }
     }
 }
+
+macro_rules! client_integer_output {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl ClientOutputValue for $ty {
+                const VALUE_TYPE: ClientValueType = ClientValueType::Integer;
+
+                fn try_from_sdk_value(value: Value) -> Result<Self> {
+                    <$ty>::try_from(value)
+                }
+            }
+        )*
+    };
+}
+
+client_integer_output!(i8, i16, i32, i64, u8, u16, u32, u64);
 
 impl ClientOutputValue for bool {
     const VALUE_TYPE: ClientValueType = ClientValueType::Boolean;
@@ -509,6 +607,12 @@ impl TypedClientInputs for () {
     }
 }
 
+impl ProgramArgs for () {
+    fn into_values(self) -> Vec<Value> {
+        Vec::new()
+    }
+}
+
 impl<T> TypedClientInputs for T
 where
     T: ClientInputValue,
@@ -519,6 +623,38 @@ where
 
     fn value_types() -> Vec<ClientValueType> {
         vec![T::VALUE_TYPE]
+    }
+}
+
+macro_rules! program_arg_scalar {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl ProgramArgs for $ty {
+                fn into_values(self) -> Vec<Value> {
+                    vec![self.into()]
+                }
+            }
+        )*
+    };
+}
+
+program_arg_scalar!(
+    i8, i16, i32, i64, isize,
+    u8, u16, u32, u64, usize,
+    bool, f32, f64,
+    String, &str, Value,
+    Vec<u8>, &[u8], Vec<Value>, BTreeMap<String, Value>,
+);
+
+impl<const N: usize> ProgramArgs for [u8; N] {
+    fn into_values(self) -> Vec<Value> {
+        vec![self.into()]
+    }
+}
+
+impl ProgramArgs for &String {
+    fn into_values(self) -> Vec<Value> {
+        vec![self.into()]
     }
 }
 
@@ -594,6 +730,16 @@ macro_rules! typed_client_tuple {
 
                 fn value_types() -> Vec<ClientValueType> {
                     vec![$($type_name::VALUE_TYPE),+]
+                }
+            }
+
+            impl<$($type_name),+> ProgramArgs for ($($type_name,)+)
+            where
+                $($type_name: Into<Value>),+
+            {
+                fn into_values(self) -> Vec<Value> {
+                    let ($($value_name,)+) = self;
+                    vec![$($value_name.into()),+]
                 }
             }
         )+
