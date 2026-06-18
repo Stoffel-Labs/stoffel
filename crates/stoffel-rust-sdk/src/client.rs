@@ -1159,6 +1159,7 @@ where
             &config.coordinator_host,
             config.coordinator_port,
             config.threshold as u64,
+            config.parties as u64,
             config.output_count,
             config.cert_der.clone(),
             config.key_der.clone(),
