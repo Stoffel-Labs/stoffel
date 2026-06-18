@@ -228,6 +228,7 @@ where
 
                 let mut encoded_results = Vec::with_capacity(pairs.len());
                 let mut node = self.clone_node().await;
+                node.params.n_triples = node.params.n_triples.max(max_pairs_per_session);
                 for (chunk_index, chunk) in pairs.chunks(max_pairs_per_session).enumerate() {
                     let mut left_shares = Vec::with_capacity(chunk.len());
                     let mut right_shares = Vec::with_capacity(chunk.len());
