@@ -1,5 +1,6 @@
 //! Build-script helpers for generating typed client IO bindings from `.stflb`.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Cursor;
 use std::path::Path;
@@ -295,7 +296,7 @@ pub(crate) fn generate_bindings_source(
     .expect("writing to String cannot fail");
     writeln!(source).expect("writing to String cannot fail");
 
-    emit_program_manifest(&mut source, program, &config.crate_path)?;
+    emit_program_manifest(&mut source, program, config)?;
     writeln!(source).expect("writing to String cannot fail");
 
     if !program.has_client_io() {
@@ -334,7 +335,14 @@ pub(crate) fn generate_bindings_source(
     Ok(source)
 }
 
-fn emit_program_manifest(source: &mut String, program: &Program, crate_path: &str) -> Result<()> {
+fn emit_program_manifest(
+    source: &mut String,
+    program: &Program,
+    config: &BindingsConfig,
+) -> Result<()> {
+    let crate_path = &config.crate_path;
+    let output_types = merged_client_output_types(program, config)?;
+
     writeln!(source, "pub struct ProgramManifest;").expect("writing to String cannot fail");
     writeln!(
         source,
@@ -376,12 +384,12 @@ fn emit_program_manifest(source: &mut String, program: &Program, crate_path: &st
     )
     .expect("writing to String cannot fail");
     writeln!(source, "        match client_slot {{").expect("writing to String cannot fail");
-    for client in program.clients() {
+    for (client_slot, outputs) in output_types {
         writeln!(
             source,
             "            {} => Some(&{}),",
-            client.client_slot(),
-            client_value_type_array(crate_path, client.outputs())?
+            client_slot,
+            client_value_type_array(crate_path, &outputs)?
         )
         .expect("writing to String cannot fail");
     }
@@ -390,6 +398,43 @@ fn emit_program_manifest(source: &mut String, program: &Program, crate_path: &st
     writeln!(source, "    }}").expect("writing to String cannot fail");
     writeln!(source, "}}").expect("writing to String cannot fail");
     Ok(())
+}
+
+fn merged_client_output_types(
+    program: &Program,
+    config: &BindingsConfig,
+) -> Result<BTreeMap<u64, Vec<ShareType>>> {
+    let mut output_types = BTreeMap::new();
+    for client in program.clients() {
+        output_types.insert(client.client_slot(), client.outputs().to_vec());
+    }
+    for entrypoint in &config.entrypoints {
+        if entrypoint.output_types.is_empty() {
+            continue;
+        }
+        match output_types.get_mut(&entrypoint.output_client_slot) {
+            Some(existing) if existing.is_empty() => {
+                *existing = entrypoint.output_types.clone();
+            }
+            Some(existing) if *existing == entrypoint.output_types => {}
+            Some(existing) => {
+                return Err(Error::Configuration(format!(
+                    "entrypoint '{}' declares {} output value(s) for client {}, but the manifest already has {} incompatible output value(s)",
+                    entrypoint.entrypoint,
+                    entrypoint.output_types.len(),
+                    entrypoint.output_client_slot,
+                    existing.len()
+                )));
+            }
+            None => {
+                output_types.insert(
+                    entrypoint.output_client_slot,
+                    entrypoint.output_types.clone(),
+                );
+            }
+        }
+    }
+    Ok(output_types)
 }
 
 fn sdk_backend_expr(crate_path: &str, backend: MpcBackend, curve: MpcCurve) -> String {

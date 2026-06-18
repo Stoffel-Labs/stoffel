@@ -3747,20 +3747,13 @@ fn offchain_coordinator_surface_reexports_core_types() {
     let _ = std::any::type_name::<
         stoffel::coordinator::OffChainCoordinator<
             stoffel_mpc_coordinator::tests::fake_coord::FakeShareValueType,
-            stoffel_mpc_coordinator::tests::fake_coord::HoneyBadgerShareType,
+            stoffel_mpc_coordinator::tests::fake_coord::FakeShareType,
         >,
     >();
 
     let client: stoffel::coordinator::ClientIdentity = vec![1, 2, 3];
-    let reservation = stoffel::coordinator::AssignedMaskReservation {
-        client: client.clone(),
-        reserved_index: 7,
-        input_ordinal: 0,
-    };
 
     assert_eq!(client, vec![1, 2, 3]);
-    assert_eq!(reservation.client, client);
-    assert_eq!(reservation.reserved_index, 7);
 }
 
 #[test]

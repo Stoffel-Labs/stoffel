@@ -1155,12 +1155,11 @@ where
     S: stoffel_mpc_coordinator::ShareBound<Fr, ValueType = Fr>,
 {
     tokio::time::timeout(config.timeout, async {
-        let coord = OffChainCoordinatorClient::<Fr, S>::start_rpc_client_with_parties(
+        let coord = OffChainCoordinatorClient::<Fr, S>::start_rpc_client(
             &config.coordinator_host,
             config.coordinator_port,
             config.timestamp,
             config.threshold as u64,
-            config.parties as u64,
             config.output_count,
             config.cert_der.clone(),
             config.key_der.clone(),
@@ -1186,22 +1185,22 @@ where
             config.key_der.clone(),
         )
         .await?;
-        let masks = node_rpc.receive_assigned_masks().await?;
+        let mut masks = Vec::with_capacity(inputs.len());
+        for _ in 0..inputs.len() {
+            masks.push(node_rpc.receive_mask().await?);
+        }
         for (ordinal, (input, share_type)) in
             inputs.iter().zip(config.input_types.iter()).enumerate()
         {
             let reserved_index = config.input_start_index + ordinal as u64;
-            let (_, mask) = masks
-                .iter()
-                .find(|(metadata, _)| metadata.reserved_index == reserved_index)
-                .ok_or_else(|| {
-                    Error::Coordinator(stoffel_mpc_coordinator::CoordinatorError::JSONError(
-                        format!("missing assigned mask for input ordinal {ordinal}"),
-                    ))
-                })?;
+            let mask = masks.get(ordinal).ok_or_else(|| {
+                Error::Coordinator(stoffel_mpc_coordinator::CoordinatorError::JSONError(
+                    format!("missing assigned mask for input ordinal {ordinal}"),
+                ))
+            })?;
             let field_input = value_to_field(input, *share_type)?;
             coord
-                .send_masked_input(field_input + *mask, reserved_index)
+                .send_masked_input(field_input + mask, reserved_index)
                 .await?;
         }
         outputs_to_values(coord.obtain_outputs().await?, &config.output_types)

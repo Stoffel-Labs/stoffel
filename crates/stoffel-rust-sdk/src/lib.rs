@@ -689,7 +689,7 @@ impl Stoffel {
         let mut probe = self.clone();
         probe.inputs.clear();
         let probe_runtime = probe.build()?;
-        if probe_runtime.program().has_client_io() {
+        if probe_runtime.program().has_client_input_metadata() {
             return Err(Error::Unsupported(
                 "SDK local named-input adapter does not support programs that already declare ClientStore input metadata"
                     .to_owned(),

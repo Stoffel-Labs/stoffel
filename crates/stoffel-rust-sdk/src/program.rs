@@ -287,6 +287,20 @@ impl Program {
         !self.binary.client_io_manifest.clients.is_empty()
     }
 
+    /// Whether the program reads client INPUTS via `ClientStore` (as opposed to
+    /// only delivering client OUTPUTS via `send_to_client`). The local
+    /// named-input adapter synthesizes the input wrapper itself, so it can only
+    /// wrap programs that take their inputs as function parameters — i.e. those
+    /// with no client input metadata. Output-only client IO is fine and is
+    /// preserved through wrapping.
+    pub fn has_client_input_metadata(&self) -> bool {
+        self.binary
+            .client_io_manifest
+            .clients
+            .iter()
+            .any(|client| !client.inputs.is_empty())
+    }
+
     pub fn validate_expected_clients(&self, expected_clients: usize) -> Result<()> {
         let minimum_expected_clients = self.minimum_expected_clients();
         if minimum_expected_clients > expected_clients {
@@ -428,9 +442,7 @@ impl Program {
         }
 
         let mut instructions = Vec::with_capacity(input_count * 8 + input_shapes.len() + 2);
-        let first_clear_arg_register = 2;
-        let mut next_clear_register = first_clear_arg_register;
-        let mut next_secret_register = DEFAULT_SECRET_REGISTER_START;
+        let mut registers = WrapperRegisters::new();
         let mut next_share_index = 0usize;
         let mut arg_registers = Vec::with_capacity(input_shapes.len());
         for shape in input_shapes {
@@ -439,8 +451,7 @@ impl Program {
                 &mut binary,
                 &mut instructions,
                 &mut next_share_index,
-                &mut next_clear_register,
-                &mut next_secret_register,
+                &mut registers,
             )?;
             arg_registers.push(register);
         }
@@ -450,11 +461,7 @@ impl Program {
         instructions.push(CompiledInstruction::CALL(call_name.to_owned()));
         instructions.push(CompiledInstruction::RET(0));
 
-        let register_count = if next_secret_register == DEFAULT_SECRET_REGISTER_START {
-            next_clear_register.max(first_clear_arg_register)
-        } else {
-            next_clear_register.max(next_secret_register)
-        };
+        let register_count = registers.register_count();
         binary.functions.push(CompiledFunction {
             name: entry_name.to_owned(),
             register_count,
@@ -467,15 +474,27 @@ impl Program {
             instructions,
         });
 
-        binary.client_io_manifest.clients = if input_count == 0 {
-            Vec::new()
-        } else {
-            vec![ClientIoSchema {
-                client_slot: 0,
-                inputs: input_types,
-                outputs: Vec::new(),
-            }]
-        };
+        // The wrapper synthesizes all client inputs (clear constants + secret
+        // `take_share*` loads) on client slot 0, so it owns the input schema.
+        // Any client OUTPUT schema the program declares (e.g. `send_to_client`)
+        // is orthogonal and must be preserved, so a wrapped program can still
+        // deliver results to its clients.
+        if input_count > 0 {
+            if let Some(client) = binary
+                .client_io_manifest
+                .clients
+                .iter_mut()
+                .find(|client| client.client_slot == 0)
+            {
+                client.inputs = input_types;
+            } else {
+                binary.client_io_manifest.clients.push(ClientIoSchema {
+                    client_slot: 0,
+                    inputs: input_types,
+                    outputs: Vec::new(),
+                });
+            }
+        }
 
         Ok(Self::new(binary))
     }
@@ -819,17 +838,74 @@ fn bytecode_curve_name(curve: stoffel_vm_types::compiled_binary::MpcCurve) -> &'
     }
 }
 
+/// Register-frame bookkeeping for the local input wrapper.
+///
+/// The VM splits the register frame into a clear bank (indices below
+/// [`DEFAULT_SECRET_REGISTER_START`]) and a secret bank (at or above it), so a
+/// clear value must live in a low index and a secret share in a high one. The
+/// wrapper builds aggregate (list/object) inputs by materializing each element
+/// into a temporary register and immediately consuming it with `array_push`/
+/// `set_field`; those element registers are dead afterwards, so we reuse them
+/// instead of allocating one per element (a 128-element list would otherwise
+/// overflow the 14-slot clear bank and corrupt the secret bank). `next_*` is the
+/// reusable cursor and `high_*` is the high-water mark used to size the frame.
+struct WrapperRegisters {
+    next_clear: usize,
+    next_secret: usize,
+    high_clear: usize,
+    high_secret: usize,
+    used_secret: bool,
+}
+
+impl WrapperRegisters {
+    /// Registers 0 and 1 are scratch for the builtin call ABI (return value and
+    /// argument staging), so clear allocation starts at 2.
+    const FIRST_CLEAR_REGISTER: usize = 2;
+
+    fn new() -> Self {
+        Self {
+            next_clear: Self::FIRST_CLEAR_REGISTER,
+            next_secret: DEFAULT_SECRET_REGISTER_START,
+            high_clear: Self::FIRST_CLEAR_REGISTER,
+            high_secret: DEFAULT_SECRET_REGISTER_START,
+            used_secret: false,
+        }
+    }
+
+    fn allocate_clear(&mut self) -> usize {
+        let register = self.next_clear;
+        self.next_clear += 1;
+        self.high_clear = self.high_clear.max(self.next_clear);
+        register
+    }
+
+    fn allocate_secret(&mut self) -> usize {
+        let register = self.next_secret;
+        self.next_secret += 1;
+        self.high_secret = self.high_secret.max(self.next_secret);
+        self.used_secret = true;
+        register
+    }
+
+    fn register_count(&self) -> usize {
+        if self.used_secret {
+            self.high_clear.max(self.high_secret)
+        } else {
+            self.high_clear
+        }
+    }
+}
+
 fn emit_local_input_shape(
     shape: &LocalInputShape,
     binary: &mut CompiledBinary,
     instructions: &mut Vec<CompiledInstruction>,
     next_share_index: &mut usize,
-    next_clear_register: &mut usize,
-    next_secret_register: &mut usize,
+    registers: &mut WrapperRegisters,
 ) -> Result<usize> {
     match shape {
         LocalInputShape::Clear(value) => {
-            let dest = allocate_wrapper_register(next_clear_register);
+            let dest = registers.allocate_clear();
             let const_index = binary.constants.len();
             binary
                 .constants
@@ -837,8 +913,8 @@ fn emit_local_input_shape(
             instructions.push(CompiledInstruction::LDI(dest, const_index));
             Ok(dest)
         }
-        LocalInputShape::Share(_) => {
-            let dest = allocate_wrapper_register(next_secret_register);
+        LocalInputShape::Share(share_type) => {
+            let dest = registers.allocate_secret();
             let client_index_const = binary.constants.len();
             binary.constants.push(VmValue::U64(0));
             let share_index_const = binary.constants.len();
@@ -850,37 +926,56 @@ fn emit_local_input_shape(
             instructions.push(CompiledInstruction::LDI(1, share_index_const));
             instructions.push(CompiledInstruction::PUSHARG(0));
             instructions.push(CompiledInstruction::PUSHARG(1));
-            instructions.push(CompiledInstruction::CALL(
-                "ClientStore.take_share".to_owned(),
-            ));
+            // Pick the ClientStore loader that tags the share with the declared
+            // type. The boolean gates (NOT/AND/XOR) reject the default 64-bit
+            // integer share, so a 1-bit secret must be loaded via
+            // `take_share_bool`; fixed-point likewise needs `take_share_fixed`.
+            let take_method = match share_type {
+                ShareType::SecretInt { bit_length: 1 } => "ClientStore.take_share_bool",
+                ShareType::SecretFixedPoint { .. } => "ClientStore.take_share_fixed",
+                _ => "ClientStore.take_share",
+            };
+            instructions.push(CompiledInstruction::CALL(take_method.to_owned()));
             instructions.push(CompiledInstruction::MOV(dest, 0));
             Ok(dest)
         }
         LocalInputShape::List(items) => {
-            let dest = allocate_wrapper_register(next_clear_register);
+            let dest = registers.allocate_clear();
             instructions.push(CompiledInstruction::CALL("create_array".to_owned()));
             instructions.push(CompiledInstruction::MOV(dest, 0));
             for item in items {
+                // Each element is consumed immediately by `array_push`, so its
+                // register is dead afterwards: snapshot the cursors, emit, push,
+                // then rewind to reuse the registers for the next element. The
+                // array handle in `dest` was allocated before the snapshot, so
+                // it survives.
+                let saved_clear = registers.next_clear;
+                let saved_secret = registers.next_secret;
                 let item_register = emit_local_input_shape(
                     item,
                     binary,
                     instructions,
                     next_share_index,
-                    next_clear_register,
-                    next_secret_register,
+                    registers,
                 )?;
                 instructions.push(CompiledInstruction::PUSHARG(dest));
                 instructions.push(CompiledInstruction::PUSHARG(item_register));
                 instructions.push(CompiledInstruction::CALL("array_push".to_owned()));
+                registers.next_clear = saved_clear;
+                registers.next_secret = saved_secret;
             }
             Ok(dest)
         }
         LocalInputShape::Object(fields) => {
-            let dest = allocate_wrapper_register(next_clear_register);
+            let dest = registers.allocate_clear();
             instructions.push(CompiledInstruction::CALL("create_object".to_owned()));
             instructions.push(CompiledInstruction::MOV(dest, 0));
             for (field_name, field_shape) in fields {
-                let key_register = allocate_wrapper_register(next_clear_register);
+                // Key and value are both live until `set_field`, then dead;
+                // rewind afterwards so the next field reuses their registers.
+                let saved_clear = registers.next_clear;
+                let saved_secret = registers.next_secret;
+                let key_register = registers.allocate_clear();
                 let key_const = binary.constants.len();
                 binary.constants.push(VmValue::String(field_name.clone()));
                 instructions.push(CompiledInstruction::LDI(key_register, key_const));
@@ -889,13 +984,14 @@ fn emit_local_input_shape(
                     binary,
                     instructions,
                     next_share_index,
-                    next_clear_register,
-                    next_secret_register,
+                    registers,
                 )?;
                 instructions.push(CompiledInstruction::PUSHARG(dest));
                 instructions.push(CompiledInstruction::PUSHARG(key_register));
                 instructions.push(CompiledInstruction::PUSHARG(value_register));
                 instructions.push(CompiledInstruction::CALL("set_field".to_owned()));
+                registers.next_clear = saved_clear;
+                registers.next_secret = saved_secret;
             }
             Ok(dest)
         }
@@ -919,11 +1015,6 @@ fn clear_sdk_value_to_vm_constant(value: &Value) -> Result<VmValue> {
     }
 }
 
-fn allocate_wrapper_register(next_register: &mut usize) -> usize {
-    let register = *next_register;
-    *next_register += 1;
-    register
-}
 
 #[cfg(test)]
 mod tests {

@@ -42,6 +42,7 @@ stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
 stoffelmpc-mpc = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "temp/monorepo-network-dep" }
 
 [dev-dependencies]
+aes = "0.8"
 stoffel-bindgen = { version = "0.1.0", path = "../stoffel-bindgen" }
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
 trybuild = "1"

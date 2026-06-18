@@ -8,9 +8,7 @@ pub mod offchain;
 pub mod onchain;
 
 pub use offchain::{
-    AssignedMaskReservation, AssignedMaskShare, AssignedMaskedInputEvent, ClientIdentity,
-    InputAssignment, InputSlotAssignment, OffChainCoordinator, OffChainCoordinatorClient,
-    OffChainCoordinatorServer,
+    ClientIdentity, OffChainCoordinator, OffChainCoordinatorClient, OffChainCoordinatorServer,
 };
 pub use onchain::{
     node_rpc, setup_coord, ws_connect, BlsOnChainAvssCoordinator, CoordinatorEvent,

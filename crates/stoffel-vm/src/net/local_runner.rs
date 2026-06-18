@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::{BigInteger, PrimeField};
 use stoffel_mpc_coordinator::off_chain::{
-    node_rpc::NodeRPCClient as OffChainNodeRPCClient, InputAssignment, InputSlotAssignment,
-    OffChainCoordinatorClient, OffChainCoordinatorServer,
+    node_rpc::NodeRPCClient as OffChainNodeRPCClient, OffChainCoordinatorClient,
+    OffChainCoordinatorServer,
 };
 use stoffel_mpc_coordinator::self_signed_certs;
 use stoffel_mpc_coordinator::tests::fake_coord::off_chain::{
@@ -128,28 +128,15 @@ impl LocalCoordinatorRunner {
 
         let coord_port = reserve_port()?;
         let coord_cert = self_signed_certs::server_cert();
-        let coord_state = if local_clients.is_empty() {
-            FakeCoordinatorRPCServerSharedBase::new(
-                program_id,
-                self.parties as u64,
-                self.threshold as u64,
-                node_public_keys,
-                0,
-                Vec::new(),
-            )
-        } else {
-            let (n_inputs, output_clients, input_assignment) =
-                self.coordinator_client_io_binding(&client_bindings)?;
-            FakeCoordinatorRPCServerSharedBase::new_with_input_assignment(
-                program_id,
-                self.parties as u64,
-                self.threshold as u64,
-                node_public_keys,
-                n_inputs,
-                output_clients,
-                input_assignment,
-            )?
-        };
+        let (n_inputs, output_clients) = self.coordinator_client_io_binding(&client_bindings)?;
+        let coord_state = FakeCoordinatorRPCServerSharedBase::new(
+            program_id,
+            self.parties as u64,
+            self.threshold as u64,
+            node_public_keys,
+            n_inputs,
+            output_clients,
+        );
         let coord = OffChainCoordinatorServer::<FakeCoordinatorConnection>::start_coord(
             coord_state,
             "127.0.0.1",
@@ -197,46 +184,74 @@ impl LocalCoordinatorRunner {
             )?);
         }
 
-        let client_results = match self.backend {
-            MpcBackendKind::HoneyBadger => {
-                futures::future::join_all(
-                    local_clients
-                        .iter()
-                        .filter(|client| client.input.has_input())
-                        .cloned()
-                        .map(|client| {
-                            run_honeybadger_offchain_client(
-                                client,
-                                node_rpc_addrs.clone(),
-                                coord_port,
-                                coord.get_timestamp(),
-                                self.threshold,
-                                self.timeout,
-                            )
-                        }),
-                )
-                .await
-            }
-            MpcBackendKind::Avss => {
-                futures::future::join_all(
-                    local_clients
-                        .iter()
-                        .filter(|client| client.input.has_input())
-                        .cloned()
-                        .map(|client| {
-                            run_avss_offchain_client(
-                                client,
-                                node_rpc_addrs.clone(),
-                                coord_port,
-                                coord.get_timestamp(),
-                                self.threshold,
-                                self.timeout,
-                            )
-                        }),
-                )
-                .await
+        let timeout = self.timeout;
+        let threshold = self.threshold;
+        let timestamp = coord.get_timestamp();
+        let client_results_future = async {
+            match self.backend {
+                MpcBackendKind::HoneyBadger => {
+                    futures::future::join_all(
+                        local_clients
+                            .iter()
+                            .filter(|client| client.input.has_input())
+                            .cloned()
+                            .map(|client| {
+                                run_honeybadger_offchain_client(
+                                    client,
+                                    node_rpc_addrs.clone(),
+                                    coord_port,
+                                    timestamp,
+                                    threshold,
+                                    timeout,
+                                )
+                            }),
+                    )
+                    .await
+                }
+                MpcBackendKind::Avss => {
+                    futures::future::join_all(
+                        local_clients
+                            .iter()
+                            .filter(|client| client.input.has_input())
+                            .cloned()
+                            .map(|client| {
+                                run_avss_offchain_client(
+                                    client,
+                                    node_rpc_addrs.clone(),
+                                    coord_port,
+                                    timestamp,
+                                    threshold,
+                                    timeout,
+                                )
+                            }),
+                    )
+                    .await
+                }
             }
         };
+        let party_outputs_future = futures::future::join_all(
+            children
+                .into_iter()
+                .map(|(name, child)| wait_for_child(name, child, timeout)),
+        );
+
+        tokio::pin!(client_results_future);
+        tokio::pin!(party_outputs_future);
+
+        let (client_results, combined_output, party_outputs) = tokio::select! {
+            client_results = &mut client_results_future => {
+                let outputs = party_outputs_future.await;
+                let (combined_output, party_outputs) = Self::collect_party_outputs(outputs)?;
+                (client_results, combined_output, party_outputs)
+            }
+            outputs = &mut party_outputs_future => {
+                let (combined_output, _party_outputs) = Self::collect_party_outputs(outputs)?;
+                return Err(LocalCoordinatorRunnerError::ProcessFailures(format!(
+                    "local coordinator parties exited before client IO completed\n\ncompleted process output:\n{combined_output}"
+                )));
+            }
+        };
+
         let mut client_outputs = Vec::new();
         for result in client_results {
             if let Some(record) = result? {
@@ -244,12 +259,16 @@ impl LocalCoordinatorRunner {
             }
         }
 
-        let outputs = futures::future::join_all(
-            children
-                .into_iter()
-                .map(|(name, child)| wait_for_child(name, child, self.timeout)),
-        )
-        .await;
+        Ok(LocalCoordinatorRunOutput {
+            combined_output,
+            party_outputs,
+            client_outputs,
+        })
+    }
+
+    fn collect_party_outputs(
+        outputs: Vec<LocalCoordinatorRunnerResult<LocalPartyOutput>>,
+    ) -> LocalCoordinatorRunnerResult<(String, Vec<LocalPartyOutput>)> {
         let mut combined_output = String::new();
         let mut party_outputs = Vec::with_capacity(outputs.len());
         let mut failures = Vec::new();
@@ -271,11 +290,7 @@ impl LocalCoordinatorRunner {
             ));
         }
 
-        Ok(LocalCoordinatorRunOutput {
-            combined_output,
-            party_outputs,
-            client_outputs,
-        })
+        Ok((combined_output, party_outputs))
     }
 
     fn validate(&self) -> LocalCoordinatorRunnerResult<()> {
@@ -486,65 +501,41 @@ impl LocalCoordinatorRunner {
     fn coordinator_client_io_binding(
         &self,
         client_bindings: &[(u64, Vec<u8>)],
-    ) -> LocalCoordinatorRunnerResult<(u64, Vec<Vec<u8>>, InputAssignment)> {
-        let mut input_slots = Vec::new();
+    ) -> LocalCoordinatorRunnerResult<(u64, Vec<Vec<u8>>)> {
+        let mut n_inputs = 0_u64;
         let output_clients = client_bindings
             .iter()
             .map(|(_slot, identity)| identity.clone())
             .collect::<Vec<_>>();
         if self.binary.client_io_manifest.clients.is_empty() {
             for input in &self.client_inputs {
-                let client = client_bindings
+                client_bindings
                     .iter()
-                    .find_map(|(slot, identity)| {
-                        (*slot == input.client_slot).then(|| identity.clone())
-                    })
+                    .find(|(slot, _identity)| *slot == input.client_slot)
                     .ok_or_else(|| {
                         LocalCoordinatorRunnerError::Configuration(format!(
                             "client slot {} does not have a local client identity",
                             input.client_slot
                         ))
                     })?;
-
-                for input_ordinal in 0..input.values.len() {
-                    input_slots.push(InputSlotAssignment {
-                        client: client.clone(),
-                        label: input_ordinal as u64,
-                    });
-                }
+                n_inputs += input.values.len() as u64;
             }
-            return Ok((
-                input_slots.len() as u64,
-                output_clients,
-                InputAssignment { input_slots },
-            ));
+            return Ok((n_inputs, output_clients));
         }
 
         for schema in &self.binary.client_io_manifest.clients {
-            let client = client_bindings
+            client_bindings
                 .iter()
-                .find_map(|(slot, identity)| {
-                    (*slot == schema.client_slot).then(|| identity.clone())
-                })
+                .find(|(slot, _identity)| *slot == schema.client_slot)
                 .ok_or_else(|| {
                     LocalCoordinatorRunnerError::Configuration(format!(
                         "client slot {} does not have a local client identity",
                         schema.client_slot
                     ))
                 })?;
-
-            for input_ordinal in 0..schema.inputs.len() {
-                input_slots.push(InputSlotAssignment {
-                    client: client.clone(),
-                    label: input_ordinal as u64,
-                });
-            }
+            n_inputs += schema.inputs.len() as u64;
         }
-        Ok((
-            input_slots.len() as u64,
-            output_clients,
-            InputAssignment { input_slots },
-        ))
+        Ok((n_inputs, output_clients))
     }
 
     fn spawn_party(
@@ -1447,12 +1438,11 @@ mod tests {
         );
         assert!(known_clients.iter().all(|client| client.values.is_empty()));
 
-        let (n_inputs, output_clients, assignment) = runner
+        let (n_inputs, output_clients) = runner
             .coordinator_client_io_binding(&[(0, vec![10]), (1, vec![11])])
             .expect("binding");
         assert_eq!(n_inputs, 0);
         assert_eq!(output_clients, vec![vec![10], vec![11]]);
-        assert!(assignment.input_slots.is_empty());
     }
 
     #[test]
@@ -1481,13 +1471,10 @@ mod tests {
         assert_eq!(known_clients[0].values, vec!["42".to_owned()]);
         assert!(known_clients[1].values.is_empty());
 
-        let (n_inputs, output_clients, assignment) = runner
+        let (n_inputs, output_clients) = runner
             .coordinator_client_io_binding(&[(0, vec![10]), (1, vec![11])])
             .expect("binding");
         assert_eq!(n_inputs, 1);
         assert_eq!(output_clients, vec![vec![10], vec![11]]);
-        assert_eq!(assignment.input_slots.len(), 1);
-        assert_eq!(assignment.input_slots[0].client, vec![10]);
-        assert_eq!(assignment.input_slots[0].label, 0);
     }
 }
