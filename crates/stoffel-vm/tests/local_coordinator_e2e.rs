@@ -253,6 +253,7 @@ fn local_run_output_reports_consistent_party_return_values() {
             party_output("party0", "Program returned: 5\n"),
             party_output("party1", "Program returned: 5\n"),
         ],
+        client_outputs: Vec::new(),
     };
 
     assert_eq!(output.returned_values(), vec!["5", "5"]);
@@ -267,6 +268,7 @@ fn local_run_output_rejects_inconsistent_party_return_values() {
             party_output("party0", "Program returned: 5\n"),
             party_output("party1", "Program returned: 6\n"),
         ],
+        client_outputs: Vec::new(),
     };
 
     let err = output.consistent_returned_values().unwrap_err();

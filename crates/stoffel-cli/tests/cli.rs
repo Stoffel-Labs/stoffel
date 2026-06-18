@@ -20,6 +20,20 @@ fn local_mpc_guard() -> MutexGuard<'static, ()> {
 
 const LOCAL_MPC_TEST_TIMEOUT_SECS: &str = "120";
 
+/// Overwrites the scaffolded `src/main.stfl` with a deterministic two-argument
+/// addition program so named-input run flows have a stable, cleartext-safe
+/// `main(a, b)` to exercise. The default `init` template is a no-argument random
+/// boolean circuit, which neither accepts named inputs nor runs without an MPC
+/// engine, so tests that assert on `--input a=.. --input b=..` results write this
+/// program after `init` (and before any `build`).
+fn write_addition_program(project_dir: &std::path::Path) {
+    fs::write(
+        project_dir.join("src/main.stfl"),
+        "def main(a: int64, b: int64) -> int64:\n  return a + b\n",
+    )
+    .unwrap();
+}
+
 #[test]
 fn cli_exits_cleanly_when_stdout_pipe_closes() {
     let temp = TempDir::new().unwrap();
@@ -160,6 +174,7 @@ fn common_command_aliases_work() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Created Stoffel project"));
+    write_addition_program(&project);
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -255,7 +270,7 @@ fn run_accepts_numeric_bits_for_secret_bool_list_inputs() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("0"))
+        .stdout(predicate::str::contains("false"))
         .stderr(predicate::str::contains("expects bool, got i64").not());
 }
 
@@ -338,6 +353,7 @@ fn run_executes_bytecode_file() {
         .arg("--force")
         .assert()
         .success();
+    write_addition_program(temp.path());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -375,6 +391,7 @@ fn run_auto_discovers_built_bytecode() {
         .arg(&project)
         .assert()
         .success();
+    write_addition_program(&project);
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -421,7 +438,7 @@ fn run_recompiles_when_project_source_is_newer_than_bytecode() {
     thread::sleep(Duration::from_secs(1));
     fs::write(
         project.join("src/main.stfl"),
-        "def main(a: Share, b: Share) -> int64:\n  var sum = Share.add(a, b)\n  var sum2 = Share.add(sum, b)\n  return sum2.open()\n",
+        "def main(a: int64, b: int64) -> int64:\n  var sum = a + b\n  var sum2 = sum + b\n  return sum2\n",
     )
     .unwrap();
 
@@ -440,7 +457,7 @@ fn run_recompiles_when_project_source_is_newer_than_bytecode() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Instructions: 16"))
+        .stdout(predicate::str::contains("Instructions: 7"))
         .stdout(predicate::str::contains("5"));
 }
 
@@ -466,7 +483,7 @@ fn run_ignores_stray_bytecode_when_project_source_is_newer() {
     thread::sleep(Duration::from_secs(1));
     fs::write(
         project.join("src/main.stfl"),
-        "def main(a: Share, b: Share) -> int64:\n  return 100\n",
+        "def main(a: int64, b: int64) -> int64:\n  return 100\n",
     )
     .unwrap();
     fs::copy(
@@ -492,7 +509,7 @@ fn run_ignores_stray_bytecode_when_project_source_is_newer() {
         .success()
         .stdout(predicate::str::contains("Instructions: 4"))
         .stdout(predicate::str::contains("100"))
-        .stdout(predicate::str::contains("Instructions: 9").not());
+        .stdout(predicate::str::contains("Instructions: 113").not());
 }
 
 #[test]
@@ -549,6 +566,7 @@ fn run_folder_compiles_project_when_bytecode_is_missing() {
         .arg(&project)
         .assert()
         .success();
+    write_addition_program(&project);
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -1111,6 +1129,7 @@ fn common_flag_aliases_work_or_explain_defaults() {
         .arg("--force")
         .assert()
         .success();
+    write_addition_program(temp.path());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -1345,6 +1364,7 @@ fn run_rejects_build_only_flags_and_honors_program_info() {
         .arg("--force")
         .assert()
         .success();
+    write_addition_program(temp.path());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -1414,11 +1434,13 @@ fn run_validates_entry_and_inputs_before_timeout() {
         .stderr(predicate::str::contains(
             "entry function 'missing' is not declared",
         ))
-        .stderr(predicate::str::contains("Available source functions: main"));
+        .stderr(predicate::str::contains(
+            "Available source functions: circuit, gate_and, gate_not, gate_or, gate_xor, main",
+        ));
 
     fs::write(
         temp.path().join("src/main.stfl"),
-        "def add(a: Share, b: Share) -> int64:\n  var c = Share.add(a, b)\n  return c.open()\n",
+        "def add(a: int64, b: int64) -> int64:\n  return a + b\n",
     )
     .unwrap();
     Command::cargo_bin("stoffel")
@@ -1456,6 +1478,7 @@ fn run_validates_entry_and_inputs_before_timeout() {
         .arg("--force")
         .assert()
         .success();
+    write_addition_program(temp.path());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -1599,7 +1622,7 @@ fn run_validates_entry_and_inputs_before_timeout() {
         .arg(temp.path())
         .args([
             "--input",
-            "a=0x01",
+            "a=1",
             "--input",
             "b=2",
             "--timeout-secs",
@@ -1887,6 +1910,7 @@ fn run_network_validates_config_path_before_parsing() {
         .arg("--force")
         .assert()
         .success();
+    write_addition_program(temp.path());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -1950,6 +1974,7 @@ fn run_config_rejects_project_stoffel_toml() {
         .arg("--force")
         .assert()
         .success();
+    write_addition_program(temp.path());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -2146,6 +2171,7 @@ fn run_network_validates_program_before_parsing_config_contents() {
         .arg("--force")
         .assert()
         .success();
+    write_addition_program(temp.path());
     fs::write(temp.path().join("network.toml"), "not = [valid").unwrap();
 
     Command::cargo_bin("stoffel")
@@ -2201,7 +2227,7 @@ fn run_network_validates_program_before_parsing_config_contents() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "--client-input is only used for local ClientStore runs",
+            "--client-input and --client-input-file are only used for local ClientStore runs",
         ))
         .stderr(predicate::str::contains("failed to parse").not());
 }
@@ -2216,6 +2242,7 @@ fn run_network_accepts_network_config_and_attempts_connection() {
         .arg("--force")
         .assert()
         .success();
+    write_addition_program(temp.path());
     fs::write(
         temp.path().join("network.toml"),
         r#"
@@ -4105,6 +4132,7 @@ fn test_rejects_parameterized_programs_with_run_guidance() {
         .arg("--force")
         .assert()
         .success();
+    write_addition_program(temp.path());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -4428,6 +4456,9 @@ fn status_reports_project_health() {
         .arg("--force")
         .assert()
         .success();
+    // The default template ships a Rust SDK wrapper (Cargo.toml). Drop it so this
+    // test exercises a Stoffel-only project with no declared ecosystem dependencies.
+    fs::remove_file(temp.path().join("Cargo.toml")).unwrap();
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -4479,6 +4510,9 @@ fn status_verbose_names_missing_dependency_commands() {
         ])
         .assert()
         .success();
+    // The Stoffel scaffold also writes a Rust SDK Cargo.toml; remove it so the
+    // foundry toolchain is the only declared dependency this test reports on.
+    fs::remove_file(temp.path().join("Cargo.toml")).unwrap();
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -4886,6 +4920,10 @@ fn update_python_dependencies_report_missing_python_commands() {
         ])
         .assert()
         .success();
+    // `update` walks dependency manifests in order and the Stoffel scaffold also
+    // writes a Rust SDK Cargo.toml, which would otherwise fail on `cargo` first.
+    // Remove it so this test reaches the Python toolchain check it targets.
+    fs::remove_file(temp.path().join("Cargo.toml")).unwrap();
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -4910,6 +4948,9 @@ fn update_source_self_update_requires_explicit_opt_in() {
         .arg("--force")
         .assert()
         .success();
+    // Drop the scaffolded Rust SDK Cargo.toml so the project-dependency pass has
+    // nothing to run; this test only exercises the CLI self-update messaging.
+    fs::remove_file(temp.path().join("Cargo.toml")).unwrap();
 
     Command::cargo_bin("stoffel")
         .unwrap()

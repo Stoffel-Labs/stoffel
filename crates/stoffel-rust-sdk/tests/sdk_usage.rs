@@ -1750,7 +1750,12 @@ def main() -> int64:
     .expected_output_clients(2)
     .build()?;
 
-    assert_eq!(runtime.program().minimum_expected_clients(), 1);
+    // The output client slot `i` is a runtime `while`-loop counter spanning
+    // `0..count`, so it is NOT statically resolvable and contributes no client
+    // to the manifest — the static minimum is 0. This is precisely why the
+    // developer must declare `expected_output_clients` explicitly for dynamic
+    // outputs (a counter's initial value is not a meaningful static slot).
+    assert_eq!(runtime.program().minimum_expected_clients(), 0);
     assert_eq!(runtime.configured_expected_clients(), Some(2));
     runtime.validate_client_inputs()?;
     Ok(())

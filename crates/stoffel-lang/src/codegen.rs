@@ -179,6 +179,10 @@ struct CodeGenerator {
     variable_share_types: HashMap<String, ShareType>,
     variable_share_lists: HashMap<String, Vec<ShareType>>,
     clear_int_constants: HashMap<String, u64>,
+    /// Names of variables reassigned somewhere in the current function body.
+    /// Such variables (e.g. `while`-loop counters) are not constants, so their
+    /// initial value must not be used to statically resolve client-IO slots.
+    reassigned_vars: HashSet<String>,
     active_loop_bounds: Vec<(String, u64)>,
     /// (continue_label, break_label) for each enclosing loop, innermost last
     loop_label_stack: Vec<(String, String)>,
@@ -208,6 +212,7 @@ impl CodeGenerator {
             variable_share_types: HashMap::new(),
             variable_share_lists: HashMap::new(),
             clear_int_constants: HashMap::new(),
+            reassigned_vars: HashSet::new(),
             active_loop_bounds: Vec::new(),
             loop_label_stack: Vec::new(),
         }
@@ -1323,6 +1328,7 @@ impl CodeGenerator {
                 if let Some(value) = value
                     .as_deref()
                     .and_then(|node| int_literal_u64(Some(node)))
+                    .filter(|_| !self.reassigned_vars.contains(name))
                 {
                     self.clear_int_constants.insert(name.clone(), value);
                 } else {
@@ -1606,7 +1612,9 @@ impl CodeGenerator {
                         self.emit(Instruction::MOV(dest_vr_index, value_vr.0));
 
                         // Assignment itself doesn't produce a value/register to be used further.
-                        if let Some(value) = int_literal_u64(Some(value.as_ref())) {
+                        if let Some(value) = int_literal_u64(Some(value.as_ref()))
+                            .filter(|_| !self.reassigned_vars.contains(name))
+                        {
                             self.clear_int_constants.insert(name.clone(), value);
                         } else {
                             self.clear_int_constants.remove(name);
@@ -2260,6 +2268,11 @@ impl CodeGenerator {
                 // --- Compile the function body ---
                 let mut function_generator = CodeGenerator::new();
                 function_generator.object_field_types = self.object_field_types.clone();
+                // A variable that is reassigned anywhere in the body (e.g. a
+                // `while`-loop counter) is not a constant, so it must not be
+                // resolved to its initial value when statically determining
+                // client-IO slots/ordinals.
+                collect_reassigned_vars(body, &mut function_generator.reassigned_vars);
 
                 // --- Add parameters to the function_generator's symbol table ---
                 let mut param_vrs: Vec<VirtualRegister> = Vec::new();
@@ -2731,8 +2744,104 @@ fn collect_upvalue_names(node: &AstNode) -> Vec<String> {
     upvalues
 }
 
+/// Collect the names of all variables that are reassigned (the LHS of an
+/// `Assignment`) within `node`, not descending into nested function definitions
+/// (which have their own scope and are seeded separately). Used to exclude
+/// loop counters and other mutated variables from constant-slot resolution.
+fn collect_reassigned_vars(node: &AstNode, out: &mut HashSet<String>) {
+    match node {
+        AstNode::Assignment { target, value, .. } => {
+            if let AstNode::Identifier(name, _) = target.as_ref() {
+                out.insert(name.clone());
+            }
+            collect_reassigned_vars(target, out);
+            collect_reassigned_vars(value, out);
+        }
+        AstNode::Block(statements) => {
+            for statement in statements {
+                collect_reassigned_vars(statement, out);
+            }
+        }
+        AstNode::VariableDeclaration {
+            value: Some(value), ..
+        } => collect_reassigned_vars(value, out),
+        AstNode::Return {
+            value: Some(value), ..
+        } => collect_reassigned_vars(value, out),
+        AstNode::DiscardStatement { expression, .. } => collect_reassigned_vars(expression, out),
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_reassigned_vars(condition, out);
+            collect_reassigned_vars(then_branch, out);
+            if let Some(else_branch) = else_branch {
+                collect_reassigned_vars(else_branch, out);
+            }
+        }
+        AstNode::WhileLoop {
+            condition, body, ..
+        } => {
+            collect_reassigned_vars(condition, out);
+            collect_reassigned_vars(body, out);
+        }
+        AstNode::ForLoop { iterable, body, .. } => {
+            collect_reassigned_vars(iterable, out);
+            collect_reassigned_vars(body, out);
+        }
+        AstNode::BinaryOperation { left, right, .. } => {
+            collect_reassigned_vars(left, out);
+            collect_reassigned_vars(right, out);
+        }
+        AstNode::UnaryOperation { operand, .. } => collect_reassigned_vars(operand, out),
+        AstNode::NamedArgument { value, .. } => collect_reassigned_vars(value, out),
+        AstNode::FieldAccess { object, .. } => collect_reassigned_vars(object, out),
+        AstNode::IndexAccess { base, index, .. } => {
+            collect_reassigned_vars(base, out);
+            collect_reassigned_vars(index, out);
+        }
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            ..
+        } => {
+            collect_reassigned_vars(function, out);
+            for argument in arguments {
+                collect_reassigned_vars(argument, out);
+            }
+        }
+        AstNode::CommandCall {
+            command, arguments, ..
+        } => {
+            collect_reassigned_vars(command, out);
+            for argument in arguments {
+                collect_reassigned_vars(argument, out);
+            }
+        }
+        AstNode::ListLiteral { elements, .. }
+        | AstNode::TupleLiteral(elements)
+        | AstNode::SetLiteral(elements) => {
+            for element in elements {
+                collect_reassigned_vars(element, out);
+            }
+        }
+        AstNode::DictLiteral { pairs, .. } => {
+            for (key, value) in pairs {
+                collect_reassigned_vars(key, out);
+                collect_reassigned_vars(value, out);
+            }
+        }
+        // Do not descend into nested function definitions: their bodies are
+        // analyzed against their own reassignment set.
+        AstNode::FunctionDefinition { .. } => {}
+        _ => {}
+    }
+}
+
 pub fn generate_bytecode(node: &AstNode) -> CompilerResult<CompiledProgram> {
     let mut generator = CodeGenerator::new();
+    collect_reassigned_vars(node, &mut generator.reassigned_vars);
     let (_result_vr, _result_is_secret) = generator.compile_node(node)?;
     let mut program = generator.finalize_program()?;
     // Compute the program's MPC preprocessing demand interprocedurally over the

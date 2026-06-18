@@ -954,6 +954,10 @@ fn coordinator_output_share_bytes(vm: &mut VirtualMachine, result: &Value) -> Op
         .map(|(_ty, share_data)| share_data.as_bytes().to_vec())
 }
 fn parse_inputs_as_field<F: PrimeField>(inputs_str: &str) -> Vec<F> {
+    // An output-only client has no inputs.
+    if inputs_str.trim().is_empty() {
+        return Vec::new();
+    }
     inputs_str
         .split(',')
         .map(|s| {
@@ -1293,10 +1297,15 @@ async fn sync_client_set_across_parties(
 struct HbClientProtocolConfig {
     n: usize,
     t: usize,
+    /// Number of input values this client contributes (0 for an output-only client).
     input_len: usize,
+    /// Number of output values this client receives via `send_to_client` (0 for
+    /// an input-only client).
+    output_len: usize,
     instance_id: u64,
     client_index: u8,
     local_position: usize,
+    curve_config: MpcCurveConfig,
 }
 struct AvssClientProtocolConfig {
     n: usize,
@@ -1318,13 +1327,23 @@ async fn run_hb_client_protocol_for_curve<F: PrimeField>(
     // not the transport-derived cid, because the session_id only has
     // 8 bits for the client_id field.
     let mpc_cid = config.client_index as usize;
+    // A client with no inputs is an output-only client: it does not run the
+    // input protocol, it only waits for the servers to deliver its output
+    // shares and reconstructs them. The `OutputClient` is sized by the number
+    // of outputs the client receives; an input client keeps its prior sizing.
+    let is_output_only = config.input_len == 0;
+    let output_client_len = if is_output_only {
+        config.output_len
+    } else {
+        config.input_len
+    };
     let mut mpc_client = HoneyBadgerMPCClient::<F, Avid<HbSessionId>>::new(
         mpc_cid,
         config.n,
         config.t,
         instance_id,
         parse_inputs_as_field::<F>(inputs_str),
-        config.input_len,
+        output_client_len,
     )
     .map_err(|e| format!("Failed to create MPC client: {:?}", e))?;
 
@@ -1360,6 +1379,20 @@ async fn run_hb_client_protocol_for_curve<F: PrimeField>(
                     "[client {}] Successfully processed message #{} from server {}",
                     mpc_cid, messages_processed, sender_id
                 );
+                // Output-only client: finish as soon as the output shares
+                // reconstruct (>= 2t+1 received).
+                if is_output_only {
+                    if let Some(outputs) = mpc_client.output.get_output() {
+                        let output_hex = field_outputs_to_hex(&outputs, config.curve_config);
+                        println!("Client output: field[{}] 0x{}", outputs.len(), output_hex);
+                        eprintln!(
+                            "[client {}] Reconstructed {} output value(s)",
+                            mpc_cid,
+                            outputs.len()
+                        );
+                        return Ok(());
+                    }
+                }
             }
             Err(e) => {
                 eprintln!(
@@ -1369,9 +1402,9 @@ async fn run_hb_client_protocol_for_curve<F: PrimeField>(
             }
         }
 
-        if messages_processed >= config.n {
-            // Keep connection alive long enough for servers to drain their
-            // preprocessing backlog and process our input messages.
+        if !is_output_only && messages_processed >= config.n {
+            // Input client: keep the connection alive long enough for servers
+            // to drain their preprocessing backlog and process our masked input.
             eprintln!(
                 "[client {}] Input protocol complete, holding connection for 300s...",
                 mpc_cid
@@ -1379,6 +1412,12 @@ async fn run_hb_client_protocol_for_curve<F: PrimeField>(
             tokio::time::sleep(Duration::from_secs(300)).await;
             break;
         }
+    }
+
+    if is_output_only {
+        return Err(format!(
+            "HB output client receiver closed before output reconstruction (processed {messages_processed} messages)"
+        ));
     }
 
     eprintln!(
@@ -1592,14 +1631,21 @@ async fn run_as_client(
         MpcBackendKind::default_backend()
     };
 
-    let inputs_str = client_inputs.unwrap_or_else(|| {
-        eprintln!("Error: --inputs is required in client mode (comma-separated values)");
-        exit(2);
-    });
-    let input_len = inputs_str.split(',').count();
+    // A client may be an input client (provides `--inputs`), an output-only
+    // client (provides `--outputs` and no inputs, e.g. a result recipient), or
+    // both. `--inputs` is therefore optional.
+    let inputs_str = client_inputs.unwrap_or_default();
+    let input_len = if inputs_str.trim().is_empty() {
+        0
+    } else {
+        inputs_str.split(',').count()
+    };
     let output_len = client_outputs.unwrap_or(input_len);
-    if output_len == 0 {
-        eprintln!("Error: --outputs must be greater than zero in client mode");
+    if input_len == 0 && output_len == 0 {
+        eprintln!(
+            "Error: a client must either provide --inputs (comma-separated values) or receive \
+             outputs via --outputs <N> in client mode"
+        );
         exit(2);
     }
 
@@ -1748,9 +1794,11 @@ async fn run_as_client(
                 n,
                 t,
                 input_len,
+                output_len,
                 instance_id,
                 client_index,
                 local_position,
+                curve_config,
             };
             tokio::spawn(async move {
                 run_hb_client_for_curve(

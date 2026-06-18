@@ -222,9 +222,37 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Compiling and executing the optimized AES circuit recurses deeply (the
+/// inlined S-box network and the VM interpreter), which overflows the default
+/// ~2 MB cargo/tokio test-thread stack on some platforms. Run the work on a
+/// dedicated large-stack thread with its own runtime.
+fn run_on_large_stack<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(256 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build tokio runtime")
+                .block_on(future);
+        })
+        .expect("spawn large-stack test thread")
+        .join()
+        .expect("large-stack test thread panicked");
+}
+
+#[test]
 #[ignore = "counts optimized AES MPC multiplication demand"]
-async fn count_optimized_aes_batch_mul_items() {
+fn count_optimized_aes_batch_mul_items() {
+    run_on_large_stack(count_optimized_aes_batch_mul_items_impl());
+}
+
+async fn count_optimized_aes_batch_mul_items_impl() {
     let source = include_str!("../../stoffel-lang/examples/mpc_aes128_circuit/main.stfl");
     let options = stoffellang::CompilerOptions {
         optimize: true,
@@ -257,8 +285,12 @@ async fn count_optimized_aes_batch_mul_items() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn optimized_aes_matches_nist_vector_with_compiler_spills() {
+#[test]
+fn optimized_aes_matches_nist_vector_with_compiler_spills() {
+    run_on_large_stack(optimized_aes_matches_nist_vector_with_compiler_spills_impl());
+}
+
+async fn optimized_aes_matches_nist_vector_with_compiler_spills_impl() {
     let source = include_str!("../../stoffel-lang/examples/mpc_aes128_circuit/main.stfl");
     let options = stoffellang::CompilerOptions {
         optimize: true,
