@@ -17,6 +17,7 @@ pub mod module_resolver;
 pub mod multi_file_compiler;
 pub mod optimizations;
 pub mod parser;
+pub mod preprocessing_planner;
 pub mod register_allocator;
 pub mod semantic;
 pub mod suggestions;
