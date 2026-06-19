@@ -2586,10 +2586,11 @@ where
         .preprocess()
         .await
         .map_err(|e| format!("MPC preprocessing failed: {}", e))?;
+    let preprocessing_duration = preprocessing_started_at.elapsed();
     eprintln!(
         "[party {}] MPC preprocessing complete! elapsed_ms={}",
         my_id,
-        preprocessing_started_at.elapsed().as_millis()
+        preprocessing_duration.as_millis()
     );
     match current_cgroup_memory_bytes() {
         Some(bytes) => eprintln!(
@@ -2608,6 +2609,9 @@ where
             my_id
         ),
     }
+
+    #[cfg(feature = "benchmark")]
+    println!("BENCH_PP_SECS: {:.3}", preprocessing_duration.as_secs_f64());
 
     if n > 1 {
         eprintln!(
@@ -5117,10 +5121,14 @@ async fn main() {
     } else {
         vm.execute(&agreed_entry)
     };
+    let online_elapsed = online_started_at.elapsed().as_secs_f64();
     eprintln!(
-        "online VM execution complete! elapsed_ms={}",
-        online_started_at.elapsed().as_millis()
+        "online VM execution complete! elapsed={:.3}",
+        online_elapsed
     );
+
+    #[cfg(feature = "benchmark")]
+    println!("BENCH_EXEC_SECS: {:.3}", online_elapsed);
 
     match execution_result {
         Ok(result) => {

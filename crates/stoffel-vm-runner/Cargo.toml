@@ -19,7 +19,7 @@ stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
 stoffel-mpc-coordinator-shared = "0.1.0"
 stoffel-mpc-coordinator-off-chain = "0.1.0"
-stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0", features = ["benchmark"] }
+stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
 stoffelnet = "0.1.0"
 ark-bls12-381 = "0.5.0"
 ark-bn254 = "0.5.0"
@@ -43,6 +43,9 @@ tokio = { version = "1.47.1", features = ["full"] }
 tracing = "0.1.41"
 uuid = { version = "1.17.0", features = ["v4"] }
 x509-parser = "0.18.1"
+
+[features]
+benchmark = ["stoffelmpc-mpc/benchmark"]
 
 [dev-dependencies]
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
