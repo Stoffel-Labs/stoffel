@@ -3633,7 +3633,7 @@ async fn main() {
     // Actual TOTAL number of client input values across all clients (sum of each
     // client's count). 0 = unset, in which case we fall back to the uniform
     // `num_clients * client_input_count`. Lets clients provide different counts.
-    let mut client_input_total: usize = 0;
+    let mut client_input_total: Option<usize> = None;
     let mut _enable_nat: bool = false;
     let mut _stun_servers: Vec<SocketAddr> = Vec::new();
     let mut server_addrs_raw: Vec<String> = Vec::new();
@@ -3801,7 +3801,7 @@ async fn main() {
             }
             "--client-input-total" => {
                 if let Some(v) = args_iter.next() {
-                    client_input_total = v.parse().expect("Invalid --client-input-total");
+                    client_input_total = Some(v.parse().expect("Invalid --client-input-total"));
                 }
             }
             "--stun-servers" => {
@@ -4869,8 +4869,8 @@ async fn main() {
                             // Actual total across clients (supports asymmetric
                             // per-client input counts); fall back to the uniform
                             // estimate only when the total wasn't supplied.
-                            let total_input_count = if client_input_total > 0 {
-                                client_input_total
+                            let total_input_count = if client_input_total.is_some() {
+                                client_input_total.unwrap()
                             } else {
                                 input_ids.len().saturating_mul(client_input_count)
                             };
@@ -4911,6 +4911,7 @@ async fn main() {
                                 .unwrap();
 
                             eprintln!("[party {my_id}] waiting for reserved input indices");
+                            eprintln!("[party {my_id}] expected client input count: {}", total_input_count);
                             let client_to_indices = normalize_client_to_indices(
                                 coord
                                     .wait_for_indices(total_input_count as u64)
