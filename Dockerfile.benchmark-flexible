@@ -33,10 +33,10 @@ RUN mkdir -p ~/.ssh && \
 # Build the release binary
 RUN if [ "$ENABLE_NAT" = "true" ]; then \
         echo "Building with NAT traversal support..."; \
-        cargo build --release --package stoffel-vm --bin stoffel-run --features nat; \
+        cargo build --release --package stoffel-vm --bin stoffel-run --features nat,benchmark; \
     else \
         echo "Building without NAT traversal support..."; \
-        cargo build --release --package stoffel-vm --bin stoffel-run; \
+        cargo build --release --package stoffel-vm --bin stoffel-run --features benchmark; \
     fi && \
     strip target/release/stoffel-run
 
