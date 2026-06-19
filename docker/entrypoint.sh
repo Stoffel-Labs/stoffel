@@ -197,6 +197,10 @@ build_command() {
         cmd="${cmd} --client-input-count ${STOFFEL_CLIENT_INPUT_COUNT}"
     fi
 
+    if [ -n "${STOFFEL_CLIENT_INPUT_TOTAL:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+        cmd="${cmd} --client-input-total ${STOFFEL_CLIENT_INPUT_TOTAL}"
+    fi
+
     if [ -n "${STOFFEL_PREPROC_STORE:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
         cmd="${cmd} --preproc-store ${STOFFEL_PREPROC_STORE}"
     fi
