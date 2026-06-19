@@ -606,6 +606,26 @@ impl CodeGenerator {
         // reserved headroom above.
         let mut unspillable: std::collections::HashSet<register_allocator::VirtualRegister> =
             std::collections::HashSet::new();
+        // Pin virtual register 0 to physical R0, the ABI result/scratch register.
+        // Every CALL/builtin writes its result into physical R0, which codegen reads
+        // back via `MOV(dest, 0)` — a use with no corresponding virtual-register def.
+        // Left unpinned (e.g. in a zero-parameter function that makes calls), the
+        // allocator sees VR0 as an always-live, never-defined value and spills it,
+        // emitting `LDS` loads with no matching `STS` (reading an uninitialized Unit
+        // and feeding it into clear/secret conversions). Precoloring keeps VR0 in R0
+        // and out of the spill candidate set (matching the -O0 identity invariant and
+        // the post-CALL `MOV` special-case in `rewrite_instructions`). For functions
+        // with parameters this is already implied (parameter 0 is VR0 → R0); doing it
+        // unconditionally covers the zero-parameter case. Precoloring (not the
+        // `unspillable` set) is used deliberately so it doesn't trip the spill-reserve
+        // heuristic, which keys off `unspillable` being non-empty.
+        let precolored = {
+            let mut precolored = precolored.clone();
+            precolored
+                .entry(register_allocator::VirtualRegister(0))
+                .or_insert(register_allocator::PhysicalRegister(0));
+            precolored
+        };
         // Monotonic spill-slot counter so slots never collide across rounds.
         let mut next_spill_slot: usize = 0;
         let _ = protected_prologue_len; // spill traffic is position-independent now
@@ -629,7 +649,7 @@ impl CodeGenerator {
                 k_secret,
                 reserve,
                 secrecy_map,
-                precolored,
+                &precolored,
                 &unspillable,
             ) {
                 Ok(allocation) => return Ok(allocation),

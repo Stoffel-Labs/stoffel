@@ -10,3 +10,4 @@ threshold = 1
 [build]
 source = "main.stfl"
 target_dir = "target"
+optimization_level = 3

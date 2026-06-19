@@ -840,6 +840,24 @@ def ctr_crypt(blocks: list[list[list[secret bool]]], round_key: list[list[secret
     counter = increment_counter_block(counter)
   return out
 
+# The CTR keystream depends only on the counter and key, not the data, and
+# encryption and decryption reuse the identical keystream. Generating it once
+# (the expensive AES-per-block work) and XORing it into both directions halves
+# the secret multiplications versus calling `ctr_crypt` twice.
+def ctr_keystream(blocks: list[list[list[secret bool]]], round_key: list[list[secret bool]], initial_counter: list[list[secret bool]]) -> list[list[list[secret bool]]]:
+  var keystream: list[list[list[secret bool]]] = []
+  var counter = initial_counter
+  for i in 0..blocks.len():
+    keystream.append(aes128_encrypt_rk(counter, round_key))
+    counter = increment_counter_block(counter)
+  return keystream
+
+def ctr_apply(blocks: list[list[list[secret bool]]], keystream: list[list[list[secret bool]]]) -> list[list[list[secret bool]]]:
+  var out: list[list[list[secret bool]]] = []
+  for i in 0..blocks.len():
+    out.append(bytes_xor(blocks[i], keystream[i]))
+  return out
+
 # --- CBC -------------------------------------------------------------------
 # C_0 = AES_enc(P_0 XOR IV, key);  C_i = AES_enc(P_i XOR C_{i-1}, key).
 def cbc_encrypt(blocks: list[list[list[secret bool]]], key: list[list[secret bool]], iv: list[list[secret bool]]) -> list[list[list[secret bool]]]:
@@ -869,11 +887,14 @@ def main() -> list[int64]:
   var plaintext = [take_client_block_n(0, 0), take_client_block_n(0, 1)]
   var ctr0 = public_block([240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255])
 
-  # Encrypt, then decrypt (CTR decryption is the SAME operation) to recover P.
-  var ct = ctr_crypt(plaintext, round_key, ctr0)
+  # Generate the keystream once (the expensive AES work), then encrypt and
+  # decrypt by XORing it in — CTR decryption is the same operation, so reusing
+  # the keystream halves the secret multiplications versus encrypting twice.
+  var keystream = ctr_keystream(plaintext, round_key, ctr0)
+  var ct = ctr_apply(plaintext, keystream)
   print(reveal_block(ct[0]))
   print(reveal_block(ct[1]))
-  var pt = ctr_crypt(ct, round_key, ctr0)
+  var pt = ctr_apply(ct, keystream)
   print(reveal_block(pt[0]))
   print(reveal_block(pt[1]))
   return reveal_block(pt[1])

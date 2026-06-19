@@ -187,15 +187,26 @@ def main() -> int64:
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "starts a real localhost coordinator and long-running MPC AES party mesh"]
 async fn local_offchain_coordinator_runs_optimized_aes_circuit_without_docker_compose() {
-    let source = include_str!("../../stoffel-lang/examples/mpc_aes128_circuit/main.stfl");
-    let options = stoffellang::CompilerOptions {
-        optimize: true,
-        mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
-        ..Default::default()
-    };
-    let compiled =
-        stoffellang::compile(source, "<local-runner-aes-e2e>", &options).expect("compile AES");
-    let binary = stoffellang::convert_to_binary(&compiled);
+    // Compiling the optimized AES circuit recurses deeply (the inlined S-box
+    // network) and overflows the default test-thread stack, so do it on a
+    // dedicated large-stack thread. `CompiledBinary` is `Send`, so the result
+    // crosses back to this async context.
+    let binary = std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            let source = include_str!("../../stoffel-lang/examples/mpc_aes128_circuit/main.stfl");
+            let options = stoffellang::CompilerOptions {
+                optimize: true,
+                mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+                ..Default::default()
+            };
+            let compiled = stoffellang::compile(source, "<local-runner-aes-e2e>", &options)
+                .expect("compile AES");
+            stoffellang::convert_to_binary(&compiled)
+        })
+        .expect("spawn AES compile thread")
+        .join()
+        .expect("AES compile thread panicked");
 
     let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
         .parties(5)

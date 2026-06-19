@@ -174,10 +174,6 @@ pub fn analyze_liveness_cfg_with_liveins(
     fn bit_set(bits: &mut [u64], i: u32) {
         bits[(i >> 6) as usize] |= 1u64 << (i & 63);
     }
-    #[inline]
-    fn bit_clear(bits: &mut [u64], i: u32) {
-        bits[(i >> 6) as usize] &= !(1u64 << (i & 63));
-    }
 
     // 1) Determine basic block boundaries
     let mut block_starts: HashSet<usize> = HashSet::new();
@@ -346,11 +342,16 @@ pub fn analyze_liveness_cfg_with_liveins(
         }
     }
 
-    // 5) + 6) Extract one interval per VR from a single backward walk, without ever
-    // materializing per-instruction live sets (the previous O(n * live_set) cost):
+    // 5) + 6) Extract one interval per VR from a single SPARSE backward walk.
     //   def_first[v] = first instruction index defining v
-    //   end_idx[v]   = (last index where v is live-out) + 1, else 0
-    //   first_in[v]  = first index where v is live-in (only consulted for VRs with no def)
+    //   end_idx[v]   = (highest index where v is live-out) + 1, else 0
+    //
+    // The live set is maintained sparsely (a presence vector mutated by the
+    // per-instruction uses/defs), so the walk costs O(instructions + uses/defs)
+    // instead of the O(instructions * num_vrs/64) of a dense per-instruction
+    // bitset scan. That dense term is quadratic in function size (num_vrs grows
+    // with the instruction count) and dominated allocation time for very large
+    // fully-unrolled/inlined functions; the sparse walk removes it.
     let mut def_first = vec![usize::MAX; num_vrs];
     for (i, defs) in inst_defs.iter().enumerate() {
         for &d in defs {
@@ -360,56 +361,49 @@ pub fn analyze_liveness_cfg_with_liveins(
             }
         }
     }
-    // Only VRs with no def (function live-ins) need first_in for their start.
-    let mut undef_mask = vec![0u64; words];
-    for (vi, &df) in def_first.iter().enumerate() {
-        if df == usize::MAX {
-            bit_set(&mut undef_mask, vi as u32);
-        }
-    }
 
     let mut end_idx = vec![0usize; num_vrs];
-    let mut first_in = vec![usize::MAX; num_vrs];
-    let mut live = vec![0u64; words];
-    let mut seen_out = vec![0u64; words];
+    // Sparse live set: `present[vi]` is membership; `touched` records indices set
+    // during the current block so they can be reset in O(touched) before the next.
+    let mut present = vec![false; num_vrs];
+    let mut touched: Vec<usize> = Vec::new();
     for (bi, block) in blocks.iter().enumerate() {
-        // live := live-out of the block (== live-out of its last instruction).
-        live.copy_from_slice(&live_out_b[bi]);
-        for w in &mut seen_out {
-            *w = 0;
+        for &vi in &touched {
+            present[vi] = false;
         }
-        for i in (block.start..block.end).rev() {
-            // `live` is live_out_inst[i]. The first (highest) index in this block where a
-            // VR appears live-out is its block-max; fold into the global max via end_idx.
-            for w in 0..words {
-                let fresh = live[w] & !seen_out[w];
-                if fresh != 0 {
-                    seen_out[w] |= fresh;
-                    let mut x = fresh;
-                    while x != 0 {
-                        let vi = w * 64 + x.trailing_zeros() as usize;
-                        x &= x - 1;
-                        if i + 1 > end_idx[vi] {
-                            end_idx[vi] = i + 1;
-                        }
+        touched.clear();
+        // Seed with the block's live-out. Its last instruction is at index
+        // block.end-1, so the highest live-out index for these VRs is block.end-1
+        // (→ end_idx = block.end), matching the dense walk's `i + 1` at that index.
+        for w in 0..words {
+            let mut x = live_out_b[bi][w];
+            while x != 0 {
+                let vi = w * 64 + x.trailing_zeros() as usize;
+                x &= x - 1;
+                if !present[vi] {
+                    present[vi] = true;
+                    touched.push(vi);
+                    if block.end > end_idx[vi] {
+                        end_idx[vi] = block.end;
                     }
                 }
             }
-            // Step back to live_in_inst[i] = (live - defs) ∪ uses.
+        }
+        for i in (block.start..block.end).rev() {
+            // `present` is live_out_inst[i]. Step to live_in_inst[i] = (live − defs) ∪ uses.
             for &d in &inst_defs[i] {
-                bit_clear(&mut live, d);
+                present[d as usize] = false;
             }
             for &u in &inst_uses[i] {
-                bit_set(&mut live, u);
-            }
-            // Record first (lowest) live-in index, undefined VRs only.
-            for w in 0..words {
-                let mut x = live[w] & undef_mask[w];
-                while x != 0 {
-                    let vi = w * 64 + x.trailing_zeros() as usize;
-                    x &= x - 1;
-                    if i < first_in[vi] {
-                        first_in[vi] = i;
+                let ui = u as usize;
+                if !present[ui] {
+                    present[ui] = true;
+                    touched.push(ui);
+                    // Newly live going backward: u becomes live-out at i-1, so its
+                    // highest live-out index is i-1 (→ end_idx = i), exactly what the
+                    // dense walk recorded when it first saw u live-out at i-1.
+                    if i > end_idx[ui] {
+                        end_idx[ui] = i;
                     }
                 }
             }
@@ -418,10 +412,10 @@ pub fn analyze_liveness_cfg_with_liveins(
 
     let mut intervals: HashMap<VirtualRegister, LiveInterval> = HashMap::with_capacity(num_vrs);
     for (vi, &vr) in vrs.iter().enumerate() {
+        // A VR with no def is a function live-in (parameter): live from entry, so
+        // start at 0 — a conservative interval that is never too short.
         let start = if def_first[vi] != usize::MAX {
             def_first[vi]
-        } else if first_in[vi] != usize::MAX {
-            first_in[vi]
         } else {
             0
         };

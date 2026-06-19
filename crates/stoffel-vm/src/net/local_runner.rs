@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1384,10 +1385,23 @@ fn local_runner_curve_from_manifest(
 }
 
 fn socket_with_port_pair() -> std::io::Result<SocketAddr> {
-    let seed = SystemTime::now()
+    // Mix the wall-clock nanos with the process id and a per-call counter so
+    // that runner processes launched concurrently (e.g. parallel CLI tests)
+    // and successive calls within one process begin their scan from different
+    // base ports instead of colliding on the same time-derived guess. The
+    // chosen port is only checked for availability here and bound later by the
+    // spawned child, so a shared starting point would otherwise let two runs
+    // settle on the same port and race to bind it.
+    static CALL_COUNTER: AtomicU16 = AtomicU16::new(0);
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.subsec_nanos() as u16)
         .unwrap_or(0);
+    let pid = std::process::id() as u16;
+    let call = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let seed = nanos
+        .wrapping_add(pid.wrapping_mul(7))
+        .wrapping_add(call.wrapping_mul(1009));
     for offset in 0..30_000u16 {
         let port = 20_000 + ((seed.wrapping_add(offset)) % 30_000);
         if port_is_free(port) && port_is_free(port + 1000) {

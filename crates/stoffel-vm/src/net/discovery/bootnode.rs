@@ -6,7 +6,7 @@ use crate::net::{
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use stoffelnet::network_utils::PartyId;
 use stoffelnet::transports::quic::PeerConnection;
-use tokio::sync::{broadcast, watch, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 
 #[derive(Debug, Clone)]
 struct PendingSession {
@@ -277,16 +277,42 @@ impl BootnodeConnection {
     }
 
     async fn run(mut self) {
+        // Read framed messages in a dedicated task so the periodic session/ICE
+        // polling below never cancels an in-progress socket read. The transport's
+        // `receive()` reads a length prefix and then the payload into a local
+        // buffer, so it is NOT cancellation-safe: wrapping it directly in a short
+        // timeout (as this loop used to) drops the future mid-read on a large
+        // message — e.g. a multi-MB program upload at session registration —
+        // leaving the QUIC stream misaligned so the registration is never decoded
+        // and the session never forms. By moving the read into its own task, the
+        // 50ms tick below cancels only a cancellation-safe channel receive.
+        let (msg_tx, mut msg_rx) = mpsc::channel::<Vec<u8>>(8);
+        let reader_conn = Arc::clone(&self.conn);
+        let reader = tokio::spawn(async move {
+            loop {
+                match reader_conn.receive().await {
+                    Ok(buf) => {
+                        if msg_tx.send(buf).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
         loop {
             self.send_ready_session_if_waiting().await;
             self.relay_pending_ice_messages().await;
 
-            match tokio::time::timeout(Duration::from_millis(50), self.conn.receive()).await {
-                Ok(Ok(buf)) => self.handle_buffer(buf).await,
-                Ok(Err(_)) => break,
+            match tokio::time::timeout(Duration::from_millis(50), msg_rx.recv()).await {
+                Ok(Some(buf)) => self.handle_buffer(buf).await,
+                Ok(None) => break,
                 Err(_) => continue,
             }
         }
+
+        reader.abort();
     }
 
     async fn send_ready_session_if_waiting(&mut self) {

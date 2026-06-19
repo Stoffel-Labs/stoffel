@@ -77,16 +77,29 @@ struct PlannedPreprocessing {
     n_prandint: usize,
 }
 
-/// Round up to the next power of two (0 stays 0). The runtime generates this
-/// many of each material type, so the *observable preprocessing volume* reveals
-/// only which power-of-two band the program's demand falls in — its size octave,
-/// not its exact operation counts.
+/// Round a demand up to a coarse band for privacy: the observable preprocessing
+/// volume reveals only which band the program's demand falls in, not its exact
+/// operation count. We band to **eighths of an octave** (the next multiple of
+/// 1/8 of the demand's power-of-two floor) rather than to the next full power of
+/// two. Full-octave banding can nearly *double* the demand, which both wastes
+/// preprocessing and — critically — can push a program that comfortably fits the
+/// MPC backend's per-session generation capacity over that ceiling (e.g. a
+/// 166k-triple program banded to 262k exceeds HoneyBadger's ~196k triple limit,
+/// failing with a spurious `LimitError`). Eighth-octave banding over-provisions
+/// by at most ~12.5% while still hiding the exact count to within a size band.
 fn band_pow2(n: u64) -> u64 {
     if n == 0 {
-        0
-    } else {
-        n.next_power_of_two()
+        return 0;
     }
+    // Largest power of two <= n (the octave floor).
+    let floor_pow2 = if n.is_power_of_two() {
+        n
+    } else {
+        n.next_power_of_two() >> 1
+    };
+    // Round up to the next multiple of an eighth of that octave.
+    let granularity = (floor_pow2 >> 3).max(1);
+    n.div_ceil(granularity).saturating_mul(granularity)
 }
 
 /// Turn the compiler's static preprocessing-demand estimate into concrete
@@ -5221,11 +5234,19 @@ async fn main() {
     // Execute entry function. Prefer the async MPC scheduler when an async-capable
     // engine was installed so secret-share operations yield instead of blocking
     // inside the synchronous VM instruction path.
+    //
+    // This call is the online phase (preprocessing is already done), so timing it
+    // isolates online MPC cost from preprocessing for benchmarking.
+    let online_started_at = std::time::Instant::now();
     let execution_result = if let Some(engine) = hb_bls12381_coord_engine.as_ref() {
         vm.execute_async(&agreed_entry, engine.as_ref()).await
     } else {
         vm.execute(&agreed_entry)
     };
+    eprintln!(
+        "online VM execution complete! elapsed_ms={}",
+        online_started_at.elapsed().as_millis()
+    );
 
     match execution_result {
         Ok(result) => {
@@ -5510,12 +5531,23 @@ mod tests {
     }
 
     #[test]
-    fn band_pow2_rounds_up_to_next_octave_and_keeps_zero() {
+    fn band_pow2_rounds_up_to_eighth_octave_and_keeps_zero() {
         assert_eq!(band_pow2(0), 0);
         assert_eq!(band_pow2(1), 1);
-        assert_eq!(band_pow2(3), 4);
+        // Powers of two and their eighth-octave multiples are exact.
         assert_eq!(band_pow2(16), 16);
-        assert_eq!(band_pow2(50), 64);
+        assert_eq!(band_pow2(131072), 131072);
+        // 50 → octave floor 32, eighth = 4, round up to 52.
+        assert_eq!(band_pow2(50), 52);
+        // The banded value never exceeds the demand by more than one eighth of
+        // its octave, so a demand that fits the backend capacity stays fitting:
+        // 165_696 bands to 180_224 (< the old 262_144 that tripped LimitError).
+        assert_eq!(band_pow2(165_696), 180_224);
+        for n in [1u64, 7, 9, 100, 1000, 60_000, 134_528, 165_696, 200_000] {
+            let b = band_pow2(n);
+            assert!(b >= n, "band must not under-provision");
+            assert!(b <= n + (n / 8) + 8, "band over-provisions by at most ~1/8 octave");
+        }
     }
 
     #[test]
@@ -5540,12 +5572,14 @@ mod tests {
     fn plan_for_single_division_folds_prandbit_cost_into_triples_and_randoms() {
         // 16 prandbits + 1 prandint (one secure fix64 / constant). prandbit
         // generation consumes a triple + random per bit, so the triple/random
-        // pools must cover that on top of the banded prandbit count.
+        // pools must cover that on top of the banded prandbit count. The random
+        // pool (2 + 2*16 triples + 16 prandbits = 50) bands up to the next
+        // eighth of its octave (52).
         let plan = plan_preprocessing(&demand(0, 16, 1, false), 1, 0);
         assert_eq!(plan.n_prandbit, 16);
         assert_eq!(plan.n_prandint, 1);
         assert_eq!(plan.n_triples, 16);
-        assert_eq!(plan.n_random, 64);
+        assert_eq!(plan.n_random, 52);
     }
 
     #[test]
@@ -5559,12 +5593,14 @@ mod tests {
 
     #[test]
     fn plan_for_secret_multiplication_floors_to_protocol_triple_batch() {
-        // One triple demanded, but the protocol's minimum batch is 2t+1 = 3,
-        // banded up to the next octave (4).
+        // One triple demanded, but the protocol's minimum batch is 2t+1 = 3.
+        // Eighth-octave banding leaves 3 as-is (its octave floor is 2, so the
+        // granularity is 1), and the random pool (2 + 2*3 = 8) is already a
+        // clean octave boundary.
         let plan = plan_preprocessing(&demand(1, 0, 0, false), 1, 0);
         assert_eq!(plan.n_prandbit, 0);
-        assert_eq!(plan.n_triples, 4);
-        assert_eq!(plan.n_random, 16);
+        assert_eq!(plan.n_triples, 3);
+        assert_eq!(plan.n_random, 8);
     }
 
     #[test]
