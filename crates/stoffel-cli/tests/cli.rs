@@ -727,6 +727,10 @@ fn dev_watch_explains_input_mistakes_before_starting() {
         .arg(&project)
         .assert()
         .success();
+    // Use an input-requiring program so `stoffel dev` (no inputs) reports the
+    // missing input and exits BEFORE entering the file watcher; otherwise the
+    // default no-argument template would start watching and the test would hang.
+    write_addition_program(&project);
 
     Command::cargo_bin("stoffel")
         .unwrap()

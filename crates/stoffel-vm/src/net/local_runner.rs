@@ -569,6 +569,11 @@ impl LocalCoordinatorRunner {
             .arg("--timestamp")
             .arg(context.timestamp.to_string())
             .env("STOFFEL_AUTH_TOKEN", &self.auth_token)
+            // Tie each spawned party to this runner's lifetime: `kill_on_drop`
+            // handles a graceful drop, and the parent-death watchdog (keyed off
+            // this env var) covers the case where the runner is force-killed
+            // (SIGKILL) and cannot run drop cleanup, preventing orphaned parties.
+            .env("STOFFEL_DIE_WITH_PARENT", "1")
             .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

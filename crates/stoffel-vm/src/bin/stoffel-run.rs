@@ -3585,6 +3585,29 @@ async fn run_avss_coordinated_party(
 // Use a Tokio runtime for async operations
 #[tokio::main]
 async fn main() {
+    // When spawned by the local coordinator runner, tie this process's lifetime
+    // to its parent: if the parent (the test/CLI/SDK process) dies — including a
+    // SIGKILL, where the parent's `kill_on_drop` cleanup cannot run — this party
+    // would otherwise be re-parented to init/launchd and leak as an orphaned MPC
+    // process. Poll the parent PID and exit promptly once it changes.
+    if std::env::var_os("STOFFEL_DIE_WITH_PARENT").is_some() {
+        // SAFETY: `getppid` is always safe to call and takes no arguments.
+        let original_parent = unsafe { libc::getppid() };
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                // SAFETY: see above.
+                let current = unsafe { libc::getppid() };
+                if current != original_parent || current <= 1 {
+                    eprintln!(
+                        "[watchdog] parent process exited (ppid {original_parent} -> {current}); shutting down"
+                    );
+                    std::process::exit(0);
+                }
+            }
+        });
+    }
+
     let raw_args = env::args().skip(1).collect::<Vec<_>>();
 
     if raw_args.is_empty() {
