@@ -27,17 +27,11 @@ WORKDIR /build
 # Copy the entire project (we need all crates for workspace build)
 COPY . .
 
-# Configure git for private repos if using SSH
-# For private GitHub repos, mount SSH keys during build:
-#   docker build --ssh default .
 RUN mkdir -p ~/.ssh && \
     ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true
 
 # Build the release binary
-# Note: If using private repos with SSH, run with: docker build --ssh default .
-# If ENABLE_NAT is true, build with the nat feature
-RUN --mount=type=ssh \
-    if [ "$ENABLE_NAT" = "true" ]; then \
+RUN if [ "$ENABLE_NAT" = "true" ]; then \
         echo "Building with NAT traversal support..."; \
         cargo build --release --package stoffel-vm --bin stoffel-run --features nat; \
     else \
