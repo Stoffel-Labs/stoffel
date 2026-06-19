@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use stoffel::prelude::*;
 
-use crate::project::{init_library_project, Project, Template};
+use crate::project::{init_library_project, BuildConfig, Project, Template};
 
 macro_rules! print {
     ($($arg:tt)*) => {{
@@ -1832,6 +1832,24 @@ fn load_bytecode_for_run(path: &Path) -> Result<Stoffel> {
     })
 }
 
+/// Bridge the project's optimizer budgets into the environment knobs the
+/// compiler reads (`optimizations.rs` consults these at -O3). The compile runs
+/// in-process after the builder is configured, so setting them here takes effect
+/// for this run. An explicitly set environment variable wins, so a one-off
+/// `STOFFEL_UNROLL_BUDGET=… stoffel run` still overrides the project file.
+fn apply_optimizer_budget_env(build: &BuildConfig) {
+    let set_if_unset = |name: &str, value: Option<u64>| {
+        if let Some(value) = value {
+            if std::env::var_os(name).is_none() {
+                std::env::set_var(name, value.to_string());
+            }
+        }
+    };
+    set_if_unset("STOFFEL_INLINE_BUDGET", build.inline_budget);
+    set_if_unset("STOFFEL_UNROLL_BUDGET", build.unroll_budget);
+    set_if_unset("STOFFEL_UNROLL_MAX_EXPANSION", build.unroll_max_expansion);
+}
+
 fn apply_build_config(builder: Stoffel, project: &Project, args: &BuildArgs) -> Stoffel {
     let mut builder = builder;
     let config = project.config();
@@ -1849,6 +1867,7 @@ fn apply_build_config(builder: Stoffel, project: &Project, args: &BuildArgs) -> 
         .optimization_level(opt_level)
         .optimize(args.optimize || opt_level > 0)
         .print_ir(args.print_ir);
+    apply_optimizer_budget_env(&config.build);
     if let Some(parties) = args.parties.or(config.mpc.parties) {
         builder = builder.parties(parties);
     }

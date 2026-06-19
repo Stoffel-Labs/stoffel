@@ -75,6 +75,16 @@ pub struct BuildConfig {
     #[serde(alias = "output_dir")]
     pub target_dir: PathBuf,
     pub optimization_level: Option<u8>,
+    /// Optimizer inlining budget (fixpoint blowup cap). Only consulted at -O3.
+    /// Populates the `STOFFEL_INLINE_BUDGET` knob the compiler reads; an
+    /// explicitly set environment variable overrides this project value.
+    pub inline_budget: Option<u64>,
+    /// Optimizer loop-unrolling global blowup budget. Only consulted at -O3.
+    /// Populates `STOFFEL_UNROLL_BUDGET` (an env var overrides this).
+    pub unroll_budget: Option<u64>,
+    /// Per-loop unrolling expansion cap. Only consulted at -O3. Populates
+    /// `STOFFEL_UNROLL_MAX_EXPANSION` (an env var overrides this).
+    pub unroll_max_expansion: Option<u64>,
 }
 
 impl Default for PackageConfig {
@@ -93,6 +103,9 @@ impl Default for BuildConfig {
             source: PathBuf::from("src/main.stfl"),
             target_dir: PathBuf::from("target"),
             optimization_level: None,
+            inline_budget: None,
+            unroll_budget: None,
+            unroll_max_expansion: None,
         }
     }
 }
@@ -653,6 +666,12 @@ fn read_config(path: &Path, allow_existing_target_file: bool) -> Result<ProjectC
         allow_existing_target_file,
     )?;
     validate_optimization_level(config.build.optimization_level)?;
+    validate_optimizer_budget("build.inline_budget", config.build.inline_budget)?;
+    validate_optimizer_budget("build.unroll_budget", config.build.unroll_budget)?;
+    validate_optimizer_budget(
+        "build.unroll_max_expansion",
+        config.build.unroll_max_expansion,
+    )?;
     validate_mpc_config(&config.mpc)?;
     Ok(config)
 }
@@ -799,6 +818,13 @@ fn validate_optimization_level(level: Option<u8>) -> Result<()> {
                 "invalid build.optimization_level {level}; expected an optimization level from 0 to 3"
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_optimizer_budget(field: &str, budget: Option<u64>) -> Result<()> {
+    if let Some(0) = budget {
+        anyhow::bail!("invalid {field} 0; expected a positive budget or omit the field");
     }
     Ok(())
 }
