@@ -1881,7 +1881,6 @@ struct AvssOffchainCoordinatorClientArgs {
     coord_addr: (String, u16),
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
-    timestamp: u64,
     threshold: Option<usize>,
     coordinator_client_index: Option<u64>,
 }
@@ -1900,7 +1899,6 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
         coord_addr,
         cert_der,
         key_der,
-        timestamp,
         threshold,
         coordinator_client_index,
     } = args;
@@ -1931,8 +1929,8 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
         AvssOffChainCoordinator::<F, G>::start_rpc_client(
             &coord_addr.0,
             coord_addr.1,
-            timestamp,
             t as u64,
+            server_addrs.len() as u64,
             output_len as u64,
             cert_der.clone(),
             key_der.clone(),
@@ -1959,7 +1957,7 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
         .map(|addr| (addr.ip().to_string(), addr.port()))
         .collect();
     let node_rpc_client: AvssOffChainNodeRpcClient<F, G> =
-        AvssOffChainNodeRpcClient::<F, G>::start_rpc_client(t, rpc_addrs, cert_der, key_der)
+        AvssOffChainNodeRpcClient::<F, G>::start_rpc_client(rpc_addrs.len(), t, rpc_addrs, cert_der, key_der)
             .await
             .unwrap_or_else(|error| {
                 eprintln!("Failed to connect to AVSS node RPC servers: {error}");
@@ -2049,7 +2047,6 @@ async fn run_hb_coordinator_client_for_field<F>(
     contract_addr: Option<String>,
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
-    timestamp: Option<u64>,
     threshold: Option<usize>,
     coordinator_client_index: Option<u64>,
     eth_node_addr: Option<String>,
@@ -2091,6 +2088,7 @@ async fn run_hb_coordinator_client_for_field<F>(
         let mut coord = on_chain::setup_coord::<_, F, HbCoordinatorShare<F>>(
             eth,
             contract_addr,
+            server_addrs.len() as u64,
             t as u64,
             output_len as u64,
             Some(key_der.clone()),
@@ -2116,7 +2114,7 @@ async fn run_hb_coordinator_client_for_field<F>(
             .map(|a| (a.ip().to_string(), a.port()))
             .collect();
         let node_rpc_client =
-            HbOnChainNodeRpcClient::<F>::start_rpc_client(t, rpc_addrs, cert_der, key_der).await;
+            HbOnChainNodeRpcClient::<F>::start_rpc_client(rpc_addrs.len(), t, rpc_addrs, cert_der, key_der).await;
         let mut masks = Vec::with_capacity(input_values.len());
         for offset in 0..input_values.len() {
             let index = reserved_index + offset as u64;
@@ -2163,8 +2161,8 @@ async fn run_hb_coordinator_client_for_field<F>(
     let mut coord: HbOffChainCoordinator<F> = HbOffChainCoordinator::<F>::start_rpc_client(
         &ca.0,
         ca.1,
-        timestamp.expect("--timestamp required in client mode"),
         t as u64,
+        server_addrs.len() as u64,
         output_len as u64,
         cert_der.clone(),
         key_der.clone(),
@@ -2191,7 +2189,7 @@ async fn run_hb_coordinator_client_for_field<F>(
         .map(|a| (a.ip().to_string(), a.port()))
         .collect();
     let node_rpc_client: HbOffChainNodeRpcClient<F> =
-        HbOffChainNodeRpcClient::<F>::start_rpc_client(t, rpc_addrs, cert_der, key_der)
+        HbOffChainNodeRpcClient::<F>::start_rpc_client(rpc_addrs.len(), t, rpc_addrs, cert_der, key_der)
             .await
             .unwrap_or_else(|error| {
                 eprintln!("Failed to connect to node RPC servers: {error}");
@@ -2241,7 +2239,6 @@ async fn run_hb_coordinator_client(
     contract_addr: Option<String>,
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
-    timestamp: Option<u64>,
     threshold: Option<usize>,
     coordinator_client_index: Option<u64>,
     eth_node_addr: Option<String>,
@@ -2258,7 +2255,6 @@ async fn run_hb_coordinator_client(
                 contract_addr,
                 cert_der,
                 key_der,
-                timestamp,
                 threshold,
                 coordinator_client_index,
                 eth_node_addr,
@@ -2276,7 +2272,6 @@ async fn run_hb_coordinator_client(
                 contract_addr,
                 cert_der,
                 key_der,
-                timestamp,
                 threshold,
                 coordinator_client_index,
                 eth_node_addr,
@@ -2294,7 +2289,6 @@ async fn run_hb_coordinator_client(
                 contract_addr,
                 cert_der,
                 key_der,
-                timestamp,
                 threshold,
                 coordinator_client_index,
                 eth_node_addr,
@@ -2312,7 +2306,6 @@ async fn run_hb_coordinator_client(
                 contract_addr,
                 cert_der,
                 key_der,
-                timestamp,
                 threshold,
                 coordinator_client_index,
                 eth_node_addr,
@@ -3263,7 +3256,6 @@ async fn run_avss_coordinated_party_for_curve<F, G>(
     rpc_addr: (String, u16),
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
-    timestamp: u64,
     expected_clients: &[String],
     as_leader: bool,
     agreed_entry: &str,
@@ -3280,8 +3272,8 @@ where
     let coord: AvssOffChainCoordinator<F, G> = AvssOffChainCoordinator::<F, G>::start_rpc_client(
         &coord_addr.0,
         coord_addr.1,
-        timestamp,
         t as u64,
+        n as u64,
         2,
         cert_der.clone(),
         key_der.clone(),
@@ -3469,7 +3461,6 @@ async fn run_avss_coordinated_party(
     rpc_addr: (String, u16),
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
-    timestamp: u64,
     expected_clients: &[String],
     as_leader: bool,
     agreed_entry: &str,
@@ -3487,7 +3478,6 @@ async fn run_avss_coordinated_party(
                 rpc_addr,
                 cert_der,
                 key_der,
-                timestamp,
                 expected_clients,
                 as_leader,
                 agreed_entry,
@@ -3506,7 +3496,6 @@ async fn run_avss_coordinated_party(
                 rpc_addr,
                 cert_der,
                 key_der,
-                timestamp,
                 expected_clients,
                 as_leader,
                 agreed_entry,
@@ -3528,7 +3517,6 @@ async fn run_avss_coordinated_party(
                 rpc_addr,
                 cert_der,
                 key_der,
-                timestamp,
                 expected_clients,
                 as_leader,
                 agreed_entry,
@@ -3547,7 +3535,6 @@ async fn run_avss_coordinated_party(
                 rpc_addr,
                 cert_der,
                 key_der,
-                timestamp,
                 expected_clients,
                 as_leader,
                 agreed_entry,
@@ -3566,7 +3553,6 @@ async fn run_avss_coordinated_party(
                 rpc_addr,
                 cert_der,
                 key_der,
-                timestamp,
                 expected_clients,
                 as_leader,
                 agreed_entry,
@@ -3585,7 +3571,6 @@ async fn run_avss_coordinated_party(
                 rpc_addr,
                 cert_der,
                 key_der,
-                timestamp,
                 expected_clients,
                 as_leader,
                 agreed_entry,
@@ -3659,7 +3644,6 @@ async fn main() {
     let mut coord_addr: Option<(String, u16)> = None;
     let mut key_der: Option<Vec<u8>> = None;
     let mut cert_der: Option<Vec<u8>> = None;
-    let mut timestamp: Option<u64> = None;
     let mut expected_clients: Vec<String> = Vec::new();
     let mut client_roster: Vec<usize> = Vec::new();
     let mut client_input_slots: Vec<usize> = Vec::new();
@@ -3712,7 +3696,6 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--wallet-sk") {
         } else if let Some(_rest) = arg.strip_prefix("--key") {
         } else if let Some(_rest) = arg.strip_prefix("--cert") {
-        } else if let Some(_rest) = arg.strip_prefix("--timestamp") {
         } else if let Some(_rest) = arg.strip_prefix("--expected-clients") {
         } else if let Some(_rest) = arg.strip_prefix("--client-roster") {
         } else if let Some(_rest) = arg.strip_prefix("--client-input-slots") {
@@ -3898,11 +3881,6 @@ async fn main() {
                     cert_der = Some(std::fs::read(&v).expect("Failed to read --cert file"));
                 }
             }
-            "--timestamp" => {
-                if let Some(v) = args_iter.next() {
-                    timestamp = Some(v.parse().expect("Invalid --timestamp"));
-                }
-            }
             "--client-index" => {
                 if let Some(v) = args_iter.next() {
                     coordinator_client_index = Some(v.parse().expect("Invalid --client-index"));
@@ -4016,7 +3994,6 @@ async fn main() {
                 coord_addr: coord_addr.clone().unwrap(),
                 cert_der: cert_der.clone().expect("--cert required in client mode"),
                 key_der: key_der.clone().expect("--key required in client mode"),
-                timestamp: timestamp.expect("--timestamp required in client mode"),
                 threshold,
                 coordinator_client_index,
             })
@@ -4052,7 +4029,6 @@ async fn main() {
                     contract_addr,
                     cert_der.expect("--cert required in client mode"),
                     key_der.expect("--key required in client mode"),
-                    timestamp,
                     threshold,
                     coordinator_client_index,
                     eth_node_addr,
@@ -4647,6 +4623,7 @@ async fn main() {
                 >(
                     eth,
                     contract,
+                    session_n_parties.unwrap_or_else(|| n_parties.unwrap_or(5)) as u64,
                     session_threshold.unwrap_or(1) as u64,
                     1,
                     None,
@@ -4679,8 +4656,8 @@ async fn main() {
             let coord = HbOffChainCoordinator::<ark_bls12_381::Fr>::start_rpc_client(
                 &ca.0,
                 ca.1,
-                timestamp.expect("--timestamp required"),
                 session_threshold.unwrap_or(1) as u64,
+                session_n_parties.unwrap_or_else(|| n_parties.unwrap_or(5)) as u64,
                 1,
                 cert_der.clone().expect("--cert required"),
                 key_der.clone().expect("--key required"),
@@ -5127,10 +5104,6 @@ async fn main() {
                         eprintln!("Error: --key is required with AVSS coordinator mode");
                         exit(2);
                     });
-                    let ts = timestamp.unwrap_or_else(|| {
-                        eprintln!("Error: --timestamp is required with AVSS coordinator mode");
-                        exit(2);
-                    });
                     if let Err(e) = run_avss_coordinated_party(
                         curve_config,
                         &mut vm,
@@ -5143,7 +5116,6 @@ async fn main() {
                         rpc,
                         cert,
                         key,
-                        ts,
                         &expected_clients,
                         as_leader,
                         &agreed_entry,
@@ -5434,7 +5406,6 @@ Flags:
   --rpc-bind <addr:port>  Node RPC server bind address (for mask distribution)
   --cert <path>           Path to DER-encoded X.509 certificate
   --key <path>            Path to DER-encoded private key
-  --timestamp <u64>       Coordinator session timestamp (off-chain)
   --client-index <u64>    Reserved coordinator input index (coordinator client mode)
   --preproc-store <path>  Persistent HoneyBadger preprocessing store directory
   --local-store <path>    Persistent VM local storage database

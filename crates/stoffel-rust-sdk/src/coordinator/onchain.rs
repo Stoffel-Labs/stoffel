@@ -74,6 +74,7 @@ pub struct OnChainCoordinatorConfig {
     pub contract_address: String,
     pub websocket_endpoint: String,
     pub wallet_private_key: String,
+    pub parties: u64,
     pub threshold: u64,
     pub output_count: u64,
     pub backend: MpcBackend,
@@ -84,6 +85,7 @@ pub struct OnChainCoordinatorConfig {
 pub struct OnChainCoordinatorConfigSummary {
     pub contract_address: String,
     pub websocket_endpoint: String,
+    pub parties: u64,
     pub threshold: u64,
     pub output_count: u64,
     pub backend: MpcBackend,
@@ -95,6 +97,7 @@ pub struct OnChainCoordinatorConfigBuilder {
     contract_address: Option<String>,
     websocket_endpoint: Option<String>,
     wallet_private_key: Option<String>,
+    parties: u64,
     threshold: u64,
     output_count: u64,
     backend: MpcBackend,
@@ -225,6 +228,7 @@ impl OnChainCoordinatorConfig {
         OnChainCoordinatorConfigSummary {
             contract_address: self.contract_address.clone(),
             websocket_endpoint: self.websocket_endpoint.clone(),
+            parties: self.parties,
             threshold: self.threshold,
             output_count: self.output_count,
             backend: self.backend,
@@ -248,6 +252,7 @@ impl OnChainCoordinatorConfig {
         Ok(setup_coord::<_, Fr, RobustShare<Fr>>(
             provider,
             contract_address,
+            self.parties,
             self.threshold,
             self.output_count,
             self.output_key_der.clone(),
@@ -274,6 +279,7 @@ impl OnChainCoordinatorConfig {
         Ok(setup_coord::<_, Fr, FeldmanShamirShare<Fr, G1Projective>>(
             provider,
             contract_address,
+            self.parties,
             self.threshold,
             self.output_count,
             self.output_key_der.clone(),
@@ -288,6 +294,7 @@ impl Default for OnChainCoordinatorConfigBuilder {
             contract_address: None,
             websocket_endpoint: None,
             wallet_private_key: None,
+            parties: 1,
             threshold: 1,
             output_count: 0,
             backend: MpcBackend::HoneyBadger,
@@ -309,6 +316,11 @@ impl OnChainCoordinatorConfigBuilder {
 
     pub fn wallet_private_key(mut self, private_key: impl Into<String>) -> Self {
         self.wallet_private_key = Some(private_key.into());
+        self
+    }
+
+    pub fn parties(mut self, parties: u64) -> Self {
+        self.parties = parties;
         self
     }
 
@@ -353,6 +365,7 @@ impl OnChainCoordinatorConfigBuilder {
             wallet_private_key: self.wallet_private_key.ok_or_else(|| {
                 Error::Configuration("on-chain wallet private key is required".to_owned())
             })?,
+            parties: self.parties,
             threshold: self.threshold,
             output_count: self.output_count,
             backend: self.backend,

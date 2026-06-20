@@ -1158,8 +1158,8 @@ where
         let coord = OffChainCoordinatorClient::<Fr, S>::start_rpc_client(
             &config.coordinator_host,
             config.coordinator_port,
-            config.timestamp,
             config.threshold as u64,
+            config.parties as u64,
             config.output_count,
             config.cert_der.clone(),
             config.key_der.clone(),
@@ -1179,6 +1179,7 @@ where
             coord.reserve_mask_index(reserved_index).await?;
         }
         let node_rpc = OffChainNodeRPCClient::<Fr, S>::start_rpc_client(
+            config.parties,
             config.threshold,
             config.node_rpc_endpoints()?,
             config.cert_der.clone(),

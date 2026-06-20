@@ -57,7 +57,8 @@ RUN --mount=type=ssh \
     else \
         echo "Building without NAT traversal support..."; \
         cargo build --release --package stoffel-vm --bin stoffel-run; \
-    fi
+    fi && \
+    strip target/release/stoffel-run
 
 # Compile the AES-128 secret-bit circuit example into VM bytecode for compose runs.
 RUN cargo build --release --package stoffellang && \

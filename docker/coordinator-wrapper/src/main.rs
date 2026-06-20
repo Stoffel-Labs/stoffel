@@ -201,7 +201,6 @@ where
     .expect("failed to start coordinator");
 
     println!("Listening on {}:{}", args.bind_addr, args.port);
-    println!("Timestamp: {}", coord.get_timestamp());
 
     tokio::time::sleep(tokio::time::Duration::MAX).await;
 }

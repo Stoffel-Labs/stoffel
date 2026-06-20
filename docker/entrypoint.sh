@@ -16,7 +16,7 @@ validate_env
 
 # Resolve the IP address peers should use to connect to this node.
 # STOFFEL_ADVERTISE_IP can be set explicitly; otherwise auto-detect from
-# the primary network interface (works for ECS Fargate and docker-compose).
+# the primary network interface (works for ECS Fargate and docker-compose, but not for EC2!).
 if [ -z "${STOFFEL_ADVERTISE_IP:-}" ]; then
     STOFFEL_ADVERTISE_IP=$(hostname -i | awk '{print $1}')
 fi

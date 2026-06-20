@@ -14,7 +14,7 @@ use stoffel_mpc_coordinator::off_chain::{
 };
 use stoffel_mpc_coordinator::self_signed_certs;
 use stoffel_mpc_coordinator::tests::fake_coord::off_chain::{
-    FakeCoordinatorConnection, FakeCoordinatorRPCServerSharedBase,
+    HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
 };
 use stoffel_mpc_coordinator::Coordinator;
 use stoffel_vm_types::compiled_binary::{utils::save_to_file, CompiledBinary};
@@ -130,7 +130,7 @@ impl LocalCoordinatorRunner {
         let coord_port = reserve_port()?;
         let coord_cert = self_signed_certs::server_cert();
         let (n_inputs, output_clients) = self.coordinator_client_io_binding(&client_bindings)?;
-        let coord_state = FakeCoordinatorRPCServerSharedBase::new(
+        let coord_state = HoneyBadgerCoordinatorRPCServerSharedBase::new(
             program_id,
             self.parties as u64,
             self.threshold as u64,
@@ -138,7 +138,7 @@ impl LocalCoordinatorRunner {
             n_inputs,
             output_clients,
         );
-        let coord = OffChainCoordinatorServer::<FakeCoordinatorConnection>::start_coord(
+        let coord = OffChainCoordinatorServer::<HoneyBadgerCoordinatorConnection>::start_coord(
             coord_state,
             "127.0.0.1",
             coord_port,
@@ -147,6 +147,11 @@ impl LocalCoordinatorRunner {
             coord_cert.signing_key.serialize_der(),
         )
         .await?;
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         let bootnode = socket_with_port_pair()?;
         let mut children = Vec::with_capacity(self.parties + local_clients.len());
@@ -159,7 +164,7 @@ impl LocalCoordinatorRunner {
                 role: PartyRole::Leader { bootnode },
                 clients: &local_clients,
                 coord_port,
-                timestamp: coord.get_timestamp(),
+                timestamp,
             },
             &mut node_rpc_addrs,
         )?);
@@ -179,7 +184,7 @@ impl LocalCoordinatorRunner {
                     },
                     clients: &local_clients,
                     coord_port,
-                    timestamp: coord.get_timestamp(),
+                    timestamp,
                 },
                 &mut node_rpc_addrs,
             )?);
@@ -187,7 +192,6 @@ impl LocalCoordinatorRunner {
 
         let timeout = self.timeout;
         let threshold = self.threshold;
-        let timestamp = coord.get_timestamp();
         let client_results_future = async {
             match self.backend {
                 MpcBackendKind::HoneyBadger => {
@@ -201,7 +205,7 @@ impl LocalCoordinatorRunner {
                                     client,
                                     node_rpc_addrs.clone(),
                                     coord_port,
-                                    timestamp,
+                                    self.parties,
                                     threshold,
                                     timeout,
                                 )
@@ -220,7 +224,7 @@ impl LocalCoordinatorRunner {
                                     client,
                                     node_rpc_addrs.clone(),
                                     coord_port,
-                                    timestamp,
+                                    self.parties,
                                     threshold,
                                     timeout,
                                 )
@@ -854,7 +858,7 @@ async fn run_honeybadger_offchain_client(
     client: LocalClientIdentity,
     node_rpc_addrs: Vec<SocketAddr>,
     coord_port: u16,
-    timestamp: u64,
+    parties: usize,
     threshold: usize,
     timeout: Duration,
 ) -> LocalCoordinatorRunnerResult<Option<ClientOutputRecord>> {
@@ -877,8 +881,8 @@ async fn run_honeybadger_offchain_client(
             OffChainCoordinatorClient::start_rpc_client(
                 "127.0.0.1",
                 coord_port,
-                timestamp,
                 threshold as u64,
+                parties as u64,
                 client.output_count,
                 client.cert_der.clone(),
                 std::fs::read(&client.key_path)?,
@@ -901,6 +905,7 @@ async fn run_honeybadger_offchain_client(
             .collect::<Vec<_>>();
         let node_rpc: OffChainNodeRPCClient<Fr, RobustShare<Fr>> =
             OffChainNodeRPCClient::start_rpc_client(
+                parties,
                 threshold,
                 rpc_addrs,
                 client.cert_der,
@@ -965,7 +970,7 @@ async fn run_avss_offchain_client(
     client: LocalClientIdentity,
     node_rpc_addrs: Vec<SocketAddr>,
     coord_port: u16,
-    timestamp: u64,
+    parties: usize,
     threshold: usize,
     timeout: Duration,
 ) -> LocalCoordinatorRunnerResult<Option<ClientOutputRecord>> {
@@ -984,8 +989,8 @@ async fn run_avss_offchain_client(
             OffChainCoordinatorClient::start_rpc_client(
                 "127.0.0.1",
                 coord_port,
-                timestamp,
                 threshold as u64,
+                parties as u64,
                 input_values.len() as u64,
                 client.cert_der.clone(),
                 std::fs::read(&client.key_path)?,
@@ -1007,6 +1012,7 @@ async fn run_avss_offchain_client(
             .collect::<Vec<_>>();
         let node_rpc: OffChainNodeRPCClient<Fr, FeldmanShamirShare<Fr, G1Projective>> =
             OffChainNodeRPCClient::start_rpc_client(
+                parties,
                 threshold,
                 rpc_addrs,
                 client.cert_der,

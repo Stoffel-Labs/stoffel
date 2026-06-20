@@ -3751,8 +3751,8 @@ async fn participants_can_carry_verified_ordering_from_networking() -> stoffel::
 fn offchain_coordinator_surface_reexports_core_types() {
     let _ = std::any::type_name::<
         stoffel::coordinator::OffChainCoordinator<
-            stoffel_mpc_coordinator::tests::fake_coord::FakeShareValueType,
-            stoffel_mpc_coordinator::tests::fake_coord::FakeShareType,
+            stoffel_mpc_coordinator::tests::fake_coord::HoneyBadgerShareValueType,
+            stoffel_mpc_coordinator::tests::fake_coord::HoneyBadgerShareType,
         >,
     >();
 
