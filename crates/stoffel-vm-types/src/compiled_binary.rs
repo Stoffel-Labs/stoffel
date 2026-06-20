@@ -33,6 +33,12 @@ pub const FUNCTION_TYPE_METADATA_FORMAT_VERSION: u16 = 5;
 pub const PREPROCESSING_DEMAND_MANIFEST_FORMAT_VERSION: u16 = 8;
 
 const MAX_BINARY_COLLECTION_LEN: usize = 1_000_000;
+/// Per-function instruction vectors are allowed to grow far larger than the
+/// generic collection bound: a fully-unrolled MPC circuit (e.g. AES-128 at -O3
+/// with raised inline/unroll budgets) legitimately reaches ~2M instructions.
+/// Keep this finite as a guardrail against a corrupt length field triggering a
+/// multi-GB allocation, but size it with headroom over the largest real circuit.
+const MAX_INSTRUCTION_COUNT: usize = 8_000_000;
 const MAX_BINARY_STRING_BYTES: usize = 16 * 1024 * 1024;
 
 /// Error types that can occur during serialization or deserialization
@@ -1576,7 +1582,7 @@ impl CompiledBinary {
 
         // Read instructions
         let instruction_count =
-            read_u32_len_bounded(reader, "instruction count", MAX_BINARY_COLLECTION_LEN)?;
+            read_u32_len_bounded(reader, "instruction count", MAX_INSTRUCTION_COUNT)?;
 
         let mut instructions = Vec::new();
         reserve_vec(&mut instructions, instruction_count, "instruction count")?;
@@ -2605,7 +2611,7 @@ mod tests {
         bytes.extend_from_slice(&1u32.to_le_bytes()); // functions
         append_empty_function_prefix(&mut bytes);
         bytes.extend_from_slice(
-            &(u32::try_from(MAX_BINARY_COLLECTION_LEN).unwrap() + 1).to_le_bytes(),
+            &(u32::try_from(MAX_INSTRUCTION_COUNT).unwrap() + 1).to_le_bytes(),
         );
 
         assert_invalid_data(
