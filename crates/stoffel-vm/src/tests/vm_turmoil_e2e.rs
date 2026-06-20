@@ -556,7 +556,7 @@ impl AsyncMpcEngine for HbTurmoilVmEngine {
             .ok_or_else(|| MpcEngineError::operation_failed("hb_multiply", "empty result"))?;
         let bytes = Self::encode_share(&result)
             .map_err(|error| MpcEngineError::operation_failed("encode_hb_share", error))?;
-        Ok(ShareData::Opaque(bytes))
+        Ok(ShareData::Opaque(bytes.into()))
     }
 
     async fn open_share_async(
@@ -684,7 +684,10 @@ impl AvssTurmoilVmEngine {
                 Ok(out)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        Ok(ShareData::Feldman { data, commitments })
+        Ok(ShareData::Feldman {
+            data: data.into(),
+            commitments: commitments.into(),
+        })
     }
 
     async fn broadcast_open_registry_payload(&self, payload: Vec<u8>) -> Result<(), String> {
@@ -1410,6 +1413,8 @@ fn hb_vm_turmoil_mul_open_e2e() {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 );
                 let router = Arc::new(OpenMessageRouter::new());
                 let engine = Arc::new(HbTurmoilVmEngine::new(
@@ -1425,11 +1430,19 @@ fn hb_vm_turmoil_mul_open_e2e() {
                 let args = vec![
                     Value::Share(
                         share_ty(),
-                        ShareData::Opaque(HbTurmoilVmEngine::encode_share(&left_share).unwrap()),
+                        ShareData::Opaque(
+                            HbTurmoilVmEngine::encode_share(&left_share)
+                                .unwrap()
+                                .into(),
+                        ),
                     ),
                     Value::Share(
                         share_ty(),
-                        ShareData::Opaque(HbTurmoilVmEngine::encode_share(&right_share).unwrap()),
+                        ShareData::Opaque(
+                            HbTurmoilVmEngine::encode_share(&right_share)
+                                .unwrap()
+                                .into(),
+                        ),
                     ),
                 ];
                 let result = run_hb_vm_until_done(
@@ -1623,7 +1636,7 @@ fn hb_vm_turmoil_full_client_flow_e2e() {
                         .preprocessing_material
                         .lock()
                         .await
-                        .add(Some(party_triples), None, None, None);
+                        .add(Some(party_triples), None, None, None, None, None);
                     let router = Arc::new(OpenMessageRouter::new());
                     let engine = Arc::new(HbTurmoilVmEngine::new(
                         topology_for(party_id),

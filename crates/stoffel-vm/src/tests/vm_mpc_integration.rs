@@ -363,7 +363,7 @@ async fn test_vm_mpc_multiplication_integration() {
                 0,
                 Value::Share(
                     ShareType::secret_int(64),
-                    ShareData::Opaque(result_share_bytes.clone()),
+                    ShareData::Opaque(result_share_bytes.clone().into()),
                 ),
             ),
             // Could perform additional operations here (e.g., add constants)

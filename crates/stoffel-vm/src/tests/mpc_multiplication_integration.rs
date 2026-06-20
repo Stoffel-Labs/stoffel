@@ -1155,7 +1155,7 @@ mod tests {
         let base_port = 9200;
         let _session_id = SessionId::new(
             ProtocolType::Mul,
-            SessionId::pack_slot24(0, 0, 0),
+            SessionId::pack_slot(0, 0, 0),
             instance_id as u32,
         );
         // Protocol client IDs are topologically sorted client indexes.
@@ -1356,7 +1356,7 @@ mod tests {
         let preprocessing_timeout = Duration::from_secs(30);
         let _session_id = SessionId::new(
             ProtocolType::Ransha,
-            SessionId::pack_slot24(0, 0, 0),
+            SessionId::pack_slot(0, 0, 0),
             instance_id as u32,
         );
         let preprocessing_handles: Vec<_> = servers
@@ -1729,7 +1729,7 @@ mod tests {
         let preprocessing_timeout = Duration::from_secs(30);
         let _session_id = SessionId::new(
             ProtocolType::Ransha,
-            SessionId::pack_slot24(0, 0, 0),
+            SessionId::pack_slot(0, 0, 0),
             instance_id as u32,
         );
         let preprocessing_handles: Vec<_> = servers
@@ -1961,7 +1961,7 @@ mod tests {
         let preprocessing_timeout = Duration::from_secs(30);
         let _session_id = SessionId::new(
             ProtocolType::Ransha,
-            SessionId::pack_slot24(0, 0, 0),
+            SessionId::pack_slot(0, 0, 0),
             instance_id as u32,
         );
         let preprocessing_handles: Vec<_> = servers
@@ -2033,8 +2033,9 @@ mod tests {
                 //let node = server.node.lock().await;
                 let preproc = server.node.preprocessing_material.lock().await;
 
-                let (triples_count, random_shares_count, _prandbit_count, _prandint_count) =
-                    preproc.len();
+                let preproc_len = preproc.length();
+                let triples_count = preproc_len.beaver_triples;
+                let random_shares_count = preproc_len.random_shr;
 
                 info!(
                     "Server {} has {} triples and {} random shares",
