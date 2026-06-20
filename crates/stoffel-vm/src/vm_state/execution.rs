@@ -265,55 +265,64 @@ impl VMState {
         mut executed_instructions: usize,
         mut runtime_cache: RuntimeFunctionCache,
     ) -> VmResult<VmRunSlice> {
+        // Hot path for online MPC execution (no debug hooks). Fetch + execute are
+        // fused into a single loop body so the compiler can keep the frame and
+        // instruction pointers in registers across instructions, instead of
+        // crossing function-call boundaries and constructing/destructing the
+        // `PreparedStep` / `StepResult` intermediate enums on every instruction.
+        let checkpoint = context.checkpoint();
         loop {
             if budget.is_exhausted(executed_instructions) {
                 return Ok(VmRunSlice::BudgetExhausted);
             }
 
             let runtime_function = runtime_cache.current(self)?;
-            match self.execute_async_step_without_hooks(context, runtime_function)? {
-                StepResult::Continue => {
-                    executed_instructions = executed_instructions.saturating_add(1);
-                }
-                StepResult::Return(value) => return Ok(VmRunSlice::Complete(value)),
-                StepResult::NeedsMpc {
-                    operation,
-                    after_instruction,
-                } => {
-                    return Ok(VmRunSlice::Yield(VmEffect::new(
-                        operation,
-                        after_instruction,
-                        false,
-                    )));
-                }
-            }
-        }
-    }
 
-    fn execute_async_step_without_hooks(
-        &mut self,
-        context: ExecutionContext,
-        runtime_function: &RuntimeFunction,
-    ) -> VmResult<StepResult> {
-        let fetched =
-            match self.prepare_next_step_without_hooks(context.checkpoint(), runtime_function)? {
-                PreparedStep::Instruction(fetched) => fetched,
-                PreparedStep::Return(value) => return Ok(StepResult::Return(value)),
-                PreparedStep::Continue => return Ok(StepResult::Continue),
+            // ---- fetch (inlined from prepare_next_step_without_hooks) ----
+            // The frame borrow is confined to this block so `handle_function_end`
+            // below can take `&mut self` once the frame has been dropped.
+            let instruction = match {
+                if !checkpoint.has_active_frame(self.call_stack.len()) {
+                    return Err(VmError::UnexpectedEndOfExecution);
+                }
+                let frame = self.current_frame_mut()?;
+                let instruction_pointer = frame.instruction_pointer();
+                match runtime_function.get_instruction(instruction_pointer) {
+                    Some(fetched) => {
+                        frame.advance_instruction_pointer_after_fetch();
+                        Some(fetched)
+                    }
+                    None => None,
+                }
+            } {
+                Some(instruction) => instruction,
+                None => {
+                    // Ran past the end of this function's instruction vector:
+                    // resolve its return value and pop the activation frame.
+                    if let Some(result) =
+                        self.handle_function_end(ExecutionContext::new(checkpoint, false))?
+                    {
+                        return Ok(VmRunSlice::Complete(result));
+                    }
+                    continue;
+                }
             };
 
-        match self.execute_effect_instruction_without_hooks(
-            fetched.runtime_instruction(),
-            context.checkpoint(),
-        )? {
-            InstructionEffect::Completed(InstructionOutcome::Continue) => Ok(StepResult::Continue),
-            InstructionEffect::Completed(InstructionOutcome::Return(value)) => {
-                Ok(StepResult::Return(value))
+            // ---- execute (plan an async MPC effect, otherwise run locally) ----
+            match self.execute_effect_instruction_without_hooks(
+                instruction.runtime_instruction(),
+                checkpoint,
+            )? {
+                InstructionEffect::Completed(InstructionOutcome::Continue) => {
+                    executed_instructions = executed_instructions.saturating_add(1);
+                }
+                InstructionEffect::Completed(InstructionOutcome::Return(value)) => {
+                    return Ok(VmRunSlice::Complete(value));
+                }
+                InstructionEffect::PendingMpc(operation) => {
+                    return Ok(VmRunSlice::Yield(VmEffect::new(operation, None, false)));
+                }
             }
-            InstructionEffect::PendingMpc(operation) => Ok(StepResult::NeedsMpc {
-                operation,
-                after_instruction: None,
-            }),
         }
     }
 
