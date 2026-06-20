@@ -19,7 +19,7 @@ use stoffel_mpc_coordinator::off_chain::node_rpc::{
 use stoffel_mpc_coordinator::off_chain::OffChainCoordinatorClient;
 use stoffel_mpc_coordinator::on_chain;
 use stoffel_mpc_coordinator::on_chain::node_rpc::NodeRPCClient as OnChainNodeRPCClient;
-use stoffel_mpc_coordinator::{Coordinator, Round};
+use stoffel_mpc_coordinator::{Coordinator, NodeRPCError, Round};
 use stoffel_vm::core_vm::VirtualMachine;
 use stoffel_vm::net::curve::{field_from_i64, field_to_i64, SupportedMpcField};
 use stoffel_vm::net::hb_engine::HoneyBadgerMpcEngine;
@@ -3270,6 +3270,18 @@ where
         .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
         .collect();
 
+    if input_ids.is_empty() {
+        eprintln!(
+            "[party {}] AVSS coordinator mode has no client inputs; executing '{}' without preprocessing",
+            my_id, agreed_entry
+        );
+        let result = vm
+            .execute(agreed_entry)
+            .map_err(|err| format!("Execution error in '{}': {}", agreed_entry, err))?;
+        print_vm_result(vm, result);
+        return Ok(());
+    }
+
     let coord: AvssOffChainCoordinator<F, G> = AvssOffChainCoordinator::<F, G>::start_rpc_client(
         &coord_addr.0,
         coord_addr.1,
@@ -3317,23 +3329,6 @@ where
     .await?;
     engine.enable_client_output_capture().await;
 
-    if input_ids.is_empty() {
-        if as_leader {
-            coord.start_mpc().await.map_err(|e| e.to_string())?;
-        }
-        coord
-            .wait_for_round(Round::MPCExecution)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        eprintln!("Starting VM execution of '{}'...", agreed_entry);
-        let result = vm
-            .execute(agreed_entry)
-            .map_err(|err| format!("Execution error in '{}': {}", agreed_entry, err))?;
-        print_vm_result(vm, result);
-        return Ok(());
-    }
-
     let mut mask_shares = Vec::with_capacity(input_ids.len());
     {
         let node = engine.node_handle().lock().await;
@@ -3379,7 +3374,16 @@ where
             node_rpc
                 .add_reserved_index(cid.clone(), *idx)
                 .await
-                .map_err(|e| format!("add_reserved_index: {:?}", e))?;
+                .or_else(|e| match e {
+                    NodeRPCError::JSONError => {
+                        eprintln!(
+                            "[party {}] add_reserved_index observed a stale client sink for index {}; continuing",
+                            my_id, idx
+                        );
+                        Ok(())
+                    }
+                    other => Err(format!("add_reserved_index: {:?}", other)),
+                })?;
         }
     }
 
