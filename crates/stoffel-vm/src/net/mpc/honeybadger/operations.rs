@@ -91,8 +91,9 @@ where
                 let trace = Self::trace_multiply_enabled();
                 let started_at = Instant::now();
                 if trace {
+                    let _m = node.preprocessing_material.lock().await.length();
                     let (triples, randoms, bits, exp_points) =
-                        node.preprocessing_material.lock().await.len();
+                        (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
                     eprintln!(
                         "[hb multiply start] party={} items=1 ty={:?} material=triples:{} randoms:{} bits:{} exp_points:{}",
                         self.topology.party_id(),
@@ -108,8 +109,9 @@ where
                     .await
                     .map_err(|e| format!("MPC multiplication failed: {:?}", e))?;
                 if trace {
+                    let _m = node.preprocessing_material.lock().await.length();
                     let (triples, randoms, bits, exp_points) =
-                        node.preprocessing_material.lock().await.len();
+                        (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
                     eprintln!(
                         "[hb multiply done] party={} items=1 elapsed_ms={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                         self.topology.party_id(),
@@ -240,8 +242,9 @@ where
 
                     let chunk_started_at = Instant::now();
                     if trace {
+                        let _m = node.preprocessing_material.lock().await.length();
                         let (triples, randoms, bits, exp_points) =
-                            node.preprocessing_material.lock().await.len();
+                            (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
                         eprintln!(
                             "[hb batch_multiply chunk start] party={} chunk={} items={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                             self.topology.party_id(),
@@ -259,8 +262,9 @@ where
                         .await
                         .map_err(|e| format!("MPC batch multiplication failed: {:?}", e))?;
                     if trace {
+                        let _m = node.preprocessing_material.lock().await.length();
                         let (triples, randoms, bits, exp_points) =
-                            node.preprocessing_material.lock().await.len();
+                            (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
                         eprintln!(
                             "[hb batch_multiply chunk done] party={} chunk={} items={} elapsed_ms={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                             self.topology.party_id(),

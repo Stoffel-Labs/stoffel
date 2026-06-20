@@ -150,7 +150,7 @@ where
                 node.preprocessing_material
                     .lock()
                     .await
-                    .add(Some(decoded), None, None, None);
+                    .add(Some(decoded), None, None, None, None, None);
             }
         }
         if let Some(ref blob) = randoms {
@@ -170,7 +170,7 @@ where
                 node.preprocessing_material
                     .lock()
                     .await
-                    .add(None, Some(decoded), None, None);
+                    .add(None, None, Some(decoded), None, None, None);
             }
         }
         if let Some(ref blob) = prandbits {
@@ -190,7 +190,7 @@ where
                 node.preprocessing_material
                     .lock()
                     .await
-                    .add(None, None, Some(decoded), None);
+                    .add(None, None, None, None, Some(decoded), None);
             }
         }
         if let Some(ref blob) = prandints {
@@ -210,7 +210,7 @@ where
                 node.preprocessing_material
                     .lock()
                     .await
-                    .add(None, None, None, Some(decoded));
+                    .add(None, None, None, None, None, Some(decoded));
             }
         }
 
@@ -278,7 +278,9 @@ where
         {
             let node = self.clone_node().await;
             let mut prep = node.preprocessing_material.lock().await;
-            let (n_bt, n_rs, n_pb, n_pi) = prep.len();
+            let _m = prep.length();
+            let (n_bt, n_rs, n_pb, n_pi) =
+                (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
 
             if n_bt > 0 {
                 let items = prep
@@ -325,7 +327,7 @@ where
                 restore_pi = Some(items);
             }
 
-            prep.add(restore_bt, restore_rs, restore_pb, restore_pi);
+            prep.add(restore_bt, None, restore_rs, None, restore_pb, restore_pi);
         }
 
         for (key, blob) in &to_store {
@@ -397,7 +399,7 @@ where
     async fn regenerate_random_shares(&self, needed: usize) -> Result<(), String> {
         let mut node = self.clone_node().await;
         {
-            let current = node.preprocessing_material.lock().await.len().1;
+            let current = node.preprocessing_material.lock().await.length().random_shr;
             let target = current + needed;
             if node.params.n_random_shares < target {
                 node.params.n_random_shares = target;
@@ -413,7 +415,7 @@ where
     async fn regenerate_prandint_shares(&self, needed: usize, ty: ShareType) -> Result<(), String> {
         let mut node = self.clone_node().await;
         {
-            let current = node.preprocessing_material.lock().await.len().3;
+            let current = node.preprocessing_material.lock().await.length().prandint;
             let target = current + needed;
             if node.params.n_prandint < target {
                 node.params.n_prandint = target;
