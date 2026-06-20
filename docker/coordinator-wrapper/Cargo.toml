@@ -19,7 +19,7 @@ clap = { version = "4.5.56", features = ["derive"] }
 hex = "0.4.3"
 jsonrpsee = { version = "0.26.0", features = ["full"] }
 rustls = "0.23.36"
-stoffel-mpc-coordinator = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "feature/no-feature-gates-and-multi-type-awareness" }
-stoffelmpc-mpc = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "temp/monorepo-network-dep" }
+stoffel-mpc-coordinator = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev" }
+stoffelmpc-mpc = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "temp/reverted-stuff-monorepo-network-dep" }
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time"] }
 x509-parser = "0.18.1"

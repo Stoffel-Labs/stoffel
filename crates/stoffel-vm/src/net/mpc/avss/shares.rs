@@ -110,7 +110,7 @@ where
             "AVSS share generation initiated: party={}, key='{}', session={}",
             self.topology.party_id(),
             key_name,
-            session_id.as_u64()
+            session_id.as_u128()
         );
 
         let share = self.wait_for_share(session_id).await?;
@@ -151,7 +151,7 @@ where
                 _ = tokio::time::sleep_until(deadline) => {
                     return Err(format!(
                         "Timeout waiting for AVSS share: session={}",
-                        session_id.as_u64()
+                        session_id.as_u128()
                     ));
                 }
             }
