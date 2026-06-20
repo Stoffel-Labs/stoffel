@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::fs::File;
+use std::io::BufReader;
 use std::net::SocketAddr;
 use std::process::exit;
 use std::str::FromStr;
@@ -4067,14 +4068,14 @@ async fn main() {
     };
 
     let manifest_config = path_opt.as_ref().map(|path| {
-        let mut file = File::open(path).unwrap_or_else(|error| {
+        let file = File::open(path).unwrap_or_else(|error| {
             eprintln!(
                 "Error: failed to open compiled program '{}': {}",
                 path, error
             );
             exit(2);
         });
-        let binary = CompiledBinary::deserialize(&mut file).unwrap_or_else(|error| {
+        let binary = CompiledBinary::deserialize(&mut BufReader::new(file)).unwrap_or_else(|error| {
             eprintln!(
                 "Error: failed to deserialize compiled program '{}': {:?}",
                 path, error
@@ -4395,8 +4396,8 @@ async fn main() {
         let p = stoffel_vm::net::program_sync::program_path(&program_id);
         p.to_string_lossy().to_string()
     };
-    let mut f = File::open(&load_path).expect("open binary file");
-    let binary = CompiledBinary::deserialize(&mut f).expect("deserialize compiled binary");
+    let f = File::open(&load_path).expect("open binary file");
+    let binary = CompiledBinary::deserialize(&mut BufReader::new(f)).expect("deserialize compiled binary");
     let client_input_types = manifest_client_input_types(&binary);
     let preprocessing_demand = binary.client_io_manifest.preprocessing_demand;
     let functions = match binary.try_to_vm_functions() {

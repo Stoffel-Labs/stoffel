@@ -638,7 +638,39 @@ impl LocalCoordinatorRunner {
             }
         }
 
-        Ok((name.to_owned(), command.spawn()?))
+        let mut child = command.spawn()?;
+        // Profiler attachment hooks. External `sample`/`ps` can't reliably discover
+        // these short-lived child processes (PID races; TEE-buffered markers arrive
+        // after the fast online window), so the runner attaches from spawn instead.
+        if let Some(pid) = child.id() {
+            if std::env::var("STOFFEL_PRINT_PARTY_PIDS").is_ok() {
+                eprintln!("[local-runner] party '{name}' pid={pid}");
+            }
+            // Attach macOS `sample` to this child for STOFFEL_SAMPLE_CHILDREN seconds,
+            // writing to /tmp/stoffel_child_sample_<name>_<pid>.txt. Detached — runs
+            // independently of the runner, sampling the party across all its phases.
+            if let Ok(dur) = std::env::var("STOFFEL_SAMPLE_CHILDREN") {
+                let path = format!("/tmp/stoffel_child_sample_{name}_{pid}.txt");
+                match std::process::Command::new("sample")
+                    .arg(pid.to_string())
+                    .arg(&dur)
+                    .arg("-mayDie")
+                    .arg("-file")
+                    .arg(&path)
+                    .spawn()
+                {
+                    Ok(_) => {
+                        eprintln!(
+                            "[local-runner] sampling party '{name}' (pid={pid}) for {dur}s -> {path}"
+                        );
+                    }
+                    Err(error) => eprintln!(
+                        "[local-runner] failed to attach sample to pid={pid}: {error}"
+                    ),
+                }
+            }
+        }
+        Ok((name.to_owned(), child))
     }
 
     fn max_client_input_count(&self) -> usize {
