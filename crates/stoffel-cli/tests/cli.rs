@@ -85,9 +85,9 @@ fn init_creates_default_project() {
     assert!(temp.path().join("hello/src/main.rs").exists());
     assert!(!temp.path().join("hello/src/stoffel_bindings.rs").exists());
     let program = fs::read_to_string(temp.path().join("hello/src/main.stfl")).unwrap();
-    assert!(program.contains("def gate_and(a: secret bool, b: secret bool) -> secret bool"));
-    assert!(program.contains("var x: secret bool = Share.random()"));
-    assert!(program.contains("return result.reveal()"));
+    assert!(program.contains("ClientStore.take_share(0, 0)"));
+    assert!(program.contains("MpcOutput.send_to_client(0, [doubled])"));
+    assert!(program.contains("return doubled.open()"));
     let cargo_toml = fs::read_to_string(temp.path().join("hello/Cargo.toml")).unwrap();
     assert!(cargo_toml.contains("stoffel-rust-sdk"));
     assert!(cargo_toml.contains("stoffel = { package = \"stoffel-rust-sdk\""));
@@ -100,12 +100,17 @@ fn init_creates_default_project() {
     assert!(main_rs.contains("mod stoffel_bindings"));
     assert!(main_rs.contains("include!(concat!(env!(\"OUT_DIR\")"));
     assert!(main_rs.contains("stoffel_bindings::ProgramManifest"));
+    assert!(main_rs.contains("run_locally"));
+    assert!(main_rs.contains("run_as_app_client"));
+    assert!(main_rs.contains("with_client_input(0, &[42_i64])"));
+    assert!(main_rs.contains("client_for_deployment"));
     assert!(!main_rs.contains("with_inputs"));
     let readme = fs::read_to_string(temp.path().join("hello/README.md")).unwrap();
-    assert!(readme.contains("stoffel check"));
-    assert!(readme.contains("stoffel run"));
-    assert!(readme.contains("stoffel dev --once"));
-    assert!(!readme.contains("--input a=40 --input b=2"));
+    assert!(readme.contains("Local development"));
+    assert!(readme.contains("App/client integration"));
+    assert!(readme.contains("stoffel run --client-input 0=42 --expected-output-clients 1"));
+    assert!(readme.contains("cargo run -- client"));
+    assert!(!readme.contains("stoffel dev --once"));
     assert!(readme.contains("stoffel build"));
     assert!(readme.contains("cargo build"));
     assert!(readme.contains("cargo run"));
@@ -221,7 +226,7 @@ fn init_help_names_supported_templates_and_aliases() {
 }
 
 #[test]
-fn run_executes_default_secret_bool_circuit_project() {
+fn run_executes_default_client_input_project() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
@@ -235,10 +240,18 @@ fn run_executes_default_secret_bool_circuit_project() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .current_dir(temp.path())
-        .args(["run", "--timeout-secs", LOCAL_MPC_TEST_TIMEOUT_SECS])
+        .args([
+            "run",
+            "--timeout-secs",
+            LOCAL_MPC_TEST_TIMEOUT_SECS,
+            "--client-input",
+            "0=42",
+            "--expected-output-clients",
+            "1",
+        ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("true").or(predicate::str::contains("false")));
+        .stdout(predicate::str::contains("84"));
 }
 
 #[test]

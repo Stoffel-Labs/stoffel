@@ -452,13 +452,10 @@ fn init_stoffel_project(path: &Path) -> Result<()> {
         path.join("build.rs"),
         &default_build_rs_text("src/main.stfl"),
     )?;
-    write_new(path.join("src/main.rs"), default_main_rs_text())?;
+    write_new(path.join("src/main.rs"), &default_main_rs_text(&name))?;
     write_new(
         path.join("README.md"),
-        &format!(
-            "{}\nBuild the Rust SDK wrapper with included bindings:\n\n```sh\ncargo build\n```\n\nRun the Rust SDK wrapper:\n\n```sh\ncargo run\n```\n",
-            default_readme_text("Stoffel Project")
-        ),
+        &default_readme_text("Stoffel Project"),
     )?;
     Ok(())
 }
@@ -917,41 +914,25 @@ fn default_config_text(name: String) -> String {
 
 fn default_readme_text(title: &str) -> String {
     format!(
-        "# {title}\n\nValidate the Stoffel source:\n\n```sh\nstoffel check\n```\n\nRun the default local MPC example:\n\n```sh\nstoffel run\n```\n\nRun the default example once with the development command:\n\n```sh\nstoffel dev --once\n```\n\nBuild bytecode:\n\n```sh\nstoffel build\n```\n"
+        "# {title}\n\nThis project shows the two SDK paths you will use while building a Stoffel app.\n\n## 1. Local development\n\nUse this while developing the Stoffel program. It compiles `src/main.stfl`, feeds client slot 0 a local private input, and runs the local MPC smoke path with `execute_local()`.\n\n```sh\ncargo run\n```\n\nYou can also exercise the same program through the CLI local runner:\n\n```sh\nstoffel run --client-input 0=42 --expected-output-clients 1\n```\n\n## 2. App/client integration\n\nUse this shape from a Rust app when the Stoffel nodes are already running as long-lived services. First build the bytecode artifact:\n\n```sh\nstoffel build\n```\n\nThen run the client-mode example after replacing the placeholder node addresses, coordinator address, and certificate paths in `src/main.rs` with your deployment values:\n\n```sh\ncargo run -- client\n```\n\nThe app/client path loads `target/debug/<project-name>.stflb`, builds a `StoffelClient`, submits this client's private input, and awaits the output. The app does not start or manage MPC nodes.\n\nBuild the Rust SDK wrapper and generated bindings:\n\n```sh\ncargo build\n```\n"
     )
 }
 
 fn default_stoffel_program_text() -> &'static str {
     concat!(
-        "def gate_and(a: secret bool, b: secret bool) -> secret bool:\n",
-        "  return Share.mul(a, b)\n",
+        "# One private input from client slot 0.\n",
+        "#\n",
+        "# Local development can feed this input with `with_client_input` or\n",
+        "# `stoffel run --client-input 0=42`. A deployed app submits the same\n",
+        "# input through `StoffelClient::run`.\n",
+        "def main() -> int64:\n",
+        "  var value: Share = ClientStore.take_share(0, 0)\n",
+        "  var doubled: Share = Share.add(value, value)\n",
         "\n",
-        "def gate_not(a: secret bool) -> secret bool:\n",
-        "  var one = Share.from_clear_int(1, 1)\n",
-        "  return Share.sub(one, a)\n",
+        "  if Mpc.has_capability(\"client-output\"):\n",
+        "    MpcOutput.send_to_client(0, [doubled])\n",
         "\n",
-        "def gate_or(a: secret bool, b: secret bool) -> secret bool:\n",
-        "  var ab: secret bool = gate_and(a, b)\n",
-        "  var sum = Share.add(a, b)\n",
-        "  return Share.sub(sum, ab)\n",
-        "\n",
-        "def gate_xor(a: secret bool, b: secret bool) -> secret bool:\n",
-        "  var ab: secret bool = gate_and(a, b)\n",
-        "  var sum = Share.add(a, b)\n",
-        "  var two_ab = Share.mul_scalar(ab, 2)\n",
-        "  return Share.sub(sum, two_ab)\n",
-        "\n",
-        "def circuit(x: secret bool, y: secret bool, z: secret bool) -> secret bool:\n",
-        "  var left: secret bool = gate_or(gate_and(x, y), gate_not(z))\n",
-        "  var right: secret bool = gate_and(x, gate_not(y))\n",
-        "  return gate_xor(left, right)\n",
-        "\n",
-        "def main() -> bool:\n",
-        "  var x: secret bool = Share.random()\n",
-        "  var y: secret bool = Share.random()\n",
-        "  var z: secret bool = Share.random()\n",
-        "  var result: secret bool = circuit(x, y, z)\n",
-        "  return result.reveal()\n",
+        "  return doubled.open()\n",
     )
 }
 
@@ -967,8 +948,93 @@ fn default_build_rs_text(program_path: &str) -> String {
     )
 }
 
-fn default_main_rs_text() -> &'static str {
-    "use stoffel::prelude::*;\n\n#[allow(dead_code, unused_mut, unused_variables)]\nmod stoffel_bindings {\n    include!(concat!(env!(\"OUT_DIR\"), \"/stoffel_bindings.rs\"));\n}\n\n#[tokio::main]\nasync fn main() -> stoffel::Result<()> {\n    let result = Stoffel::compile_file(\"src/main.stfl\")?\n        .manifest::<stoffel_bindings::ProgramManifest>()\n        .parties(5)\n        .threshold(1)\n        // Load named function inputs from JSON, CSV, or TXT when your program takes parameters.\n        // Examples:\n        //   inputs.json: {\"a\": 40, \"b\": 2}\n        //   inputs.csv:  a,b\\n40,2\n        //   inputs.txt:  a=40\\nb=2\n        // .with_input_file(\"inputs.json\")?\n        // Load ClientStore values for no-argument MPC programs with:\n        // .with_client_input_file(\"client-inputs.json\")?\n        .execute_local()\n        .await?;\n\n    println!(\"{}\", result[0]);\n    Ok(())\n}\n"
+fn default_main_rs_text(name: &str) -> String {
+    r#"use std::path::PathBuf;
+use std::time::Duration;
+
+use stoffel::prelude::*;
+
+#[allow(dead_code, unused_mut, unused_variables)]
+mod stoffel_bindings {
+    include!(concat!(env!("OUT_DIR"), "/stoffel_bindings.rs"));
+}
+
+#[tokio::main]
+async fn main() -> stoffel::Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        Some("client") => run_as_app_client().await,
+        _ => run_locally().await,
+    }
+}
+
+// Local development: compile the Stoffel source and use the local MPC runner.
+async fn run_locally() -> stoffel::Result<()> {
+    let result = Stoffel::compile_file("src/main.stfl")?
+        .manifest::<stoffel_bindings::ProgramManifest>()
+        .parties(5)
+        .threshold(1)
+        .expected_output_clients(1)
+        .with_client_input(0, &[42_i64])
+        .execute_local()
+        .await?;
+
+    println!("local result: {}", result[0]);
+    Ok(())
+}
+
+// App integration: connect as a client to long-lived Stoffel nodes.
+// Replace these placeholder addresses and cert paths with your deployment values.
+async fn run_as_app_client() -> stoffel::Result<()> {
+    let runtime = Stoffel::load_file("__BYTECODE_PATH__")?
+        .parties(5)
+        .threshold(1)
+        .honeybadger()
+        .build()?;
+
+    let deployment = NetworkDeployment::builder([
+        "node-0.example.com:19200",
+        "node-1.example.com:19200",
+        "node-2.example.com:19200",
+        "node-3.example.com:19200",
+        "node-4.example.com:19200",
+    ])
+    .expected_clients(1)
+    .threshold(1)
+    .honeybadger()
+    .build()?;
+
+    let client_slot = 0;
+    let offchain_io = runtime
+        .offchain_client_config(client_slot)?
+        .coordinator("coordinator.example.com", 19300)
+        .timestamp(1)
+        .node_rpc_addresses([
+            "node-0.example.com:19400",
+            "node-1.example.com:19400",
+            "node-2.example.com:19400",
+            "node-3.example.com:19400",
+            "node-4.example.com:19400",
+        ])
+        .output_types([ShareType::SecretInt { bit_length: 64 }])
+        .identity_files(
+            PathBuf::from("certs/client.der"),
+            PathBuf::from("certs/client.key.der"),
+        )
+        .timeout(Duration::from_secs(60))
+        .build()?;
+
+    let client = runtime
+        .client_for_deployment(&deployment)
+        .client_id(client_slot as usize)
+        .offchain_io(offchain_io)
+        .build()?;
+
+    let outputs = client.run(&[42_i64]).await?;
+    println!("client result: {}", outputs[0]);
+    Ok(())
+}
+"#
+    .replace("__BYTECODE_PATH__", &format!("target/debug/{name}.stflb"))
 }
 
 fn config_text(name: String, source: &str) -> String {
