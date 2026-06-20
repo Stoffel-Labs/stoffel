@@ -443,7 +443,7 @@ where
         _ty: ShareType,
     ) -> Result<ShareData, String> {
         let shares = self.reserve_random_shares(1).await?;
-        Self::encode_share(&shares[0]).map(ShareData::Opaque)
+        Self::encode_share(&shares[0]).map(|v| ShareData::Opaque(v.into()))
     }
 
     /// Pull one pre-generated PRandInt share from the preprocessing pool.
@@ -452,6 +452,6 @@ where
         ty: ShareType,
     ) -> Result<ShareData, String> {
         let shares = self.reserve_prandint_shares(1, ty).await?;
-        Self::encode_share(&shares[0]).map(ShareData::Opaque)
+        Self::encode_share(&shares[0]).map(|v| ShareData::Opaque(v.into()))
     }
 }

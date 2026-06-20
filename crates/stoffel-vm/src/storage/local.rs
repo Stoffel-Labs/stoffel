@@ -321,8 +321,9 @@ mod tests {
                 Value::Share(
                     ShareType::secret_int(64),
                     ShareData::Feldman {
-                        data: vec![1, 2, 3],
-                        commitments: vec![vec![4], vec![5, 6]],
+                        data: vec![1, 2, 3].into(),
+                        commitments: vec![vec![4], vec![5, 6]].into(),
+
                     },
                 ),
             )
@@ -378,8 +379,9 @@ mod tests {
             Some(Value::Share(
                 ShareType::secret_int(64),
                 ShareData::Feldman {
-                    data: vec![1, 2, 3],
-                    commitments: vec![vec![4], vec![5, 6]],
+                    data: vec![1, 2, 3].into(),
+                    commitments: vec![vec![4], vec![5, 6]].into(),
+
                 },
             ))
         );

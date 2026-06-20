@@ -164,7 +164,7 @@ impl AsyncMpcEngineClientOps for AsyncHydratingEngine {
             7,
             vec![ClientShare::typed(
                 ShareType::default_secret_int(),
-                ShareData::Opaque(vec![9]),
+                ShareData::Opaque(vec![9].into()),
             )],
         );
         Ok(ClientInputHydrationCount::new(1))
@@ -181,7 +181,7 @@ impl AsyncMpcEngineClientOps for AsyncHydratingEngine {
                 client_id,
                 vec![ClientShare::typed(
                     ShareType::default_secret_int(),
-                    ShareData::Opaque(vec![9]),
+                    ShareData::Opaque(vec![9].into()),
                 )],
             );
             hydrated += 1;
@@ -431,5 +431,5 @@ async fn async_execute_function_uses_async_client_input_hydration() {
         .try_with_vm(|vm| vm.client_share_data(7, ClientShareIndex::new(0)))
         .expect("inspect hydrated VM input")
         .expect("client input should be hydrated");
-    assert_eq!(hydrated_share.data(), &ShareData::Opaque(vec![9]));
+    assert_eq!(hydrated_share.data(), &ShareData::Opaque(vec![9].into()));
 }

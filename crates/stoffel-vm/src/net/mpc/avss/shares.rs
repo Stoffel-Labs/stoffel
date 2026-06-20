@@ -627,7 +627,10 @@ where
             })
             .collect::<Result<Vec<Vec<u8>>, String>>()?;
 
-        Ok(ShareData::Feldman { data, commitments })
+        Ok(ShareData::Feldman {
+            data: data.into(),
+            commitments: commitments.into(),
+        })
     }
 
     /// Create AVSS shares for a secret value (generates Feldman-verifiable shares for all parties).

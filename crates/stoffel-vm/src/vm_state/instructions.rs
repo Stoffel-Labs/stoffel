@@ -1562,8 +1562,8 @@ mod tests {
         let mut runtime = FakeInstructionRuntime {
             pending_operation: Some(PendingMpcOperation::Multiply {
                 share_type: ShareType::secret_int(64),
-                left_data: ShareData::Opaque(vec![1]),
-                right_data: ShareData::Opaque(vec![2]),
+                left_data: ShareData::Opaque(vec![1].into()),
+                right_data: ShareData::Opaque(vec![2].into()),
                 dest: runtime_reg(0),
             }),
             ..Default::default()

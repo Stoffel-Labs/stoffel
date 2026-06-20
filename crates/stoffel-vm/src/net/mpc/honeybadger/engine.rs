@@ -55,7 +55,7 @@ where
                         self.topology.party_id(),
                         self.topology.threshold(),
                     );
-                    Self::encode_share(&share).map(ShareData::Opaque)
+                    Self::encode_share(&share).map(|v| ShareData::Opaque(v.into()))
                 }
                 (ShareType::SecretUInt { .. }, ClearShareValue::UnsignedInteger(v)) => {
                     let secret = crate::net::curve::field_from_u64::<F>(v);
@@ -64,7 +64,7 @@ where
                         self.topology.party_id(),
                         self.topology.threshold(),
                     );
-                    Self::encode_share(&share).map(ShareData::Opaque)
+                    Self::encode_share(&share).map(|v| ShareData::Opaque(v.into()))
                 }
                 (
                     ShareType::SecretInt {
@@ -78,7 +78,7 @@ where
                         self.topology.party_id(),
                         self.topology.threshold(),
                     );
-                    Self::encode_share(&share).map(ShareData::Opaque)
+                    Self::encode_share(&share).map(|v| ShareData::Opaque(v.into()))
                 }
                 (ShareType::SecretFixedPoint { precision }, ClearShareValue::FixedPoint(fp)) => {
                     let scaled_value = crate::net::curve::fixed_point_float_to_i64(precision, fp)?;
@@ -88,7 +88,7 @@ where
                         self.topology.party_id(),
                         self.topology.threshold(),
                     );
-                    Self::encode_share(&share).map(ShareData::Opaque)
+                    Self::encode_share(&share).map(|v| ShareData::Opaque(v.into()))
                 }
                 _ => Err("Unsupported type for input_share".to_string()),
             }

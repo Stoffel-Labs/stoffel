@@ -734,7 +734,7 @@ mod tests {
         let mut registers = RegisterFile::new(RegisterLayout::new(2), 4);
         let share = Value::Share(
             crate::core_types::ShareType::secret_int(64),
-            crate::core_types::ShareData::Opaque(vec![7]),
+            crate::core_types::ShareData::Opaque(vec![7].into()),
         );
         *registers.get_mut(r(2)).expect("secret register r2") = share.clone();
 

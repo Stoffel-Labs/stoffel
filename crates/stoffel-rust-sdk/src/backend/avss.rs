@@ -210,9 +210,11 @@ fn bls12381_share_to_sdk(key_name: &str, share: &Bls12381AvssShare) -> Result<Sh
         .map_err(Error::Computation)?;
     match data {
         stoffel_vm_types::core_types::ShareData::Feldman { data, commitments } => {
-            Ok(Share::feldman(key_name, data, commitments))
+            Ok(Share::feldman(key_name, data.to_vec(), commitments.to_vec()))
         }
-        stoffel_vm_types::core_types::ShareData::Opaque(data) => Ok(Share::opaque(key_name, data)),
+        stoffel_vm_types::core_types::ShareData::Opaque(data) => {
+            Ok(Share::opaque(key_name, data.to_vec()))
+        }
     }
 }
 

@@ -58,7 +58,7 @@ pub(crate) fn preserve_share_data_format_for_curve(
     result_bytes: Vec<u8>,
 ) -> ShareAlgebraResult<ShareData> {
     match template {
-        ShareData::Opaque(_) => Ok(ShareData::Opaque(result_bytes)),
+        ShareData::Opaque(_) => Ok(ShareData::Opaque(result_bytes.into())),
         ShareData::Feldman { .. } => {
             dispatch_share_curve_config!(
                 curve_config,
@@ -124,7 +124,7 @@ where
     let share = decode_exact_typed::<FeldmanShamirShare<F, G>>(&bytes, "FeldmanShamirShare")?;
     let commitments = encode_feldman_commitments_typed(&share.commitments)?;
     Ok(ShareData::Feldman {
-        data: bytes,
-        commitments,
+        data: bytes.into(),
+        commitments: commitments.into(),
     })
 }

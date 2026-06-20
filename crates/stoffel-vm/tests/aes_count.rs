@@ -37,7 +37,7 @@ impl CountingEngine {
             ClearShareValue::FixedPoint(value) => ((value.0 as i64) & 1) as u8,
             ClearShareValue::Boolean(value) => u8::from(value),
         };
-        ShareData::Opaque(vec![byte])
+        ShareData::Opaque(vec![byte].into())
     }
 
     fn open_bool(share_bytes: &[u8]) -> ClearShareValue {
@@ -157,7 +157,7 @@ impl MpcEngineMultiplication for CountingEngine {
         self.scalar_mul_calls.fetch_add(1, Ordering::SeqCst);
         Ok(ShareData::Opaque(vec![
             CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right),
-        ]))
+        ].into()))
     }
 }
 
@@ -176,7 +176,7 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
         self.scalar_mul_calls.fetch_add(1, Ordering::SeqCst);
         Ok(ShareData::Opaque(vec![
             CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right),
-        ]))
+        ].into()))
     }
 
     async fn batch_multiply_share_async(
@@ -192,7 +192,7 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
             .map(|(left, right)| {
                 ShareData::Opaque(vec![
                     CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right),
-                ])
+                ].into())
             })
             .collect())
     }
@@ -214,11 +214,11 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
     }
 
     async fn random_share_async(&self, _ty: ShareType) -> MpcEngineResult<ShareData> {
-        Ok(ShareData::Opaque(vec![0]))
+        Ok(ShareData::Opaque(vec![0].into()))
     }
 
     async fn random_integer_share_async(&self, _ty: ShareType) -> MpcEngineResult<ShareData> {
-        Ok(ShareData::Opaque(vec![0]))
+        Ok(ShareData::Opaque(vec![0].into()))
     }
 }
 

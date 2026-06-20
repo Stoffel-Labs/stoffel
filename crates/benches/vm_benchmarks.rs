@@ -35,7 +35,7 @@ impl ImmediateAsyncEngine {
             ClearShareValue::FixedPoint(value) => (value.0 as i64).to_le_bytes()[0],
             ClearShareValue::Boolean(value) => u8::from(value),
         };
-        ShareData::Opaque(vec![byte])
+        ShareData::Opaque(vec![byte].into())
     }
 
     fn open_share_bytes(share_bytes: &[u8]) -> ClearShareValue {
@@ -1374,6 +1374,192 @@ fn bench_register_bank_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Async dispatch throughput (the real online MPC execution path).
+//
+// The sync benches above drive `execute()`; online MPC runs the async effect
+// scheduler (`run_until_effect_or_budget`) via `execute_async`. These benches
+// isolate async-path dispatch cost at N >> 1024 (the cooperative yield budget)
+// so the yield loop is actually exercised. clear_mov = pure dispatch + cheap
+// clear-register read; secret_mov = dispatch + secret-share clone (the cost the
+// Arc<[u8]> ShareData change targets).
+// ============================================================================
+
+fn async_clear_mov_straight(count: usize) -> VMFunction {
+    let mut instructions = Vec::with_capacity(count + 3);
+    instructions.push(Instruction::LDI(0, Value::I64(1)));
+    instructions.push(Instruction::LDI(1, Value::I64(2)));
+    instructions.extend(std::iter::repeat_n(Instruction::MOV(0, 1), count));
+    instructions.push(Instruction::RET(0));
+
+    function(
+        "async_clear_mov_straight",
+        2,
+        instructions,
+        HashMap::new(),
+    )
+}
+
+fn async_secret_mov_straight(count: usize) -> VMFunction {
+    // All-secret layout (secret_start = 0): the LDIs populate secret registers
+    // via input_share (one effect each), then `count` MOVs clone the share in
+    // reg 1 into reg 0.
+    let mut instructions = Vec::with_capacity(count + 3);
+    instructions.push(Instruction::LDI(0, Value::I64(7)));
+    instructions.push(Instruction::LDI(1, Value::I64(7)));
+    instructions.extend(std::iter::repeat_n(Instruction::MOV(0, 1), count));
+    instructions.push(Instruction::RET(0));
+
+    function(
+        "async_secret_mov_straight",
+        2,
+        instructions,
+        HashMap::new(),
+    )
+}
+
+fn bench_async_dispatch_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("async_dispatch_throughput");
+    configure_long_diagnostic(&mut group);
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("benchmark runtime should build");
+    let async_engine = Arc::new(ImmediateAsyncEngine);
+    let runtime_engine: Arc<dyn MpcEngine> = async_engine.clone();
+    const ASYNC_DISPATCH_COUNTS: [usize; 3] = [100_000, 500_000, 1_000_000];
+
+    for &count in &ASYNC_DISPATCH_COUNTS {
+        group.throughput(Throughput::Elements(count as u64));
+
+        let mut clear_vm = vm_with_register_layout(
+            [async_clear_mov_straight(count)],
+            RegisterLayout::default(),
+            Arc::clone(&runtime_engine),
+        );
+        group.bench_with_input(
+            BenchmarkId::new("clear_mov", count),
+            &count,
+            |b, _| {
+                b.iter(|| {
+                    black_box(
+                        runtime
+                            .block_on(clear_vm.execute_async(
+                                "async_clear_mov_straight",
+                                async_engine.as_ref(),
+                            ))
+                            .unwrap(),
+                    )
+                })
+            },
+        );
+
+        let mut secret_vm = vm_with_register_layout(
+            [async_secret_mov_straight(count)],
+            RegisterLayout::new(0),
+            Arc::clone(&runtime_engine),
+        );
+        group.bench_with_input(
+            BenchmarkId::new("secret_mov", count),
+            &count,
+            |b, _| {
+                b.iter(|| {
+                    black_box(
+                        runtime
+                            .block_on(secret_vm.execute_async(
+                                "async_secret_mov_straight",
+                                async_engine.as_ref(),
+                            ))
+                            .unwrap(),
+                    )
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// Zero-arg VM callees for the CALL-dispatch investigation.
+fn call_bench_noop_a() -> VMFunction {
+    function("call_bench_noop_a", 1, vec![Instruction::RET(0)], HashMap::new())
+}
+fn call_bench_noop_b() -> VMFunction {
+    function("call_bench_noop_b", 1, vec![Instruction::RET(0)], HashMap::new())
+}
+fn call_same_loop(count: usize) -> VMFunction {
+    let mut instructions = Vec::with_capacity(count + 1);
+    instructions.extend((0..count).map(|_| Instruction::CALL("call_bench_noop_a".to_owned())));
+    instructions.push(Instruction::RET(0));
+    function("call_same_loop", 1, instructions, HashMap::new())
+}
+fn call_alternating_loop(count: usize) -> VMFunction {
+    let mut instructions = Vec::with_capacity(count + 1);
+    for i in 0..count {
+        let callee = if i % 2 == 0 {
+            "call_bench_noop_a"
+        } else {
+            "call_bench_noop_b"
+        };
+        instructions.push(Instruction::CALL(callee.to_owned()));
+    }
+    instructions.push(Instruction::RET(0));
+    function("call_alternating_loop", 1, instructions, HashMap::new())
+}
+
+/// Investigate the CALL target-cache: same_callee hits the 1-entry cache every
+/// call; alternating thrashes it (the AES pattern of Share.add / get_field /
+/// array_push). The delta = what an N-way cache (Phase D) would recover.
+fn bench_async_call_dispatch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("async_call_dispatch");
+    configure_long_diagnostic(&mut group);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("benchmark runtime should build");
+    let async_engine = Arc::new(ImmediateAsyncEngine);
+    let runtime_engine: Arc<dyn MpcEngine> = async_engine.clone();
+    const N: usize = 100_000;
+    group.throughput(Throughput::Elements(N as u64));
+
+    let mut same_vm = vm_with_register_layout(
+        [call_same_loop(N), call_bench_noop_a()],
+        RegisterLayout::default(),
+        Arc::clone(&runtime_engine),
+    );
+    group.bench_with_input(BenchmarkId::new("same_callee", N), &N, |b, _| {
+        b.iter(|| {
+            black_box(
+                runtime
+                    .block_on(same_vm.execute_async("call_same_loop", async_engine.as_ref()))
+                    .unwrap(),
+            )
+        })
+    });
+
+    let mut alt_vm = vm_with_register_layout(
+        [
+            call_alternating_loop(N),
+            call_bench_noop_a(),
+            call_bench_noop_b(),
+        ],
+        RegisterLayout::default(),
+        Arc::clone(&runtime_engine),
+    );
+    group.bench_with_input(BenchmarkId::new("alternating", N), &N, |b, _| {
+        b.iter(|| {
+            black_box(
+                runtime
+                    .block_on(alt_vm.execute_async("call_alternating_loop", async_engine.as_ref()))
+                    .unwrap(),
+            )
+        })
+    });
+
+    group.finish();
+}
+
 fn bench_async_effect_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("async_effect_throughput");
     configure(&mut group);
@@ -1425,6 +1611,8 @@ criterion_group!(
     bench_hook_overhead,
     bench_table_memory_throughput,
     bench_register_bank_throughput,
+    bench_async_dispatch_throughput,
+    bench_async_call_dispatch,
     bench_async_effect_throughput,
 );
 criterion_main!(benches);

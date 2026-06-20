@@ -114,8 +114,8 @@ fn clear_float_arithmetic_does_not_require_share_runtime() {
 #[test]
 fn share_type_mismatch_rejects_before_backend_dispatch() {
     let err = add(
-        &Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1])),
-        &Value::Share(ShareType::secret_int(32), ShareData::Opaque(vec![2])),
+        &Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1].into())),
+        &Value::Share(ShareType::secret_int(32), ShareData::Opaque(vec![2].into())),
         &unavailable_runtime,
     )
     .expect_err("mismatched share types should fail before asking for a backend");
@@ -130,7 +130,7 @@ fn share_scalar_ops_accept_vm_integer_widths() {
     let engine = Arc::new(ScalarRecordingEngine::default());
     let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
     let share_type = ShareType::secret_int(64);
-    let share = Value::Share(share_type, ShareData::Opaque(vec![1]));
+    let share = Value::Share(share_type, ShareData::Opaque(vec![1].into()));
     let runtime =
         || MpcShareRuntime::from_configured(Some(runtime_engine.as_ref())).map_err(Into::into);
 
@@ -138,14 +138,14 @@ fn share_scalar_ops_accept_vm_integer_widths() {
 
     assert_eq!(
         result,
-        Value::Share(share_type, ShareData::Opaque(7i64.to_le_bytes().to_vec()))
+        Value::Share(share_type, ShareData::Opaque(7i64.to_le_bytes().to_vec().into()))
     );
     assert_eq!(engine.add_scalars.lock().unwrap().as_slice(), &[7]);
 }
 
 #[test]
 fn share_scalar_ops_reject_scalars_outside_i64_domain_before_backend_dispatch() {
-    let share = Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1]));
+    let share = Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1].into()));
 
     let err = add(
         &share,
@@ -160,7 +160,7 @@ fn share_scalar_ops_reject_scalars_outside_i64_domain_before_backend_dispatch() 
 #[test]
 fn compare_rejects_secret_shares() {
     let err = compare(
-        &Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1])),
+        &Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1].into())),
         &Value::I64(1),
     )
     .expect_err("secret comparisons require an explicit MPC comparison protocol");
@@ -219,7 +219,7 @@ fn clear_compare_helper_handles_public_float64_values() {
 fn unsupported_secret_bit_ops_classify_any_share_type() {
     let fixed_share = Value::Share(
         ShareType::default_secret_fixed_point(),
-        ShareData::Opaque(vec![1]),
+        ShareData::Opaque(vec![1].into()),
     );
 
     let err = bit_and(&fixed_share, &Value::Bool(true), &unavailable_runtime)

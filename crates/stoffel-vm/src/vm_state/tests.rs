@@ -439,7 +439,7 @@ impl MpcEngine for MockConversionEngine {
             .lock()
             .unwrap()
             .push((clear.share_type(), clear.into_vm_value()));
-        Ok(ShareData::Opaque(vec![42]))
+        Ok(ShareData::Opaque(vec![42].into()))
     }
     fn open_share(
         &self,
@@ -554,7 +554,7 @@ impl AsyncMpcEngine for AsyncOpenEngine {
             .lock()
             .unwrap()
             .push((clear.share_type(), clear.into_vm_value()));
-        Ok(ShareData::Opaque(vec![42]))
+        Ok(ShareData::Opaque(vec![42].into()))
     }
 
     async fn open_share_async(
@@ -776,17 +776,17 @@ fn reveal_batcher_flush_groups_mixed_share_types() {
     batcher.queue(
         reveal_destination(0, 1),
         ShareType::secret_int(64),
-        ShareData::Opaque(vec![10]),
+        ShareData::Opaque(vec![10].into()),
     );
     batcher.queue(
         reveal_destination(0, 2),
         fixed_ty,
-        ShareData::Opaque(vec![7]),
+        ShareData::Opaque(vec![7].into()),
     );
     batcher.queue(
         reveal_destination(0, 3),
         ShareType::secret_int(64),
-        ShareData::Opaque(vec![11]),
+        ShareData::Opaque(vec![11].into()),
     );
 
     let results = batcher
@@ -820,8 +820,9 @@ fn reveal_batcher_keeps_structured_share_data_until_backend_flush() {
         reveal_destination(0, 4),
         ty,
         ShareData::Feldman {
-            data: vec![21],
-            commitments: vec![vec![1, 2, 3]],
+            data: vec![21].into(),
+            commitments: vec![vec![1, 2, 3]].into(),
+
         },
     );
 
@@ -844,13 +845,14 @@ fn reveal_batcher_splits_same_type_mixed_share_data_formats() {
     let engine = MockBatchEngine::default();
     let ty = ShareType::secret_int(64);
 
-    batcher.queue(reveal_destination(0, 1), ty, ShareData::Opaque(vec![10]));
+    batcher.queue(reveal_destination(0, 1), ty, ShareData::Opaque(vec![10].into()));
     batcher.queue(
         reveal_destination(0, 2),
         ty,
         ShareData::Feldman {
-            data: vec![11],
-            commitments: vec![vec![1, 2, 3]],
+            data: vec![11].into(),
+            commitments: vec![vec![1, 2, 3]].into(),
+
         },
     );
 
@@ -875,8 +877,8 @@ fn reveal_batcher_scopes_pending_registers_by_frame_depth() {
     let engine = MockBatchEngine::default();
     let ty = ShareType::secret_int(64);
 
-    batcher.queue(reveal_destination(0, 1), ty, ShareData::Opaque(vec![10]));
-    batcher.queue(reveal_destination(1, 1), ty, ShareData::Opaque(vec![11]));
+    batcher.queue(reveal_destination(0, 1), ty, ShareData::Opaque(vec![10].into()));
+    batcher.queue(reveal_destination(1, 1), ty, ShareData::Opaque(vec![11].into()));
 
     assert!(batcher.has_pending_destination(reveal_destination(0, 1)));
     assert!(batcher.has_pending_destination(reveal_destination(1, 1)));
@@ -906,8 +908,8 @@ fn reveal_batcher_queue_replaces_existing_destination() {
     let engine = MockBatchEngine::default();
     let ty = ShareType::secret_int(64);
 
-    batcher.queue(reveal_destination(0, 1), ty, ShareData::Opaque(vec![10]));
-    batcher.queue(reveal_destination(0, 1), ty, ShareData::Opaque(vec![12]));
+    batcher.queue(reveal_destination(0, 1), ty, ShareData::Opaque(vec![10].into()));
+    batcher.queue(reveal_destination(0, 1), ty, ShareData::Opaque(vec![12].into()));
 
     let results = batcher
         .flush(frame_depth(0), &engine)
@@ -925,7 +927,7 @@ fn reveal_batcher_reports_typed_count_mismatch() {
     batcher.queue(
         reveal_destination(0, 1),
         ShareType::secret_int(64),
-        ShareData::Opaque(vec![10]),
+        ShareData::Opaque(vec![10].into()),
     );
 
     let err = batcher
@@ -944,7 +946,7 @@ fn reveal_batcher_wraps_backend_errors_with_share_type_context() {
     batcher.queue(
         reveal_destination(0, 1),
         ShareType::secret_int(64),
-        ShareData::Opaque(vec![10]),
+        ShareData::Opaque(vec![10].into()),
     );
 
     let err = batcher
@@ -968,9 +970,9 @@ fn replacing_mpc_engine_clears_engine_scoped_runtime_state() {
     let ty = ShareType::secret_int(64);
 
     vm.set_mpc_engine(Arc::new(MockBatchEngine::default()));
-    vm.store_client_shares(42, vec![ClientShare::typed(ty, ShareData::Opaque(vec![7]))]);
+    vm.store_client_shares(42, vec![ClientShare::typed(ty, ShareData::Opaque(vec![7].into()))]);
     vm.mpc_runtime
-        .queue_reveal(reveal_destination(0, 1), ty, ShareData::Opaque(vec![9]));
+        .queue_reveal(reveal_destination(0, 1), ty, ShareData::Opaque(vec![9].into()));
 
     assert_eq!(vm.client_store_len(), 1);
     assert!(vm
@@ -1000,7 +1002,7 @@ fn sync_secret_to_clear_mov_resolves_pending_reveal_on_return() {
         None,
         9,
         vec![
-            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![42]))),
+            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![42].into()))),
             Instruction::MOV(0, 8),
             Instruction::RET(0),
         ],
@@ -1031,7 +1033,7 @@ fn overwritten_pending_reveal_does_not_clobber_register() {
         None,
         9,
         vec![
-            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![7]))),
+            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![7].into()))),
             Instruction::MOV(0, 8),
             Instruction::LDI(0, Value::I64(5)),
             Instruction::RET(0),
@@ -1066,7 +1068,7 @@ fn binary_instruction_resolves_pending_reveal_before_reading_operand() {
         None,
         9,
         vec![
-            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![42]))),
+            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![42].into()))),
             Instruction::MOV(0, 8),
             Instruction::LDI(1, Value::I64(8)),
             Instruction::ADD(2, 0, 1),
@@ -1099,7 +1101,7 @@ fn mpc_planner_resolves_pending_reveal_before_reading_multiply_operands() {
     vm.assign_current_register(runtime_reg(1, 3), Value::I64(2))
         .expect("write scalar operand");
     vm.queue_reveal_to_register(
-        &Value::Share(ty, ShareData::Opaque(vec![42])),
+        &Value::Share(ty, ShareData::Opaque(vec![42].into())),
         runtime_reg(0, 3),
     )
     .expect("queue pending reveal");
@@ -1144,7 +1146,7 @@ fn vm_call_preserves_caller_pending_reveals_across_frame_switch() {
         None,
         9,
         vec![
-            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![42]))),
+            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![42].into()))),
             Instruction::MOV(1, 8),
             Instruction::CALL("callee_writes_same_register".to_string()),
             Instruction::RET(1),
@@ -1192,7 +1194,7 @@ fn closure_call_preserves_caller_pending_reveals_across_frame_switch() {
 
     let mut registers = RegisterFile::new(RegisterLayout::new(8), 9);
     *registers.get_mut(r(8)).expect("secret register r8") =
-        Value::Share(ty, ShareData::Opaque(vec![42]));
+        Value::Share(ty, ShareData::Opaque(vec![42].into()));
     vm.push_activation_record(ActivationRecord::with_registers(
         "caller",
         registers,
@@ -1244,7 +1246,7 @@ fn foreign_call_does_not_eagerly_open_caller_pending_reveal() {
         None,
         9,
         vec![
-            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![42]))),
+            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![42].into()))),
             Instruction::MOV(1, 8),
             Instruction::CALL("assert_no_open_yet".to_string()),
             Instruction::RET(1),
@@ -1277,7 +1279,7 @@ fn return_discards_unused_pending_reveals_without_opening_them() {
         9,
         vec![
             Instruction::LDI(0, Value::I64(5)),
-            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![7]))),
+            Instruction::LDI(8, Value::Share(ty, ShareData::Opaque(vec![7].into()))),
             Instruction::MOV(1, 8),
             Instruction::RET(0),
         ],
@@ -1777,7 +1779,7 @@ fn run_until_effect_or_budget_yields_after_local_instruction_budget() {
 #[test]
 fn run_until_effect_or_budget_yields_online_operation_without_awaiting() {
     let ty = ShareType::secret_int(64);
-    let share_data = ShareData::Opaque(vec![1, 2, 3]);
+    let share_data = ShareData::Opaque(vec![1, 2, 3].into());
     let mut vm = VMState::new();
     vm.set_register_layout(RegisterLayout::new(1));
     let function = VMFunction::new(
@@ -1980,7 +1982,7 @@ fn clear_to_secret_mov_extracts_share_object_payload() {
     let mut vm = VMState::new();
     vm.set_register_layout(RegisterLayout::new(8));
     let ty = ShareType::secret_int(64);
-    let data = ShareData::Opaque(vec![1, 2, 3]);
+    let data = ShareData::Opaque(vec![1, 2, 3].into());
     let share_ref =
         share_object::create_share_object_ref(vm.table_memory.as_mut(), ty, data.clone(), 0)
             .expect("create share object");
@@ -2010,7 +2012,7 @@ fn active_frame_layout_controls_secret_to_clear_mov_boundary() {
 
     let mut registers = RegisterFile::new(RegisterLayout::new(1), 2);
     *registers.get_mut(r(1)).expect("secret register r1") =
-        Value::Share(ty, ShareData::Opaque(vec![7]));
+        Value::Share(ty, ShareData::Opaque(vec![7].into()));
     vm.push_activation_record(ActivationRecord::with_registers(
         "test",
         registers,
@@ -2547,8 +2549,9 @@ fn client_share_load_uses_stored_type_and_share_data() {
     let vm = VMState::new();
     let share_type = ShareType::default_secret_fixed_point();
     let share_data = ShareData::Feldman {
-        data: vec![1, 2, 3],
-        commitments: vec![vec![4, 5, 6]],
+        data: vec![1, 2, 3].into(),
+        commitments: vec![vec![4, 5, 6]].into(),
+
     };
     vm.store_client_shares(42, vec![ClientShare::typed(share_type, share_data.clone())]);
 
@@ -2567,7 +2570,7 @@ fn client_share_load_uses_stored_type_and_share_data() {
 fn client_share_load_accepts_explicit_share_type_request() {
     let vm = VMState::new();
     let requested_type = ShareType::secret_fixed_point_from_bits(32, 8);
-    let share_data = ShareData::Opaque(vec![1, 2, 3]);
+    let share_data = ShareData::Opaque(vec![1, 2, 3].into());
     vm.store_client_shares(42, vec![ClientShare::untyped(share_data.clone())]);
 
     let loaded = vm
@@ -2581,7 +2584,7 @@ fn client_share_load_accepts_explicit_share_type_request() {
 fn client_share_load_infers_stored_type() {
     let vm = VMState::new();
     let share_type = ShareType::default_secret_fixed_point();
-    let share_data = ShareData::Opaque(vec![1, 2, 3]);
+    let share_data = ShareData::Opaque(vec![1, 2, 3].into());
     vm.store_client_shares(42, vec![ClientShare::typed(share_type, share_data.clone())]);
 
     let loaded = vm
@@ -2598,7 +2601,7 @@ fn client_share_load_rejects_mismatched_explicit_type_request() {
         42,
         vec![ClientShare::typed(
             ShareType::default_secret_fixed_point(),
-            ShareData::Opaque(vec![1, 2, 3]),
+            ShareData::Opaque(vec![1, 2, 3].into()),
         )],
     );
 
@@ -2693,8 +2696,8 @@ fn cmp_rejects_secret_shares_without_decoding_share_bytes() {
     vm.push_activation_record(ActivationRecord::with_registers(
         "test",
         RegisterFile::from(vec![
-            Value::Share(ty, ShareData::Opaque(vec![1])),
-            Value::Share(ty, ShareData::Opaque(vec![2])),
+            Value::Share(ty, ShareData::Opaque(vec![1].into())),
+            Value::Share(ty, ShareData::Opaque(vec![2].into())),
         ]),
         vec![],
         None,
@@ -2715,8 +2718,9 @@ fn cmp_rejects_secret_shares_without_decoding_share_bytes() {
 fn pending_async_open_preserves_share_data_shape_until_backend_dispatch() {
     let ty = ShareType::secret_int(64);
     let share_data = ShareData::Feldman {
-        data: vec![1, 2, 3],
-        commitments: vec![vec![4, 5, 6]],
+        data: vec![1, 2, 3].into(),
+        commitments: vec![vec![4, 5, 6]].into(),
+
     };
     let mut vm = VMState::new();
     vm.set_register_layout(RegisterLayout::new(1));
@@ -2760,12 +2764,14 @@ fn pending_async_open_preserves_share_data_shape_until_backend_dispatch() {
 fn pending_async_multiply_preserves_share_data_shape_until_backend_dispatch() {
     let ty = ShareType::secret_int(64);
     let left_data = ShareData::Feldman {
-        data: vec![1, 2, 3],
-        commitments: vec![vec![4, 5, 6]],
+        data: vec![1, 2, 3].into(),
+        commitments: vec![vec![4, 5, 6]].into(),
+
     };
     let right_data = ShareData::Feldman {
-        data: vec![7, 8, 9],
-        commitments: vec![vec![10, 11, 12]],
+        data: vec![7, 8, 9].into(),
+        commitments: vec![vec![10, 11, 12]].into(),
+
     };
     let mut vm = VMState::new();
     vm.push_activation_record(ActivationRecord::with_registers(
@@ -2815,12 +2821,13 @@ fn pending_async_multiply_rejects_mixed_share_data_formats_before_backend_dispat
     vm.push_activation_record(ActivationRecord::with_registers(
         "test",
         RegisterFile::from(vec![
-            Value::Share(ty, ShareData::Opaque(vec![1])),
+            Value::Share(ty, ShareData::Opaque(vec![1].into())),
             Value::Share(
                 ty,
                 ShareData::Feldman {
-                    data: vec![2],
-                    commitments: vec![vec![3]],
+                    data: vec![2].into(),
+                    commitments: vec![vec![3]].into(),
+
                 },
             ),
             Value::Unit,
@@ -2855,8 +2862,8 @@ fn share_multiply_rejects_engine_without_multiplication_capability() {
     vm.push_activation_record(ActivationRecord::with_registers(
         "test",
         RegisterFile::from(vec![
-            Value::Share(ty, ShareData::Opaque(vec![1])),
-            Value::Share(ty, ShareData::Opaque(vec![2])),
+            Value::Share(ty, ShareData::Opaque(vec![1].into())),
+            Value::Share(ty, ShareData::Opaque(vec![2].into())),
             Value::Unit,
         ]),
         vec![],
@@ -2884,8 +2891,8 @@ fn share_multiply_rejects_mismatched_share_types_before_engine_dispatch() {
     vm.push_activation_record(ActivationRecord::with_registers(
         "test",
         RegisterFile::from(vec![
-            Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1])),
-            Value::Share(ShareType::secret_int(32), ShareData::Opaque(vec![2])),
+            Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1].into())),
+            Value::Share(ShareType::secret_int(32), ShareData::Opaque(vec![2].into())),
             Value::Unit,
         ]),
         vec![],
@@ -2929,7 +2936,7 @@ async fn async_clear_to_secret_ldi_uses_async_input_share() {
 
     assert_eq!(
         result,
-        Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![42]))
+        Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![42].into()))
     );
     assert_eq!(
         engine.input_calls.lock().unwrap().as_slice(),
@@ -2953,7 +2960,7 @@ async fn async_secret_to_clear_mov_uses_async_open() {
         None,
         2,
         vec![
-            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(share_bytes.clone()))),
+            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(share_bytes.clone().into()))),
             Instruction::MOV(0, 1),
             Instruction::RET(0),
         ],
@@ -2990,7 +2997,7 @@ async fn async_execution_accepts_async_engine_trait_object() {
         None,
         2,
         vec![
-            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(share_bytes.clone()))),
+            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(share_bytes.clone().into()))),
             Instruction::MOV(0, 1),
             Instruction::RET(0),
         ],
@@ -3056,7 +3063,7 @@ async fn async_secret_to_clear_mov_completes_hook_lifecycle() {
         None,
         2,
         vec![
-            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(share_bytes))),
+            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(share_bytes.into()))),
             Instruction::MOV(0, 1),
             Instruction::RET(0),
         ],
@@ -3092,7 +3099,7 @@ async fn async_mpc_operation_rejects_mismatched_state_engine() {
         None,
         2,
         vec![
-            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(vec![1, 2, 3]))),
+            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(vec![1, 2, 3].into()))),
             Instruction::MOV(0, 1),
             Instruction::RET(0),
         ],
@@ -3131,7 +3138,7 @@ async fn async_mpc_operation_rejects_mismatched_field_engine() {
         None,
         2,
         vec![
-            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(vec![1, 2, 3]))),
+            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(vec![1, 2, 3].into()))),
             Instruction::MOV(0, 1),
             Instruction::RET(0),
         ],
@@ -3183,7 +3190,7 @@ async fn async_mpc_operation_rejects_mismatched_curve_engine_with_same_field() {
         None,
         2,
         vec![
-            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(vec![1, 2, 3]))),
+            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(vec![1, 2, 3].into()))),
             Instruction::MOV(0, 1),
             Instruction::RET(0),
         ],
@@ -3219,8 +3226,8 @@ async fn async_share_multiply_reports_missing_capability_as_mpc_backend_error() 
         None,
         3,
         vec![
-            Instruction::LDI(0, Value::Share(ty, ShareData::Opaque(vec![1]))),
-            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(vec![2]))),
+            Instruction::LDI(0, Value::Share(ty, ShareData::Opaque(vec![1].into()))),
+            Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(vec![2].into()))),
             Instruction::MUL(2, 0, 1),
             Instruction::RET(2),
         ],
@@ -3278,12 +3285,14 @@ fn secret_share_add_supports_feldman_encoded_shares() {
     );
 
     let lhs_data = ShareData::Feldman {
-        data: lhs,
-        commitments: Vec::new(),
+        data: lhs.into(),
+        commitments: Vec::new().into(),
+
     };
     let rhs_data = ShareData::Feldman {
-        data: rhs,
-        commitments: Vec::new(),
+        data: rhs.into(),
+        commitments: Vec::new().into(),
+
     };
     let result_data = vm
         .secret_share_add_data(ShareType::secret_int(64), &lhs_data, &rhs_data)
@@ -3330,12 +3339,14 @@ fn secret_share_interpolate_local_supports_feldman_encoded_shares() {
             ShareType::secret_int(64),
             &[
                 ShareData::Feldman {
-                    data: encode(share_1),
-                    commitments: Vec::new(),
+                    data: encode(share_1).into(),
+                    commitments: Vec::new().into(),
+
                 },
                 ShareData::Feldman {
-                    data: encode(share_2),
-                    commitments: Vec::new(),
+                    data: encode(share_2).into(),
+                    commitments: Vec::new().into(),
+
                 },
             ],
         )

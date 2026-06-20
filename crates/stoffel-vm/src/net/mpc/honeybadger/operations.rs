@@ -68,7 +68,7 @@ where
                 .mul_fixed(x, y, self.net.clone())
                 .await
                 .map_err(|e| format!("MPC fixed-point multiply failed: {:?}", e))?;
-            return Self::encode_share(result.value()).map(ShareData::Opaque);
+            return Self::encode_share(result.value()).map(|v| ShareData::Opaque(v.into()));
         }
 
         match ty {
@@ -126,7 +126,7 @@ where
                     .next()
                     .ok_or_else(|| "Multiplication returned no shares".to_string())?;
 
-                Self::encode_share(&result_share).map(ShareData::Opaque)
+                Self::encode_share(&result_share).map(|v| ShareData::Opaque(v.into()))
             }
         }
     }
@@ -193,7 +193,7 @@ where
             .await
             .map_err(|e| format!("MPC fixed-point division failed: {:?}", e))?;
 
-        Self::encode_share(result.value()).map(ShareData::Opaque)
+        Self::encode_share(result.value()).map(|v| ShareData::Opaque(v.into()))
     }
 
     pub async fn batch_multiply_share_async(
@@ -283,7 +283,7 @@ where
                     }
 
                     for share in result_shares {
-                        encoded_results.push(Self::encode_share(&share).map(ShareData::Opaque)?);
+                        encoded_results.push(Self::encode_share(&share).map(|v| ShareData::Opaque(v.into()))?);
                     }
                 }
                 if trace {

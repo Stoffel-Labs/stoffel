@@ -210,8 +210,9 @@ fn client_share_metadata_round_trips_without_flattening_to_bytes() {
     let store = ClientInputStore::new();
     let share_type = ShareType::default_secret_fixed_point();
     let share_data = ShareData::Feldman {
-        data: vec![1, 2, 3],
-        commitments: vec![vec![9, 8], vec![7, 6]],
+        data: vec![1, 2, 3].into(),
+        commitments: vec![vec![9, 8], vec![7, 6]].into(),
+
     };
 
     store.store_client_shares(7, vec![ClientShare::typed(share_type, share_data.clone())]);

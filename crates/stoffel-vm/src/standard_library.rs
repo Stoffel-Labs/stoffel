@@ -1667,8 +1667,9 @@ mod tests {
         let stored = Value::Share(
             ShareType::secret_int(64),
             ShareData::Feldman {
-                data: vec![1, 2, 3],
-                commitments: vec![vec![4, 5], vec![6]],
+                data: vec![1, 2, 3].into(),
+                commitments: vec![vec![4, 5], vec![6]].into(),
+
             },
         );
 
@@ -1773,8 +1774,8 @@ mod tests {
         let output_array = vm
             .execute_with_args("create_array", &[Value::I64(2)])
             .expect("create output array");
-        let first = Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1, 2, 3]));
-        let second = Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![4, 5]));
+        let first = Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1, 2, 3].into()));
+        let second = Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![4, 5].into()));
 
         vm.execute_with_args("array_push", &[output_array.clone(), first])
             .expect("push first output share");

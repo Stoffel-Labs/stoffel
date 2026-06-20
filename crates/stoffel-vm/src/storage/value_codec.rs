@@ -387,7 +387,7 @@ impl Encoder<'_> {
                 self.write_u8(SHARE_DATA_FELDMAN);
                 self.write_bytes(data)?;
                 self.write_len(commitments.len(), "Feldman commitment")?;
-                for commitment in commitments {
+                for commitment in commitments.iter() {
                     self.write_bytes(commitment)?;
                 }
             }
@@ -594,7 +594,7 @@ impl Reader<'_> {
 
     fn read_share_data(&mut self) -> PersistentValueResult<ShareData> {
         match self.read_u8()? {
-            SHARE_DATA_OPAQUE => Ok(ShareData::Opaque(self.read_bytes()?.to_vec())),
+            SHARE_DATA_OPAQUE => Ok(ShareData::Opaque(self.read_bytes()?.to_vec().into())),
             SHARE_DATA_FELDMAN => {
                 let data = self.read_bytes()?.to_vec();
                 let commitment_count =
@@ -603,7 +603,10 @@ impl Reader<'_> {
                 for _ in 0..commitment_count {
                     commitments.push(self.read_bytes()?.to_vec());
                 }
-                Ok(ShareData::Feldman { data, commitments })
+                Ok(ShareData::Feldman {
+                    data: data.into(),
+                    commitments: commitments.into(),
+                })
             }
             tag => Err(invalid_data(format!("unknown share data tag {tag}"))),
         }
@@ -886,8 +889,9 @@ mod tests {
             Value::Share(
                 ShareType::secret_fixed_point_from_bits(64, 16),
                 ShareData::Feldman {
-                    data: vec![1, 2, 3],
-                    commitments: vec![vec![4, 5], vec![6]],
+                    data: vec![1, 2, 3].into(),
+                    commitments: vec![vec![4, 5], vec![6]].into(),
+
                 },
             ),
         ];
@@ -945,7 +949,7 @@ mod tests {
             .set_table_field(
                 TableRef::from(object_ref),
                 Value::String("share".to_owned()),
-                Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![9, 8, 7])),
+                Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![9, 8, 7].into())),
             )
             .expect("object share");
 
@@ -964,7 +968,7 @@ mod tests {
                 .expect("read share"),
             Some(Value::Share(
                 ShareType::secret_int(64),
-                ShareData::Opaque(vec![9, 8, 7])
+                ShareData::Opaque(vec![9, 8, 7].into())
             ))
         );
 
@@ -1002,8 +1006,9 @@ mod tests {
         let share = Value::Share(
             ShareType::secret_int(64),
             ShareData::Feldman {
-                data: vec![1, 2, 3],
-                commitments: vec![vec![4, 5, 6]],
+                data: vec![1, 2, 3].into(),
+                commitments: vec![vec![4, 5, 6]].into(),
+
             },
         );
         let context = test_context(b"share-key");

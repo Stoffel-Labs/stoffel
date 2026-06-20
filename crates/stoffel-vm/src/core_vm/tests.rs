@@ -315,7 +315,7 @@ impl MpcEngine for ClonePreservedEngine {
         &self,
         _clear: ClearShareInput,
     ) -> crate::net::mpc_engine::MpcEngineResult<ShareData> {
-        Ok(ShareData::Opaque(Vec::new()))
+        Ok(ShareData::Opaque(Vec::new().into()))
     }
 
     fn open_share(
@@ -382,7 +382,7 @@ impl MpcEngine for BarrierOpenEngine {
         &self,
         _clear: ClearShareInput,
     ) -> crate::net::mpc_engine::MpcEngineResult<ShareData> {
-        Ok(ShareData::Opaque(Vec::new()))
+        Ok(ShareData::Opaque(Vec::new().into()))
     }
 
     fn open_share(
@@ -475,7 +475,7 @@ impl AsyncMpcEngine for BarrierInputEngine {
         self.input_started.fetch_add(1, Ordering::SeqCst);
         self.barrier.wait().await;
         self.input_finished.fetch_add(1, Ordering::SeqCst);
-        Ok(ShareData::Opaque(vec![share_byte]))
+        Ok(ShareData::Opaque(vec![share_byte].into()))
     }
 
     async fn open_share_async(
@@ -524,7 +524,7 @@ impl MpcEngine for AsyncBatchOpenEngine {
         &self,
         _clear: ClearShareInput,
     ) -> crate::net::mpc_engine::MpcEngineResult<ShareData> {
-        Ok(ShareData::Opaque(Vec::new()))
+        Ok(ShareData::Opaque(Vec::new().into()))
     }
 
     fn open_share(
@@ -611,7 +611,7 @@ impl MpcEngine for AsyncBatchMulEngine {
     }
 
     fn input_share(&self, _clear: ClearShareInput) -> MpcEngineResult<ShareData> {
-        Ok(ShareData::Opaque(Vec::new()))
+        Ok(ShareData::Opaque(Vec::new().into()))
     }
 
     fn open_share(&self, _ty: ShareType, _share_bytes: &[u8]) -> MpcEngineResult<ClearShareValue> {
@@ -667,7 +667,7 @@ impl AsyncMpcEngine for AsyncBatchMulEngine {
             .map(|(left, right)| {
                 let left_byte = left.first().copied().unwrap_or_default();
                 let right_byte = right.first().copied().unwrap_or_default();
-                ShareData::Opaque(vec![left_byte.wrapping_mul(right_byte)])
+                ShareData::Opaque(vec![left_byte.wrapping_mul(right_byte)].into())
             })
             .collect())
     }
@@ -718,7 +718,7 @@ impl MpcEngine for BarrierConsensusEngine {
     }
 
     fn input_share(&self, _clear: ClearShareInput) -> MpcEngineResult<ShareData> {
-        Ok(ShareData::Opaque(Vec::new()))
+        Ok(ShareData::Opaque(Vec::new().into()))
     }
 
     fn open_share(&self, _ty: ShareType, _share_bytes: &[u8]) -> MpcEngineResult<ClearShareValue> {
@@ -853,7 +853,7 @@ impl MpcEngine for TurmoilConsensusEngine {
     }
 
     fn input_share(&self, _clear: ClearShareInput) -> MpcEngineResult<ShareData> {
-        Ok(ShareData::Opaque(Vec::new()))
+        Ok(ShareData::Opaque(Vec::new().into()))
     }
 
     fn open_share(&self, _ty: ShareType, _share_bytes: &[u8]) -> MpcEngineResult<ClearShareValue> {
@@ -1364,7 +1364,7 @@ impl AsyncMpcEngine for TurmoilAllOpsEngine {
                 TURMOIL_RPC_TIMEOUT_MS,
             )
             .await?;
-        Ok(ShareData::Opaque(response))
+        Ok(ShareData::Opaque(response.into()))
     }
 
     async fn multiply_share_async(
@@ -1380,7 +1380,7 @@ impl AsyncMpcEngine for TurmoilAllOpsEngine {
                 TURMOIL_RPC_TIMEOUT_MS,
             )
             .await?;
-        Ok(ShareData::Opaque(response))
+        Ok(ShareData::Opaque(response.into()))
     }
 
     async fn open_share_async(
@@ -1430,7 +1430,7 @@ impl AsyncMpcEngine for TurmoilAllOpsEngine {
                 TURMOIL_RPC_TIMEOUT_MS,
             )
             .await?;
-        Ok(ShareData::Opaque(response))
+        Ok(ShareData::Opaque(response.into()))
     }
 
     async fn open_share_as_field_async(
@@ -2331,7 +2331,7 @@ fn independent_clone_preserves_client_input_snapshot_without_aliasing() {
         10,
         vec![ClientShare::typed(
             share_type,
-            ShareData::Opaque(vec![1, 2, 3]),
+            ShareData::Opaque(vec![1, 2, 3].into()),
         )],
     );
 
@@ -2341,14 +2341,14 @@ fn independent_clone_preserves_client_input_snapshot_without_aliasing() {
 
     vm.replace_client_shares([(
         11,
-        vec![ClientShare::typed(share_type, ShareData::Opaque(vec![4]))],
+        vec![ClientShare::typed(share_type, ShareData::Opaque(vec![4].into()))],
     )]);
 
     let cloned_share = cloned
         .client_share_data(10, ClientShareIndex::new(0))
         .expect("cloned client input snapshot");
     assert_eq!(cloned_share.share_type(), Some(share_type));
-    assert_eq!(cloned_share.data(), &ShareData::Opaque(vec![1, 2, 3]));
+    assert_eq!(cloned_share.data(), &ShareData::Opaque(vec![1, 2, 3].into()));
     assert!(cloned
         .client_share_data(11, ClientShareIndex::new(0))
         .is_none());
@@ -2365,7 +2365,7 @@ fn vm_open_share_value_uses_configured_mpc_runtime() {
     let opened = vm
         .open_share_value(&Value::Share(
             ShareType::default_secret_int(),
-            ShareData::Opaque(vec![1, 2, 3]),
+            ShareData::Opaque(vec![1, 2, 3].into()),
         ))
         .expect("open share through VM runtime");
 
@@ -2407,18 +2407,19 @@ fn replace_client_shares_uses_backend_neutral_payloads() {
 
     vm.store_client_shares(
         10,
-        vec![ClientShare::typed(share_type, ShareData::Opaque(vec![0]))],
+        vec![ClientShare::typed(share_type, ShareData::Opaque(vec![0].into()))],
     );
     let replaced = vm.replace_client_shares([
         (
             2,
-            vec![ClientShare::typed(share_type, ShareData::Opaque(vec![7]))],
+            vec![ClientShare::typed(share_type, ShareData::Opaque(vec![7].into()))],
         ),
         (
             1,
             vec![ClientShare::untyped(ShareData::Feldman {
-                data: vec![8],
-                commitments: vec![vec![9]],
+                data: vec![8].into(),
+                commitments: vec![vec![9]].into(),
+
             })],
         ),
     ]);
@@ -2429,7 +2430,7 @@ fn replace_client_shares_uses_backend_neutral_payloads() {
         .client_share_data(2, ClientShareIndex::new(0))
         .expect("typed client share");
     assert_eq!(typed_share.share_type(), Some(share_type));
-    assert_eq!(typed_share.data(), &ShareData::Opaque(vec![7]));
+    assert_eq!(typed_share.data(), &ShareData::Opaque(vec![7].into()));
     let feldman_share = vm
         .client_share_data(1, ClientShareIndex::new(0))
         .expect("feldman client share");
@@ -2633,7 +2634,7 @@ fn share_object_builtins_use_mutating_read_boundary() {
     let share_value = vm
         .create_share_object(
             ShareType::default_secret_int(),
-            ShareData::Opaque(vec![1]),
+            ShareData::Opaque(vec![1].into()),
             7,
         )
         .expect("share object creation should succeed");
@@ -2766,8 +2767,8 @@ fn value_operation_runtime_errors_preserve_inner_public_kind() {
         None,
         3,
         vec![
-            Instruction::LDI(0, Value::Share(share_type, ShareData::Opaque(vec![1]))),
-            Instruction::LDI(1, Value::Share(share_type, ShareData::Opaque(vec![2]))),
+            Instruction::LDI(0, Value::Share(share_type, ShareData::Opaque(vec![1].into()))),
+            Instruction::LDI(1, Value::Share(share_type, ShareData::Opaque(vec![2].into()))),
             Instruction::ADD(2, 0, 1),
             Instruction::RET(2),
         ],
@@ -2847,7 +2848,7 @@ fn async_open_function(name: &str, opened_value: u8) -> VMFunction {
                 1,
                 Value::Share(
                     ShareType::secret_int(64),
-                    ShareData::Opaque(vec![opened_value]),
+                    ShareData::Opaque(vec![opened_value].into()),
                 ),
             ),
             Instruction::MOV(0, 1),
@@ -2869,7 +2870,7 @@ fn async_share_open_call_function(name: &str, opened_value: u8) -> VMFunction {
                 1,
                 Value::Share(
                     ShareType::secret_int(64),
-                    ShareData::Opaque(vec![opened_value]),
+                    ShareData::Opaque(vec![opened_value].into()),
                 ),
             ),
             Instruction::PUSHARG(1),
@@ -3375,8 +3376,8 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
             .execute_async_with_args(
                 "turmoil_mul_args",
                 &[
-                    Value::Share(ty, ShareData::Opaque(vec![3])),
-                    Value::Share(ty, ShareData::Opaque(vec![4])),
+                    Value::Share(ty, ShareData::Opaque(vec![3].into())),
+                    Value::Share(ty, ShareData::Opaque(vec![4].into())),
                 ],
                 engine.as_ref(),
             )
@@ -3391,8 +3392,8 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
         vm.push_array_values(
             shares,
             &[
-                Value::Share(ty, ShareData::Opaque(vec![5])),
-                Value::Share(ty, ShareData::Opaque(vec![6])),
+                Value::Share(ty, ShareData::Opaque(vec![5].into())),
+                Value::Share(ty, ShareData::Opaque(vec![6].into())),
             ],
         )
         .expect("seed shares array");
@@ -3421,7 +3422,7 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
         assert_eq!(
             vm.execute_async_with_args(
                 "turmoil_send_to_client",
-                &[Value::Share(ty, ShareData::Opaque(vec![42]))],
+                &[Value::Share(ty, ShareData::Opaque(vec![42].into()))],
                 engine.as_ref(),
             )
             .await?,
@@ -3438,7 +3439,7 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
         let field_bytes = vm
             .execute_async_with_args(
                 "turmoil_open_field",
-                &[Value::Share(ty, ShareData::Opaque(vec![77]))],
+                &[Value::Share(ty, ShareData::Opaque(vec![77].into()))],
                 engine.as_ref(),
             )
             .await?;
@@ -3451,7 +3452,7 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
         let exp_bytes = vm
             .execute_async_with_args(
                 "turmoil_open_exp",
-                &[Value::Share(ty, ShareData::Opaque(vec![88]))],
+                &[Value::Share(ty, ShareData::Opaque(vec![88].into()))],
                 engine.as_ref(),
             )
             .await?;
@@ -3466,7 +3467,7 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
         let exp_custom_bytes = vm
             .execute_async_with_args(
                 "turmoil_open_exp_custom",
-                &[Value::Share(ty, ShareData::Opaque(vec![89])), generator],
+                &[Value::Share(ty, ShareData::Opaque(vec![89].into())), generator],
                 engine.as_ref(),
             )
             .await?;
@@ -3630,7 +3631,7 @@ fn turmoil_execute_many_async_runs_mixed_programs_under_randomized_network_order
             None,
             2,
             vec![
-                Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(vec![21]))),
+                Instruction::LDI(1, Value::Share(ty, ShareData::Opaque(vec![21].into()))),
                 Instruction::PUSHARG(1),
                 Instruction::CALL("Share.open".to_string()),
                 Instruction::RET(0),
@@ -3759,7 +3760,7 @@ fn turmoil_truncated_async_response_surfaces_error_and_vm_recovers() -> turmoil:
         let error = vm
             .execute_async_with_args(
                 "network_open",
-                &[Value::Share(ty, ShareData::Opaque(vec![33]))],
+                &[Value::Share(ty, ShareData::Opaque(vec![33].into()))],
                 engine.as_ref(),
             )
             .await
@@ -3772,7 +3773,7 @@ fn turmoil_truncated_async_response_surfaces_error_and_vm_recovers() -> turmoil:
         let result = vm
             .execute_async_with_args(
                 "network_open",
-                &[Value::Share(ty, ShareData::Opaque(vec![34]))],
+                &[Value::Share(ty, ShareData::Opaque(vec![34].into()))],
                 engine.as_ref(),
             )
             .await?;
@@ -3815,7 +3816,7 @@ fn turmoil_oversized_async_response_is_rejected_before_allocation() -> turmoil::
         let error = vm
             .execute_async_with_args(
                 "network_open_field",
-                &[Value::Share(ty, ShareData::Opaque(vec![44]))],
+                &[Value::Share(ty, ShareData::Opaque(vec![44].into()))],
                 engine.as_ref(),
             )
             .await
@@ -3828,7 +3829,7 @@ fn turmoil_oversized_async_response_is_rejected_before_allocation() -> turmoil::
         let result = vm
             .execute_async_with_args(
                 "network_open_field",
-                &[Value::Share(ty, ShareData::Opaque(vec![45]))],
+                &[Value::Share(ty, ShareData::Opaque(vec![45].into()))],
                 engine.as_ref(),
             )
             .await?;
@@ -3952,8 +3953,8 @@ async fn share_batch_open_builtin_uses_async_batch_open() {
     vm.push_array_values(
         shares,
         &[
-            Value::Share(ty, ShareData::Opaque(vec![5])),
-            Value::Share(ty, ShareData::Opaque(vec![8])),
+            Value::Share(ty, ShareData::Opaque(vec![5].into())),
+            Value::Share(ty, ShareData::Opaque(vec![8].into())),
         ],
     )
     .expect("seed shares array");
@@ -4011,8 +4012,8 @@ async fn share_batch_mul_builtin_uses_async_batch_multiply() {
     vm.push_array_values(
         lefts,
         &[
-            Value::Share(ty, ShareData::Opaque(vec![1])),
-            Value::Share(ty, ShareData::Opaque(vec![0])),
+            Value::Share(ty, ShareData::Opaque(vec![1].into())),
+            Value::Share(ty, ShareData::Opaque(vec![0].into())),
         ],
     )
     .expect("seed left shares array");
@@ -4020,8 +4021,8 @@ async fn share_batch_mul_builtin_uses_async_batch_multiply() {
     vm.push_array_values(
         rights,
         &[
-            Value::Share(ty, ShareData::Opaque(vec![1])),
-            Value::Share(ty, ShareData::Opaque(vec![1])),
+            Value::Share(ty, ShareData::Opaque(vec![1].into())),
+            Value::Share(ty, ShareData::Opaque(vec![1].into())),
         ],
     )
     .expect("seed right shares array");
@@ -4056,12 +4057,12 @@ async fn share_batch_mul_builtin_uses_async_batch_multiply() {
     assert_eq!(
         vm.read_table_field(TableRef::from(result_ref), &Value::I64(0))
             .expect("read first result"),
-        Some(Value::Share(ty, ShareData::Opaque(vec![1])))
+        Some(Value::Share(ty, ShareData::Opaque(vec![1].into())))
     );
     assert_eq!(
         vm.read_table_field(TableRef::from(result_ref), &Value::I64(1))
             .expect("read second result"),
-        Some(Value::Share(ty, ShareData::Opaque(vec![0])))
+        Some(Value::Share(ty, ShareData::Opaque(vec![0].into())))
     );
     assert_eq!(engine.sync_mul_calls.load(Ordering::SeqCst), 0);
     assert_eq!(engine.async_batch_calls.load(Ordering::SeqCst), 1);
