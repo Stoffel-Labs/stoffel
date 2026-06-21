@@ -457,36 +457,38 @@ def aes128_encrypt(block: list[list[secret bool]], key: list[list[secret bool]])
   state = add_round_key(state, round_key, 160)
   return state
 
-def reveal_byte(byte: list[secret bool]) -> int64:
-  var value: int64 = 0
-  var b0: bool = byte[0].reveal()
-  if b0:
-    value += 1
-  var b1: bool = byte[1].reveal()
-  if b1:
-    value += 2
-  var b2: bool = byte[2].reveal()
-  if b2:
-    value += 4
-  var b3: bool = byte[3].reveal()
-  if b3:
-    value += 8
-  var b4: bool = byte[4].reveal()
-  if b4:
-    value += 16
-  var b5: bool = byte[5].reveal()
-  if b5:
-    value += 32
-  var b6: bool = byte[6].reveal()
-  if b6:
-    value += 64
-  var b7: bool = byte[7].reveal()
-  if b7:
-    value += 128
-  return value
-
 def reveal_block(block: list[list[secret bool]]) -> list[int64]:
-  return [reveal_byte(block[0]), reveal_byte(block[1]), reveal_byte(block[2]), reveal_byte(block[3]), reveal_byte(block[4]), reveal_byte(block[5]), reveal_byte(block[6]), reveal_byte(block[7]), reveal_byte(block[8]), reveal_byte(block[9]), reveal_byte(block[10]), reveal_byte(block[11]), reveal_byte(block[12]), reveal_byte(block[13]), reveal_byte(block[14]), reveal_byte(block[15])]
+  # Open all 16 bytes x 8 bits in a single batched reveal (one MPC round)
+  # instead of 128 sequential .reveal() calls. Bytes are little-endian, so
+  # bit j of byte i carries weight 2**j.
+  var flat: list[Share] = []
+  for i in 0..16:
+    for j in 0..8:
+      flat.append(block[i][j])
+  var bits: list[bool] = Share.batch_open_fixed(flat)
+  var out: list[int64] = []
+  var k: int64 = 0
+  for i in 0..16:
+    var value: int64 = 0
+    if bits[k]:
+      value += 1
+    if bits[k + 1]:
+      value += 2
+    if bits[k + 2]:
+      value += 4
+    if bits[k + 3]:
+      value += 8
+    if bits[k + 4]:
+      value += 16
+    if bits[k + 5]:
+      value += 32
+    if bits[k + 6]:
+      value += 64
+    if bits[k + 7]:
+      value += 128
+    out.append(value)
+    k += 8
+  return out
 
 def nist_plaintext() -> list[list[secret bool]]:
   return [[Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1), Share.from_clear_int(1, 1)]]
