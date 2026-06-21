@@ -106,7 +106,7 @@ pub fn compile(
     let optimized_ast = if options.optimize {
         let ast = optimizations::optimize_all(analyzed_ast, options.optimization_level);
         if options.print_ir {
-            println!("--- Optimized AST (Reveal Batching + Reordering) ---");
+            println!("--- Optimized AST (full optimize_all pipeline) ---");
             println!("{:#?}", ast);
             println!("----------------------------------------------------");
         }

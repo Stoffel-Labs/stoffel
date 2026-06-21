@@ -90,7 +90,6 @@ fn feldman_share_data() -> ShareData {
     ShareData::Feldman {
         data: vec![2].into(),
         commitments: vec![vec![3]].into(),
-
     }
 }
 

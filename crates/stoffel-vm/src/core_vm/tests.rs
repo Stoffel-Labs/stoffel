@@ -2341,14 +2341,20 @@ fn independent_clone_preserves_client_input_snapshot_without_aliasing() {
 
     vm.replace_client_shares([(
         11,
-        vec![ClientShare::typed(share_type, ShareData::Opaque(vec![4].into()))],
+        vec![ClientShare::typed(
+            share_type,
+            ShareData::Opaque(vec![4].into()),
+        )],
     )]);
 
     let cloned_share = cloned
         .client_share_data(10, ClientShareIndex::new(0))
         .expect("cloned client input snapshot");
     assert_eq!(cloned_share.share_type(), Some(share_type));
-    assert_eq!(cloned_share.data(), &ShareData::Opaque(vec![1, 2, 3].into()));
+    assert_eq!(
+        cloned_share.data(),
+        &ShareData::Opaque(vec![1, 2, 3].into())
+    );
     assert!(cloned
         .client_share_data(11, ClientShareIndex::new(0))
         .is_none());
@@ -2407,19 +2413,24 @@ fn replace_client_shares_uses_backend_neutral_payloads() {
 
     vm.store_client_shares(
         10,
-        vec![ClientShare::typed(share_type, ShareData::Opaque(vec![0].into()))],
+        vec![ClientShare::typed(
+            share_type,
+            ShareData::Opaque(vec![0].into()),
+        )],
     );
     let replaced = vm.replace_client_shares([
         (
             2,
-            vec![ClientShare::typed(share_type, ShareData::Opaque(vec![7].into()))],
+            vec![ClientShare::typed(
+                share_type,
+                ShareData::Opaque(vec![7].into()),
+            )],
         ),
         (
             1,
             vec![ClientShare::untyped(ShareData::Feldman {
                 data: vec![8].into(),
                 commitments: vec![vec![9]].into(),
-
             })],
         ),
     ]);
@@ -2767,8 +2778,14 @@ fn value_operation_runtime_errors_preserve_inner_public_kind() {
         None,
         3,
         vec![
-            Instruction::LDI(0, Value::Share(share_type, ShareData::Opaque(vec![1].into()))),
-            Instruction::LDI(1, Value::Share(share_type, ShareData::Opaque(vec![2].into()))),
+            Instruction::LDI(
+                0,
+                Value::Share(share_type, ShareData::Opaque(vec![1].into())),
+            ),
+            Instruction::LDI(
+                1,
+                Value::Share(share_type, ShareData::Opaque(vec![2].into())),
+            ),
             Instruction::ADD(2, 0, 1),
             Instruction::RET(2),
         ],
@@ -3467,7 +3484,10 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
         let exp_custom_bytes = vm
             .execute_async_with_args(
                 "turmoil_open_exp_custom",
-                &[Value::Share(ty, ShareData::Opaque(vec![89].into())), generator],
+                &[
+                    Value::Share(ty, ShareData::Opaque(vec![89].into())),
+                    generator,
+                ],
                 engine.as_ref(),
             )
             .await?;

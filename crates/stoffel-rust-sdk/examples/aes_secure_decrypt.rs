@@ -66,7 +66,10 @@ async fn main() -> stoffel::Result<()> {
     );
     println!(
         "Client ciphertext   = {}",
-        ciphertext.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        ciphertext
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     );
     println!("Running AES-128 secure decryption + uppercase over MPC...");
     println!("(client 0 = ciphertext, client 1 = key; plaintext never revealed to nodes)");
@@ -101,7 +104,10 @@ async fn main() -> stoffel::Result<()> {
     let received_text = String::from_utf8_lossy(&received);
 
     println!("client-received text = {received_text:?}");
-    println!("expected             = {:?}", std::str::from_utf8(EXPECTED).unwrap());
+    println!(
+        "expected             = {:?}",
+        std::str::from_utf8(EXPECTED).unwrap()
+    );
     assert_eq!(
         received.as_slice(),
         EXPECTED.as_slice(),

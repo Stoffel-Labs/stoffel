@@ -664,9 +664,9 @@ impl LocalCoordinatorRunner {
                             "[local-runner] sampling party '{name}' (pid={pid}) for {dur}s -> {path}"
                         );
                     }
-                    Err(error) => eprintln!(
-                        "[local-runner] failed to attach sample to pid={pid}: {error}"
-                    ),
+                    Err(error) => {
+                        eprintln!("[local-runner] failed to attach sample to pid={pid}: {error}")
+                    }
                 }
             }
         }

@@ -155,9 +155,9 @@ impl MpcEngineMultiplication for CountingEngine {
         right: &[u8],
     ) -> MpcEngineResult<ShareData> {
         self.scalar_mul_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ShareData::Opaque(vec![
-            CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right),
-        ].into()))
+        Ok(ShareData::Opaque(
+            vec![CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right)].into(),
+        ))
     }
 }
 
@@ -174,9 +174,9 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
         right: &[u8],
     ) -> MpcEngineResult<ShareData> {
         self.scalar_mul_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ShareData::Opaque(vec![
-            CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right),
-        ].into()))
+        Ok(ShareData::Opaque(
+            vec![CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right)].into(),
+        ))
     }
 
     async fn batch_multiply_share_async(
@@ -190,9 +190,9 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
         Ok(pairs
             .iter()
             .map(|(left, right)| {
-                ShareData::Opaque(vec![
-                    CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right),
-                ].into())
+                ShareData::Opaque(
+                    vec![CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right)].into(),
+                )
             })
             .collect())
     }
@@ -297,7 +297,8 @@ def main() -> int64:
             .with_mpc_engine(engine.clone())
             .build();
         for function in functions {
-            vm.try_register_function(function).expect("register function");
+            vm.try_register_function(function)
+                .expect("register function");
         }
         let result = vm
             .execute_async("main", engine.as_ref())
@@ -461,7 +462,8 @@ async fn optimized_aes_at_o3_matches_nist_vector_impl() {
         .with_mpc_engine(engine.clone())
         .build();
     for function in functions {
-        vm.try_register_function(function).expect("register function");
+        vm.try_register_function(function)
+            .expect("register function");
     }
 
     let result = vm
@@ -538,7 +540,10 @@ fn optimized_aes_full_unroll_minimizes_rounds() {
         for f in functions {
             vm.try_register_function(f).expect("reg");
         }
-        let result = vm.execute_async("main", engine.as_ref()).await.expect("exec");
+        let result = vm
+            .execute_async("main", engine.as_ref())
+            .await
+            .expect("exec");
         // Correct ciphertext (NIST AES-128 test vector).
         let Value::Array(result_ref) = result else {
             panic!("AES main should return an array");
@@ -549,7 +554,9 @@ fn optimized_aes_full_unroll_minimizes_rounds() {
                 .read_table_field(TableRef::from(result_ref), &Value::I64(index as i64))
                 .expect("read")
                 .expect("byte");
-            let Value::I64(byte) = value else { panic!("byte") };
+            let Value::I64(byte) = value else {
+                panic!("byte")
+            };
             ciphertext.push(byte);
         }
         assert_eq!(
@@ -564,4 +571,249 @@ fn optimized_aes_full_unroll_minimizes_rounds() {
             "fully-flattened AES should reach a few hundred multiply rounds; got {batch_calls}"
         );
     });
+}
+
+/// Regression for a loop-carried-state mis-optimization when a function with a
+/// reassigned (loop-carried) local is inlined more than once. CTR's keystream
+/// inlines `aes128_encrypt_rk` (loop-carried `state`) twice — once per block —
+/// and at -O3 once produced a wrong block-1 result (C1 != NIST). The single-block
+/// AES circuit inlines it only once and was unaffected. This calls a small
+/// loop-carried folder twice with distinct inputs and requires -O3 to match -O0.
+#[test]
+fn loop_carried_state_inlined_twice_o3_matches_o0() {
+    run_on_large_stack(loop_carried_state_inlined_twice_o3_matches_o0_impl());
+}
+
+async fn loop_carried_state_inlined_twice_o3_matches_o0_impl() {
+    let source = r#"
+def gate_xor(a: secret bool, b: secret bool) -> secret bool:
+  return a xor b
+
+# Loop-carried fold: `result` is reassigned each iteration.
+def fold(bits: list[secret bool]) -> secret bool:
+  var result: secret bool = Share.from_clear_int(0, 1)
+  for i in 0..bits.len():
+    result = gate_xor(result, bits[i])
+  return result
+
+def main() -> list[int64]:
+  # Two INDEPENDENT folds with distinct inputs and distinct results, so a
+  # cross-inline collision on `result` is detectable. fold([1,0,0,0]) = 1,
+  # fold([0,0,0,0]) = 0.
+  var r0 = fold([Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)])
+  var r1 = fold([Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1), Share.from_clear_int(0, 1)])
+  var out: list[int64] = []
+  var b0: bool = r0.reveal()
+  var b1: bool = r1.reveal()
+  if b0:
+    out.append(1)
+  else:
+    out.append(0)
+  if b1:
+    out.append(1)
+  else:
+    out.append(0)
+  return out
+"#;
+
+    let run_at = |level: u8| async move {
+        let options = stoffellang::CompilerOptions {
+            optimize: level > 0,
+            optimization_level: level,
+            mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+            ..Default::default()
+        };
+        let compiled = stoffellang::compile(source, "<fold>", &options)
+            .unwrap_or_else(|e| panic!("compile at -O{level}: {e:?}"));
+        let binary = stoffellang::convert_to_binary(&compiled);
+        let functions = binary.try_to_vm_functions().expect("vm functions");
+        let engine = Arc::new(CountingEngine::default());
+        let mut vm = VirtualMachine::builder()
+            .with_mpc_engine(engine.clone())
+            .build();
+        for function in functions {
+            vm.try_register_function(function)
+                .expect("register function");
+        }
+        let result = vm
+            .execute_async("main", engine.as_ref())
+            .await
+            .unwrap_or_else(|e| panic!("execute at -O{level}: {e:?}"));
+        let Value::Array(result_ref) = result else {
+            panic!("fold main should return an array");
+        };
+        let mut bits = Vec::new();
+        for index in 0..vm.read_array_len(result_ref).expect("len") {
+            let value = vm
+                .read_table_field(TableRef::from(result_ref), &Value::I64(index as i64))
+                .expect("read bit")
+                .expect("bit");
+            let Value::I64(b) = value else {
+                panic!("bit should be int64, got {value:?}");
+            };
+            bits.push(b);
+        }
+        bits
+    };
+
+    let expected = vec![1, 0]; // fold([1,0,0,0])=1, fold([0,0,0,0])=0
+    let o0 = run_at(0).await;
+    let o3 = run_at(3).await;
+    assert_eq!(o0, expected, "-O0 fold must be correct");
+    assert_eq!(
+        o3, expected,
+        "-O3 must match -O0 when a loop-carried-state function is inlined twice"
+    );
+}
+
+/// Differential test for the CTR -O3 full-unroll correctness bug using the
+/// reduced counter-increment reproducer. The original AES CTR failure presented
+/// as a wrong C1 block; shrinking showed the counter increment itself diverged
+/// under -O3 inlining/unrolling/scheduling.
+#[test]
+fn ctr_full_unroll_c1_matches_o0() {
+    run_on_large_stack(ctr_full_unroll_c1_matches_o0_impl());
+}
+
+async fn ctr_full_unroll_c1_matches_o0_impl() {
+    let base = r#"
+def gate_and(a: secret bool, b: secret bool) -> secret bool:
+  return a and b
+
+def gate_xor(a: secret bool, b: secret bool) -> secret bool:
+  return a xor b
+
+def reveal_byte(byte: list[secret bool]) -> int64:
+  var value: int64 = 0
+  var b0: bool = byte[0].reveal()
+  if b0:
+    value += 1
+  var b1: bool = byte[1].reveal()
+  if b1:
+    value += 2
+  var b2: bool = byte[2].reveal()
+  if b2:
+    value += 4
+  var b3: bool = byte[3].reveal()
+  if b3:
+    value += 8
+  var b4: bool = byte[4].reveal()
+  if b4:
+    value += 16
+  var b5: bool = byte[5].reveal()
+  if b5:
+    value += 32
+  var b6: bool = byte[6].reveal()
+  if b6:
+    value += 64
+  var b7: bool = byte[7].reveal()
+  if b7:
+    value += 128
+  return value
+
+def reveal_block(block: list[list[secret bool]]) -> list[int64]:
+  return [reveal_byte(block[0]), reveal_byte(block[1]), reveal_byte(block[2]), reveal_byte(block[3]), reveal_byte(block[4]), reveal_byte(block[5]), reveal_byte(block[6]), reveal_byte(block[7]), reveal_byte(block[8]), reveal_byte(block[9]), reveal_byte(block[10]), reveal_byte(block[11]), reveal_byte(block[12]), reveal_byte(block[13]), reveal_byte(block[14]), reveal_byte(block[15])]
+
+def public_byte(value: int64) -> list[secret bool]:
+  var bits: list[secret bool] = []
+  var v: int64 = value
+  for i in 0..8:
+    bits.append(Share.from_clear_int(v % 2, 1))
+    v = v / 2
+  return bits
+
+def public_block(values: list[int64]) -> list[list[secret bool]]:
+  var block: list[list[secret bool]] = []
+  for i in 0..16:
+    block.append(public_byte(values[i]))
+  return block
+
+def increment_counter_byte(byte: list[secret bool], carry_in: secret bool) -> list[secret bool]:
+  var out: list[secret bool] = []
+  var carry = carry_in
+  for bit_index in 0..8:
+    out.append(gate_xor(byte[bit_index], carry))
+    carry = gate_and(byte[bit_index], carry)
+  return out
+
+def increment_counter_byte_carry(byte: list[secret bool], carry_in: secret bool) -> secret bool:
+  var carry = carry_in
+  for bit_index in 0..8:
+    carry = gate_and(byte[bit_index], carry)
+  return carry
+
+def increment_counter_block(counter: list[list[secret bool]]) -> list[list[secret bool]]:
+  var out: list[list[secret bool]] = []
+  var carry = Share.from_clear_int(1, 1)
+  for offset in 0..16:
+    var byte_index = 15 - offset
+    out.insert(0, increment_counter_byte(counter[byte_index], carry))
+    carry = increment_counter_byte_carry(counter[byte_index], carry)
+  return out
+"#;
+    let main_lit = r#"
+def main_lit() -> list[int64]:
+  var ctr0 = public_block([240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255])
+  var ctr1 = increment_counter_block(ctr0)
+  return reveal_block(ctr1)
+"#;
+    let source = format!("{base}\n{main_lit}");
+
+    let run_at = |level: u8, full_unroll: bool, source: String| async move {
+        if full_unroll {
+            std::env::set_var("STOFFEL_INLINE_BUDGET", "100000000");
+            std::env::set_var("STOFFEL_UNROLL_BUDGET", "100000000");
+            std::env::set_var("STOFFEL_UNROLL_MAX_EXPANSION", "100000000");
+        }
+        let options = stoffellang::CompilerOptions {
+            optimize: level > 0,
+            optimization_level: level,
+            mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+            ..Default::default()
+        };
+        let compiled = stoffellang::compile(&source, "<ctr-lit>", &options)
+            .unwrap_or_else(|e| panic!("compile at -O{level}: {e:?}"));
+        let binary = stoffellang::convert_to_binary(&compiled);
+        let functions = binary.try_to_vm_functions().expect("vm functions");
+        let engine = Arc::new(CountingEngine::default());
+        let mut vm = VirtualMachine::builder()
+            .with_mpc_engine(engine.clone())
+            .build();
+        for function in functions {
+            vm.try_register_function(function)
+                .expect("register function");
+        }
+        let result = vm
+            .execute_async("main_lit", engine.as_ref())
+            .await
+            .unwrap_or_else(|e| panic!("execute at -O{level}: {e:?}"));
+        let Value::Array(result_ref) = result else {
+            panic!("main_lit should return an array");
+        };
+        let mut out = Vec::new();
+        for index in 0..vm.read_array_len(result_ref).expect("len") {
+            let value = vm
+                .read_table_field(TableRef::from(result_ref), &Value::I64(index as i64))
+                .expect("read byte")
+                .expect("byte");
+            let Value::I64(b) = value else {
+                panic!("byte should be int64, got {value:?}");
+            };
+            out.push(b);
+        }
+        out
+    };
+
+    let o0 = run_at(0, false, source.clone()).await;
+    eprintln!("CTR1_O0 = {:?}", &o0);
+    std::env::set_var("STOFFEL_INLINE_BUDGET", "100000000");
+    std::env::set_var("STOFFEL_UNROLL_BUDGET", "100000000");
+    std::env::set_var("STOFFEL_UNROLL_MAX_EXPANSION", "100000000");
+    let o3 = run_at(3, false, source).await;
+    eprintln!("CTR1_O3 = {:?}", &o3);
+    eprintln!("match: {}", o0 == o3);
+    assert_eq!(
+        o0, o3,
+        "ctr1 (counter increment) must match between -O0 and -O3"
+    );
 }

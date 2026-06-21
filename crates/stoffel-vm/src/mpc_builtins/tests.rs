@@ -314,7 +314,10 @@ fn share_object_type_metadata_rejects_invalid_integer_conversions() {
         .set_table_field(
             table_ref,
             Value::String(share_fields::DATA.to_string()),
-            Value::Share(ShareType::default_secret_int(), ShareData::Opaque(vec![].into())),
+            Value::Share(
+                ShareType::default_secret_int(),
+                ShareData::Opaque(vec![].into()),
+            ),
         )
         .expect("set share data field");
 
@@ -399,7 +402,6 @@ fn share_mul_field_preserves_feldman_share_data() {
             ShareData::Feldman {
                 data: share_bytes.into(),
                 commitments: Vec::new().into(),
-
             },
             0,
         )
@@ -534,9 +536,13 @@ fn test_is_share_object() {
     let share_type = ShareType::default_secret_int();
     let data = vec![1, 2, 3, 4];
 
-    let share_ref =
-        share_object::create_share_object_ref(&mut store, share_type, ShareData::Opaque(data.into()), 0)
-            .expect("share object creation should succeed");
+    let share_ref = share_object::create_share_object_ref(
+        &mut store,
+        share_type,
+        ShareData::Opaque(data.into()),
+        0,
+    )
+    .expect("share object creation should succeed");
     let non_share_ref = store.create_object_ref().expect("create non-share object");
 
     assert!(share_object::is_share_object(
@@ -600,7 +606,10 @@ fn share_get_party_id_rejects_raw_shares_without_mpc_engine() {
     let mut vm = VirtualMachine::builder().with_mpc_builtins(false).build();
     register_mpc_builtins(&mut vm);
 
-    let raw_share = Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![1, 2, 3].into()));
+    let raw_share = Value::Share(
+        ShareType::secret_int(64),
+        ShareData::Opaque(vec![1, 2, 3].into()),
+    );
     let err = vm
         .execute_with_args("Share.get_party_id", &[raw_share])
         .expect_err("raw share party ID must come from configured MPC engine");

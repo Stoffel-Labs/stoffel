@@ -891,7 +891,6 @@ mod tests {
                 ShareData::Feldman {
                     data: vec![1, 2, 3].into(),
                     commitments: vec![vec![4, 5], vec![6]].into(),
-
                 },
             ),
         ];
@@ -949,7 +948,10 @@ mod tests {
             .set_table_field(
                 TableRef::from(object_ref),
                 Value::String("share".to_owned()),
-                Value::Share(ShareType::secret_int(64), ShareData::Opaque(vec![9, 8, 7].into())),
+                Value::Share(
+                    ShareType::secret_int(64),
+                    ShareData::Opaque(vec![9, 8, 7].into()),
+                ),
             )
             .expect("object share");
 
@@ -1008,7 +1010,6 @@ mod tests {
             ShareData::Feldman {
                 data: vec![1, 2, 3].into(),
                 commitments: vec![vec![4, 5, 6]].into(),
-
             },
         );
         let context = test_context(b"share-key");

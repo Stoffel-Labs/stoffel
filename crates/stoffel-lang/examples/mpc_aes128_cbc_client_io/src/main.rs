@@ -13,7 +13,7 @@ const CIPHERTEXT_HEX: &str = "7649abac8119b246cee98e9b12e9197d";
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> stoffel::Result<()> {
     println!("Compiling {PROGRAM}");
-    
+
     let program = ProgramClient::new(PROGRAM).local_runner_path_from_env("STOFFEL_RUN_BIN");
 
     let ciphertext = program.encrypt(PLAINTEXT_HEX, KEY_HEX).await?;

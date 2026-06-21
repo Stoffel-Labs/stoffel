@@ -28,7 +28,9 @@ impl ClientInputStore {
                 })?;
 
                 Ok(match share_type {
-                    Some(share_type) => ClientShare::typed(share_type, ShareData::Opaque(bytes.into())),
+                    Some(share_type) => {
+                        ClientShare::typed(share_type, ShareData::Opaque(bytes.into()))
+                    }
                     None => ClientShare::untyped_bytes(bytes),
                 })
             })
@@ -66,7 +68,10 @@ impl ClientInputStore {
                     }
                 })?;
 
-                Ok(ClientShare::typed(share_type, ShareData::Opaque(bytes.into())))
+                Ok(ClientShare::typed(
+                    share_type,
+                    ShareData::Opaque(bytes.into()),
+                ))
             })
             .collect()
     }

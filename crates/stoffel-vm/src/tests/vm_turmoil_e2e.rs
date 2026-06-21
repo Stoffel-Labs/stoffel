@@ -1431,9 +1431,7 @@ fn hb_vm_turmoil_mul_open_e2e() {
                     Value::Share(
                         share_ty(),
                         ShareData::Opaque(
-                            HbTurmoilVmEngine::encode_share(&left_share)
-                                .unwrap()
-                                .into(),
+                            HbTurmoilVmEngine::encode_share(&left_share).unwrap().into(),
                         ),
                     ),
                     Value::Share(

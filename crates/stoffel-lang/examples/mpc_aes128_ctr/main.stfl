@@ -678,107 +678,14 @@ def take_client_block(client_slot: int64) -> list[list[secret bool]]:
     block.append(take_client_byte(client_slot, byte_index))
   return block
 
-# --- AES-128 decryption (inverse cipher) ----------------------------------
-#
-# The forward S-box is `aes_sbox(x) = Affine(GFInverse(x))`. The AES affine map
-# A is invertible, so `GFInverse(x) = InvAffine(aes_sbox(x))` and therefore the
-# inverse S-box is `InvSBox(y) = GFInverse(InvAffine(y)) =
-# InvAffine(aes_sbox(InvAffine(y)))`. This reuses the (already-correct) forward
-# S-box circuit and only needs the inverse affine map below — no second 113-gate
-# netlist to get wrong.
-
-def inv_affine(y: list[secret bool]) -> list[secret bool]:
-  # InvAffine: out[i] = y[(i+2)%8] ^ y[(i+5)%8] ^ y[(i+7)%8], then ^ 0x05.
-  # Bits are little-endian (bit i has weight 2^i); 0x05 flips bits 0 and 2.
-  var out: list[secret bool] = []
-  for i in 0..8:
-    var v: secret bool = gate_xor(gate_xor(y[(i + 2) % 8], y[(i + 5) % 8]), y[(i + 7) % 8])
-    if i == 0:
-      v = gate_not(v)
-    if i == 2:
-      v = gate_not(v)
-    out.append(v)
-  return out
-
-def inv_sbox(y: list[secret bool]) -> list[secret bool]:
-  return inv_affine(aes_sbox(inv_affine(y)))
-
-def inv_sub_bytes(state: list[list[secret bool]]) -> list[list[secret bool]]:
-  # inv_sbox(y) = inv_affine(aes_sbox(inv_affine(y))); inv_affine is linear, so
-  # batch the (only non-linear) S-box across all bytes via aes_sbox_vec.
-  var pre: list[list[secret bool]] = []
-  for i in 0..state.len():
-    pre.append(inv_affine(state[i]))
-  var mid = aes_sbox_vec(pre)
-  var out: list[list[secret bool]] = []
-  for i in 0..mid.len():
-    out.append(inv_affine(mid[i]))
-  return out
-
-def inv_shift_rows(state: list[list[secret bool]]) -> list[list[secret bool]]:
-  # Inverse of shift_rows: row r is rotated right by r (state is column-major).
-  return [state[0], state[13], state[10], state[7], state[4], state[1], state[14], state[11], state[8], state[5], state[2], state[15], state[12], state[9], state[6], state[3]]
-
-# GF(2^8) multiply-by-constant for the inverse MixColumns matrix. xtime/byte_xor
-# are linear (no AND gates), so InvMixColumns adds no multiplication rounds.
-def mul9(a: list[secret bool]) -> list[secret bool]:
-  return byte_xor(xtime(xtime(xtime(a))), a)
-
-def mul11(a: list[secret bool]) -> list[secret bool]:
-  var x2 = xtime(a)
-  var x8 = xtime(xtime(x2))
-  return byte_xor3(x8, x2, a)
-
-def mul13(a: list[secret bool]) -> list[secret bool]:
-  var x4 = xtime(xtime(a))
-  var x8 = xtime(x4)
-  return byte_xor3(x8, x4, a)
-
-def mul14(a: list[secret bool]) -> list[secret bool]:
-  var x2 = xtime(a)
-  var x4 = xtime(x2)
-  var x8 = xtime(x4)
-  return byte_xor3(x8, x4, x2)
-
-def inv_mix_single_column(a0: list[secret bool], a1: list[secret bool], a2: list[secret bool], a3: list[secret bool]) -> list[list[secret bool]]:
-  var b0 = byte_xor4(mul14(a0), mul11(a1), mul13(a2), mul9(a3))
-  var b1 = byte_xor4(mul9(a0), mul14(a1), mul11(a2), mul13(a3))
-  var b2 = byte_xor4(mul13(a0), mul9(a1), mul14(a2), mul11(a3))
-  var b3 = byte_xor4(mul11(a0), mul13(a1), mul9(a2), mul14(a3))
-  return [b0, b1, b2, b3]
-
-def inv_mix_columns(state: list[list[secret bool]]) -> list[list[secret bool]]:
-  var out: list[list[secret bool]] = []
-  for col in 0..4:
-    var offset: int64 = col * 4
-    var mixed = inv_mix_single_column(state[offset], state[offset + 1], state[offset + 2], state[offset + 3])
-    out.append(mixed[0])
-    out.append(mixed[1])
-    out.append(mixed[2])
-    out.append(mixed[3])
-  return out
-
-def aes128_decrypt_rk(block: list[list[secret bool]], round_key: list[list[secret bool]]) -> list[list[secret bool]]:
-  var state = add_round_key(block, round_key, 160)
-  for round in 1..10:
-    state = inv_shift_rows(state)
-    state = inv_sub_bytes(state)
-    state = add_round_key(state, round_key, (10 - round) * 16)
-    state = inv_mix_columns(state)
-  state = inv_shift_rows(state)
-  state = inv_sub_bytes(state)
-  state = add_round_key(state, round_key, 0)
-  return state
-
-def aes128_decrypt(block: list[list[secret bool]], key: list[list[secret bool]]) -> list[list[secret bool]]:
-  return aes128_decrypt_rk(block, key_expansion(key))
-
 # ===========================================================================
-# Modes of operation (CTR and CBC) over the single-block AES primitive.
+# CTR mode of operation over the single-block AES primitive.
 #
-# IV / nonce / counter blocks are PUBLIC values; only the plaintext and key are
-# secret. Block XOR (`bytes_xor`) is linear, so CBC/CTR chaining adds no extra
-# multiplication rounds beyond the underlying AES block calls.
+# The IV / nonce / counter block is a PUBLIC value; only the plaintext and key
+# are secret. Block XOR (`bytes_xor`) is linear, so CTR chaining adds no extra
+# multiplication rounds beyond the underlying AES block calls. CTR decryption
+# is the same operation as encryption (XOR the shared keystream), so the
+# keystream is generated once and applied to both directions.
 # ===========================================================================
 
 # Build a (publicly-known) secret-bool block from 16 clear byte values.
@@ -856,26 +763,6 @@ def ctr_apply(blocks: list[list[list[secret bool]]], keystream: list[list[list[s
   var out: list[list[list[secret bool]]] = []
   for i in 0..blocks.len():
     out.append(bytes_xor(blocks[i], keystream[i]))
-  return out
-
-# --- CBC -------------------------------------------------------------------
-# C_0 = AES_enc(P_0 XOR IV, key);  C_i = AES_enc(P_i XOR C_{i-1}, key).
-def cbc_encrypt(blocks: list[list[list[secret bool]]], key: list[list[secret bool]], iv: list[list[secret bool]]) -> list[list[list[secret bool]]]:
-  var out: list[list[list[secret bool]]] = []
-  var prev = iv
-  for i in 0..blocks.len():
-    var c = aes128_encrypt(bytes_xor(blocks[i], prev), key)
-    out.append(c)
-    prev = c
-  return out
-
-# P_0 = AES_dec(C_0, key) XOR IV;  P_i = AES_dec(C_i, key) XOR C_{i-1}.
-def cbc_decrypt(cts: list[list[list[secret bool]]], key: list[list[secret bool]], iv: list[list[secret bool]]) -> list[list[list[secret bool]]]:
-  var out: list[list[list[secret bool]]] = []
-  var prev = iv
-  for i in 0..cts.len():
-    out.append(bytes_xor(aes128_decrypt(cts[i], key), prev))
-    prev = cts[i]
   return out
 
 def main() -> list[int64]:

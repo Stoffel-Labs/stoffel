@@ -78,7 +78,10 @@ async fn main() -> stoffel::Result<()> {
     // Secret key bits, as a list[secret bool].
     let key_bits: Vec<Value> = bits_lsb_first(&KEY).into_iter().map(Value::Bool).collect();
 
-    println!("Client plaintext    = {:?}", std::str::from_utf8(MESSAGE).unwrap());
+    println!(
+        "Client plaintext    = {:?}",
+        std::str::from_utf8(MESSAGE).unwrap()
+    );
     println!("Clear input ct       = {}", hex(&ciphertext));
     println!("Running AES-128 transciphering over MPC (clear ct in, secret key, new ct out)...");
 
@@ -115,7 +118,10 @@ async fn main() -> stoffel::Result<()> {
 
     println!("client-received ct   = {}", hex(&new_ciphertext));
     println!("client decrypts to   = {recovered_text:?}");
-    println!("expected plaintext   = {:?}", std::str::from_utf8(EXPECTED_PLAINTEXT).unwrap());
+    println!(
+        "expected plaintext   = {:?}",
+        std::str::from_utf8(EXPECTED_PLAINTEXT).unwrap()
+    );
 
     // Validate two ways: the new ciphertext is exactly CTR(uppercased message),
     // and decrypting it yields the uppercased text.

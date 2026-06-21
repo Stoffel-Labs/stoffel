@@ -1015,7 +1015,6 @@ fn clear_sdk_value_to_vm_constant(value: &Value) -> Result<VmValue> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

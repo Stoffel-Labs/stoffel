@@ -1392,12 +1392,7 @@ fn async_clear_mov_straight(count: usize) -> VMFunction {
     instructions.extend(std::iter::repeat_n(Instruction::MOV(0, 1), count));
     instructions.push(Instruction::RET(0));
 
-    function(
-        "async_clear_mov_straight",
-        2,
-        instructions,
-        HashMap::new(),
-    )
+    function("async_clear_mov_straight", 2, instructions, HashMap::new())
 }
 
 fn async_secret_mov_straight(count: usize) -> VMFunction {
@@ -1410,12 +1405,7 @@ fn async_secret_mov_straight(count: usize) -> VMFunction {
     instructions.extend(std::iter::repeat_n(Instruction::MOV(0, 1), count));
     instructions.push(Instruction::RET(0));
 
-    function(
-        "async_secret_mov_straight",
-        2,
-        instructions,
-        HashMap::new(),
-    )
+    function("async_secret_mov_straight", 2, instructions, HashMap::new())
 }
 
 fn bench_async_dispatch_throughput(c: &mut Criterion) {
@@ -1438,44 +1428,36 @@ fn bench_async_dispatch_throughput(c: &mut Criterion) {
             RegisterLayout::default(),
             Arc::clone(&runtime_engine),
         );
-        group.bench_with_input(
-            BenchmarkId::new("clear_mov", count),
-            &count,
-            |b, _| {
-                b.iter(|| {
-                    black_box(
-                        runtime
-                            .block_on(clear_vm.execute_async(
-                                "async_clear_mov_straight",
-                                async_engine.as_ref(),
-                            ))
-                            .unwrap(),
-                    )
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("clear_mov", count), &count, |b, _| {
+            b.iter(|| {
+                black_box(
+                    runtime
+                        .block_on(
+                            clear_vm
+                                .execute_async("async_clear_mov_straight", async_engine.as_ref()),
+                        )
+                        .unwrap(),
+                )
+            })
+        });
 
         let mut secret_vm = vm_with_register_layout(
             [async_secret_mov_straight(count)],
             RegisterLayout::new(0),
             Arc::clone(&runtime_engine),
         );
-        group.bench_with_input(
-            BenchmarkId::new("secret_mov", count),
-            &count,
-            |b, _| {
-                b.iter(|| {
-                    black_box(
-                        runtime
-                            .block_on(secret_vm.execute_async(
-                                "async_secret_mov_straight",
-                                async_engine.as_ref(),
-                            ))
-                            .unwrap(),
-                    )
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("secret_mov", count), &count, |b, _| {
+            b.iter(|| {
+                black_box(
+                    runtime
+                        .block_on(
+                            secret_vm
+                                .execute_async("async_secret_mov_straight", async_engine.as_ref()),
+                        )
+                        .unwrap(),
+                )
+            })
+        });
     }
 
     group.finish();
@@ -1483,10 +1465,20 @@ fn bench_async_dispatch_throughput(c: &mut Criterion) {
 
 // Zero-arg VM callees for the CALL-dispatch investigation.
 fn call_bench_noop_a() -> VMFunction {
-    function("call_bench_noop_a", 1, vec![Instruction::RET(0)], HashMap::new())
+    function(
+        "call_bench_noop_a",
+        1,
+        vec![Instruction::RET(0)],
+        HashMap::new(),
+    )
 }
 fn call_bench_noop_b() -> VMFunction {
-    function("call_bench_noop_b", 1, vec![Instruction::RET(0)], HashMap::new())
+    function(
+        "call_bench_noop_b",
+        1,
+        vec![Instruction::RET(0)],
+        HashMap::new(),
+    )
 }
 fn call_same_loop(count: usize) -> VMFunction {
     let mut instructions = Vec::with_capacity(count + 1);

@@ -66,7 +66,10 @@ fn share_object_metadata_errors_are_typed() {
         .set_table_field(
             table_ref,
             Value::String(share_fields::DATA.to_string()),
-            Value::Share(ShareType::default_secret_int(), ShareData::Opaque(vec![].into())),
+            Value::Share(
+                ShareType::default_secret_int(),
+                ShareData::Opaque(vec![].into()),
+            ),
         )
         .expect("set share data");
 

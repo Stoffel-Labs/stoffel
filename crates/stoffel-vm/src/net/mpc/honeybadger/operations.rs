@@ -64,8 +64,7 @@ pub(crate) fn max_honeybadger_mul_pairs_per_session_with(
     if let Some(value) = override_pairs {
         return value.max(1);
     }
-    DEFAULT_MAX_HONEYBADGER_MUL_BATCH_RECON_CHUNKS
-        .saturating_mul(threshold.saturating_add(1))
+    DEFAULT_MAX_HONEYBADGER_MUL_BATCH_RECON_CHUNKS.saturating_mul(threshold.saturating_add(1))
 }
 
 impl<F, G> HoneyBadgerMpcEngine<F, G>
@@ -335,7 +334,8 @@ where
                     }
 
                     for share in result_shares {
-                        encoded_results.push(Self::encode_share(&share).map(|v| ShareData::Opaque(v.into()))?);
+                        encoded_results
+                            .push(Self::encode_share(&share).map(|v| ShareData::Opaque(v.into()))?);
                     }
                 }
                 if trace {
@@ -887,7 +887,10 @@ mod tests {
     #[test]
     fn override_forces_pairs_per_session_directly() {
         // An explicit override is used as-is (not forced to a multiple of t+1).
-        assert_eq!(max_honeybadger_mul_pairs_per_session_with(1, Some(256)), 256);
+        assert_eq!(
+            max_honeybadger_mul_pairs_per_session_with(1, Some(256)),
+            256
+        );
         // A floor of 1 keeps an accidental 0 from starving every multiply.
         assert_eq!(max_honeybadger_mul_pairs_per_session_with(1, Some(0)), 1);
     }

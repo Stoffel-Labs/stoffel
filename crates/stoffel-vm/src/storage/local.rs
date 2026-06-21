@@ -323,7 +323,6 @@ mod tests {
                     ShareData::Feldman {
                         data: vec![1, 2, 3].into(),
                         commitments: vec![vec![4], vec![5, 6]].into(),
-
                     },
                 ),
             )
@@ -381,7 +380,6 @@ mod tests {
                 ShareData::Feldman {
                     data: vec![1, 2, 3].into(),
                     commitments: vec![vec![4], vec![5, 6]].into(),
-
                 },
             ))
         );

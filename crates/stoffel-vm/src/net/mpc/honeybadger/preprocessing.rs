@@ -147,10 +147,14 @@ where
                     .await?;
                 store.delete(&base).await?;
                 loaded_triples = available;
-                node.preprocessing_material
-                    .lock()
-                    .await
-                    .add(Some(decoded), None, None, None, None, None);
+                node.preprocessing_material.lock().await.add(
+                    Some(decoded),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
             }
         }
         if let Some(ref blob) = randoms {
@@ -167,10 +171,14 @@ where
                     .await?;
                 store.delete(&k_rs).await?;
                 loaded_randoms = available;
-                node.preprocessing_material
-                    .lock()
-                    .await
-                    .add(None, None, Some(decoded), None, None, None);
+                node.preprocessing_material.lock().await.add(
+                    None,
+                    None,
+                    Some(decoded),
+                    None,
+                    None,
+                    None,
+                );
             }
         }
         if let Some(ref blob) = prandbits {
@@ -187,10 +195,14 @@ where
                     .await?;
                 store.delete(&k_pb).await?;
                 loaded_prandbits = available;
-                node.preprocessing_material
-                    .lock()
-                    .await
-                    .add(None, None, None, None, Some(decoded), None);
+                node.preprocessing_material.lock().await.add(
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(decoded),
+                    None,
+                );
             }
         }
         if let Some(ref blob) = prandints {
@@ -207,10 +219,14 @@ where
                     .await?;
                 store.delete(&k_pi).await?;
                 loaded_prandints = available;
-                node.preprocessing_material
-                    .lock()
-                    .await
-                    .add(None, None, None, None, None, Some(decoded));
+                node.preprocessing_material.lock().await.add(
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(decoded),
+                );
             }
         }
 

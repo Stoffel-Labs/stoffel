@@ -138,7 +138,10 @@ fn share_scalar_ops_accept_vm_integer_widths() {
 
     assert_eq!(
         result,
-        Value::Share(share_type, ShareData::Opaque(7i64.to_le_bytes().to_vec().into()))
+        Value::Share(
+            share_type,
+            ShareData::Opaque(7i64.to_le_bytes().to_vec().into())
+        )
     );
     assert_eq!(engine.add_scalars.lock().unwrap().as_slice(), &[7]);
 }

@@ -1958,12 +1958,18 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
         .map(|addr| (addr.ip().to_string(), addr.port()))
         .collect();
     let node_rpc_client: AvssOffChainNodeRpcClient<F, G> =
-        AvssOffChainNodeRpcClient::<F, G>::start_rpc_client(rpc_addrs.len(), t, rpc_addrs, cert_der, key_der)
-            .await
-            .unwrap_or_else(|error| {
-                eprintln!("Failed to connect to AVSS node RPC servers: {error}");
-                exit(13);
-            });
+        AvssOffChainNodeRpcClient::<F, G>::start_rpc_client(
+            rpc_addrs.len(),
+            t,
+            rpc_addrs,
+            cert_der,
+            key_der,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Failed to connect to AVSS node RPC servers: {error}");
+            exit(13);
+        });
     let mut masks = Vec::with_capacity(input_values.len());
     for offset in 0..input_values.len() {
         let index = reserved_index + offset as u64;
@@ -2114,8 +2120,14 @@ async fn run_hb_coordinator_client_for_field<F>(
             .iter()
             .map(|a| (a.ip().to_string(), a.port()))
             .collect();
-        let node_rpc_client =
-            HbOnChainNodeRpcClient::<F>::start_rpc_client(rpc_addrs.len(), t, rpc_addrs, cert_der, key_der).await;
+        let node_rpc_client = HbOnChainNodeRpcClient::<F>::start_rpc_client(
+            rpc_addrs.len(),
+            t,
+            rpc_addrs,
+            cert_der,
+            key_der,
+        )
+        .await;
         let mut masks = Vec::with_capacity(input_values.len());
         for offset in 0..input_values.len() {
             let index = reserved_index + offset as u64;
@@ -2190,12 +2202,18 @@ async fn run_hb_coordinator_client_for_field<F>(
         .map(|a| (a.ip().to_string(), a.port()))
         .collect();
     let node_rpc_client: HbOffChainNodeRpcClient<F> =
-        HbOffChainNodeRpcClient::<F>::start_rpc_client(rpc_addrs.len(), t, rpc_addrs, cert_der, key_der)
-            .await
-            .unwrap_or_else(|error| {
-                eprintln!("Failed to connect to node RPC servers: {error}");
-                exit(13);
-            });
+        HbOffChainNodeRpcClient::<F>::start_rpc_client(
+            rpc_addrs.len(),
+            t,
+            rpc_addrs,
+            cert_der,
+            key_der,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Failed to connect to node RPC servers: {error}");
+            exit(13);
+        });
     let mut masks = Vec::with_capacity(input_values.len());
     for offset in 0..input_values.len() {
         let index = reserved_index + offset as u64;
@@ -4079,13 +4097,14 @@ async fn main() {
             );
             exit(2);
         });
-        let binary = CompiledBinary::deserialize(&mut BufReader::new(file)).unwrap_or_else(|error| {
-            eprintln!(
-                "Error: failed to deserialize compiled program '{}': {:?}",
-                path, error
-            );
-            exit(2);
-        });
+        let binary =
+            CompiledBinary::deserialize(&mut BufReader::new(file)).unwrap_or_else(|error| {
+                eprintln!(
+                    "Error: failed to deserialize compiled program '{}': {:?}",
+                    path, error
+                );
+                exit(2);
+            });
         let backend = (binary.version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION)
             .then_some(MpcBackendKind::from(binary.client_io_manifest.mpc_backend));
         let curve = (binary.version >= MPC_CURVE_MANIFEST_FORMAT_VERSION).then_some(
@@ -4401,7 +4420,8 @@ async fn main() {
         p.to_string_lossy().to_string()
     };
     let f = File::open(&load_path).expect("open binary file");
-    let binary = CompiledBinary::deserialize(&mut BufReader::new(f)).expect("deserialize compiled binary");
+    let binary =
+        CompiledBinary::deserialize(&mut BufReader::new(f)).expect("deserialize compiled binary");
     let client_input_types = manifest_client_input_types(&binary);
     let preprocessing_demand = binary.client_io_manifest.preprocessing_demand;
     let functions = match binary.try_to_vm_functions() {
@@ -5522,7 +5542,10 @@ mod tests {
         for n in [1u64, 7, 9, 100, 1000, 60_000, 134_528, 165_696, 200_000] {
             let b = band_pow2(n);
             assert!(b >= n, "band must not under-provision");
-            assert!(b <= n + (n / 8) + 8, "band over-provisions by at most ~1/8 octave");
+            assert!(
+                b <= n + (n / 8) + 8,
+                "band over-provisions by at most ~1/8 octave"
+            );
         }
     }
 
