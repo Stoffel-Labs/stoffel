@@ -614,7 +614,18 @@ impl<F: FftField + PrimeField + 'static> HoneyBadgerQuicServer<F> {
             let _ = tx.send(()).await;
         }
         if let Some(task) = self.connection_task.take() {
-            let _ = task.await;
+            let mut task = task;
+            tokio::select! {
+                _ = &mut task => {}
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                    warn!(
+                        "Timed out waiting for HoneyBadger QUIC server {} accept loop to stop",
+                        self.node_id
+                    );
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
         }
         info!("Stopped HoneyBadger QUIC server for node {}", self.node_id);
     }
