@@ -239,7 +239,9 @@ pub struct ClientIoManifest {
 pub struct PreprocessingDemand {
     /// Beaver triples — one per secret*secret multiplication.
     pub triples: u64,
-    /// Random shares — masks for inputs/reveals and triple generation.
+    /// Program-visible random shares — masks for inputs/reveals and direct
+    /// random-share requests. Backends may allocate extra internal randoms for
+    /// derived material such as triples.
     pub randoms: u64,
     /// Random bits — `frac_bits` per secret fixed-point division (truncation).
     pub prandbits: u64,
@@ -643,6 +645,45 @@ impl CompiledBinary {
         })
     }
 
+    fn compiled_instruction_into_vm_instruction<F>(
+        instruction: CompiledInstruction,
+        mut constant_lookup: F,
+    ) -> BinaryResult<Instruction>
+    where
+        F: FnMut(usize) -> BinaryResult<Value>,
+    {
+        Ok(match instruction {
+            CompiledInstruction::NOP => Instruction::NOP,
+            CompiledInstruction::LD(reg, offset) => Instruction::LD(reg, offset),
+            CompiledInstruction::LDI(reg, const_idx) => {
+                Instruction::LDI(reg, constant_lookup(const_idx)?)
+            }
+            CompiledInstruction::MOV(target, source) => Instruction::MOV(target, source),
+            CompiledInstruction::ADD(target, src1, src2) => Instruction::ADD(target, src1, src2),
+            CompiledInstruction::SUB(target, src1, src2) => Instruction::SUB(target, src1, src2),
+            CompiledInstruction::MUL(target, src1, src2) => Instruction::MUL(target, src1, src2),
+            CompiledInstruction::DIV(target, src1, src2) => Instruction::DIV(target, src1, src2),
+            CompiledInstruction::MOD(target, src1, src2) => Instruction::MOD(target, src1, src2),
+            CompiledInstruction::AND(target, src1, src2) => Instruction::AND(target, src1, src2),
+            CompiledInstruction::OR(target, src1, src2) => Instruction::OR(target, src1, src2),
+            CompiledInstruction::XOR(target, src1, src2) => Instruction::XOR(target, src1, src2),
+            CompiledInstruction::NOT(target, source) => Instruction::NOT(target, source),
+            CompiledInstruction::SHL(target, src1, src2) => Instruction::SHL(target, src1, src2),
+            CompiledInstruction::SHR(target, src1, src2) => Instruction::SHR(target, src1, src2),
+            CompiledInstruction::JMP(label) => Instruction::JMP(label),
+            CompiledInstruction::JMPEQ(label) => Instruction::JMPEQ(label),
+            CompiledInstruction::JMPNEQ(label) => Instruction::JMPNEQ(label),
+            CompiledInstruction::JMPLT(label) => Instruction::JMPLT(label),
+            CompiledInstruction::JMPGT(label) => Instruction::JMPGT(label),
+            CompiledInstruction::CALL(function_name) => Instruction::CALL(function_name),
+            CompiledInstruction::RET(reg) => Instruction::RET(reg),
+            CompiledInstruction::PUSHARG(reg) => Instruction::PUSHARG(reg),
+            CompiledInstruction::CMP(reg1, reg2) => Instruction::CMP(reg1, reg2),
+            CompiledInstruction::LDS(reg, slot) => Instruction::LDS(reg, slot),
+            CompiledInstruction::STS(slot, reg) => Instruction::STS(slot, reg),
+        })
+    }
+
     fn vm_function_from_instructions(
         function: &CompiledFunction,
         instructions: Vec<Instruction>,
@@ -681,6 +722,54 @@ impl CompiledBinary {
         }
 
         let mut vm_function = Self::vm_function_from_instructions(function, instructions);
+        vm_function.try_normalize_register_count()?;
+        Ok(vm_function)
+    }
+
+    fn try_compiled_function_into_vm_function(
+        constants: &[Value],
+        function: CompiledFunction,
+    ) -> BinaryResult<VMFunction> {
+        let CompiledFunction {
+            name,
+            register_count,
+            parameters,
+            parameter_types: _,
+            return_type: _,
+            upvalues,
+            parent,
+            labels,
+            instructions: compiled_instructions,
+        } = function;
+        let function_name = name.clone();
+        let instruction_count = compiled_instructions.len();
+        let mut instructions = Vec::with_capacity(instruction_count);
+        for (instruction_index, instruction) in compiled_instructions.into_iter().enumerate() {
+            instructions.push(Self::compiled_instruction_into_vm_instruction(
+                instruction,
+                |const_idx| {
+                    constants.get(const_idx).cloned().ok_or_else(|| {
+                        invalid_data(format!(
+                            "Function {} instruction {} references constant {} but constant pool has {} values",
+                            function_name,
+                            instruction_index,
+                            const_idx,
+                            constants.len()
+                        ))
+                    })
+                },
+            )?);
+        }
+
+        let mut vm_function = VMFunction::new(
+            name,
+            parameters,
+            upvalues,
+            parent,
+            register_count,
+            instructions,
+            labels,
+        );
         vm_function.try_normalize_register_count()?;
         Ok(vm_function)
     }
@@ -732,6 +821,46 @@ impl CompiledBinary {
 
             seen.insert(function.name.as_str(), function);
             vm_functions.push(self.try_compiled_function_to_vm_function(function)?);
+        }
+
+        Ok(vm_functions)
+    }
+
+    /// Consumes the compiled binary and converts it to executable VM functions.
+    ///
+    /// This avoids retaining the compiled function records while building the VM
+    /// instruction stream, which keeps peak memory lower for very large
+    /// optimized circuits.
+    pub fn try_into_vm_functions(self) -> BinaryResult<Vec<VMFunction>> {
+        let CompiledBinary {
+            constants,
+            functions,
+            ..
+        } = self;
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut unique_functions: Vec<CompiledFunction> = Vec::new();
+
+        for function in functions {
+            if let Some(existing_index) = seen.get(function.name.as_str()) {
+                if unique_functions[*existing_index] == function {
+                    continue;
+                }
+
+                return Err(invalid_data(format!(
+                    "duplicate function '{}' has conflicting definitions",
+                    function.name
+                )));
+            }
+
+            seen.insert(function.name.clone(), unique_functions.len());
+            unique_functions.push(function);
+        }
+
+        let mut vm_functions = Vec::with_capacity(unique_functions.len());
+        for function in unique_functions {
+            vm_functions.push(Self::try_compiled_function_into_vm_function(
+                &constants, function,
+            )?);
         }
 
         Ok(vm_functions)

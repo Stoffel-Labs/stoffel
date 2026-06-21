@@ -212,6 +212,38 @@ impl VMFunction {
         self.constant_values.as_deref()
     }
 
+    pub fn discard_resolved_instructions(&mut self) {
+        self.resolved_instructions = None;
+        self.constant_values = None;
+    }
+
+    /// Drop the source instruction stream after a runtime representation has
+    /// been lowered.
+    ///
+    /// This is only valid for VM instances that do not need source instructions
+    /// later, such as runs without instruction tracing hooks.
+    pub fn discard_source_instructions(&mut self) {
+        self.instructions.clear();
+        self.instructions.shrink_to_fit();
+        self.labels.clear();
+        self.labels.shrink_to_fit();
+    }
+
+    /// Clone only executable metadata, omitting source instructions and labels.
+    pub fn clone_without_source_instructions(&self) -> Self {
+        Self {
+            resolved_instructions: self.resolved_instructions.clone(),
+            constant_values: self.constant_values.clone(),
+            name: self.name.clone(),
+            parameters: self.parameters.clone(),
+            upvalues: self.upvalues.clone(),
+            parent: self.parent.clone(),
+            register_count: self.register_count,
+            instructions: Vec::new(),
+            labels: HashMap::new(),
+        }
+    }
+
     /// Number of register slots required by the instruction operands and ABI
     /// parameter/return placement.
     ///

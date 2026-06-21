@@ -146,7 +146,6 @@ impl VmError {
             | VmError::JumpTargetOutOfBounds { .. }
             | VmError::ConstantOutOfBounds { .. }
             | VmError::InvalidFunctionNameConstant { .. } => VirtualMachineErrorKind::Runtime,
-            #[cfg(test)]
             VmError::InstructionOutOfBounds { .. } => VirtualMachineErrorKind::Runtime,
             VmError::TableMemory(_) => VirtualMachineErrorKind::TableMemory,
             VmError::ValueOp(error) => error
@@ -319,7 +318,6 @@ pub(crate) enum VmError {
         resolved_instruction_count: usize,
         source_instruction_count: usize,
     },
-    #[cfg(test)]
     #[error("Instruction index {index} out of bounds")]
     InstructionOutOfBounds { index: usize },
     #[error("Jump target {target} out of bounds for instruction stream with {instruction_count} instructions")]

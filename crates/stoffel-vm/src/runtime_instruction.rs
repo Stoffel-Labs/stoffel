@@ -3,7 +3,7 @@ use std::sync::Arc;
 use stoffel_vm_types::activations::{CompareFlag, InstructionPointer};
 use stoffel_vm_types::core_types::Value;
 use stoffel_vm_types::functions::VMFunction;
-use stoffel_vm_types::instructions::{Instruction, ResolvedInstruction};
+use stoffel_vm_types::instructions::ResolvedInstruction;
 use stoffel_vm_types::registers::{RegisterIndex, RETURN_REGISTER_INDEX};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,12 +51,17 @@ impl RuntimeJumpCondition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct RuntimeRegister(usize);
+pub(crate) struct RuntimeRegister(u32);
 
 impl RuntimeRegister {
     pub(crate) fn try_new(register: usize, register_count: usize) -> VmResult<Self> {
         if register < register_count {
-            Ok(Self(register))
+            Ok(Self(u32::try_from(register).map_err(|_| {
+                VmError::RegisterOutOfBounds {
+                    register,
+                    register_count,
+                }
+            })?))
         } else {
             Err(VmError::RegisterOutOfBounds {
                 register,
@@ -70,11 +75,11 @@ impl RuntimeRegister {
     }
 
     pub(crate) const fn index(self) -> usize {
-        self.0
+        self.0 as usize
     }
 
     pub(crate) const fn register_index(self) -> RegisterIndex {
-        RegisterIndex::new(self.0)
+        RegisterIndex::new(self.index())
     }
 }
 
@@ -112,12 +117,17 @@ impl StackOffset {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct JumpTarget(usize);
+pub(crate) struct JumpTarget(u32);
 
 impl JumpTarget {
     pub(crate) fn try_new(target: usize, instruction_count: usize) -> VmResult<Self> {
         if target <= instruction_count {
-            Ok(Self(target))
+            Ok(Self(u32::try_from(target).map_err(|_| {
+                VmError::JumpTargetOutOfBounds {
+                    target,
+                    instruction_count,
+                }
+            })?))
         } else {
             Err(VmError::JumpTargetOutOfBounds {
                 target,
@@ -127,13 +137,12 @@ impl JumpTarget {
     }
 
     pub(crate) const fn index(self) -> usize {
-        self.0
+        self.0 as usize
     }
 }
 
 #[derive(Debug)]
 struct RuntimeInstructionEntry {
-    hook_instruction: Instruction,
     runtime_instruction: RuntimeInstruction,
 }
 
@@ -146,7 +155,7 @@ pub(crate) enum RuntimeInstruction {
     },
     LoadImmediate {
         dest: RuntimeRegister,
-        value: Value,
+        value: Box<Value>,
     },
     Move {
         dest: RuntimeRegister,
@@ -215,26 +224,20 @@ impl RuntimeFunction {
                 function: function.name().to_owned(),
             }
         })?;
-        let source_instructions = function.instructions();
-
-        if resolved_instructions.len() != source_instructions.len() {
+        if resolved_instructions.len() != function.instructions().len() {
             return Err(VmError::RuntimeInstructionMetadataMismatch {
                 function: function.name().to_owned(),
                 resolved_instruction_count: resolved_instructions.len(),
-                source_instruction_count: source_instructions.len(),
+                source_instruction_count: function.instructions().len(),
             });
         }
 
-        let instructions = resolved_instructions
-            .iter()
-            .zip(source_instructions)
-            .map(|(resolved, source)| {
-                Ok(RuntimeInstructionEntry {
-                    hook_instruction: source.clone(),
-                    runtime_instruction: lower_instruction(function, resolved)?,
-                })
-            })
-            .collect::<VmResult<Vec<_>>>()?;
+        let mut instructions = Vec::with_capacity(resolved_instructions.len());
+        for resolved in resolved_instructions {
+            instructions.push(RuntimeInstructionEntry {
+                runtime_instruction: lower_instruction(function, resolved)?,
+            });
+        }
 
         Ok(Self { instructions })
     }
@@ -282,19 +285,14 @@ impl<'function> FetchedInstruction<'function> {
     }
 
     #[inline]
-    pub(crate) fn hook_instruction(&self) -> &Instruction {
-        &self.entry.hook_instruction
-    }
-
-    #[inline]
     pub(crate) fn runtime_instruction(&self) -> &RuntimeInstruction {
         &self.entry.runtime_instruction
     }
 
     #[inline]
     #[cfg(test)]
-    pub(crate) fn instructions(&self) -> (&RuntimeInstruction, &Instruction) {
-        (self.runtime_instruction(), self.hook_instruction())
+    pub(crate) fn runtime_instruction_for_test(&self) -> &RuntimeInstruction {
+        self.runtime_instruction()
     }
 }
 
@@ -312,7 +310,7 @@ fn lower_instruction(
             let value = get_constant_value(vm_function, const_idx)?;
             RuntimeInstruction::LoadImmediate {
                 dest: reg(vm_function, dest)?,
-                value,
+                value: Box::new(value),
             }
         }
         ResolvedInstruction::MOV(dest, src) => RuntimeInstruction::Move {
@@ -460,6 +458,7 @@ fn get_function_name_from_constant(vm_function: &VMFunction, func_idx: usize) ->
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use stoffel_vm_types::instructions::Instruction;
 
     #[test]
     fn stack_offset_resolves_relative_to_top_of_stack() {

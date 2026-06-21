@@ -2,7 +2,7 @@ use super::mpc_operation::PendingMpcOperation;
 use super::{CallStackCheckpoint, VMState, VmEffect, VmExecutionBudget, VmRunSlice};
 use crate::error::{VmError, VmResult};
 use crate::runtime_hooks::HookEvent;
-use crate::runtime_instruction::{FetchedInstruction, RuntimeFunction};
+use crate::runtime_instruction::{FetchedInstruction, RuntimeFunction, RuntimeInstruction};
 use std::sync::Arc;
 use stoffel_vm_types::core_types::Value;
 use stoffel_vm_types::instructions::Instruction;
@@ -54,7 +54,7 @@ enum StepResult {
 }
 
 enum PreparedStep<'function> {
-    Instruction(FetchedInstruction<'function>),
+    Instruction(PreparedInstruction<'function>),
     Return(Value),
     Continue,
 }
@@ -62,6 +62,42 @@ enum PreparedStep<'function> {
 enum CompletedStep {
     Continue,
     Return(Value),
+}
+
+struct PreparedInstruction<'function> {
+    fetched: FetchedInstruction<'function>,
+    hook_instruction: Option<Instruction>,
+}
+
+impl<'function> PreparedInstruction<'function> {
+    fn without_hooks(fetched: FetchedInstruction<'function>) -> Self {
+        Self {
+            fetched,
+            hook_instruction: None,
+        }
+    }
+
+    fn with_hooks(fetched: FetchedInstruction<'function>, hook_instruction: Instruction) -> Self {
+        Self {
+            fetched,
+            hook_instruction: Some(hook_instruction),
+        }
+    }
+
+    #[inline]
+    fn runtime_instruction(&self) -> &RuntimeInstruction {
+        self.fetched.runtime_instruction()
+    }
+
+    fn hook_instruction(&self) -> VmResult<&Instruction> {
+        self.hook_instruction
+            .as_ref()
+            .ok_or(VmError::InstructionOutOfBounds { index: usize::MAX })
+    }
+
+    fn cloned_hook_instruction(&self) -> VmResult<Instruction> {
+        self.hook_instruction().cloned()
+    }
 }
 
 #[derive(Default)]
@@ -140,7 +176,7 @@ impl VMState {
     ) -> VmResult<CompletedStep> {
         let fetched =
             match self.prepare_next_step_without_hooks(context.checkpoint(), runtime_function)? {
-                PreparedStep::Instruction(fetched) => fetched,
+                PreparedStep::Instruction(prepared) => prepared,
                 PreparedStep::Return(value) => return Ok(CompletedStep::Return(value)),
                 PreparedStep::Continue => return Ok(CompletedStep::Continue),
             };
@@ -160,14 +196,14 @@ impl VMState {
         runtime_function: &RuntimeFunction,
     ) -> VmResult<CompletedStep> {
         let fetched = match self.prepare_next_step(context, runtime_function)? {
-            PreparedStep::Instruction(fetched) => fetched,
+            PreparedStep::Instruction(prepared) => prepared,
             PreparedStep::Return(value) => return Ok(CompletedStep::Return(value)),
             PreparedStep::Continue => return Ok(CompletedStep::Continue),
         };
 
         let execution_result = self.execute_local_instruction(
             fetched.runtime_instruction(),
-            fetched.hook_instruction(),
+            fetched.hook_instruction()?,
             context,
         )?;
 
@@ -176,7 +212,7 @@ impl VMState {
 
     fn complete_prepared_instruction(
         &mut self,
-        fetched: FetchedInstruction,
+        fetched: PreparedInstruction,
         execution_result: InstructionOutcome,
         context: ExecutionContext,
     ) -> VmResult<CompletedStep> {
@@ -188,7 +224,7 @@ impl VMState {
         }
 
         if context.hooks_enabled() {
-            let event = HookEvent::AfterInstructionExecute(fetched.hook_instruction().clone());
+            let event = HookEvent::AfterInstructionExecute(fetched.cloned_hook_instruction()?);
             self.trigger_hook_with_snapshot(&event)?;
         }
 
@@ -339,7 +375,7 @@ impl VMState {
 
         let execution_result = self.execute_effect_instruction(
             fetched.runtime_instruction(),
-            fetched.hook_instruction(),
+            fetched.hook_instruction()?,
             context,
         )?;
 
@@ -354,7 +390,8 @@ impl VMState {
                 operation,
                 after_instruction: context
                     .hooks_enabled()
-                    .then(|| fetched.hook_instruction().clone()),
+                    .then(|| fetched.cloned_hook_instruction())
+                    .transpose()?,
             }),
         }
     }
@@ -400,7 +437,9 @@ impl VMState {
             return Ok(PreparedStep::Continue);
         };
 
-        Ok(PreparedStep::Instruction(fetched))
+        Ok(PreparedStep::Instruction(
+            PreparedInstruction::without_hooks(fetched),
+        ))
     }
 
     fn prepare_next_step_with_hooks<'function>(
@@ -432,11 +471,22 @@ impl VMState {
             return Ok(PreparedStep::Continue);
         };
 
+        let hook_instruction = self
+            .program
+            .instruction_at(hook_function_name.as_ref(), instruction_pointer)
+            .cloned()
+            .ok_or(VmError::InstructionOutOfBounds {
+                index: instruction_pointer.index(),
+            })?;
+
         self.set_current_instruction(hook_function_name, instruction_pointer);
-        let event = HookEvent::BeforeInstructionExecute(fetched.hook_instruction().clone());
+        let event = HookEvent::BeforeInstructionExecute(hook_instruction.clone());
         self.trigger_hook_with_snapshot(&event)?;
 
-        Ok(PreparedStep::Instruction(fetched))
+        Ok(PreparedStep::Instruction(PreparedInstruction::with_hooks(
+            fetched,
+            hook_instruction,
+        )))
     }
 
     fn handle_function_end(&mut self, context: ExecutionContext) -> VmResult<Option<Value>> {

@@ -1,0 +1,91 @@
+# syntax=docker/dockerfile:1.4
+
+FROM rustlang/rust:nightly-bookworm AS builder
+
+ARG ENABLE_NAT=false
+ARG PROFILE_BUILD=false
+
+RUN apt-get update && apt-get install -y \
+    git \
+    libssl-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY . .
+COPY --from=coordinator . /stoffel-mpc-coordinator
+COPY --from=network . /stoffel-network
+
+RUN sed -i 's#path = "../StoffelVM/crates/stoffel-vm-types"#path = "/build/crates/stoffel-vm-types"#' \
+      /stoffel-mpc-coordinator/Cargo.toml
+
+RUN printf '%s\n' \
+      '[net]' \
+      'git-fetch-with-cli = true' \
+      '' \
+      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
+      'stoffel-mpc-coordinator = { path = "/stoffel-mpc-coordinator" }' \
+      '' \
+      '[patch."https://github.com/Stoffel-Labs/stoffel-networking.git"]' \
+      'stoffelnet = { path = "/stoffel-network" }' \
+      > /build/.cargo/config.toml
+
+RUN mkdir -p ~/.ssh && \
+    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true
+
+RUN --mount=type=ssh \
+    if [ "$PROFILE_BUILD" = "true" ]; then \
+        export CARGO_PROFILE_RELEASE_DEBUG=1; \
+    fi; \
+    if [ "$ENABLE_NAT" = "true" ]; then \
+        cargo build --release --package stoffel-vm --bin stoffel-run --features nat; \
+    else \
+        cargo build --release --package stoffel-vm --bin stoffel-run; \
+    fi; \
+    if [ "$PROFILE_BUILD" != "true" ]; then \
+        strip target/release/stoffel-run; \
+    fi
+
+RUN cargo build --release --package stoffellang && \
+    mkdir -p /build/programs && \
+    STOFFEL_INLINE_BUDGET=100000000 \
+    STOFFEL_UNROLL_BUDGET=100000000 \
+    STOFFEL_UNROLL_MAX_EXPANSION=100000000 \
+    /build/target/release/stoffellang \
+      --binary \
+      --opt-level 3 \
+      --mpc-backend honeybadger \
+      --mpc-curve bls12-381 \
+      --output /build/programs/mpc_aes128_circuit.stflb \
+      /build/crates/stoffel-lang/examples/mpc_aes128_circuit/main.stfl
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    heaptrack \
+    iproute2 \
+    iputils-ping \
+    libssl3 \
+    linux-perf \
+    netcat-openbsd \
+    net-tools \
+    procps \
+    valgrind \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /build/target/release/stoffel-run /app/stoffel-run
+COPY --from=builder /build/programs /app/programs
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+ENV STOFFEL_PROGRAM="/app/programs/mpc_aes128_circuit.stflb"
+ENV STOFFEL_ENTRY="main"
+ENV STOFFEL_MPC_BACKEND="honeybadger"
+ENV STOFFEL_MPC_CURVE="bls12-381"
+ENV STOFFEL_SKIP_HOST_WAIT="true"
+
+ENTRYPOINT ["/app/entrypoint.sh"]

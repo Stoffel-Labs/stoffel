@@ -132,7 +132,11 @@ impl Program {
         }
     }
 
-    pub fn try_insert(&mut self, function: Function) -> VmResult<()> {
+    fn try_insert_with_source_retention(
+        &mut self,
+        function: Function,
+        retain_vm_source: bool,
+    ) -> VmResult<()> {
         let name = function.name().to_owned();
         if self.functions.contains_key(&name) {
             return Err(VmError::FunctionAlreadyRegistered { function: name });
@@ -143,6 +147,10 @@ impl Program {
                 function.resolve_instructions()?;
                 let runtime = Arc::new(RuntimeFunction::from_vm_function(&function)?);
                 let call_target = VmCallTarget::from_vm_function(&function, Arc::clone(&runtime));
+                function.discard_resolved_instructions();
+                if !retain_vm_source {
+                    function.discard_source_instructions();
+                }
                 RegisteredFunction::Vm {
                     source: Arc::from(function),
                     runtime,
@@ -154,6 +162,14 @@ impl Program {
 
         self.functions.insert(name, registered);
         Ok(())
+    }
+
+    pub fn try_insert(&mut self, function: Function) -> VmResult<()> {
+        self.try_insert_with_source_retention(function, true)
+    }
+
+    pub(crate) fn try_insert_without_vm_source(&mut self, function: Function) -> VmResult<()> {
+        self.try_insert_with_source_retention(function, false)
     }
 
     pub fn try_insert_method(
@@ -258,6 +274,20 @@ impl Program {
                 Err(VmError::MissingResolvedInstructions {
                     function: name.to_owned(),
                 })
+            }
+        }
+    }
+
+    pub(crate) fn discard_vm_source_instructions(&mut self) {
+        for function in self.functions.values_mut() {
+            let RegisteredFunction::Vm { source, .. } = function else {
+                continue;
+            };
+
+            if let Some(source) = Arc::get_mut(source) {
+                source.discard_source_instructions();
+            } else {
+                *source = Arc::new(source.clone_without_source_instructions());
             }
         }
     }
@@ -570,7 +600,7 @@ mod tests {
             .expect("program registration should normalize VM functions");
 
         let function = program.vm_function("secret_frame").unwrap();
-        assert!(function.is_resolved());
+        assert!(!function.is_resolved());
         assert_eq!(function.register_count(), 17);
 
         let CallTarget::Vm(target) = program.call_target("secret_frame").unwrap() else {
@@ -606,21 +636,51 @@ mod tests {
 
         let fetched = FetchedInstruction::fetch(InstructionPointer::new(0), &runtime)
             .expect("first instruction");
-        let (runtime_instruction, _) = fetched.instructions();
         assert!(matches!(
-            runtime_instruction,
+            fetched.runtime_instruction_for_test(),
             RuntimeInstruction::LoadImmediate {
-                value: Value::I64(7),
+                value,
                 dest
-            } if dest.index() == 0
+            } if dest.index() == 0 && value.as_ref() == &Value::I64(7)
         ));
 
         let fetched = FetchedInstruction::fetch(InstructionPointer::new(1), &runtime)
             .expect("call instruction");
-        let (runtime_instruction, _) = fetched.instructions();
         assert!(matches!(
-            runtime_instruction,
+            fetched.runtime_instruction_for_test(),
             RuntimeInstruction::Call { function } if function.as_ref() == "native"
+        ));
+    }
+
+    #[test]
+    fn program_can_discard_source_instructions_after_runtime_lowering() {
+        let mut program = Program::new();
+        program
+            .try_insert(Function::vm(VMFunction::new(
+                "main".to_string(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                1,
+                vec![Instruction::LDI(0, Value::I64(7)), Instruction::RET(0)],
+                HashMap::new(),
+            )))
+            .expect("program registration should lower runtime instructions");
+
+        assert!(program
+            .instruction_at("main", InstructionPointer::new(0))
+            .is_some());
+        program.discard_vm_source_instructions();
+        assert!(program
+            .instruction_at("main", InstructionPointer::new(0))
+            .is_none());
+
+        let runtime = program.runtime_function("main").expect("runtime function");
+        let fetched = FetchedInstruction::fetch(InstructionPointer::new(0), &runtime)
+            .expect("runtime instruction remains available");
+        assert!(matches!(
+            fetched.runtime_instruction_for_test(),
+            RuntimeInstruction::LoadImmediate { value, .. } if value.as_ref() == &Value::I64(7)
         ));
     }
 }

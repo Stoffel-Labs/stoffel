@@ -144,7 +144,7 @@ impl<'state, 'instruction, R: InstructionRuntime + ?Sized>
             }
             RuntimeInstruction::LoadImmediate { dest, value } => {
                 self.state
-                    .execute_ldi(*dest, value.clone(), hooks_enabled)?;
+                    .execute_ldi(*dest, value.as_ref().clone(), hooks_enabled)?;
             }
             RuntimeInstruction::Move { dest, src } => {
                 self.state.execute_mov(*dest, *src, hooks_enabled)?;
@@ -392,7 +392,7 @@ impl VMState {
                 self.execute_ld(*dest, *offset, HOOKS_ENABLED)?;
             }
             RuntimeInstruction::LoadImmediate { dest, value } => {
-                self.execute_ldi(*dest, value.clone(), HOOKS_ENABLED)?;
+                self.execute_ldi(*dest, value.as_ref().clone(), HOOKS_ENABLED)?;
             }
             RuntimeInstruction::Move { dest, src } => {
                 self.execute_mov(*dest, *src, HOOKS_ENABLED)?;
@@ -1570,7 +1570,7 @@ mod tests {
         };
         let instruction = RuntimeInstruction::LoadImmediate {
             dest: runtime_reg(0),
-            value: Value::I64(7),
+            value: Box::new(Value::I64(7)),
         };
         let hook_instruction = Instruction::LDI(0, Value::I64(7));
 

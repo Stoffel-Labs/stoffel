@@ -78,6 +78,29 @@ struct PlannedPreprocessing {
     n_prandint: usize,
 }
 
+fn read_trimmed_u64(path: &str) -> Option<u64> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+fn current_process_rss_bytes() -> Option<u64> {
+    fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                let value = line.strip_prefix("VmRSS:")?;
+                let kb = value.split_whitespace().next()?.parse::<u64>().ok()?;
+                Some(kb.saturating_mul(1024))
+            })
+        })
+}
+
+fn current_cgroup_memory_bytes() -> Option<u64> {
+    read_trimmed_u64("/sys/fs/cgroup/memory.current")
+        .or_else(|| read_trimmed_u64("/sys/fs/cgroup/memory/memory.usage_in_bytes"))
+}
+
 /// Round a demand up to a coarse band for privacy: the observable preprocessing
 /// volume reveals only which band the program's demand falls in, not its exact
 /// operation count. We band to **eighths of an octave** (the next multiple of
@@ -107,8 +130,10 @@ fn band_pow2(n: u64) -> u64 {
 /// material counts to generate up front. Each count is rounded up to a power of
 /// two for privacy (see `band_pow2`); `dynamic` programs (data-dependent loops,
 /// recursion, runtime-sized batches) get an extra octave of headroom because the
-/// static estimate may undercount them. The triple/random counts absorb the
-/// dependency that prandbit generation itself consumes a triple + random per bit.
+/// static estimate may undercount them. The triple count absorbs the dependency
+/// that prandbit generation itself consumes a triple per bit. The random count
+/// only covers program-visible random material; HoneyBadger generates the
+/// random shares needed to build triples inside `run_preprocessing`.
 /// `STOFFEL_PREPROCESSING_TRIPLES` / `STOFFEL_PREPROCESSING_PRANDBITS` override
 /// the estimate for unusually loop-heavy programs.
 fn plan_preprocessing(
@@ -136,6 +161,7 @@ fn plan_preprocessing(
         .map(band_pow2)
         .unwrap_or_else(|| band_pow2(with_headroom(demand.prandbits)));
     let prandints = band_pow2(with_headroom(demand.prandints));
+    let direct_randoms = band_pow2(with_headroom(demand.randoms));
 
     let direct_triples = env_u64("STOFFEL_PREPROCESSING_TRIPLES")
         .map(band_pow2)
@@ -148,8 +174,12 @@ fn plan_preprocessing(
         triple_target = triple_target.max(2 * threshold as u64 + 1);
     }
     let n_triples = band_pow2(triple_target);
+    // HoneyBadger adds and consumes two random shares per triple internally.
+    // `n_random` is the pool left for direct program use and prandbit generation
+    // after triples have been built; adding `2 * n_triples` here makes the
+    // backend generate an extra full random pool.
     let n_random = band_pow2(
-        2u64.saturating_add(2u64.saturating_mul(n_triples))
+        2u64.saturating_add(direct_randoms)
             .saturating_add(prandbits)
             .saturating_add(n_client_random as u64),
     );
@@ -2634,6 +2664,23 @@ where
         my_id,
         preprocessing_started_at.elapsed().as_millis()
     );
+    match current_cgroup_memory_bytes() {
+        Some(bytes) => eprintln!(
+            "[party {}] POST_PREPROCESSING_CGROUP_MEM_BYTES: {}",
+            my_id, bytes
+        ),
+        None => eprintln!(
+            "[party {}] POST_PREPROCESSING_CGROUP_MEM_BYTES: unavailable",
+            my_id
+        ),
+    }
+    match current_process_rss_bytes() {
+        Some(bytes) => eprintln!("[party {}] POST_PREPROCESSING_RSS_BYTES: {}", my_id, bytes),
+        None => eprintln!(
+            "[party {}] POST_PREPROCESSING_RSS_BYTES: unavailable",
+            my_id
+        ),
+    }
 
     if n > 1 {
         eprintln!(
@@ -3644,6 +3691,7 @@ async fn main() {
     let mut as_bootnode = false;
     let mut as_leader = false;
     let mut as_client = false;
+    let mut upload_program_bytes = true;
     let mut bind_addr: Option<SocketAddr> = None;
     let mut party_id: Option<usize> = None;
     let mut bootstrap_addr: Option<SocketAddr> = None;
@@ -3693,6 +3741,8 @@ async fn main() {
             as_leader = true;
         } else if arg == "--client" {
             as_client = true;
+        } else if arg == "--no-program-upload" {
+            upload_program_bytes = false;
         } else if arg == "--nat" {
             _enable_nat = true;
         } else if let Some(_rest) = arg.strip_prefix("--bind") {
@@ -3726,6 +3776,7 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--preproc-store") {
         } else if let Some(_rest) = arg.strip_prefix("--local-store") {
         } else if let Some(_rest) = arg.strip_prefix("--advertise") {
+        } else if let Some(_rest) = arg.strip_prefix("--no-program-upload") {
         }
     }
 
@@ -3947,6 +3998,7 @@ async fn main() {
                     advertise_addr = Some(v.parse().expect("Invalid --advertise addr"));
                 }
             }
+            "--no-program-upload" => {}
             _ => {}
         }
     }
@@ -4269,8 +4321,15 @@ async fn main() {
             my_id, party_bind, bind, bootnode_connect
         );
 
-        // Register with our own bootnode and wait for session
-        // Leader uploads program bytes so other parties can fetch them
+        // Register with our own bootnode and wait for session. By default the
+        // leader uploads program bytes so parties without a local copy can fetch
+        // them; mounted-program deployments can opt out to avoid a large
+        // discovery message.
+        let program_bytes = if upload_program_bytes {
+            Some(bytes)
+        } else {
+            None
+        };
         let session_info = match register_and_wait_for_session(
             &mut mgr,
             SessionRegistrationConfig {
@@ -4282,7 +4341,7 @@ async fn main() {
                 n_parties: n,
                 threshold: t,
                 timeout: session_registration_timeout(),
-                program_bytes: Some(bytes), // Leader uploads program bytes
+                program_bytes,
             },
         )
         .await
@@ -4357,9 +4416,15 @@ async fn main() {
             my_id, actual_listen, bootnode
         );
 
-        // Register with bootnode and wait for session to be announced
-        // This blocks until all n parties have registered
-        // Upload program bytes so bootnode can distribute to parties that don't have it
+        // Register with bootnode and wait for session to be announced. This
+        // blocks until all n parties have registered. By default parties upload
+        // program bytes so the bootnode can distribute to parties that don't
+        // have a local copy; mounted-program deployments can opt out.
+        let program_bytes = if upload_program_bytes {
+            Some(bytes)
+        } else {
+            None
+        };
         let session_info = match register_and_wait_for_session(
             &mut mgr,
             SessionRegistrationConfig {
@@ -4371,7 +4436,7 @@ async fn main() {
                 n_parties: n,
                 threshold: t,
                 timeout: session_registration_timeout(),
-                program_bytes: Some(bytes), // Upload program bytes
+                program_bytes,
             },
         )
         .await
@@ -4424,7 +4489,7 @@ async fn main() {
         CompiledBinary::deserialize(&mut BufReader::new(f)).expect("deserialize compiled binary");
     let client_input_types = manifest_client_input_types(&binary);
     let preprocessing_demand = binary.client_io_manifest.preprocessing_demand;
-    let functions = match binary.try_to_vm_functions() {
+    let functions = match binary.try_into_vm_functions() {
         Ok(functions) => functions,
         Err(err) => {
             eprintln!("Error: invalid compiled program: {:?}", err);
@@ -4452,7 +4517,12 @@ async fn main() {
 
     // Register all functions
     for f in functions {
-        if let Err(err) = vm.try_register_function(f) {
+        let result = if trace_instr {
+            vm.try_register_function(f)
+        } else {
+            vm.try_register_function_without_source(f)
+        };
+        if let Err(err) = result {
             eprintln!("Error: invalid VM function: {}", err);
             exit(3);
         }
@@ -4608,6 +4678,10 @@ async fn main() {
             },
             0,
         );
+    }
+
+    if !trace_instr {
+        vm.discard_vm_source_instructions();
     }
 
     // =====================================================================
@@ -5402,6 +5476,7 @@ Flags:
   --bootnode              Run as bootnode only (coordinates party discovery)
   --leader                Run as leader: bootnode + party 0 in one process
   --client                Run as client (provide inputs to MPC network)
+  --no-program-upload     Do not upload program bytes during session registration
   --bind <addr:port>      Bind address for bootnode or party listen
   --party-id <usize>      Party id (party mode, 0-indexed)
   --bootstrap <addr:port> Bootnode address (party mode or client mode)
@@ -5570,15 +5645,15 @@ mod tests {
     #[test]
     fn plan_for_single_division_folds_prandbit_cost_into_triples_and_randoms() {
         // 16 prandbits + 1 prandint (one secure fix64 / constant). prandbit
-        // generation consumes a triple + random per bit, so the triple/random
-        // pools must cover that on top of the banded prandbit count. The random
-        // pool (2 + 2*16 triples + 16 prandbits = 50) bands up to the next
-        // eighth of its octave (52).
+        // generation consumes a triple + random per bit, so the planned triple
+        // and random pools must cover the banded prandbit count. HoneyBadger
+        // generates the random shares needed to build triples internally, so the
+        // visible random pool is only the baseline plus prandbits.
         let plan = plan_preprocessing(&demand(0, 16, 1, false), 1, 0);
         assert_eq!(plan.n_prandbit, 16);
         assert_eq!(plan.n_prandint, 1);
         assert_eq!(plan.n_triples, 16);
-        assert_eq!(plan.n_random, 52);
+        assert_eq!(plan.n_random, 18);
     }
 
     #[test]
@@ -5594,12 +5669,13 @@ mod tests {
     fn plan_for_secret_multiplication_floors_to_protocol_triple_batch() {
         // One triple demanded, but the protocol's minimum batch is 2t+1 = 3.
         // Eighth-octave banding leaves 3 as-is (its octave floor is 2, so the
-        // granularity is 1), and the random pool (2 + 2*3 = 8) is already a
-        // clean octave boundary.
+        // granularity is 1). The requested random pool stays at the baseline
+        // because HoneyBadger generates the random shares used to build triples
+        // inside preprocessing.
         let plan = plan_preprocessing(&demand(1, 0, 0, false), 1, 0);
         assert_eq!(plan.n_prandbit, 0);
         assert_eq!(plan.n_triples, 3);
-        assert_eq!(plan.n_random, 8);
+        assert_eq!(plan.n_random, 2);
     }
 
     #[test]

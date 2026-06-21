@@ -2096,6 +2096,7 @@ version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 dependencies = [
+ "powerfmt",
  "serde_core",
 ]
 
@@ -3682,6 +3683,8 @@ checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
  "num-integer",
  "num-traits",
+ "rand 0.8.6",
+ "serde",
 ]
 
 [[package]]
@@ -5206,7 +5209,7 @@ dependencies = [
 [[package]]
 name = "stoffel-mpc-coordinator"
 version = "0.1.0"
-source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-feature-gates-and-multi-type-awareness#098e4285213fa0a12470f58a9ed813f28d483575"
+source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=dev#cf632ff3575c8a7ef6b2a706a4fe0e4bc37be587"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -5279,7 +5282,7 @@ dependencies = [
 [[package]]
 name = "stoffelmpc-mpc"
 version = "0.1.0"
-source = "git+https://github.com/Stoffel-Labs/mpc-protocols.git?branch=temp%2Fmonorepo-network-dep#db17115a343ede00c0cd65b13a5ec341b1697b09"
+source = "git+https://github.com/Stoffel-Labs/mpc-protocols.git?branch=temp%2Freverted-stuff-monorepo-network-dep#87e81ccb64dcd4ac548dbc0b0a3da9412e4e5955"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
@@ -5295,6 +5298,7 @@ dependencies = [
  "itertools 0.14.0",
  "num-bigint 0.4.6",
  "num-integer",
+ "num-traits",
  "rand 0.7.3",
  "reed-solomon-erasure",
  "rs_merkle",
@@ -5308,13 +5312,14 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "turmoil",
  "uuid",
 ]
 
 [[package]]
 name = "stoffelmpc-network"
 version = "0.1.0"
-source = "git+https://github.com/Stoffel-Labs/mpc-protocols.git?branch=temp%2Fmonorepo-network-dep#db17115a343ede00c0cd65b13a5ec341b1697b09"
+source = "git+https://github.com/Stoffel-Labs/mpc-protocols.git?branch=temp%2Freverted-stuff-monorepo-network-dep#87e81ccb64dcd4ac548dbc0b0a3da9412e4e5955"
 dependencies = [
  "ark-ff 0.5.0",
  "ark-serialize 0.5.0",
@@ -5325,6 +5330,7 @@ dependencies = [
  "serde",
  "stoffelnet",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -5554,11 +5560,12 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.49"
+version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "711a53c2d47bbd818258c498c8dbfe186a2526c631495cfe7e078567f86b8469"
+checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
 dependencies = [
  "deranged",
+ "itoa",
  "num-conv",
  "powerfmt",
  "serde_core",
@@ -5568,15 +5575,15 @@ dependencies = [
 
 [[package]]
 name = "time-core"
-version = "0.1.9"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
+checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
 
 [[package]]
 name = "time-macros"
-version = "0.2.29"
+version = "0.2.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71c652a3727a9cbb9a02f707f530b618ce00d0ccd762009c8c23bd191df3c17d"
+checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
 dependencies = [
  "num-conv",
  "time-core",

@@ -1,0 +1,229 @@
+networks:
+  stoffel:
+    driver: bridge
+
+x-party: &party
+  build:
+    context: .
+    dockerfile: Dockerfile.benchmark
+    args:
+      PROFILE_BUILD: "${STOFFEL_PROFILE_BUILD:-false}"
+    additional_contexts:
+      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-../stoffel-mpc-coordinator}"
+      network: "${STOFFEL_NETWORK_CONTEXT:-../stoffel-network}"
+  volumes:
+    - ./ids:/app/ids:ro
+    - ./profiles:/app/profiles
+  cap_add: [NET_ADMIN, SYS_PTRACE, SYS_ADMIN, PERFMON]
+  security_opt:
+    - seccomp:unconfined
+  entrypoint: ["/bin/bash", "-c"]
+  command:
+    - |
+      NETEM=""
+      if [ -n "$${NET_LOSS}" ]; then NETEM="$$NETEM loss $${NET_LOSS}%"; fi
+      if [ -n "$${NET_BANDWIDTH}" ]; then NETEM="$$NETEM rate $${NET_BANDWIDTH}mbit"; fi
+      if [ -n "$$NETEM" ]; then
+        tc qdisc add dev eth0 root netem $$NETEM \
+          || echo "WARNING: tc failed" >&2
+      fi
+      /app/entrypoint.sh; EXIT=$$?
+      MEM=$$(cat /sys/fs/cgroup/memory.peak 2>/dev/null \
+          || cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null \
+          || cat /sys/fs/cgroup/memory.current 2>/dev/null)
+      [ -n "$$MEM" ] && echo "PEAK_MEM_BYTES: $$MEM"
+      exit $$EXIT
+
+x-common-env: &common-env
+  STOFFEL_AUTH_TOKEN: "${STOFFEL_AUTH_TOKEN:-stoffel-benchmark-token}"
+  STOFFEL_N_PARTIES: "5"
+  STOFFEL_THRESHOLD: "1"
+  STOFFEL_ENTRY: main
+  STOFFEL_COORD_ADDR: "coordinator.stoffel-coord.local:31415"
+  STOFFEL_TIMESTAMP: "0"
+  STOFFEL_PROGRAM: "${STOFFEL_PROGRAM:-/app/programs/mpc_aes128_circuit.stflb}"
+  STOFFEL_MPC_BACKEND: ${STOFFEL_MPC_BACKEND:-honeybadger}
+  STOFFEL_MPC_CURVE: ${STOFFEL_MPC_CURVE:-bls12-381}
+  RUST_MIN_STACK: ${RUST_MIN_STACK:-67108864}
+  RUST_LOG: "${RUST_LOG:-info}"
+  RUST_BACKTRACE: "1"
+  NET_LOSS: "${NET_LOSS:-}"
+  NET_BANDWIDTH: "${NET_BANDWIDTH:-}"
+  STOFFEL_SKIP_HOST_WAIT: "true"
+  STOFFEL_PROFILE: "${STOFFEL_PROFILE:-none}"
+  STOFFEL_PROFILE_PARTY_ID: "${STOFFEL_PROFILE_PARTY_ID:-0}"
+  STOFFEL_PROFILE_DIR: "${STOFFEL_PROFILE_DIR:-/app/profiles}"
+  STOFFEL_PROFILE_LABEL: "${STOFFEL_PROFILE_LABEL:-}"
+  STOFFEL_PERF_FREQUENCY: "${STOFFEL_PERF_FREQUENCY:-99}"
+  STOFFEL_UPLOAD_PROGRAM_BYTES: "${STOFFEL_UPLOAD_PROGRAM_BYTES:-false}"
+
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: docker/coordinator.Dockerfile
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-../stoffel-mpc-coordinator}"
+        network: "${STOFFEL_NETWORK_CONTEXT:-../stoffel-network}"
+    volumes:
+      - ./ids:/app/ids:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        print_mem() {
+          MEM=$$(cat /sys/fs/cgroup/memory.peak 2>/dev/null \
+              || cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null \
+              || cat /sys/fs/cgroup/memory.current 2>/dev/null)
+          [ -n "$$MEM" ] && echo "COORDINATOR_PEAK_MEM_BYTES: $$MEM"
+        }
+
+        /app/stoffel-coordinator \
+          --bind-addr 0.0.0.0 \
+          --port 31415 \
+          --hash 0000000000000000000000000000000000000000000000000000000000000000 \
+          --server-cert /app/ids/server_cert.crt \
+          --server-key /app/ids/server_key.der \
+          --n 5 \
+          --t 1 \
+          --mpc-backend ${STOFFEL_MPC_BACKEND:-honeybadger} \
+          --mpc-curve ${STOFFEL_MPC_CURVE:-bls12-381} \
+          --n-inputs 0 \
+          --output-clients /app/ids/clients/cert0.crt \
+          --initial-mpc-nodes /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt &
+        COORD_PID=$$!
+
+        trap 'kill -TERM "$$COORD_PID" 2>/dev/null; wait "$$COORD_PID"; EXIT=$$?; print_mem; exit "$$EXIT"' TERM INT
+        wait "$$COORD_PID"
+        EXIT=$$?
+        print_mem
+        exit "$$EXIT"
+    ports:
+      - "31415:31415"
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -tuln 2>/dev/null | grep -q ':31415' || ss -tuln | grep -q ':31415'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      stoffel:
+        aliases: [coordinator.stoffel-coord.local]
+
+  party0:
+    <<: *party
+    environment:
+      <<: *common-env
+      STOFFEL_ROLE: leader
+      STOFFEL_PARTY_ID: "0"
+      STOFFEL_BIND_ADDR: "0.0.0.0:9000"
+      STOFFEL_RPC_ADDR: "0.0.0.0:16180"
+      STOFFEL_CERT: /app/ids/nodes/cert0.crt
+      STOFFEL_KEY: /app/ids/nodes/key0.der
+    ports:
+      - "9000:9000"
+      - "10000:10000"
+      - "16180:16180"
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -tuln 2>/dev/null | grep -q ':9000' || ss -tuln | grep -q ':9000'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      stoffel:
+        aliases: [party0.stoffel-coord.local]
+
+  party1:
+    <<: *party
+    environment:
+      <<: *common-env
+      STOFFEL_ROLE: party
+      STOFFEL_PARTY_ID: "1"
+      STOFFEL_BIND_ADDR: "0.0.0.0:9001"
+      STOFFEL_RPC_ADDR: "0.0.0.0:16181"
+      STOFFEL_CERT: /app/ids/nodes/cert1.crt
+      STOFFEL_KEY: /app/ids/nodes/key1.der
+      STOFFEL_BOOTSTRAP_ADDR: "party0.stoffel-coord.local:9000"
+    ports:
+      - "9001:9001"
+      - "16181:16181"
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      party0:
+        condition: service_healthy
+    networks:
+      stoffel:
+        aliases: [party1.stoffel-coord.local]
+
+  party2:
+    <<: *party
+    environment:
+      <<: *common-env
+      STOFFEL_ROLE: party
+      STOFFEL_PARTY_ID: "2"
+      STOFFEL_BIND_ADDR: "0.0.0.0:9002"
+      STOFFEL_RPC_ADDR: "0.0.0.0:16182"
+      STOFFEL_CERT: /app/ids/nodes/cert2.crt
+      STOFFEL_KEY: /app/ids/nodes/key2.der
+      STOFFEL_BOOTSTRAP_ADDR: "party0.stoffel-coord.local:9000"
+    ports:
+      - "9002:9002"
+      - "16182:16182"
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      party0:
+        condition: service_healthy
+    networks:
+      stoffel:
+        aliases: [party2.stoffel-coord.local]
+
+  party3:
+    <<: *party
+    environment:
+      <<: *common-env
+      STOFFEL_ROLE: party
+      STOFFEL_PARTY_ID: "3"
+      STOFFEL_BIND_ADDR: "0.0.0.0:9003"
+      STOFFEL_RPC_ADDR: "0.0.0.0:16183"
+      STOFFEL_CERT: /app/ids/nodes/cert3.crt
+      STOFFEL_KEY: /app/ids/nodes/key3.der
+      STOFFEL_BOOTSTRAP_ADDR: "party0.stoffel-coord.local:9000"
+    ports:
+      - "9003:9003"
+      - "16183:16183"
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      party0:
+        condition: service_healthy
+    networks:
+      stoffel:
+        aliases: [party3.stoffel-coord.local]
+
+  party4:
+    <<: *party
+    environment:
+      <<: *common-env
+      STOFFEL_ROLE: party
+      STOFFEL_PARTY_ID: "4"
+      STOFFEL_BIND_ADDR: "0.0.0.0:9004"
+      STOFFEL_RPC_ADDR: "0.0.0.0:16184"
+      STOFFEL_CERT: /app/ids/nodes/cert4.crt
+      STOFFEL_KEY: /app/ids/nodes/key4.der
+      STOFFEL_BOOTSTRAP_ADDR: "party0.stoffel-coord.local:9000"
+    ports:
+      - "9004:9004"
+      - "16184:16184"
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      party0:
+        condition: service_healthy
+    networks:
+      stoffel:
+        aliases: [party4.stoffel-coord.local]

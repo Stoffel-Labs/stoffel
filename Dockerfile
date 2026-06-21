@@ -63,9 +63,12 @@ RUN --mount=type=ssh \
 # Compile the AES-128 secret-bit circuit example into VM bytecode for compose runs.
 RUN cargo build --release --package stoffellang && \
     mkdir -p /build/crates/stoffel-lang/examples/mpc_aes128_circuit/target && \
+    STOFFEL_INLINE_BUDGET=100000000 \
+    STOFFEL_UNROLL_BUDGET=100000000 \
+    STOFFEL_UNROLL_MAX_EXPANSION=100000000 \
     /build/target/release/stoffellang \
       --binary \
-      --opt-level 2 \
+      --opt-level 3 \
       --mpc-backend honeybadger \
       --mpc-curve bls12-381 \
       --output /build/crates/stoffel-lang/examples/mpc_aes128_circuit/target/mpc_aes128_circuit.stflb \
