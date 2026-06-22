@@ -38,6 +38,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
 stoffel-mpc-coordinator = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev", default-features = false, features = ["off-chain", "on-chain"] }
 stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
+stoffel-vm-runner = { version = "0.1.0", path = "../stoffel-vm-runner" }
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
 stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "main" }
 

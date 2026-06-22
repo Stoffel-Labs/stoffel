@@ -24,8 +24,8 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-use crate::net::program_id_from_bytes;
-use crate::net::{MpcBackendKind, MpcCurveConfig};
+use stoffel_vm::net::program_id_from_bytes;
+use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_AUTH_TOKEN: &str = "stoffel-local-coordinator-runner";
@@ -1197,7 +1197,7 @@ fn parse_input_as_field(value: &str) -> LocalCoordinatorRunnerResult<Fr> {
             "invalid integer client input '{value}': {error}"
         ))
     })?;
-    Ok(crate::net::field_from_i64::<Fr>(value))
+    Ok(stoffel_vm::net::field_from_i64::<Fr>(value))
 }
 
 enum PartyRole {

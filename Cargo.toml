@@ -5,6 +5,7 @@ members = [
     "crates/stoffel-lang",
     "crates/stoffel-rust-sdk",
     "crates/stoffel-vm",
+    "crates/stoffel-vm-runner",
     "crates/stoffel-vm-types",
     "crates/stoffel-lang/examples/mpc_aes128_cbc_client_io",
 ]
