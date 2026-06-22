@@ -4,8 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "Build-time Rust binding generation for Stoffel programs"
 license = "MIT"
-publish = false
+repository = "https://github.com/Stoffel-Labs/StoffelVM"
+homepage = "https://stoffelmpc.com"
+keywords = ["mpc", "bindings", "codegen", "compiler", "rust"]
+categories = ["development-tools::build-utils", "compilers"]
+publish = true
 
 [dependencies]
-stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
+stoffellang = "0.1.0"
 thiserror = "2"
