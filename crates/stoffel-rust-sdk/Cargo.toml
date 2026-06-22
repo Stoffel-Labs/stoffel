@@ -39,8 +39,8 @@ tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
 stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
-stoffel-mpc-coordinator-shared = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev" }
-stoffel-mpc-coordinator-off-chain = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev" }
+stoffel-mpc-coordinator-shared = "0.1.0"
+stoffel-mpc-coordinator-off-chain = "0.1.0"
 stoffel-mpc-coordinator-on-chain = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev", optional = true }
 stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
 stoffel-vm-runner = { version = "0.1.0", path = "../stoffel-vm-runner" }
