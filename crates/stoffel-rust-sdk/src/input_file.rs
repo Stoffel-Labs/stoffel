@@ -305,7 +305,7 @@ fn parse_scalar_or_json(raw: &str) -> Result<Value> {
 }
 
 fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(Error::InvalidInput(
             "hex byte input must contain an even number of digits".to_owned(),
         ));

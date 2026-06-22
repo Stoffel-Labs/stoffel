@@ -5597,52 +5597,50 @@ impl<'a> SemanticAnalyzer<'a> {
                     if matches!(key_type, SymbolType::Unknown) {
                         key_type = key_ty.clone();
                         key_type_from_untyped_literal = Self::is_untyped_int_literal(&checked_key);
-                    } else if !matches!(key_ty, SymbolType::Unknown) {
-                        if !(key_type_from_untyped_literal
+                    } else if !matches!(key_ty, SymbolType::Unknown)
+                        && !(key_type_from_untyped_literal
                             && Self::is_untyped_int_literal(&checked_key))
-                        {
-                            Self::refine_argument_with_expected(
-                                &mut checked_key,
-                                &mut key_ty,
-                                &key_type,
-                            );
-                            if !Self::types_compatible(&key_ty, &key_type) {
-                                self.error_reporter.add_error(CompilerError::type_error(
-                                    format!(
-                                        "Dict keys must share one type: expected '{}', found '{}'",
-                                        declared_type_to_string(&key_type),
-                                        declared_type_to_string(&key_ty)
-                                    ),
-                                    checked_key.location(),
-                                ));
-                                return Err(());
-                            }
+                    {
+                        Self::refine_argument_with_expected(
+                            &mut checked_key,
+                            &mut key_ty,
+                            &key_type,
+                        );
+                        if !Self::types_compatible(&key_ty, &key_type) {
+                            self.error_reporter.add_error(CompilerError::type_error(
+                                format!(
+                                    "Dict keys must share one type: expected '{}', found '{}'",
+                                    declared_type_to_string(&key_type),
+                                    declared_type_to_string(&key_ty)
+                                ),
+                                checked_key.location(),
+                            ));
+                            return Err(());
                         }
                     }
                     if matches!(value_type, SymbolType::Unknown) {
                         value_type = val_ty.clone();
                         value_type_from_untyped_literal =
                             Self::is_untyped_int_literal(&checked_value);
-                    } else if !matches!(val_ty, SymbolType::Unknown) {
-                        if !(value_type_from_untyped_literal
+                    } else if !matches!(val_ty, SymbolType::Unknown)
+                        && !(value_type_from_untyped_literal
                             && Self::is_untyped_int_literal(&checked_value))
-                        {
-                            Self::refine_argument_with_expected(
-                                &mut checked_value,
-                                &mut val_ty,
-                                &value_type,
-                            );
-                            if !Self::types_compatible(&val_ty, &value_type) {
-                                self.error_reporter.add_error(CompilerError::type_error(
-                                    format!(
-                                        "Dict values must share one type: expected '{}', found '{}'",
-                                        declared_type_to_string(&value_type),
-                                        declared_type_to_string(&val_ty)
-                                    ),
-                                    checked_value.location(),
-                                ));
-                                return Err(());
-                            }
+                    {
+                        Self::refine_argument_with_expected(
+                            &mut checked_value,
+                            &mut val_ty,
+                            &value_type,
+                        );
+                        if !Self::types_compatible(&val_ty, &value_type) {
+                            self.error_reporter.add_error(CompilerError::type_error(
+                                format!(
+                                    "Dict values must share one type: expected '{}', found '{}'",
+                                    declared_type_to_string(&value_type),
+                                    declared_type_to_string(&val_ty)
+                                ),
+                                checked_value.location(),
+                            ));
+                            return Err(());
                         }
                     }
                     checked_pairs.push((checked_key, checked_value));
@@ -5696,18 +5694,18 @@ impl<'a> SemanticAnalyzer<'a> {
                             return Err(());
                         }
                     }
-                    SymbolType::Dict(key_ty, _) => {
-                        if !Self::types_compatible(index_type.underlying_type(), key_ty) {
-                            self.error_reporter.add_error(CompilerError::type_error(
-                                format!(
-                                    "Dict key must be '{}', found '{}'",
-                                    declared_type_to_string(key_ty),
-                                    declared_type_to_string(&index_type)
-                                ),
-                                checked_index.location(),
-                            ));
-                            return Err(());
-                        }
+                    SymbolType::Dict(key_ty, _)
+                        if !Self::types_compatible(index_type.underlying_type(), key_ty) =>
+                    {
+                        self.error_reporter.add_error(CompilerError::type_error(
+                            format!(
+                                "Dict key must be '{}', found '{}'",
+                                declared_type_to_string(key_ty),
+                                declared_type_to_string(&index_type)
+                            ),
+                            checked_index.location(),
+                        ));
+                        return Err(());
                     }
                     _ => {}
                 }

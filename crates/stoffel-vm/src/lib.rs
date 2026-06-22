@@ -1,3 +1,10 @@
+#![allow(
+    clippy::blocks_in_conditions,
+    clippy::len_without_is_empty,
+    clippy::too_many_arguments,
+    clippy::while_let_loop
+)]
+
 pub mod cffi;
 pub mod core_vm;
 mod error;

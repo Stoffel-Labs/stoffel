@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Build-time Rust binding generation for Stoffel programs"
 license = "MIT"
+repository = "https://github.com/Stoffel-Labs/StoffelVM"
 publish = false
 
 [dependencies]
