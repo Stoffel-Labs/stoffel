@@ -1,6 +1,6 @@
-# StoffelVM
-![Discord](https://img.shields.io/discord/1300834528042160150?label=discord)
-[![GitHub License](https://img.shields.io/github/license/Stoffel-Labs/StoffelVM)](LICENSE)
+# stoffel
+[![GitHub License](https://img.shields.io/github/license/Stoffel-Labs/stoffel)](LICENSE)
+[![Reddit](https://img.shields.io/reddit/subreddit-subscribers/StoffelMPC?style=social&label=r%2FStoffelMPC)](https://www.reddit.com/r/StoffelMPC/)
 
 This repository contains the core crates of the Stoffel Virtual Machine, a register-based VM built for both local execution and networked multiparty computation (MPC).
 
@@ -165,7 +165,7 @@ Now that you're familiar with the basics of Stoffel VM, good places to explore n
 ## Learn More
 
 To learn more about what you can build with Stoffel, visit 
-[stoffelmpc.com](https://stoffelmpc.com?utm_source=github&utm_medium=readme&utm_campaign=stoffelvm-repo&utm_term=mpc)
+[stoffelmpc.com](https://stoffelmpc.com?utm_source=github&utm_medium=readme&utm_campaign=stoffel-repo&utm_term=mpc)
 
 ## Compiled Bytecode
 
@@ -244,7 +244,7 @@ Run local MPC development mode when `stoffel-run` is available:
 
 ```bash
 cargo build -p stoffel-vm --bin stoffel-run
-stoffel dev --runner /path/to/StoffelVM/target/debug/stoffel-run --parties 5 --threshold 1 --input a=40 --input b=2
+stoffel dev --runner /path/to/stoffel/target/debug/stoffel-run --parties 5 --threshold 1 --input a=40 --input b=2
 ```
 
 `stoffel dev` runs once, watches `Stoffel.toml` and the configured source tree,
