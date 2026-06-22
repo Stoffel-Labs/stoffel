@@ -17,18 +17,11 @@ FROM chef AS planner
 COPY crates/stoffel-vm-types /StoffelVM/crates/stoffel-vm-types
 COPY docker/coordinator-wrapper /build/coordinator-wrapper
 COPY --from=coordinator . /stoffel-mpc-coordinator
-COPY --from=network . /stoffel-network
 
 RUN mkdir -p /build/.cargo && \
     printf '%s\n' \
       '[net]' \
       'git-fetch-with-cli = true' \
-      '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
-      'stoffel-mpc-coordinator = { path = "/stoffel-mpc-coordinator" }' \
-      '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-networking.git"]' \
-      'stoffelnet = { path = "/stoffel-network" }' \
       '' \
       '[patch."https://github.com/Stoffel-Labs/StoffelVM.git"]' \
       'stoffel-vm-types = { path = "/StoffelVM/crates/stoffel-vm-types" }' \
@@ -46,7 +39,6 @@ COPY --from=planner /build/coordinator-wrapper/recipe.json /build/coordinator-wr
 COPY --from=planner /build/.cargo /build/.cargo
 COPY --from=planner /StoffelVM/crates/stoffel-vm-types /StoffelVM/crates/stoffel-vm-types
 COPY --from=planner /stoffel-mpc-coordinator /stoffel-mpc-coordinator
-COPY --from=planner /stoffel-network /stoffel-network
 
 WORKDIR /build/coordinator-wrapper
 
@@ -61,12 +53,6 @@ RUN mkdir -p /build/.cargo && \
     printf '%s\n' \
       '[net]' \
       'git-fetch-with-cli = true' \
-      '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
-      'stoffel-mpc-coordinator = { path = "/stoffel-mpc-coordinator" }' \
-      '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-networking.git"]' \
-      'stoffelnet = { path = "/stoffel-network" }' \
       '' \
       '[patch."https://github.com/Stoffel-Labs/StoffelVM.git"]' \
       'stoffel-vm-types = { path = "/StoffelVM/crates/stoffel-vm-types" }' \

@@ -15,7 +15,6 @@ x-party-common: &party-common
     dockerfile: Dockerfile
     additional_contexts:
       coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-../stoffel-mpc-coordinator}"
-      network: "${STOFFEL_NETWORK_CONTEXT:-../stoffel-network}"
   networks:
     stoffel-net:
   volumes:
@@ -39,7 +38,6 @@ services:
       dockerfile: docker/coordinator.Dockerfile
       additional_contexts:
         coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-../stoffel-mpc-coordinator}"
-        network: "${STOFFEL_NETWORK_CONTEXT:-../stoffel-network}"
     container_name: stoffel-coordinator
     hostname: coordinator
     command:

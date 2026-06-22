@@ -26,7 +26,6 @@ WORKDIR /build
 
 COPY . .
 COPY --from=coordinator . /stoffel-mpc-coordinator
-COPY --from=network . /stoffel-network
 RUN sed -i 's#path = "../StoffelVM/crates/stoffel-vm-types"#path = "/build/crates/stoffel-vm-types"#' \
       /stoffel-mpc-coordinator/Cargo.toml
 
@@ -34,11 +33,6 @@ RUN printf '%s\n' \
       '[net]' \
       'git-fetch-with-cli = true' \
       '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
-      'stoffel-mpc-coordinator = { path = "/stoffel-mpc-coordinator" }' \
-      '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-networking.git"]' \
-      'stoffelnet = { path = "/stoffel-network" }' \
       > /build/.cargo/config.toml
 
 # Configure git for private repos if using SSH

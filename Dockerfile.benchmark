@@ -16,7 +16,6 @@ FROM chef AS planner
 
 COPY . .
 COPY --from=coordinator . /stoffel-mpc-coordinator
-COPY --from=network . /stoffel-network
 
 RUN sed -i 's#path = "../StoffelVM/crates/stoffel-vm-types"#path = "/build/crates/stoffel-vm-types"#' \
       /stoffel-mpc-coordinator/Cargo.toml
@@ -26,11 +25,6 @@ RUN mkdir -p /build/.cargo && \
       '[net]' \
       'git-fetch-with-cli = true' \
       '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
-      'stoffel-mpc-coordinator = { path = "/stoffel-mpc-coordinator" }' \
-      '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-networking.git"]' \
-      'stoffelnet = { path = "/stoffel-network" }' \
       > /build/.cargo/config.toml
 
 RUN cargo chef prepare --recipe-path recipe.json
@@ -43,7 +37,6 @@ ARG PROFILE_BUILD=false
 COPY --from=planner /build/recipe.json /build/recipe.json
 COPY --from=planner /build/.cargo /build/.cargo
 COPY --from=planner /stoffel-mpc-coordinator /stoffel-mpc-coordinator
-COPY --from=planner /stoffel-network /stoffel-network
 
 RUN mkdir -p ~/.ssh && \
     ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true
@@ -67,11 +60,6 @@ RUN mkdir -p /build/.cargo && \
       '[net]' \
       'git-fetch-with-cli = true' \
       '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
-      'stoffel-mpc-coordinator = { path = "/stoffel-mpc-coordinator" }' \
-      '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-networking.git"]' \
-      'stoffelnet = { path = "/stoffel-network" }' \
       > /build/.cargo/config.toml
 
 RUN --mount=type=ssh \

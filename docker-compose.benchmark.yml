@@ -10,7 +10,6 @@ x-party: &party
       PROFILE_BUILD: "${STOFFEL_PROFILE_BUILD:-false}"
     additional_contexts:
       coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-../stoffel-mpc-coordinator}"
-      network: "${STOFFEL_NETWORK_CONTEXT:-../stoffel-network}"
   volumes:
     - ./ids:/app/ids:ro
     - ./profiles:/app/profiles
@@ -64,7 +63,6 @@ services:
       dockerfile: docker/coordinator.Dockerfile
       additional_contexts:
         coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-../stoffel-mpc-coordinator}"
-        network: "${STOFFEL_NETWORK_CONTEXT:-../stoffel-network}"
     volumes:
       - ./ids:/app/ids:ro
     entrypoint: ["/bin/sh", "-c"]
