@@ -368,60 +368,6 @@ impl CodeGenerator {
         vr
     }
 
-    fn emit_spill_key_load(
-        out: &mut Vec<Instruction>,
-        constants: &mut Vec<Constant>,
-        next_virtual_reg: &mut usize,
-        secrecy_map: &mut HashMap<VirtualRegister, bool>,
-        spilled_vr: VirtualRegister,
-    ) -> VirtualRegister {
-        let key = Constant::String(format!("__stoffel_spill_{}", spilled_vr.0));
-        constants.push(key.clone());
-        let key_vr = Self::fresh_virtual_register(next_virtual_reg, secrecy_map, false);
-        out.push(Instruction::LDI(
-            key_vr.0,
-            crate::core_types::Value::from(key),
-        ));
-        key_vr
-    }
-
-    fn emit_spill_load(
-        out: &mut Vec<Instruction>,
-        constants: &mut Vec<Constant>,
-        next_virtual_reg: &mut usize,
-        secrecy_map: &mut HashMap<VirtualRegister, bool>,
-        spill_object_vr: VirtualRegister,
-        spilled_vr: VirtualRegister,
-    ) -> VirtualRegister {
-        let key_vr =
-            Self::emit_spill_key_load(out, constants, next_virtual_reg, secrecy_map, spilled_vr);
-        out.push(Instruction::PUSHARG(spill_object_vr.0));
-        out.push(Instruction::PUSHARG(key_vr.0));
-        out.push(Instruction::CALL("get_field".to_string()));
-
-        let value_is_secret = *secrecy_map.get(&spilled_vr).unwrap_or(&false);
-        let value_vr = Self::fresh_virtual_register(next_virtual_reg, secrecy_map, value_is_secret);
-        out.push(Instruction::MOV(value_vr.0, 0));
-        value_vr
-    }
-
-    fn emit_spill_store(
-        out: &mut Vec<Instruction>,
-        constants: &mut Vec<Constant>,
-        next_virtual_reg: &mut usize,
-        secrecy_map: &mut HashMap<VirtualRegister, bool>,
-        spill_object_vr: VirtualRegister,
-        spilled_vr: VirtualRegister,
-        value_vr: VirtualRegister,
-    ) {
-        let key_vr =
-            Self::emit_spill_key_load(out, constants, next_virtual_reg, secrecy_map, spilled_vr);
-        out.push(Instruction::PUSHARG(spill_object_vr.0));
-        out.push(Instruction::PUSHARG(key_vr.0));
-        out.push(Instruction::PUSHARG(value_vr.0));
-        out.push(Instruction::CALL("set_field".to_string()));
-    }
-
     fn remap_instruction_registers(
         instruction: &Instruction,
         mapped_uses: &HashMap<VirtualRegister, VirtualRegister>,
@@ -586,7 +532,7 @@ impl CodeGenerator {
     fn allocate_registers_with_object_spills(
         instructions: &mut Vec<Instruction>,
         labels: &mut HashMap<String, usize>,
-        constants: &mut Vec<Constant>,
+        _constants: &mut Vec<Constant>,
         next_virtual_reg: &mut usize,
         secrecy_map: &mut HashMap<VirtualRegister, bool>,
         precolored: &HashMap<VirtualRegister, PhysicalRegister>,

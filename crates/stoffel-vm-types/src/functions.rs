@@ -27,6 +27,11 @@ use crate::instructions::ResolvedInstruction;
 use smallvec::SmallVec;
 
 pub type FunctionResult<T> = Result<T, FunctionError>;
+type ResolvedFunctionParts = (
+    SmallVec<[ResolvedInstruction; 32]>,
+    SmallVec<[Value; 16]>,
+    SmallVec<[String; 16]>,
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FunctionError {
@@ -175,6 +180,7 @@ impl VMFunction {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_new_resolved_with_call_targets(
         name: String,
         parameters: Vec<String>,
@@ -259,13 +265,7 @@ impl VMFunction {
         self.call_target_names.as_deref()
     }
 
-    pub fn take_resolved_parts(
-        &mut self,
-    ) -> Option<(
-        SmallVec<[ResolvedInstruction; 32]>,
-        SmallVec<[Value; 16]>,
-        SmallVec<[String; 16]>,
-    )> {
+    pub fn take_resolved_parts(&mut self) -> Option<ResolvedFunctionParts> {
         Some((
             self.resolved_instructions.take()?,
             self.constant_values.take().unwrap_or_default(),

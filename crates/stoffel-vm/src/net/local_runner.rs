@@ -138,7 +138,7 @@ impl LocalCoordinatorRunner {
             n_inputs,
             output_clients,
         );
-        let coord = OffChainCoordinatorServer::<HoneyBadgerCoordinatorConnection>::start_coord(
+        let _coord = OffChainCoordinatorServer::<HoneyBadgerCoordinatorConnection>::start_coord(
             coord_state,
             "127.0.0.1",
             coord_port,
@@ -638,7 +638,7 @@ impl LocalCoordinatorRunner {
             }
         }
 
-        let mut child = command.spawn()?;
+        let child = command.spawn()?;
         // Profiler attachment hooks. External `sample`/`ps` can't reliably discover
         // these short-lived child processes (PID races; TEE-buffered markers arrive
         // after the fast online window), so the runner attaches from spawn instead.

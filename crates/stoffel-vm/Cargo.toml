@@ -3,6 +3,12 @@ name = "stoffel-vm"
 authors = ["Gabriel Arrouye"]
 version = "0.1.0"
 edition = "2021"
+description = "Register-based virtual machine runtime and MPC execution engine for Stoffel programs"
+license = "MIT"
+repository = "https://github.com/Stoffel-Labs/StoffelVM"
+homepage = "https://stoffelmpc.com"
+keywords = ["mpc", "vm", "runtime", "bytecode", "cryptography"]
+categories = ["compilers", "cryptography", "virtualization"]
 
 # Build as both a Rust library and a C-compatible dynamic library
 [lib]
