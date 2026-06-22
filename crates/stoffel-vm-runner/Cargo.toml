@@ -2,7 +2,12 @@
 name = "stoffel-vm-runner"
 version = "0.1.0"
 edition = "2021"
-publish = false
+description = "Local runner and CLI binary for executing Stoffel VM programs"
+license = "Apache-2.0"
+repository = "https://github.com/Stoffel-Labs/StoffelVM"
+homepage = "https://stoffelmpc.com"
+keywords = ["mpc", "vm", "runner", "cryptography"]
+categories = ["command-line-utilities", "cryptography"]
 
 [[bin]]
 name = "stoffel-run"

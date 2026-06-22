@@ -8,7 +8,6 @@ repository = "https://github.com/Stoffel-Labs/StoffelVM"
 readme = "README.md"
 keywords = ["mpc", "sdk", "compiler", "vm", "cryptography"]
 categories = ["api-bindings", "compilers", "cryptography"]
-publish = false
 
 [lib]
 name = "stoffel"
