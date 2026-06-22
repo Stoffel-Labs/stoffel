@@ -20,13 +20,6 @@ pub use crate::coordinator::{
     Coordinator, OffChainCoordinator, OffChainCoordinatorClient, OffChainCoordinatorServer,
     ShareBound,
 };
-#[cfg(feature = "on-chain")]
-pub use crate::coordinator::{
-    node_rpc, setup_coord, ws_connect, BlsOnChainAvssCoordinator, CoordinatorEvent,
-    CoordinatorEventStream, HoneyBadgerOnChainCoordinator, OnChainClientIdentity,
-    OnChainCoordinator, OnChainCoordinatorConfig, OnChainCoordinatorConfigBuilder,
-    OnChainCoordinatorConfigSummary, OnChainCoordinatorHandle, OnChainCoordinatorSummary,
-};
 pub use crate::error::{
     ConsensusError, CoordinatorError, Error, ErrorCategory, NetworkError, Result,
 };

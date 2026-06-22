@@ -7,12 +7,12 @@ use ark_ff::FftField;
 use async_trait::async_trait;
 use clap::Parser;
 use jsonrpsee::{core::RpcResult, server::RpcModule};
-use stoffel_mpc_coordinator::off_chain::{
+use stoffel_mpc_coordinator_off_chain::{
     ClientIdentity, CoordinatorRPCBaseServer, CoordinatorRPCServerConnectionBase,
     CoordinatorRPCServerSharedBase, OffChainCoordinatorServer, StoffelCoordinatorRPCServer,
 };
-use stoffel_mpc_coordinator::rpc::RPCServerConnection;
-use stoffel_mpc_coordinator::{Round, ShareBound};
+use stoffel_mpc_coordinator_shared::rpc::RPCServerConnection;
+use stoffel_mpc_coordinator_shared::{Round, ShareBound};
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use tokio::sync::Mutex;
@@ -189,7 +189,7 @@ where
         output_client_keys,
     );
 
-    let coord = OffChainCoordinatorServer::<CoordinatorConnection<F, S>>::start_coord(
+    let _coord = OffChainCoordinatorServer::<CoordinatorConnection<F, S>>::start_coord(
         server_state,
         &args.bind_addr,
         args.port,

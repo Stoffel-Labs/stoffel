@@ -597,15 +597,6 @@ The SDK is intentionally thin around protocol-owned functionality:
   re-exported from `stoffel-networking`.
 - Off-chain coordinator types are re-exported from
   `stoffel-mpc-coordinator`.
-- On-chain provider-backed coordination, including `OnChainCoordinator` and
-  `OnChainClientIdentity`, is re-exported from `stoffel-mpc-coordinator` at the
-  SDK root and in the prelude. Use `OnChainCoordinatorConfig::builder()` to
-  validate contract, websocket, wallet, threshold, output count, and backend
-  settings, then call `connect_honeybadger().await` or
-  `connect_avss_bls12_381().await` for provider-backed coordination. The
-  lightweight SDK `OnChainCoordinatorHandle` exposes the no-provider
-  contract-address surface and returns an empty event stream from
-  `subscribe_events()`.
 - AVSS and HoneyBadger protocol internals remain in `stoffel-vm` and
   `mpc-protocols`.
 
@@ -623,9 +614,6 @@ release requires these dependencies to be published or replaced with registry
 dependencies first:
 
 - `stoffellang`
-- `stoffel-mpc-coordinator-off-chain`
-- `stoffel-mpc-coordinator-on-chain`
-- `stoffel-mpc-coordinator-shared`
 - `stoffel-vm`
 - `stoffel-vm-runner`
 - `stoffel-vm-types`
@@ -633,9 +621,9 @@ dependencies first:
 - `stoffelmpc-mpc`
 
 `cargo package -p stoffel-rust-sdk --allow-dirty --no-verify` currently fails
-because `stoffel-mpc-coordinator` is not available from crates.io. Once those
-crates are published and the SDK manifest no longer uses local path or git
-dependencies, remove `publish = false` and run:
+because local path dependencies are not registry-ready. Once those crates are
+published and the SDK manifest no longer uses local path dependencies, remove
+`publish = false` and run:
 
 ```sh
 cargo package -p stoffel-rust-sdk
@@ -658,14 +646,10 @@ cargo run -p stoffel-rust-sdk --example client_server
 cargo run -p stoffel-rust-sdk --example network_config
 cargo run -p stoffel-rust-sdk --example observability
 cargo run -p stoffel-rust-sdk --example avss
-cargo run -p stoffel-rust-sdk --example onchain
 ```
 
 `network_config` demonstrates deriving one config per party with
 `NetworkDeployment` and writing `party-*.toml` files for operators.
-`onchain` demonstrates the no-provider handle and, when `STOFFEL_ONCHAIN_WS`
-and `STOFFEL_ONCHAIN_PRIVATE_KEY` are set, the provider-backed HoneyBadger
-coordinator connection path.
 
 The local MPC examples use the real localhost coordinator/party runner. Build
 the VM runner first, then run them:
@@ -701,16 +685,4 @@ Those aliases expand to:
 ```sh
 cargo test -p stoffel-vm --test local_coordinator_e2e -- --ignored --test-threads=1
 cargo test -p stoffel-rust-sdk --test sdk_usage -- --ignored --test-threads=1
-```
-
-The provider-backed on-chain SDK integration test is also ignored by default.
-It skips cleanly unless these environment variables are set:
-
-```sh
-export STOFFEL_ONCHAIN_WS=ws://127.0.0.1:8545
-export STOFFEL_ONCHAIN_PRIVATE_KEY=0x...
-export STOFFEL_ONCHAIN_CONTRACT=0x0000000000000000000000000000000000000000 # optional
-cargo test -p stoffel-rust-sdk --test sdk_usage \
-  onchain_provider_backed_connect_uses_real_coordinator_api_when_configured \
-  -- --ignored --exact
 ```

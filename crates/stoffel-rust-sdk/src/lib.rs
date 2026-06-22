@@ -84,13 +84,6 @@ pub use coordinator::{
     Coordinator, OffChainCoordinator, OffChainCoordinatorClient, OffChainCoordinatorServer,
     ShareBound,
 };
-#[cfg(feature = "on-chain")]
-pub use coordinator::{
-    node_rpc, setup_coord, ws_connect, BlsOnChainAvssCoordinator, CoordinatorEvent,
-    CoordinatorEventStream, HoneyBadgerOnChainCoordinator, OnChainClientIdentity,
-    OnChainCoordinator, OnChainCoordinatorConfig, OnChainCoordinatorConfigBuilder,
-    OnChainCoordinatorConfigSummary, OnChainCoordinatorHandle, OnChainCoordinatorSummary,
-};
 pub use error::{ConsensusError, CoordinatorError, Error, ErrorCategory, NetworkError, Result};
 pub use input_file::{load_client_inputs_file, load_named_inputs_file};
 pub use networking::{NetworkManager, QuicNetworkConfig, QuicNetworkManager};

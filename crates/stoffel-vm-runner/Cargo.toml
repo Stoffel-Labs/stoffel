@@ -11,13 +11,10 @@ path = "src/bin/stoffel-run.rs"
 [dependencies]
 stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
-stoffel-mpc-coordinator-shared = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev" }
-stoffel-mpc-coordinator-off-chain = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev" }
-stoffel-mpc-coordinator-on-chain = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev" }
+stoffel-mpc-coordinator-shared = "0.1.0"
+stoffel-mpc-coordinator-off-chain = "0.1.0"
 stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
 stoffelnet = "0.1.0"
-alloy = "1.7.3"
-alloy-primitives = "1.5.7"
 ark-bls12-381 = "0.5.0"
 ark-bn254 = "0.5.0"
 ark-curve25519 = "0.5.0"
