@@ -25,9 +25,6 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /build
 
 COPY . .
-COPY --from=coordinator . /stoffel-mpc-coordinator
-RUN sed -i 's#path = "../StoffelVM/crates/stoffel-vm-types"#path = "/build/crates/stoffel-vm-types"#' \
-      /stoffel-mpc-coordinator/Cargo.toml
 
 RUN printf '%s\n' \
       '[net]' \

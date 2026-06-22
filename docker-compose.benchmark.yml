@@ -8,8 +8,6 @@ x-party: &party
     dockerfile: Dockerfile.benchmark
     args:
       PROFILE_BUILD: "${STOFFEL_PROFILE_BUILD:-false}"
-    additional_contexts:
-      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-../stoffel-mpc-coordinator}"
   volumes:
     - ./ids:/app/ids:ro
     - ./profiles:/app/profiles
@@ -61,8 +59,6 @@ services:
     build:
       context: .
       dockerfile: docker/coordinator.Dockerfile
-      additional_contexts:
-        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-../stoffel-mpc-coordinator}"
     volumes:
       - ./ids:/app/ids:ro
     entrypoint: ["/bin/sh", "-c"]

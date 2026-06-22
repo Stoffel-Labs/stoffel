@@ -15,10 +15,6 @@ WORKDIR /build
 FROM chef AS planner
 
 COPY . .
-COPY --from=coordinator . /stoffel-mpc-coordinator
-
-RUN sed -i 's#path = "../StoffelVM/crates/stoffel-vm-types"#path = "/build/crates/stoffel-vm-types"#' \
-      /stoffel-mpc-coordinator/Cargo.toml
 
 RUN mkdir -p /build/.cargo && \
     printf '%s\n' \
@@ -36,7 +32,6 @@ ARG PROFILE_BUILD=false
 
 COPY --from=planner /build/recipe.json /build/recipe.json
 COPY --from=planner /build/.cargo /build/.cargo
-COPY --from=planner /stoffel-mpc-coordinator /stoffel-mpc-coordinator
 
 RUN mkdir -p ~/.ssh && \
     ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true
@@ -51,9 +46,6 @@ RUN --mount=type=ssh \
     cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
-
-RUN sed -i 's#path = "../StoffelVM/crates/stoffel-vm-types"#path = "/build/crates/stoffel-vm-types"#' \
-      /stoffel-mpc-coordinator/Cargo.toml
 
 RUN mkdir -p /build/.cargo && \
     printf '%s\n' \
