@@ -1,4 +1,4 @@
-use super::result::create_result_share_object;
+use super::result::create_result_share_value;
 use crate::core_vm::VirtualMachine;
 use crate::foreign_functions::{
     ForeignFunctionCallbackError, ForeignFunctionCallbackResult, ForeignFunctionContext,
@@ -60,7 +60,7 @@ fn share_retag(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult
         return Err("Share.retag requires an integer share".into());
     }
 
-    create_result_share_object(&mut ctx, ShareType::try_secret_int(bit_length)?, data)
+    create_result_share_value(ShareType::try_secret_int(bit_length)?, data)
 }
 
 fn share_add(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
@@ -74,7 +74,7 @@ fn share_add(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<V
         ctx.extract_matching_share_pair(&left, &right, "Share.add")?
     };
     let result_data = ctx.secret_share_add_data(share_type, &left_data, &right_data)?;
-    create_result_share_object(&mut ctx, share_type, result_data)
+    create_result_share_value(share_type, result_data)
 }
 
 fn share_sub(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
@@ -88,7 +88,7 @@ fn share_sub(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<V
         ctx.extract_matching_share_pair(&left, &right, "Share.sub")?
     };
     let result_data = ctx.secret_share_sub_data(share_type, &left_data, &right_data)?;
-    create_result_share_object(&mut ctx, share_type, result_data)
+    create_result_share_value(share_type, result_data)
 }
 
 fn share_neg(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
@@ -103,7 +103,7 @@ fn share_neg(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<V
     };
 
     let result_data = ctx.secret_share_neg_data(ty, &data)?;
-    create_result_share_object(&mut ctx, ty, result_data)
+    create_result_share_value(ty, result_data)
 }
 
 fn share_add_scalar(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
@@ -120,7 +120,7 @@ fn share_add_scalar(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackR
     };
 
     let result_data = ctx.secret_share_add_scalar_data(ty, &data, scalar)?;
-    create_result_share_object(&mut ctx, ty, result_data)
+    create_result_share_value(ty, result_data)
 }
 
 fn share_mul_scalar(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
@@ -163,12 +163,12 @@ fn share_mul_scalar(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackR
             let scaled = scale_fixed_scalar(scalar, target_f)?;
             ctx.secret_share_mul_scalar_data(ty, &data, scaled)?
         };
-        return create_result_share_object(&mut ctx, result_ty, result_data);
+        return create_result_share_value(result_ty, result_data);
     }
 
     let scalar = value_to_i64(&scalar_value, "scalar")?;
     let result_data = ctx.secret_share_mul_scalar_data(ty, &data, scalar)?;
-    create_result_share_object(&mut ctx, ty, result_data)
+    create_result_share_value(ty, result_data)
 }
 
 /// `round(value * 2^fractional_bits)` as `i64`, erroring on overflow/non-finite.
@@ -202,7 +202,7 @@ fn share_mul_field(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackRe
     };
 
     let result_data = ctx.secret_share_mul_field_data(ty, &data, &field_bytes)?;
-    create_result_share_object(&mut ctx, ty, result_data)
+    create_result_share_value(ty, result_data)
 }
 
 fn share_add_field(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
@@ -219,7 +219,7 @@ fn share_add_field(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackRe
     };
 
     let result_data = ctx.secret_share_add_field_data(ty, &data, &field_bytes)?;
-    create_result_share_object(&mut ctx, ty, result_data)
+    create_result_share_value(ty, result_data)
 }
 
 fn share_interpolate_local(

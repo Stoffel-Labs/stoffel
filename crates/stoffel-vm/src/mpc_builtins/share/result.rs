@@ -8,3 +8,10 @@ pub(super) fn create_result_share_object(
 ) -> ForeignFunctionCallbackResult<Value> {
     ctx.create_share_object(share_type, share_data)
 }
+
+pub(super) fn create_result_share_value(
+    share_type: ShareType,
+    share_data: ShareData,
+) -> ForeignFunctionCallbackResult<Value> {
+    Ok(Value::Share(share_type, share_data))
+}

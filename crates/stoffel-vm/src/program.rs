@@ -102,7 +102,7 @@ pub(crate) enum CallTarget {
 #[derive(Clone)]
 enum RegisteredFunction {
     Vm {
-        source: Arc<VMFunction>,
+        source: Option<Arc<VMFunction>>,
         runtime: Arc<RuntimeFunction>,
         call_target: Arc<VmCallTarget>,
     },
@@ -145,14 +145,23 @@ impl Program {
         let registered = match function {
             Function::VM(mut function) => {
                 function.resolve_instructions()?;
-                let runtime = Arc::new(RuntimeFunction::from_vm_function(&function)?);
+                let runtime = if retain_vm_source {
+                    Arc::new(RuntimeFunction::from_vm_function(&function)?)
+                } else {
+                    Arc::new(RuntimeFunction::from_vm_function_consuming_resolved(
+                        &mut function,
+                    )?)
+                };
                 let call_target = VmCallTarget::from_vm_function(&function, Arc::clone(&runtime));
-                function.discard_resolved_instructions();
+                if retain_vm_source {
+                    function.discard_resolved_instructions();
+                }
                 if !retain_vm_source {
                     function.discard_source_instructions();
                 }
+                let source = retain_vm_source.then(|| Arc::from(function));
                 RegisteredFunction::Vm {
-                    source: Arc::from(function),
+                    source,
                     runtime,
                     call_target: Arc::new(call_target),
                 }
@@ -283,6 +292,9 @@ impl Program {
             let RegisteredFunction::Vm { source, .. } = function else {
                 continue;
             };
+            let Some(source) = source else {
+                continue;
+            };
 
             if let Some(source) = Arc::get_mut(source) {
                 source.discard_source_instructions();
@@ -298,10 +310,11 @@ impl Program {
         instruction_pointer: InstructionPointer,
     ) -> Option<&Instruction> {
         match self.functions.get(name)? {
-            RegisteredFunction::Vm { source, .. } => {
-                source.instructions().get(instruction_pointer.index())
-            }
-            RegisteredFunction::Foreign(_) => None,
+            RegisteredFunction::Vm {
+                source: Some(source),
+                ..
+            } => source.instructions().get(instruction_pointer.index()),
+            RegisteredFunction::Vm { source: None, .. } | RegisteredFunction::Foreign(_) => None,
         }
     }
 
@@ -332,7 +345,15 @@ impl Program {
         F: FnOnce(&str) -> VmError,
     {
         match self.functions.get(name) {
-            Some(RegisteredFunction::Vm { source, .. }) => Ok(source),
+            Some(RegisteredFunction::Vm {
+                source: Some(source),
+                ..
+            }) => Ok(source),
+            Some(RegisteredFunction::Vm { source: None, .. }) => {
+                Err(VmError::MissingResolvedInstructions {
+                    function: name.to_owned(),
+                })
+            }
             Some(RegisteredFunction::Foreign(_)) => Err(foreign_error(name)),
             None => Err(VmError::FunctionNotFound {
                 function: name.to_owned(),
@@ -393,6 +414,8 @@ mod tests {
         assert_eq!(
             size_of::<RuntimeFunction>(),
             size_of::<Vec<RuntimeInstruction>>()
+                + size_of::<Box<[Value]>>()
+                + size_of::<Box<[Arc<str>]>>()
         );
     }
 
@@ -423,6 +446,8 @@ mod tests {
             panic!("main should be a VM function");
         };
 
+        let original_source = original_source.as_ref().expect("source retained");
+        let cloned_source = cloned_source.as_ref().expect("source retained");
         assert!(Arc::ptr_eq(original_source, cloned_source));
         assert!(Arc::ptr_eq(original_runtime, cloned_runtime));
         assert!(Arc::ptr_eq(original_call_target, cloned_call_target));
@@ -641,14 +666,16 @@ mod tests {
             RuntimeInstruction::LoadImmediate {
                 value,
                 dest
-            } if dest.index() == 0 && value.as_ref() == &Value::I64(7)
+            } if dest.index() == 0
+                && fetched.load_immediate_value(&value).expect("ldi value") == &Value::I64(7)
         ));
 
         let fetched = FetchedInstruction::fetch(InstructionPointer::new(1), &runtime)
             .expect("call instruction");
         assert!(matches!(
             fetched.runtime_instruction_for_test(),
-            RuntimeInstruction::Call { function } if function.as_ref() == "native"
+            RuntimeInstruction::Call { function }
+                if fetched.call_target_name(&function).expect("call target") == "native"
         ));
     }
 
@@ -680,7 +707,47 @@ mod tests {
             .expect("runtime instruction remains available");
         assert!(matches!(
             fetched.runtime_instruction_for_test(),
-            RuntimeInstruction::LoadImmediate { value, .. } if value.as_ref() == &Value::I64(7)
+            RuntimeInstruction::LoadImmediate { value, .. }
+                if fetched.load_immediate_value(&value).expect("ldi value") == &Value::I64(7)
+        ));
+    }
+
+    #[test]
+    fn program_can_register_without_retaining_vm_source() {
+        let mut program = Program::new();
+        program
+            .try_insert_without_vm_source(Function::vm(VMFunction::new(
+                "main".to_string(),
+                vec!["x".to_string()],
+                Vec::new(),
+                None,
+                1,
+                vec![Instruction::LDI(0, Value::I64(7)), Instruction::RET(0)],
+                HashMap::new(),
+            )))
+            .expect("program registration should lower runtime instructions");
+
+        match program.functions.get("main").expect("registered function") {
+            RegisteredFunction::Vm {
+                source,
+                runtime,
+                call_target,
+            } => {
+                assert!(source.is_none());
+                assert_eq!(runtime.len(), 2);
+                assert_eq!(call_target.name(), "main");
+                assert_eq!(call_target.parameters(), &["x".to_string()]);
+            }
+            RegisteredFunction::Foreign(_) => panic!("main should be a VM function"),
+        }
+
+        assert!(program
+            .instruction_at("main", InstructionPointer::new(0))
+            .is_none());
+        assert!(program.runtime_function("main").is_ok());
+        assert!(matches!(
+            program.call_target("main").expect("call target"),
+            CallTarget::Vm(_)
         ));
     }
 }

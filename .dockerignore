@@ -21,6 +21,10 @@ target/
 # Test artifacts
 *.log
 *.tmp
+profiles/
+*.heaptrack.gz
+perf.data*
+callgrind.out.*
 
 # Local development files
 .env

@@ -1,0 +1,12 @@
+{
+  "includeCoAuthoredBy": false,
+  "enabledPlugins": {
+    "ralph-loop@claude-plugins-official": true
+  },
+  "env": {
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2[1m]"
+  }
+}

@@ -7,7 +7,9 @@ use crate::net::curve::clear_share_value_to_vm_value;
 use crate::net::mpc_engine::{AsyncMpcEngine, MpcEngine, MpcExponentGroup, MpcPartyId};
 use crate::net::share_runtime::ensure_matching_share_data_format;
 use crate::runtime_hooks::{HookCallTarget, HookEvent};
-use crate::runtime_instruction::{RuntimeBinaryOp, RuntimeInstruction, RuntimeRegister};
+use crate::runtime_instruction::{
+    FetchedInstruction, RuntimeBinaryOp, RuntimeInstruction, RuntimeRegister,
+};
 use crate::runtime_value_ops::{bool_or_data, bool_xor_data, matching_share_pair};
 use crate::value_conversions::{u64_to_vm_i64, usize_to_vm_i64};
 use stoffel_vm_types::core_types::{
@@ -425,7 +427,7 @@ impl PendingMpcBuiltinCall {
                     .multiply_share_async(share_type, left_data.as_bytes(), right_data.as_bytes())
                     .await
                     .map_mpc_backend_err("async_multiply_share")?;
-                CompletedMpcBuiltinResult::ShareObject {
+                CompletedMpcBuiltinResult::ShareValue {
                     share_type,
                     share_data,
                 }
@@ -700,6 +702,28 @@ fn consensus_message_to_string(message: Vec<u8>, binary_fallback: &str) -> Strin
 }
 
 impl VMState {
+    pub(super) fn plan_async_mpc_operation_for_fetched(
+        &mut self,
+        fetched: FetchedInstruction<'_>,
+        hooks_enabled: bool,
+    ) -> VmResult<Option<PendingMpcOperation>> {
+        match fetched.runtime_instruction() {
+            RuntimeInstruction::LoadImmediate { dest, value } => {
+                if !self
+                    .current_register_layout()?
+                    .is_secret(dest.register_index())
+                {
+                    return Ok(None);
+                }
+
+                PendingMpcOperation::input_share(dest, fetched.load_immediate_value(&value)?)
+            }
+            RuntimeInstruction::Call { function } => self
+                .plan_async_mpc_builtin_call(fetched.call_target_name(&function)?, hooks_enabled),
+            instruction => self.plan_async_mpc_operation(&instruction, hooks_enabled),
+        }
+    }
+
     pub(super) fn plan_async_mpc_operation(
         &mut self,
         instruction: &RuntimeInstruction,
@@ -714,7 +738,7 @@ impl VMState {
                     return Ok(None);
                 }
 
-                PendingMpcOperation::input_share(*dest, value)
+                PendingMpcOperation::input_share(*dest, value.direct_value()?)
             }
             RuntimeInstruction::Move { dest, src } => {
                 if self
@@ -748,7 +772,7 @@ impl VMState {
                 PendingMpcOperation::boolean_bit_share(*op, *dest, left, right)
             }
             RuntimeInstruction::Call { function } => {
-                self.plan_async_mpc_builtin_call(function, hooks_enabled)
+                self.plan_async_mpc_builtin_call(function.direct_function_name()?, hooks_enabled)
             }
             _ => Ok(None),
         }

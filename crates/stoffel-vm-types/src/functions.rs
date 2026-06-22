@@ -123,6 +123,8 @@ pub struct VMFunction {
     resolved_instructions: Option<SmallVec<[ResolvedInstruction; 32]>>,
     /// Constant values extracted from instructions
     constant_values: Option<SmallVec<[Value; 16]>>,
+    /// Function names referenced by resolved CALL instructions
+    call_target_names: Option<SmallVec<[String; 16]>>,
     /// Function name (used for lookup and debugging)
     name: String,
     /// Parameter names (used for binding arguments)
@@ -162,6 +164,7 @@ impl VMFunction {
         VMFunction {
             resolved_instructions: None,
             constant_values: None,
+            call_target_names: None,
             name,
             parameters,
             upvalues,
@@ -170,6 +173,46 @@ impl VMFunction {
             instructions,
             labels,
         }
+    }
+
+    pub(crate) fn try_new_resolved_with_call_targets(
+        name: String,
+        parameters: Vec<String>,
+        upvalues: Vec<String>,
+        parent: Option<String>,
+        mut register_count: usize,
+        resolved_instructions: Vec<ResolvedInstruction>,
+        constant_values: Vec<Value>,
+        call_target_names: Vec<String>,
+    ) -> FunctionResult<Self> {
+        register_count = register_count
+            .max(MIN_FRAME_REGISTER_COUNT)
+            .max(parameters.len())
+            .max(referenced_resolved_register_count(
+                &name,
+                &resolved_instructions,
+            )?);
+
+        if parameters.len() > register_count {
+            return Err(FunctionError::ParametersExceedRegisters {
+                function: name,
+                parameters: parameters.len(),
+                registers: register_count,
+            });
+        }
+
+        Ok(Self {
+            resolved_instructions: Some(SmallVec::from_vec(resolved_instructions)),
+            constant_values: Some(SmallVec::from_vec(constant_values)),
+            call_target_names: Some(SmallVec::from_vec(call_target_names)),
+            name,
+            parameters,
+            upvalues,
+            parent,
+            register_count,
+            instructions: Vec::new(),
+            labels: HashMap::new(),
+        })
     }
 
     pub fn is_resolved(&self) -> bool {
@@ -212,9 +255,28 @@ impl VMFunction {
         self.constant_values.as_deref()
     }
 
+    pub fn call_target_names(&self) -> Option<&[String]> {
+        self.call_target_names.as_deref()
+    }
+
+    pub fn take_resolved_parts(
+        &mut self,
+    ) -> Option<(
+        SmallVec<[ResolvedInstruction; 32]>,
+        SmallVec<[Value; 16]>,
+        SmallVec<[String; 16]>,
+    )> {
+        Some((
+            self.resolved_instructions.take()?,
+            self.constant_values.take().unwrap_or_default(),
+            self.call_target_names.take().unwrap_or_default(),
+        ))
+    }
+
     pub fn discard_resolved_instructions(&mut self) {
         self.resolved_instructions = None;
         self.constant_values = None;
+        self.call_target_names = None;
     }
 
     /// Drop the source instruction stream after a runtime representation has
@@ -234,6 +296,7 @@ impl VMFunction {
         Self {
             resolved_instructions: self.resolved_instructions.clone(),
             constant_values: self.constant_values.clone(),
+            call_target_names: self.call_target_names.clone(),
             name: self.name.clone(),
             parameters: self.parameters.clone(),
             upvalues: self.upvalues.clone(),
@@ -284,6 +347,7 @@ impl VMFunction {
 
         let mut resolved = SmallVec::<[ResolvedInstruction; 32]>::new();
         let mut constants = SmallVec::<[Value; 16]>::new();
+        let mut call_target_names = SmallVec::<[String; 16]>::new();
 
         if self.parameters.len() > self.register_count {
             return Err(FunctionError::ParametersExceedRegisters {
@@ -378,9 +442,9 @@ impl VMFunction {
                     resolved.push(ResolvedInstruction::JMPGT(target));
                 }
                 Instruction::CALL(func_name) => {
-                    let const_idx = constants.len();
-                    constants.push(Value::String(func_name.clone()));
-                    resolved.push(ResolvedInstruction::CALL(const_idx));
+                    let call_idx = call_target_names.len();
+                    call_target_names.push(func_name.clone());
+                    resolved.push(ResolvedInstruction::CALL(call_idx));
                 }
                 Instruction::RET(reg) => {
                     resolved.push(ResolvedInstruction::RET(*reg));
@@ -402,6 +466,7 @@ impl VMFunction {
 
         self.resolved_instructions = Some(resolved);
         self.constant_values = Some(constants);
+        self.call_target_names = Some(call_target_names);
         Ok(())
     }
 }
@@ -413,6 +478,24 @@ fn referenced_register_count(
     instructions
         .iter()
         .filter_map(max_referenced_register)
+        .max()
+        .map_or(Ok(0), |max_register| {
+            max_register
+                .checked_add(1)
+                .ok_or_else(|| FunctionError::RegisterIndexOverflow {
+                    function: function_name.to_owned(),
+                    register: max_register,
+                })
+        })
+}
+
+fn referenced_resolved_register_count(
+    function_name: &str,
+    instructions: &[ResolvedInstruction],
+) -> FunctionResult<usize> {
+    instructions
+        .iter()
+        .filter_map(max_referenced_resolved_register)
         .max()
         .map_or(Ok(0), |max_register| {
             max_register
@@ -454,6 +537,37 @@ fn max_referenced_register(instruction: &Instruction) -> Option<usize> {
         | Instruction::JMPLT(_)
         | Instruction::JMPGT(_)
         | Instruction::CALL(_) => None,
+    }
+}
+
+fn max_referenced_resolved_register(instruction: &ResolvedInstruction) -> Option<usize> {
+    match instruction {
+        ResolvedInstruction::NOP => None,
+        ResolvedInstruction::LD(reg, _)
+        | ResolvedInstruction::LDI(reg, _)
+        | ResolvedInstruction::RET(reg)
+        | ResolvedInstruction::PUSHARG(reg)
+        | ResolvedInstruction::LDS(reg, _)
+        | ResolvedInstruction::STS(_, reg) => Some(*reg),
+        ResolvedInstruction::MOV(dest, src)
+        | ResolvedInstruction::NOT(dest, src)
+        | ResolvedInstruction::CMP(dest, src) => Some((*dest).max(*src)),
+        ResolvedInstruction::ADD(dest, src1, src2)
+        | ResolvedInstruction::SUB(dest, src1, src2)
+        | ResolvedInstruction::MUL(dest, src1, src2)
+        | ResolvedInstruction::DIV(dest, src1, src2)
+        | ResolvedInstruction::MOD(dest, src1, src2)
+        | ResolvedInstruction::AND(dest, src1, src2)
+        | ResolvedInstruction::OR(dest, src1, src2)
+        | ResolvedInstruction::XOR(dest, src1, src2)
+        | ResolvedInstruction::SHL(dest, src1, src2)
+        | ResolvedInstruction::SHR(dest, src1, src2) => Some((*dest).max(*src1).max(*src2)),
+        ResolvedInstruction::JMP(_)
+        | ResolvedInstruction::JMPEQ(_)
+        | ResolvedInstruction::JMPNEQ(_)
+        | ResolvedInstruction::JMPLT(_)
+        | ResolvedInstruction::JMPGT(_)
+        | ResolvedInstruction::CALL(_) => None,
     }
 }
 
@@ -624,20 +738,18 @@ mod tests {
 
         assert_eq!(
             function.constant_values(),
-            Some(
-                &[
-                    Value::I64(1),
-                    Value::String("native".to_string()),
-                    Value::I64(2),
-                ][..]
-            )
+            Some(&[Value::I64(1), Value::I64(2)][..])
+        );
+        assert_eq!(
+            function.call_target_names(),
+            Some(&["native".to_string()][..])
         );
         let resolved = function
             .resolved_instructions()
             .expect("resolved instructions");
         assert!(matches!(resolved[0], ResolvedInstruction::LDI(0, 0)));
-        assert!(matches!(resolved[1], ResolvedInstruction::CALL(1)));
-        assert!(matches!(resolved[2], ResolvedInstruction::LDI(1, 2)));
+        assert!(matches!(resolved[1], ResolvedInstruction::CALL(0)));
+        assert!(matches!(resolved[2], ResolvedInstruction::LDI(1, 1)));
     }
 
     #[test]

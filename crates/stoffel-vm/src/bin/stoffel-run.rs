@@ -37,7 +37,7 @@ use stoffel_vm::runtime_hooks::{HookContext, HookEvent};
 use stoffel_vm::storage::preproc::LmdbPreprocStore;
 use stoffel_vm::storage::RedbLocalStorage;
 use stoffel_vm_types::compiled_binary::{
-    CompiledBinary, MpcCurve, MPC_BACKEND_MANIFEST_FORMAT_VERSION,
+    BinaryError, ClientIoManifest, CompiledBinary, MpcCurve, MPC_BACKEND_MANIFEST_FORMAT_VERSION,
     MPC_CURVE_MANIFEST_FORMAT_VERSION,
 };
 use stoffel_vm_types::core_types::{ShareType, TableRef, Value};
@@ -56,10 +56,9 @@ use x509_parser::prelude::*;
 type HbCoordinatorShare<F> = RobustShare<F>;
 
 fn manifest_client_input_types(
-    binary: &CompiledBinary,
+    manifest: &ClientIoManifest,
 ) -> std::collections::BTreeMap<usize, Vec<ShareType>> {
-    binary
-        .client_io_manifest
+    manifest
         .clients
         .iter()
         .filter_map(|schema| {
@@ -4149,19 +4148,21 @@ async fn main() {
             );
             exit(2);
         });
-        let binary =
-            CompiledBinary::deserialize(&mut BufReader::new(file)).unwrap_or_else(|error| {
+        let (_, bytecode_version, client_io_manifest) =
+            CompiledBinary::try_for_each_vm_function_from_reader(&mut BufReader::new(file), |_| {
+                Ok(())
+            })
+            .unwrap_or_else(|error| {
                 eprintln!(
                     "Error: failed to deserialize compiled program '{}': {:?}",
                     path, error
                 );
                 exit(2);
             });
-        let backend = (binary.version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION)
-            .then_some(MpcBackendKind::from(binary.client_io_manifest.mpc_backend));
-        let curve = (binary.version >= MPC_CURVE_MANIFEST_FORMAT_VERSION).then_some(
-            curve_config_from_manifest(binary.client_io_manifest.mpc_curve),
-        );
+        let backend = (bytecode_version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION)
+            .then_some(MpcBackendKind::from(client_io_manifest.mpc_backend));
+        let curve = (bytecode_version >= MPC_CURVE_MANIFEST_FORMAT_VERSION)
+            .then_some(curve_config_from_manifest(client_io_manifest.mpc_curve));
         (backend, curve)
     });
     let manifest_backend = manifest_config.and_then(|(backend, _)| backend);
@@ -4484,23 +4485,6 @@ async fn main() {
         let p = stoffel_vm::net::program_sync::program_path(&program_id);
         p.to_string_lossy().to_string()
     };
-    let f = File::open(&load_path).expect("open binary file");
-    let binary =
-        CompiledBinary::deserialize(&mut BufReader::new(f)).expect("deserialize compiled binary");
-    let client_input_types = manifest_client_input_types(&binary);
-    let preprocessing_demand = binary.client_io_manifest.preprocessing_demand;
-    let functions = match binary.try_into_vm_functions() {
-        Ok(functions) => functions,
-        Err(err) => {
-            eprintln!("Error: invalid compiled program: {:?}", err);
-            exit(3);
-        }
-    };
-    if functions.is_empty() {
-        eprintln!("Error: compiled program contains no functions");
-        exit(3);
-    }
-
     // Initialize VM
     let mut vm_builder = VirtualMachine::builder();
     if let Some(path) = &local_store_path {
@@ -4515,17 +4499,56 @@ async fn main() {
     }
     let mut vm = vm_builder.build();
 
-    // Register all functions
-    for f in functions {
-        let result = if trace_instr {
-            vm.try_register_function(f)
-        } else {
-            vm.try_register_function_without_source(f)
+    let (function_count, _bytecode_version, client_io_manifest) = if trace_instr {
+        // Instruction tracing hooks need the source Instruction stream for each
+        // program counter. Use the source-preserving loader only in traced mode;
+        // normal execution keeps the low-peak streaming path below.
+        let mut f = File::open(&load_path).expect("open binary file");
+        let compiled = match CompiledBinary::deserialize(&mut f) {
+            Ok(compiled) => compiled,
+            Err(err) => {
+                eprintln!("Error: invalid compiled program: {:?}", err);
+                exit(3);
+            }
         };
-        if let Err(err) = result {
-            eprintln!("Error: invalid VM function: {}", err);
-            exit(3);
+        let bytecode_version = compiled.version;
+        let client_io_manifest = compiled.client_io_manifest.clone();
+        let functions = match compiled.try_to_vm_functions() {
+            Ok(functions) => functions,
+            Err(err) => {
+                eprintln!("Error: invalid compiled program: {:?}", err);
+                exit(3);
+            }
+        };
+        let function_count = functions.len();
+        for function in functions {
+            if let Err(err) = vm.try_register_function(function) {
+                eprintln!("Error: invalid VM function: {}", err);
+                exit(3);
+            }
         }
+        (function_count, bytecode_version, client_io_manifest)
+    } else {
+        // Register all functions as they are read and lowered to avoid retaining
+        // the compiled function table beside the runtime program.
+        let f = File::open(&load_path).expect("open binary file");
+        match CompiledBinary::try_for_each_vm_function_from_reader(&mut BufReader::new(f), |f| {
+            vm.try_register_function_without_source(f)
+                .map_err(|err| BinaryError::InvalidData(format!("invalid VM function: {err}")))?;
+            Ok(())
+        }) {
+            Ok(result) => result,
+            Err(err) => {
+                eprintln!("Error: invalid compiled program: {:?}", err);
+                exit(3);
+            }
+        }
+    };
+    let client_input_types = manifest_client_input_types(&client_io_manifest);
+    let preprocessing_demand = client_io_manifest.preprocessing_demand;
+    if function_count == 0 {
+        eprintln!("Error: compiled program contains no functions");
+        exit(3);
     }
 
     // Register debugging hooks based on flags

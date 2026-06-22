@@ -1,0 +1,2081 @@
+reading file "/profiles/aes_party0_heaptrack_reserved_loader_buffers.heaptrack.gz" - please wait, this might take some time...
+Debuggee command was: /app/stoffel-run /app/programs/mpc_aes128_circuit.stflb main --no-program-upload --leader --bind 0.0.0.0:9000 --n-parties 5 --threshold 1 --advertise 172.18.0.3:10000 --off-chain-coord coordinator.stoffel-coord.local:31415 --cert /app/ids/nodes/cert0.crt --key /app/ids/nodes/key0.der --timestamp 0 --rpc-bind 0.0.0.0:16180 --mpc-backend honeybadger --mpc-curve bls12-381
+finished reading file, now analyzing data:
+
+MOST CALLS TO ALLOCATION FUNCTIONS
+9938705 calls to allocation functions with 190.40M peak consumption from
+0xaaaaea09fc2e
+  in /app/stoffel-run
+867924 calls with 0B peak consumption from:
+    0xaaaae92c2052
+      in /app/stoffel-run
+    0xaaaae92c2366
+      in /app/stoffel-run
+    0xaaaae923a446
+      in /app/stoffel-run
+    0xaaaae923985a
+      in /app/stoffel-run
+    0xaaaae9238806
+      in /app/stoffel-run
+    0xaaaae8f22ff6
+      in /app/stoffel-run
+    0xaaaae9008f72
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+867924 calls with 3.27M peak consumption from:
+    0xaaaae92c2052
+      in /app/stoffel-run
+    0xaaaae92c2366
+      in /app/stoffel-run
+    0xaaaae923a446
+      in /app/stoffel-run
+    0xaaaae923985a
+      in /app/stoffel-run
+    0xaaaae923bfee
+      in /app/stoffel-run
+    0xaaaae900a0f2
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+278556 calls with 0B peak consumption from:
+    0xaaaae95a81fe
+      in /app/stoffel-run
+    0xaaaae95b0c76
+      in /app/stoffel-run
+    0xaaaae964100a
+      in /app/stoffel-run
+    0xaaaae94e1bfe
+      in /app/stoffel-run
+    0xaaaae9562cf2
+      in /app/stoffel-run
+    0xaaaae93d2186
+      in /app/stoffel-run
+    0xaaaae93fec36
+      in /app/stoffel-run
+    0xaaaae8ed99a6
+      in /app/stoffel-run
+    0xaaaaea0064da
+      in /app/stoffel-run
+    0xaaaaea0055ba
+      in /app/stoffel-run
+    0xaaaaea00bfde
+      in /app/stoffel-run
+    0xaaaae9ffc036
+      in /app/stoffel-run
+    0xaaaaea0076d2
+      in /app/stoffel-run
+    0xaaaaea00bc66
+      in /app/stoffel-run
+    0xaaaaea012dfe
+      in /app/stoffel-run
+    0xaaaae9ff9fc6
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+263360 calls with 0B peak consumption from:
+    0xaaaae9c5bb7e
+      in /app/stoffel-run
+    0xaaaae9c5cda6
+      in /app/stoffel-run
+    0xaaaae9c5cb06
+      in /app/stoffel-run
+    0xaaaae9c52dd6
+      in /app/stoffel-run
+    0xaaaae94b6a5a
+      in /app/stoffel-run
+    0xaaaae94ba0ee
+      in /app/stoffel-run
+    0xaaaae956497e
+      in /app/stoffel-run
+    0xaaaae93d2186
+      in /app/stoffel-run
+    0xaaaae93fec36
+      in /app/stoffel-run
+    0xaaaae8ed99a6
+      in /app/stoffel-run
+    0xaaaaea0064da
+      in /app/stoffel-run
+    0xaaaaea0055ba
+      in /app/stoffel-run
+    0xaaaaea00bfde
+      in /app/stoffel-run
+    0xaaaae9ffc036
+      in /app/stoffel-run
+    0xaaaaea0076d2
+      in /app/stoffel-run
+    0xaaaaea00bc66
+      in /app/stoffel-run
+    0xaaaaea012dfe
+      in /app/stoffel-run
+    0xaaaae9ff9fc6
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+201047 calls with 0B peak consumption from:
+    0xaaaae9a7d862
+      in /app/stoffel-run
+    0xaaaae9a7f506
+      in /app/stoffel-run
+    0xaaaae9015c4e
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+  and 7459894 from 4993 other places
+
+50 calls to allocation functions with 1.28K peak consumption from
+__cxa_thread_atexit_impl
+  at ./stdlib/cxa_thread_atexit_impl.c:107
+  in /lib/aarch64-linux-gnu/libc.so.6
+11 calls with 320B peak consumption from:
+    0xaaaaea09ec6a
+      in /app/stoffel-run
+    0xaaaaea093c96
+      in /app/stoffel-run
+    0xaaaaea000962
+      in /app/stoffel-run
+    0xaaaaea019d7a
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+11 calls with 320B peak consumption from:
+    0xaaaaea09ec6a
+      in /app/stoffel-run
+    0xaaaaea000b26
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+10 calls with 320B peak consumption from:
+    0xaaaaea09ec6a
+      in /app/stoffel-run
+    0xaaaae8e4fa9e
+      in /app/stoffel-run
+    0xaaaaea02131e
+      in /app/stoffel-run
+    0xaaaae9ffcc8e
+      in /app/stoffel-run
+    0xaaaaea0049e6
+      in /app/stoffel-run
+    0xaaaaea005b3a
+      in /app/stoffel-run
+    0xaaaaea00bfde
+      in /app/stoffel-run
+    0xaaaae9ffc036
+      in /app/stoffel-run
+    0xaaaaea0076d2
+      in /app/stoffel-run
+    0xaaaaea00bc66
+      in /app/stoffel-run
+    0xaaaaea012dfe
+      in /app/stoffel-run
+    0xaaaae9ff9fc6
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+2 calls with 0B peak consumption from:
+    0xaaaaea09ec6a
+      in /app/stoffel-run
+    0xaaaae8e45006
+      in /app/stoffel-run
+    0xaaaae9dca976
+      in /app/stoffel-run
+    0xaaaae93f5b02
+      in /app/stoffel-run
+    0xaaaae93f9a02
+      in /app/stoffel-run
+    0xaaaae93cd7e2
+      in /app/stoffel-run
+    0xaaaae93fe576
+      in /app/stoffel-run
+    0xaaaae8ed481e
+      in /app/stoffel-run
+    0xaaaaea0064da
+      in /app/stoffel-run
+    0xaaaaea0055ba
+      in /app/stoffel-run
+    0xaaaaea00bfde
+      in /app/stoffel-run
+    0xaaaae9ffc036
+      in /app/stoffel-run
+    0xaaaaea0076d2
+      in /app/stoffel-run
+    0xaaaaea00bc66
+      in /app/stoffel-run
+    0xaaaaea012dfe
+      in /app/stoffel-run
+    0xaaaae9ff9fc6
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+2 calls with 64B peak consumption from:
+    0xaaaaea09ec6a
+      in /app/stoffel-run
+    0xaaaae8e472e2
+      in /app/stoffel-run
+    0xaaaae9e04f16
+      in /app/stoffel-run
+    0xaaaae9d116d6
+      in /app/stoffel-run
+    0xaaaae9d0014e
+      in /app/stoffel-run
+    0xaaaae9cc44be
+      in /app/stoffel-run
+    0xaaaae9ccf80a
+      in /app/stoffel-run
+    0xaaaae9cce066
+      in /app/stoffel-run
+    0xaaaae9cd8b86
+      in /app/stoffel-run
+    0xaaaaea006586
+      in /app/stoffel-run
+    0xaaaaea0055ba
+      in /app/stoffel-run
+    0xaaaaea00bfde
+      in /app/stoffel-run
+    0xaaaae9ffc036
+      in /app/stoffel-run
+    0xaaaaea0076d2
+      in /app/stoffel-run
+    0xaaaaea00bc66
+      in /app/stoffel-run
+    0xaaaaea012dfe
+      in /app/stoffel-run
+    0xaaaae9ff9fc6
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+  and 14 from 14 other places
+
+13 calls to allocation functions with 0B peak consumption from
+__pthread_getattr_np
+  at ./nptl/pthread_getattr_np.c:180
+  in /lib/aarch64-linux-gnu/libc.so.6
+12 calls with 0B peak consumption from:
+    0xaaaaea0a0c8e
+      in /app/stoffel-run
+    0xaaaaea0a12ea
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    0xaaaaea099cee
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+
+13 calls to allocation functions with 0B peak consumption from
+__pthread_attr_extension
+  at ./nptl/pthread_attr_extension.c:28
+  in /lib/aarch64-linux-gnu/libc.so.6
+12 calls with 0B peak consumption from:
+    __GI___pthread_attr_setaffinity_np
+      at ./nptl/pthread_attr_setaffinity.c:45
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __pthread_getattr_np
+      at ./nptl/pthread_getattr_np.c:194
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaaea0a0c8e
+      in /app/stoffel-run
+    0xaaaaea0a12ea
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    __GI___pthread_attr_setaffinity_np
+      at ./nptl/pthread_attr_setaffinity.c:45
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __pthread_getattr_np
+      at ./nptl/pthread_getattr_np.c:194
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaaea099cee
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+
+13 calls to allocation functions with 0B peak consumption from
+__GI___pthread_attr_setaffinity_np
+  at ./nptl/pthread_attr_setaffinity.c:51
+  in /lib/aarch64-linux-gnu/libc.so.6
+12 calls with 0B peak consumption from:
+    __pthread_getattr_np
+      at ./nptl/pthread_getattr_np.c:194
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaaea0a0c8e
+      in /app/stoffel-run
+    0xaaaaea0a12ea
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    __pthread_getattr_np
+      at ./nptl/pthread_getattr_np.c:194
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaaea099cee
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+
+12 calls to allocation functions with 3.36K peak consumption from
+calloc
+  at ../include/rtld-malloc.h:44
+  in /lib/ld-linux-aarch64.so.1
+allocate_dtv
+  at ./elf/dl-tls.c:401
+10 calls with 3.36K peak consumption from:
+    __GI__dl_allocate_tls
+      at ./elf/dl-tls.c:670
+      in /lib/ld-linux-aarch64.so.1
+    allocate_stack
+      at ./nptl/allocatestack.c:423
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __pthread_create_2_1
+      at ./nptl/pthread_create.c:650
+    0xaaaaea08d69a
+      in /app/stoffel-run
+    0xaaaaea0199aa
+      in /app/stoffel-run
+    0xaaaae9ffef4e
+      in /app/stoffel-run
+    0xaaaae9ffde62
+      in /app/stoffel-run
+    0xaaaaea003f52
+      in /app/stoffel-run
+    0xaaaaea00ec9e
+      in /app/stoffel-run
+    0xaaaae9333c66
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+1 calls with 0B peak consumption from:
+    __GI__dl_allocate_tls
+      at ./elf/dl-tls.c:670
+      in /lib/ld-linux-aarch64.so.1
+    allocate_stack
+      at ./nptl/allocatestack.c:423
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __pthread_create_2_1
+      at ./nptl/pthread_create.c:650
+    0xaaaaea08d69a
+      in /app/stoffel-run
+    0xaaaaea0199aa
+      in /app/stoffel-run
+    0xaaaae9ffef4e
+      in /app/stoffel-run
+    0xaaaae9ffe16a
+      in /app/stoffel-run
+    0xaaaaea0135fa
+      in /app/stoffel-run
+    0xaaaae9068526
+      in /app/stoffel-run
+    0xaaaae906600a
+      in /app/stoffel-run
+    0xaaaae900a38a
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+1 calls with 0B peak consumption from:
+    __GI__dl_allocate_tls
+      at ./elf/dl-tls.c:670
+      in /lib/ld-linux-aarch64.so.1
+    allocate_stack
+      at ./nptl/allocatestack.c:423
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __pthread_create_2_1
+      at ./nptl/pthread_create.c:650
+    0xaaaaea08d69a
+      in /app/stoffel-run
+    0xaaaae9db2286
+      in /app/stoffel-run
+    0xaaaae9db078e
+      in /app/stoffel-run
+    0xaaaae9db2e5e
+      in /app/stoffel-run
+    0xaaaae8ff854a
+      in /app/stoffel-run
+    0xaaaae8ffd7ee
+      in /app/stoffel-run
+    0xaaaae907327e
+      in /app/stoffel-run
+    0xaaaae900bd66
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+
+5 calls to allocation functions with 0B peak consumption from
+__GI__IO_file_doallocate
+  at ./libio/filedoalloc.c:101
+  in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:347
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:342
+    _IO_new_file_underflow
+      at ./libio/fileops.c:485
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI___getdelim
+      at ./libio/iogetdelim.c:73
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __pthread_getattr_np
+      at ./nptl/pthread_getattr_np.c:122
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaaea099cee
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+1 calls with 0B peak consumption from:
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:347
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:342
+    _IO_new_file_underflow
+      at ./libio/fileops.c:485
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI___getdelim
+      at ./libio/iogetdelim.c:73
+      in /lib/aarch64-linux-gnu/libc.so.6
+    nss_database_reload_1
+      at ./nss/nss_database.c:283
+      in /lib/aarch64-linux-gnu/libc.so.6
+    nss_database_reload
+      at ./nss/nss_database.c:332
+    nss_database_check_reload_and_get
+      at ./nss/nss_database.c:457
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:611
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:347
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:342
+    _IO_new_file_underflow
+      at ./libio/fileops.c:485
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__IO_default_uflow
+      at ./libio/genops.c:362
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__IO_getline_info
+      at ./libio/iogetline.c:60
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI___fgets_unlocked
+      at ./libio/iofgets_u.c:52
+      in /lib/aarch64-linux-gnu/libc.so.6
+    do_init
+      at ./resolv/res_hconf.c:286
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __pthread_once_slow
+      at ./nptl/pthread_once.c:116
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __resolv_conf_load
+      at ./resolv/res_init.c:557
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __resolv_conf_get_current
+      at ./resolv/resolv_conf.c:140
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __res_vinit
+      at ./resolv/res_init.c:628
+      in /lib/aarch64-linux-gnu/libc.so.6
+    maybe_init
+      at ./resolv/resolv_context.c:122
+      in /lib/aarch64-linux-gnu/libc.so.6
+    context_get
+      at ./resolv/resolv_context.c:184
+      in /lib/aarch64-linux-gnu/libc.so.6
+    context_get
+      at ./resolv/resolv_context.c:176
+    __GI___resolv_context_get
+      at ./resolv/resolv_context.c:195
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:617
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:347
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:342
+    _IO_new_file_underflow
+      at ./libio/fileops.c:485
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI___getdelim
+      at ./libio/iogetdelim.c:73
+      in /lib/aarch64-linux-gnu/libc.so.6
+    res_vinit_1
+      at ./resolv/res_init.c:314
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __resolv_conf_load
+      at ./resolv/res_init.c:582
+    __resolv_conf_get_current
+      at ./resolv/resolv_conf.c:140
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __res_vinit
+      at ./resolv/res_init.c:628
+      in /lib/aarch64-linux-gnu/libc.so.6
+    maybe_init
+      at ./resolv/resolv_context.c:122
+      in /lib/aarch64-linux-gnu/libc.so.6
+    context_get
+      at ./resolv/resolv_context.c:184
+      in /lib/aarch64-linux-gnu/libc.so.6
+    context_get
+      at ./resolv/resolv_context.c:176
+    __GI___resolv_context_get
+      at ./resolv/resolv_context.c:195
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:617
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:347
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:342
+    _IO_new_file_seekoff
+      at ./libio/fileops.c:937
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __fseeko
+      at ./libio/fseeko.c:40
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI___nss_files_fopen
+      at ./nss/nss_files_fopen.c:36
+      in /lib/aarch64-linux-gnu/libc.so.6
+    internal_setent
+      at nss_files/files-XXX.c:76
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__nss_files_gethostbyname4_r
+      at nss_files/files-hosts.c:389
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:646
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+
+5 calls to allocation functions with 0B peak consumption from
+__nss_module_allocate
+  at ./nss/nss_module.c:88
+  in /lib/aarch64-linux-gnu/libc.so.6
+4 calls with 0B peak consumption from:
+    nss_action_parse
+      at ./nss/nss_action_parse.c:57
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __nss_action_parse
+      at ./nss/nss_action_parse.c:169
+    process_line
+      at ./nss/nss_database.c:232
+      in /lib/aarch64-linux-gnu/libc.so.6
+    nss_database_reload_1
+      at ./nss/nss_database.c:294
+    nss_database_reload
+      at ./nss/nss_database.c:332
+    nss_database_check_reload_and_get
+      at ./nss/nss_database.c:457
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:611
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    nss_action_parse
+      at ./nss/nss_action_parse.c:57
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __nss_action_parse
+      at ./nss/nss_action_parse.c:169
+    nss_database_select_default
+      at ./nss/nss_database.c:166
+      in /lib/aarch64-linux-gnu/libc.so.6
+    nss_database_reload
+      at ./nss/nss_database.c:368
+    nss_database_check_reload_and_get
+      at ./nss/nss_database.c:457
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:611
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+
+5 calls to allocation functions with 0B peak consumption from
+__nss_action_allocate
+  at ./nss/nss_action.c:90
+  in /lib/aarch64-linux-gnu/libc.so.6
+4 calls with 0B peak consumption from:
+    __nss_action_parse
+      at ./nss/nss_action_parse.c:177
+      in /lib/aarch64-linux-gnu/libc.so.6
+    process_line
+      at ./nss/nss_database.c:232
+      in /lib/aarch64-linux-gnu/libc.so.6
+    nss_database_reload_1
+      at ./nss/nss_database.c:294
+    nss_database_reload
+      at ./nss/nss_database.c:332
+    nss_database_check_reload_and_get
+      at ./nss/nss_database.c:457
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:611
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    __nss_action_parse
+      at ./nss/nss_action_parse.c:177
+      in /lib/aarch64-linux-gnu/libc.so.6
+    nss_database_select_default
+      at ./nss/nss_database.c:166
+      in /lib/aarch64-linux-gnu/libc.so.6
+    nss_database_reload
+      at ./nss/nss_database.c:368
+    nss_database_check_reload_and_get
+      at ./nss/nss_database.c:457
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:611
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+
+5 calls to allocation functions with 0B peak consumption from
+__fopen_internal
+  at ./libio/iofopen.c:65
+  in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    __pthread_getattr_np
+      at ./nptl/pthread_getattr_np.c:85
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaaea099cee
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+1 calls with 0B peak consumption from:
+    nss_database_reload
+      at ./nss/nss_database.c:306
+      in /lib/aarch64-linux-gnu/libc.so.6
+    nss_database_check_reload_and_get
+      at ./nss/nss_database.c:457
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:611
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    do_init
+      at ./resolv/res_hconf.c:280
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __pthread_once_slow
+      at ./nptl/pthread_once.c:116
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __resolv_conf_load
+      at ./resolv/res_init.c:557
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __resolv_conf_get_current
+      at ./resolv/resolv_conf.c:140
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __res_vinit
+      at ./resolv/res_init.c:628
+      in /lib/aarch64-linux-gnu/libc.so.6
+    maybe_init
+      at ./resolv/resolv_context.c:122
+      in /lib/aarch64-linux-gnu/libc.so.6
+    context_get
+      at ./resolv/resolv_context.c:184
+      in /lib/aarch64-linux-gnu/libc.so.6
+    context_get
+      at ./resolv/resolv_context.c:176
+    __GI___resolv_context_get
+      at ./resolv/resolv_context.c:195
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:617
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    __resolv_conf_load
+      at ./resolv/res_init.c:559
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __resolv_conf_get_current
+      at ./resolv/resolv_conf.c:140
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __res_vinit
+      at ./resolv/res_init.c:628
+      in /lib/aarch64-linux-gnu/libc.so.6
+    maybe_init
+      at ./resolv/resolv_context.c:122
+      in /lib/aarch64-linux-gnu/libc.so.6
+    context_get
+      at ./resolv/resolv_context.c:184
+      in /lib/aarch64-linux-gnu/libc.so.6
+    context_get
+      at ./resolv/resolv_context.c:176
+    __GI___resolv_context_get
+      at ./resolv/resolv_context.c:195
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:617
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 calls with 0B peak consumption from:
+    __GI___nss_files_fopen
+      at ./nss/nss_files_fopen.c:27
+      in /lib/aarch64-linux-gnu/libc.so.6
+    internal_setent
+      at nss_files/files-XXX.c:76
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__nss_files_gethostbyname4_r
+      at nss_files/files-hosts.c:389
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:646
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+
+
+PEAK MEMORY CONSUMERS
+190.40M peak memory consumed over 9938705 calls from
+0xaaaaea09fc2e
+  in /app/stoffel-run
+62.58M consumed over 47 calls from:
+    0xaaaae923c11a
+      in /app/stoffel-run
+    0xaaaae900a0f2
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+62.58M consumed over 47 calls from:
+    0xaaaae92c1cb2
+      in /app/stoffel-run
+    0xaaaae92397fa
+      in /app/stoffel-run
+    0xaaaae923bfee
+      in /app/stoffel-run
+    0xaaaae900a0f2
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+37.36M consumed over 47 calls from:
+    0xaaaae9a26326
+      in /app/stoffel-run
+    0xaaaae9b3137e
+      in /app/stoffel-run
+    0xaaaae931cac6
+      in /app/stoffel-run
+    0xaaaae923c176
+      in /app/stoffel-run
+    0xaaaae900a0f2
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+9.18M consumed over 44 calls from:
+    0xaaaae923c11a
+      in /app/stoffel-run
+    0xaaaae900a0f2
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+8.45M consumed over 44 calls from:
+    0xaaaae923c11a
+      in /app/stoffel-run
+    0xaaaae900a0f2
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+  and 10.26M from 4993 other places
+
+72.70K peak memory consumed over 1 calls from
+0xffff7f66e756
+  in /lib/aarch64-linux-gnu/libstdc++.so.6
+72.70K consumed over 1 calls from:
+    call_init
+      at ./elf/dl-init.c:74
+      in /lib/ld-linux-aarch64.so.1
+    call_init
+      at ./elf/dl-init.c:26
+    _dl_init
+      at ./elf/dl-init.c:121
+      in /lib/ld-linux-aarch64.so.1
+    _start
+      at ../sysdeps/aarch64/dl-start.S:46
+      in /lib/ld-linux-aarch64.so.1
+
+3.36K peak memory consumed over 12 calls from
+calloc
+  at ../include/rtld-malloc.h:44
+  in /lib/ld-linux-aarch64.so.1
+allocate_dtv
+  at ./elf/dl-tls.c:401
+3.36K consumed over 10 calls from:
+    __GI__dl_allocate_tls
+      at ./elf/dl-tls.c:670
+      in /lib/ld-linux-aarch64.so.1
+    allocate_stack
+      at ./nptl/allocatestack.c:423
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __pthread_create_2_1
+      at ./nptl/pthread_create.c:650
+    0xaaaaea08d69a
+      in /app/stoffel-run
+    0xaaaaea0199aa
+      in /app/stoffel-run
+    0xaaaae9ffef4e
+      in /app/stoffel-run
+    0xaaaae9ffde62
+      in /app/stoffel-run
+    0xaaaaea003f52
+      in /app/stoffel-run
+    0xaaaaea00ec9e
+      in /app/stoffel-run
+    0xaaaae9333c66
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+
+1.28K peak memory consumed over 50 calls from
+__cxa_thread_atexit_impl
+  at ./stdlib/cxa_thread_atexit_impl.c:107
+  in /lib/aarch64-linux-gnu/libc.so.6
+320B consumed over 11 calls from:
+    0xaaaaea09ec6a
+      in /app/stoffel-run
+    0xaaaaea000b26
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+320B consumed over 10 calls from:
+    0xaaaaea09ec6a
+      in /app/stoffel-run
+    0xaaaae8e4fa9e
+      in /app/stoffel-run
+    0xaaaaea02131e
+      in /app/stoffel-run
+    0xaaaae9ffcc8e
+      in /app/stoffel-run
+    0xaaaaea0049e6
+      in /app/stoffel-run
+    0xaaaaea005b3a
+      in /app/stoffel-run
+    0xaaaaea00bfde
+      in /app/stoffel-run
+    0xaaaae9ffc036
+      in /app/stoffel-run
+    0xaaaaea0076d2
+      in /app/stoffel-run
+    0xaaaaea00bc66
+      in /app/stoffel-run
+    0xaaaaea012dfe
+      in /app/stoffel-run
+    0xaaaae9ff9fc6
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+320B consumed over 11 calls from:
+    0xaaaaea09ec6a
+      in /app/stoffel-run
+    0xaaaaea093c96
+      in /app/stoffel-run
+    0xaaaaea000962
+      in /app/stoffel-run
+    0xaaaaea019d7a
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+64B consumed over 2 calls from:
+    0xaaaaea09ec6a
+      in /app/stoffel-run
+    0xaaaae8e472e2
+      in /app/stoffel-run
+    0xaaaae9e04f16
+      in /app/stoffel-run
+    0xaaaae9d116d6
+      in /app/stoffel-run
+    0xaaaae9d0014e
+      in /app/stoffel-run
+    0xaaaae9cc44be
+      in /app/stoffel-run
+    0xaaaae9ccf80a
+      in /app/stoffel-run
+    0xaaaae9cce066
+      in /app/stoffel-run
+    0xaaaae9cd8b86
+      in /app/stoffel-run
+    0xaaaaea006586
+      in /app/stoffel-run
+    0xaaaaea0055ba
+      in /app/stoffel-run
+    0xaaaaea00bfde
+      in /app/stoffel-run
+    0xaaaae9ffc036
+      in /app/stoffel-run
+    0xaaaaea0076d2
+      in /app/stoffel-run
+    0xaaaaea00bc66
+      in /app/stoffel-run
+    0xaaaaea012dfe
+      in /app/stoffel-run
+    0xaaaae9ff9fc6
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+32B consumed over 1 calls from:
+    0xaaaaea09ec6a
+      in /app/stoffel-run
+    0xaaaaea09cdda
+      in /app/stoffel-run
+    0xaaaaea019896
+      in /app/stoffel-run
+    0xaaaae9ffef4e
+      in /app/stoffel-run
+    0xaaaae9ffde62
+      in /app/stoffel-run
+    0xaaaaea003f52
+      in /app/stoffel-run
+    0xaaaaea00ec9e
+      in /app/stoffel-run
+    0xaaaae9333c66
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+  and 224B from 14 other places
+
+
+MOST TEMPORARY ALLOCATIONS
+3577464 temporary allocations of 9938705 allocations in total (36.00%) from
+0xaaaaea09fc2e
+  in /app/stoffel-run
+278454 temporary allocations of 278556 allocations in total (99.96%) from:
+    0xaaaae95a81fe
+      in /app/stoffel-run
+    0xaaaae95b0c76
+      in /app/stoffel-run
+    0xaaaae964100a
+      in /app/stoffel-run
+    0xaaaae94e1bfe
+      in /app/stoffel-run
+    0xaaaae9562cf2
+      in /app/stoffel-run
+    0xaaaae93d2186
+      in /app/stoffel-run
+    0xaaaae93fec36
+      in /app/stoffel-run
+    0xaaaae8ed99a6
+      in /app/stoffel-run
+    0xaaaaea0064da
+      in /app/stoffel-run
+    0xaaaaea0055ba
+      in /app/stoffel-run
+    0xaaaaea00bfde
+      in /app/stoffel-run
+    0xaaaae9ffc036
+      in /app/stoffel-run
+    0xaaaaea0076d2
+      in /app/stoffel-run
+    0xaaaaea00bc66
+      in /app/stoffel-run
+    0xaaaaea012dfe
+      in /app/stoffel-run
+    0xaaaae9ff9fc6
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+234162 temporary allocations of 263360 allocations in total (88.91%) from:
+    0xaaaae9c5bb7e
+      in /app/stoffel-run
+    0xaaaae9c5cda6
+      in /app/stoffel-run
+    0xaaaae9c5cb06
+      in /app/stoffel-run
+    0xaaaae9c52dd6
+      in /app/stoffel-run
+    0xaaaae94b6a5a
+      in /app/stoffel-run
+    0xaaaae94ba0ee
+      in /app/stoffel-run
+    0xaaaae956497e
+      in /app/stoffel-run
+    0xaaaae93d2186
+      in /app/stoffel-run
+    0xaaaae93fec36
+      in /app/stoffel-run
+    0xaaaae8ed99a6
+      in /app/stoffel-run
+    0xaaaaea0064da
+      in /app/stoffel-run
+    0xaaaaea0055ba
+      in /app/stoffel-run
+    0xaaaaea00bfde
+      in /app/stoffel-run
+    0xaaaae9ffc036
+      in /app/stoffel-run
+    0xaaaaea0076d2
+      in /app/stoffel-run
+    0xaaaaea00bc66
+      in /app/stoffel-run
+    0xaaaaea012dfe
+      in /app/stoffel-run
+    0xaaaae9ff9fc6
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+197098 temporary allocations of 201047 allocations in total (98.04%) from:
+    0xaaaae9a7d862
+      in /app/stoffel-run
+    0xaaaae9a7f506
+      in /app/stoffel-run
+    0xaaaae9015c4e
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+183540 temporary allocations of 201047 allocations in total (91.29%) from:
+    0xaaaae9a752f6
+      in /app/stoffel-run
+    0xaaaae9a720be
+      in /app/stoffel-run
+    0xaaaae9a7f572
+      in /app/stoffel-run
+    0xaaaae9015c4e
+      in /app/stoffel-run
+    0xaaaae907c38a
+      in /app/stoffel-run
+    0xaaaae9333e12
+      in /app/stoffel-run
+    0xaaaae9806bbe
+      in /app/stoffel-run
+    0xaaaae9672afe
+      in /app/stoffel-run
+    0xaaaaea099ea2
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+139188 temporary allocations of 139278 allocations in total (99.94%) from:
+    0xaaaae96d4e2e
+      in /app/stoffel-run
+    0xaaaae967979a
+      in /app/stoffel-run
+    0xaaaae9648912
+      in /app/stoffel-run
+    0xaaaae95b09ba
+      in /app/stoffel-run
+    0xaaaae964100a
+      in /app/stoffel-run
+    0xaaaae94e1bfe
+      in /app/stoffel-run
+    0xaaaae9562cf2
+      in /app/stoffel-run
+    0xaaaae93d2186
+      in /app/stoffel-run
+    0xaaaae93fec36
+      in /app/stoffel-run
+    0xaaaae8ed99a6
+      in /app/stoffel-run
+    0xaaaaea0064da
+      in /app/stoffel-run
+    0xaaaaea0055ba
+      in /app/stoffel-run
+    0xaaaaea00bfde
+      in /app/stoffel-run
+    0xaaaae9ffc036
+      in /app/stoffel-run
+    0xaaaaea0076d2
+      in /app/stoffel-run
+    0xaaaaea00bc66
+      in /app/stoffel-run
+    0xaaaaea012dfe
+      in /app/stoffel-run
+    0xaaaae9ff9fc6
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+  and 2.55M from 4993 other places
+
+2 temporary allocations of 5 allocations in total (40.00%) from
+__GI__IO_file_doallocate
+  at ./libio/filedoalloc.c:101
+  in /lib/aarch64-linux-gnu/libc.so.6
+1 temporary allocations of 1 allocations in total (100.00%) from:
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:347
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:342
+    _IO_new_file_underflow
+      at ./libio/fileops.c:485
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__IO_default_uflow
+      at ./libio/genops.c:362
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__IO_getline_info
+      at ./libio/iogetline.c:60
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI___fgets_unlocked
+      at ./libio/iofgets_u.c:52
+      in /lib/aarch64-linux-gnu/libc.so.6
+    do_init
+      at ./resolv/res_hconf.c:286
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __pthread_once_slow
+      at ./nptl/pthread_once.c:116
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __resolv_conf_load
+      at ./resolv/res_init.c:557
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __resolv_conf_get_current
+      at ./resolv/resolv_conf.c:140
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __res_vinit
+      at ./resolv/res_init.c:628
+      in /lib/aarch64-linux-gnu/libc.so.6
+    maybe_init
+      at ./resolv/resolv_context.c:122
+      in /lib/aarch64-linux-gnu/libc.so.6
+    context_get
+      at ./resolv/resolv_context.c:184
+      in /lib/aarch64-linux-gnu/libc.so.6
+    context_get
+      at ./resolv/resolv_context.c:176
+    __GI___resolv_context_get
+      at ./resolv/resolv_context.c:195
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:617
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+1 temporary allocations of 1 allocations in total (100.00%) from:
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:347
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__IO_doallocbuf
+      at ./libio/genops.c:342
+    _IO_new_file_seekoff
+      at ./libio/fileops.c:937
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __fseeko
+      at ./libio/fseeko.c:40
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI___nss_files_fopen
+      at ./nss/nss_files_fopen.c:36
+      in /lib/aarch64-linux-gnu/libc.so.6
+    internal_setent
+      at nss_files/files-XXX.c:76
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI__nss_files_gethostbyname4_r
+      at nss_files/files-hosts.c:389
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:646
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+
+1 temporary allocations of 1 allocations in total (100.00%) from
+0xffff7f66e756
+  in /lib/aarch64-linux-gnu/libstdc++.so.6
+1 temporary allocations of 1 allocations in total (100.00%) from:
+    call_init
+      at ./elf/dl-init.c:74
+      in /lib/ld-linux-aarch64.so.1
+    call_init
+      at ./elf/dl-init.c:26
+    _dl_init
+      at ./elf/dl-init.c:121
+      in /lib/ld-linux-aarch64.so.1
+    _start
+      at ../sysdeps/aarch64/dl-start.S:46
+      in /lib/ld-linux-aarch64.so.1
+
+1 temporary allocations of 1 allocations in total (100.00%) from
+send_dg
+  at ./resolv/res_send.c:1160
+  in /lib/aarch64-linux-gnu/libc.so.6
+1 temporary allocations of 1 allocations in total (100.00%) from:
+    __GI___res_context_send
+      at ./resolv/res_send.c:373
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI___res_context_query
+      at ./resolv/res_query.c:221
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __res_context_querydomain
+      at ./resolv/res_query.c:633
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __GI___res_context_search
+      at ./resolv/res_query.c:389
+    __GI__nss_dns_gethostbyname4_r
+      at nss_dns/dns-host.c:418
+      in /lib/aarch64-linux-gnu/libc.so.6
+    get_nss_addresses
+      at ../sysdeps/posix/getaddrinfo.c:646
+      in /lib/aarch64-linux-gnu/libc.so.6
+    gaih_inet
+      at ../sysdeps/posix/getaddrinfo.c:1179
+    __GI_getaddrinfo
+      at ../sysdeps/posix/getaddrinfo.c:2398
+    0xaaaaea08ace6
+      in /app/stoffel-run
+    0xaaaaea0a3d16
+      in /app/stoffel-run
+    0xaaaaea00bd4e
+      in /app/stoffel-run
+    0xaaaaea01308e
+      in /app/stoffel-run
+    0xaaaae9ffa8ae
+      in /app/stoffel-run
+    0xaaaae9fff296
+      in /app/stoffel-run
+    0xaaaaea0009fa
+      in /app/stoffel-run
+    0xaaaaea019d8e
+      in /app/stoffel-run
+    0xaaaaea0a12fa
+      in /app/stoffel-run
+    start_thread
+      at ./nptl/pthread_create.c:442
+      in /lib/aarch64-linux-gnu/libc.so.6
+    thread_start
+      at ../sysdeps/unix/sysv/linux/aarch64/clone.S:79
+      in /lib/aarch64-linux-gnu/libc.so.6
+
+1 temporary allocations of 1 allocations in total (100.00%) from
+__GI___getdelim
+  at ./libio/iogetdelim.c:102
+  in /lib/aarch64-linux-gnu/libc.so.6
+1 temporary allocations of 1 allocations in total (100.00%) from:
+    __pthread_getattr_np
+      at ./nptl/pthread_getattr_np.c:122
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaaea099cee
+      in /app/stoffel-run
+    0xaaaae93488f2
+      in /app/stoffel-run
+    __libc_start_call_main
+      at ../sysdeps/nptl/libc_start_call_main.h:58
+      in /lib/aarch64-linux-gnu/libc.so.6
+    __libc_start_main_impl
+      at ../csu/libc-start.c:360
+      in /lib/aarch64-linux-gnu/libc.so.6
+    0xaaaae8e5b42e
+      in /app/stoffel-run
+
+
+total runtime: 20.19s.
+calls to allocation functions: 9938840 (492192/s)
+temporary memory allocations: 3577469 (177163/s)
+peak heap memory consumption: 190.48M
+peak RSS (including heaptrack overhead): 232.60M
+total memory leaked: 114.17K
+suppressed leaks: 2.71K

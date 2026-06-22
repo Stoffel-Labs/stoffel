@@ -2,7 +2,7 @@ use super::mpc_operation::PendingMpcOperation;
 use super::{CallStackCheckpoint, VMState, VmEffect, VmExecutionBudget, VmRunSlice};
 use crate::error::{VmError, VmResult};
 use crate::runtime_hooks::HookEvent;
-use crate::runtime_instruction::{FetchedInstruction, RuntimeFunction, RuntimeInstruction};
+use crate::runtime_instruction::{FetchedInstruction, RuntimeFunction};
 use std::sync::Arc;
 use stoffel_vm_types::core_types::Value;
 use stoffel_vm_types::instructions::Instruction;
@@ -85,8 +85,8 @@ impl<'function> PreparedInstruction<'function> {
     }
 
     #[inline]
-    fn runtime_instruction(&self) -> &RuntimeInstruction {
-        self.fetched.runtime_instruction()
+    fn fetched(&self) -> FetchedInstruction<'function> {
+        self.fetched
     }
 
     fn hook_instruction(&self) -> VmResult<&Instruction> {
@@ -181,8 +181,8 @@ impl VMState {
                 PreparedStep::Continue => return Ok(CompletedStep::Continue),
             };
 
-        match self.execute_local_instruction_without_hooks(
-            fetched.runtime_instruction(),
+        match self.execute_local_fetched_instruction_without_hooks(
+            fetched.fetched(),
             context.checkpoint(),
         )? {
             InstructionOutcome::Continue => Ok(CompletedStep::Continue),
@@ -202,7 +202,7 @@ impl VMState {
         };
 
         let execution_result = self.execute_local_instruction(
-            fetched.runtime_instruction(),
+            fetched.fetched(),
             fetched.hook_instruction()?,
             context,
         )?;
@@ -345,10 +345,7 @@ impl VMState {
             };
 
             // ---- execute (plan an async MPC effect, otherwise run locally) ----
-            match self.execute_effect_instruction_without_hooks(
-                instruction.runtime_instruction(),
-                checkpoint,
-            )? {
+            match self.execute_effect_fetched_instruction_without_hooks(instruction, checkpoint)? {
                 InstructionEffect::Completed(InstructionOutcome::Continue) => {
                     executed_instructions = executed_instructions.saturating_add(1);
                 }
@@ -374,7 +371,7 @@ impl VMState {
         };
 
         let execution_result = self.execute_effect_instruction(
-            fetched.runtime_instruction(),
+            fetched.fetched(),
             fetched.hook_instruction()?,
             context,
         )?;
