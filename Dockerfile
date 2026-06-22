@@ -26,7 +26,6 @@ WORKDIR /build
 
 COPY . .
 COPY --from=coordinator . /stoffel-mpc-coordinator
-COPY --from=network . /stoffel-network
 RUN sed -i 's#path = "../StoffelVM/crates/stoffel-vm-types"#path = "/build/crates/stoffel-vm-types"#' \
       /stoffel-mpc-coordinator/Cargo.toml
 
@@ -34,11 +33,6 @@ RUN printf '%s\n' \
       '[net]' \
       'git-fetch-with-cli = true' \
       '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
-      'stoffel-mpc-coordinator = { path = "/stoffel-mpc-coordinator" }' \
-      '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-networking.git"]' \
-      'stoffelnet = { path = "/stoffel-network" }' \
       > /build/.cargo/config.toml
 
 # Configure git for private repos if using SSH
@@ -63,9 +57,12 @@ RUN --mount=type=ssh \
 # Compile the AES-128 secret-bit circuit example into VM bytecode for compose runs.
 RUN cargo build --release --package stoffellang && \
     mkdir -p /build/crates/stoffel-lang/examples/mpc_aes128_circuit/target && \
+    STOFFEL_INLINE_BUDGET=100000000 \
+    STOFFEL_UNROLL_BUDGET=100000000 \
+    STOFFEL_UNROLL_MAX_EXPANSION=100000000 \
     /build/target/release/stoffellang \
       --binary \
-      --opt-level 2 \
+      --opt-level 3 \
       --mpc-backend honeybadger \
       --mpc-curve bls12-381 \
       --output /build/crates/stoffel-lang/examples/mpc_aes128_circuit/target/mpc_aes128_circuit.stflb \

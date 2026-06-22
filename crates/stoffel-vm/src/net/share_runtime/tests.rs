@@ -88,8 +88,8 @@ fn runtime_for(engine: &PermissiveEngine) -> MpcShareRuntime<'_> {
 
 fn feldman_share_data() -> ShareData {
     ShareData::Feldman {
-        data: vec![2],
-        commitments: vec![vec![3]],
+        data: vec![2].into(),
+        commitments: vec![vec![3]].into(),
     }
 }
 
@@ -101,7 +101,7 @@ fn binary_ops_reject_mixed_share_data_formats_before_backend_dispatch() {
     let err = runtime
         .add_data(
             ShareType::secret_int(64),
-            &ShareData::Opaque(vec![1]),
+            &ShareData::Opaque(vec![1].into()),
             &feldman_share_data(),
         )
         .expect_err("mixed share data formats should be rejected");
@@ -121,7 +121,7 @@ fn batch_open_rejects_mixed_share_data_formats_before_backend_dispatch() {
     let err = runtime
         .batch_open_share_data(
             ShareType::secret_int(64),
-            &[ShareData::Opaque(vec![1]), feldman_share_data()],
+            &[ShareData::Opaque(vec![1].into()), feldman_share_data()],
         )
         .expect_err("mixed batch share data formats should be rejected");
 
@@ -140,7 +140,7 @@ fn interpolate_rejects_mixed_share_data_formats_before_backend_dispatch() {
     let err = runtime
         .interpolate_share_data_local(
             ShareType::secret_int(64),
-            &[ShareData::Opaque(vec![1]), feldman_share_data()],
+            &[ShareData::Opaque(vec![1].into()), feldman_share_data()],
         )
         .expect_err("mixed interpolation share data formats should be rejected");
 

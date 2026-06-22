@@ -10,6 +10,15 @@ impl VMState {
         Ok(())
     }
 
+    pub(crate) fn try_insert_function_without_vm_source(
+        &mut self,
+        function: Function,
+    ) -> VmResult<()> {
+        self.program.try_insert_without_vm_source(function)?;
+        self.last_call_target = None;
+        Ok(())
+    }
+
     pub(crate) fn try_insert_method(
         &mut self,
         receiver_type: &str,
@@ -32,6 +41,10 @@ impl VMState {
         group_name: &str,
     ) -> VmResult<()> {
         self.program.ensure_names_available(names, group_name)
+    }
+
+    pub(crate) fn discard_vm_source_instructions(&mut self) {
+        self.program.discard_vm_source_instructions();
     }
 
     pub(crate) fn foreign_function(

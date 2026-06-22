@@ -110,7 +110,7 @@ where
             "AVSS share generation initiated: party={}, key='{}', session={}",
             self.topology.party_id(),
             key_name,
-            session_id.as_u64()
+            session_id.as_u128()
         );
 
         let share = self.wait_for_share(session_id).await?;
@@ -151,7 +151,7 @@ where
                 _ = tokio::time::sleep_until(deadline) => {
                     return Err(format!(
                         "Timeout waiting for AVSS share: session={}",
-                        session_id.as_u64()
+                        session_id.as_u128()
                     ));
                 }
             }
@@ -627,7 +627,10 @@ where
             })
             .collect::<Result<Vec<Vec<u8>>, String>>()?;
 
-        Ok(ShareData::Feldman { data, commitments })
+        Ok(ShareData::Feldman {
+            data: data.into(),
+            commitments: commitments.into(),
+        })
     }
 
     /// Create AVSS shares for a secret value (generates Feldman-verifiable shares for all parties).

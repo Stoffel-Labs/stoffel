@@ -171,8 +171,8 @@ where
                 }
             })?;
             let data = ShareData::Feldman {
-                data: bytes,
-                commitments,
+                data: bytes.into(),
+                commitments: commitments.into(),
             };
             Ok(match share_type {
                 Some(share_type) => ClientShare::typed(share_type, data),
@@ -223,8 +223,8 @@ where
             Ok(ClientShare::typed(
                 share_type,
                 ShareData::Feldman {
-                    data: bytes,
-                    commitments,
+                    data: bytes.into(),
+                    commitments: commitments.into(),
                 },
             ))
         })

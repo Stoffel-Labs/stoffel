@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
-# AES-128 in CTR and CBC modes over MPC, with a secret-shared (threshold) key
-# and a client-supplied secret plaintext. Verified against NIST SP 800-38A.
+# AES-128 in CTR mode over MPC, with a secret-shared (threshold) key and a
+# client-supplied secret plaintext. Verified against NIST SP 800-38A.
+# (CBC lives in its own example: mpc_aes128_cbc.)
 #
 #   Client slot 0 (data owner): 2 secret plaintext blocks (32 bytes, 256 bits)
 #   Client slot 1 (key holder): the 128-bit AES key (threshold key)
 #
-# NIST SP 800-38A AES-128 vectors:
+# NIST SP 800-38A AES-128 CTR vectors:
 #   Key       : 2b7e151628aed2a6abf7158809cf4f3c
 #   P0        : 6bc1bee22e409f96e93d7e117393172a
 #   P1        : ae2d8a571e03ac9c9eb76fac45af8e51
-#   CBC IV    : 000102030405060708090a0b0c0d0e0f
 #   CTR ctr0  : f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff   (block1 = ...feff + 1 = ...ff00)
 #
 #   CTR C0/C1 : 874d6191b620e3261bef6864990db6ce / 9806f66b7970fdff8617187bb9fffdff
-#   CBC C0/C1 : 7649abac8119b246cee98e9b12e9197d / 5086cb9b507219ee95db113a917678b2
 #
-# The program prints 8 decimal byte-lists in order:
-#   CTR C0, CTR C1, CTR P0', CTR P1', CBC C0, CBC C1, CBC P0', CBC P1'
+# The program prints 4 decimal byte-lists in order:
+#   CTR C0, CTR C1, CTR P0', CTR P1'
 # (the primed values are the decrypted plaintext and must equal P0, P1).
 set -euo pipefail
 

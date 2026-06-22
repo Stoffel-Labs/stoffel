@@ -54,7 +54,7 @@ enum StepResult {
 }
 
 enum PreparedStep<'function> {
-    Instruction(FetchedInstruction<'function>),
+    Instruction(PreparedInstruction<'function>),
     Return(Value),
     Continue,
 }
@@ -62,6 +62,42 @@ enum PreparedStep<'function> {
 enum CompletedStep {
     Continue,
     Return(Value),
+}
+
+struct PreparedInstruction<'function> {
+    fetched: FetchedInstruction<'function>,
+    hook_instruction: Option<Instruction>,
+}
+
+impl<'function> PreparedInstruction<'function> {
+    fn without_hooks(fetched: FetchedInstruction<'function>) -> Self {
+        Self {
+            fetched,
+            hook_instruction: None,
+        }
+    }
+
+    fn with_hooks(fetched: FetchedInstruction<'function>, hook_instruction: Instruction) -> Self {
+        Self {
+            fetched,
+            hook_instruction: Some(hook_instruction),
+        }
+    }
+
+    #[inline]
+    fn fetched(&self) -> FetchedInstruction<'function> {
+        self.fetched
+    }
+
+    fn hook_instruction(&self) -> VmResult<&Instruction> {
+        self.hook_instruction
+            .as_ref()
+            .ok_or(VmError::InstructionOutOfBounds { index: usize::MAX })
+    }
+
+    fn cloned_hook_instruction(&self) -> VmResult<Instruction> {
+        self.hook_instruction().cloned()
+    }
 }
 
 #[derive(Default)]
@@ -140,13 +176,13 @@ impl VMState {
     ) -> VmResult<CompletedStep> {
         let fetched =
             match self.prepare_next_step_without_hooks(context.checkpoint(), runtime_function)? {
-                PreparedStep::Instruction(fetched) => fetched,
+                PreparedStep::Instruction(prepared) => prepared,
                 PreparedStep::Return(value) => return Ok(CompletedStep::Return(value)),
                 PreparedStep::Continue => return Ok(CompletedStep::Continue),
             };
 
-        match self.execute_local_instruction_without_hooks(
-            fetched.runtime_instruction(),
+        match self.execute_local_fetched_instruction_without_hooks(
+            fetched.fetched(),
             context.checkpoint(),
         )? {
             InstructionOutcome::Continue => Ok(CompletedStep::Continue),
@@ -160,14 +196,14 @@ impl VMState {
         runtime_function: &RuntimeFunction,
     ) -> VmResult<CompletedStep> {
         let fetched = match self.prepare_next_step(context, runtime_function)? {
-            PreparedStep::Instruction(fetched) => fetched,
+            PreparedStep::Instruction(prepared) => prepared,
             PreparedStep::Return(value) => return Ok(CompletedStep::Return(value)),
             PreparedStep::Continue => return Ok(CompletedStep::Continue),
         };
 
         let execution_result = self.execute_local_instruction(
-            fetched.runtime_instruction(),
-            fetched.hook_instruction(),
+            fetched.fetched(),
+            fetched.hook_instruction()?,
             context,
         )?;
 
@@ -176,7 +212,7 @@ impl VMState {
 
     fn complete_prepared_instruction(
         &mut self,
-        fetched: FetchedInstruction,
+        fetched: PreparedInstruction,
         execution_result: InstructionOutcome,
         context: ExecutionContext,
     ) -> VmResult<CompletedStep> {
@@ -188,7 +224,7 @@ impl VMState {
         }
 
         if context.hooks_enabled() {
-            let event = HookEvent::AfterInstructionExecute(fetched.hook_instruction().clone());
+            let event = HookEvent::AfterInstructionExecute(fetched.cloned_hook_instruction()?);
             self.trigger_hook_with_snapshot(&event)?;
         }
 
@@ -265,55 +301,61 @@ impl VMState {
         mut executed_instructions: usize,
         mut runtime_cache: RuntimeFunctionCache,
     ) -> VmResult<VmRunSlice> {
+        // Hot path for online MPC execution (no debug hooks). Fetch + execute are
+        // fused into a single loop body so the compiler can keep the frame and
+        // instruction pointers in registers across instructions, instead of
+        // crossing function-call boundaries and constructing/destructing the
+        // `PreparedStep` / `StepResult` intermediate enums on every instruction.
+        let checkpoint = context.checkpoint();
         loop {
             if budget.is_exhausted(executed_instructions) {
                 return Ok(VmRunSlice::BudgetExhausted);
             }
 
             let runtime_function = runtime_cache.current(self)?;
-            match self.execute_async_step_without_hooks(context, runtime_function)? {
-                StepResult::Continue => {
-                    executed_instructions = executed_instructions.saturating_add(1);
-                }
-                StepResult::Return(value) => return Ok(VmRunSlice::Complete(value)),
-                StepResult::NeedsMpc {
-                    operation,
-                    after_instruction,
-                } => {
-                    return Ok(VmRunSlice::Yield(VmEffect::new(
-                        operation,
-                        after_instruction,
-                        false,
-                    )));
-                }
-            }
-        }
-    }
 
-    fn execute_async_step_without_hooks(
-        &mut self,
-        context: ExecutionContext,
-        runtime_function: &RuntimeFunction,
-    ) -> VmResult<StepResult> {
-        let fetched =
-            match self.prepare_next_step_without_hooks(context.checkpoint(), runtime_function)? {
-                PreparedStep::Instruction(fetched) => fetched,
-                PreparedStep::Return(value) => return Ok(StepResult::Return(value)),
-                PreparedStep::Continue => return Ok(StepResult::Continue),
+            // ---- fetch (inlined from prepare_next_step_without_hooks) ----
+            // The frame borrow is confined to this block so `handle_function_end`
+            // below can take `&mut self` once the frame has been dropped.
+            let instruction = match {
+                if !checkpoint.has_active_frame(self.call_stack.len()) {
+                    return Err(VmError::UnexpectedEndOfExecution);
+                }
+                let frame = self.current_frame_mut()?;
+                let instruction_pointer = frame.instruction_pointer();
+                match runtime_function.get_instruction(instruction_pointer) {
+                    Some(fetched) => {
+                        frame.advance_instruction_pointer_after_fetch();
+                        Some(fetched)
+                    }
+                    None => None,
+                }
+            } {
+                Some(instruction) => instruction,
+                None => {
+                    // Ran past the end of this function's instruction vector:
+                    // resolve its return value and pop the activation frame.
+                    if let Some(result) =
+                        self.handle_function_end(ExecutionContext::new(checkpoint, false))?
+                    {
+                        return Ok(VmRunSlice::Complete(result));
+                    }
+                    continue;
+                }
             };
 
-        match self.execute_effect_instruction_without_hooks(
-            fetched.runtime_instruction(),
-            context.checkpoint(),
-        )? {
-            InstructionEffect::Completed(InstructionOutcome::Continue) => Ok(StepResult::Continue),
-            InstructionEffect::Completed(InstructionOutcome::Return(value)) => {
-                Ok(StepResult::Return(value))
+            // ---- execute (plan an async MPC effect, otherwise run locally) ----
+            match self.execute_effect_fetched_instruction_without_hooks(instruction, checkpoint)? {
+                InstructionEffect::Completed(InstructionOutcome::Continue) => {
+                    executed_instructions = executed_instructions.saturating_add(1);
+                }
+                InstructionEffect::Completed(InstructionOutcome::Return(value)) => {
+                    return Ok(VmRunSlice::Complete(value));
+                }
+                InstructionEffect::PendingMpc(operation) => {
+                    return Ok(VmRunSlice::Yield(VmEffect::new(operation, None, false)));
+                }
             }
-            InstructionEffect::PendingMpc(operation) => Ok(StepResult::NeedsMpc {
-                operation,
-                after_instruction: None,
-            }),
         }
     }
 
@@ -329,8 +371,8 @@ impl VMState {
         };
 
         let execution_result = self.execute_effect_instruction(
-            fetched.runtime_instruction(),
-            fetched.hook_instruction(),
+            fetched.fetched(),
+            fetched.hook_instruction()?,
             context,
         )?;
 
@@ -345,7 +387,8 @@ impl VMState {
                 operation,
                 after_instruction: context
                     .hooks_enabled()
-                    .then(|| fetched.hook_instruction().clone()),
+                    .then(|| fetched.cloned_hook_instruction())
+                    .transpose()?,
             }),
         }
     }
@@ -391,7 +434,9 @@ impl VMState {
             return Ok(PreparedStep::Continue);
         };
 
-        Ok(PreparedStep::Instruction(fetched))
+        Ok(PreparedStep::Instruction(
+            PreparedInstruction::without_hooks(fetched),
+        ))
     }
 
     fn prepare_next_step_with_hooks<'function>(
@@ -423,11 +468,22 @@ impl VMState {
             return Ok(PreparedStep::Continue);
         };
 
+        let hook_instruction = self
+            .program
+            .instruction_at(hook_function_name.as_ref(), instruction_pointer)
+            .cloned()
+            .ok_or(VmError::InstructionOutOfBounds {
+                index: instruction_pointer.index(),
+            })?;
+
         self.set_current_instruction(hook_function_name, instruction_pointer);
-        let event = HookEvent::BeforeInstructionExecute(fetched.hook_instruction().clone());
+        let event = HookEvent::BeforeInstructionExecute(hook_instruction.clone());
         self.trigger_hook_with_snapshot(&event)?;
 
-        Ok(PreparedStep::Instruction(fetched))
+        Ok(PreparedStep::Instruction(PreparedInstruction::with_hooks(
+            fetched,
+            hook_instruction,
+        )))
     }
 
     fn handle_function_end(&mut self, context: ExecutionContext) -> VmResult<Option<Value>> {

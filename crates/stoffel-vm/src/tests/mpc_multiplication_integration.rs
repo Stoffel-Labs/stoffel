@@ -614,7 +614,18 @@ impl<F: FftField + PrimeField + 'static> HoneyBadgerQuicServer<F> {
             let _ = tx.send(()).await;
         }
         if let Some(task) = self.connection_task.take() {
-            let _ = task.await;
+            let mut task = task;
+            tokio::select! {
+                _ = &mut task => {}
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                    warn!(
+                        "Timed out waiting for HoneyBadger QUIC server {} accept loop to stop",
+                        self.node_id
+                    );
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
         }
         info!("Stopped HoneyBadger QUIC server for node {}", self.node_id);
     }
@@ -1155,7 +1166,7 @@ mod tests {
         let base_port = 9200;
         let _session_id = SessionId::new(
             ProtocolType::Mul,
-            SessionId::pack_slot24(0, 0, 0),
+            SessionId::pack_slot(0, 0, 0),
             instance_id as u32,
         );
         // Protocol client IDs are topologically sorted client indexes.
@@ -1356,7 +1367,7 @@ mod tests {
         let preprocessing_timeout = Duration::from_secs(30);
         let _session_id = SessionId::new(
             ProtocolType::Ransha,
-            SessionId::pack_slot24(0, 0, 0),
+            SessionId::pack_slot(0, 0, 0),
             instance_id as u32,
         );
         let preprocessing_handles: Vec<_> = servers
@@ -1729,7 +1740,7 @@ mod tests {
         let preprocessing_timeout = Duration::from_secs(30);
         let _session_id = SessionId::new(
             ProtocolType::Ransha,
-            SessionId::pack_slot24(0, 0, 0),
+            SessionId::pack_slot(0, 0, 0),
             instance_id as u32,
         );
         let preprocessing_handles: Vec<_> = servers
@@ -1961,7 +1972,7 @@ mod tests {
         let preprocessing_timeout = Duration::from_secs(30);
         let _session_id = SessionId::new(
             ProtocolType::Ransha,
-            SessionId::pack_slot24(0, 0, 0),
+            SessionId::pack_slot(0, 0, 0),
             instance_id as u32,
         );
         let preprocessing_handles: Vec<_> = servers
@@ -2033,8 +2044,9 @@ mod tests {
                 //let node = server.node.lock().await;
                 let preproc = server.node.preprocessing_material.lock().await;
 
-                let (triples_count, random_shares_count, _prandbit_count, _prandint_count) =
-                    preproc.len();
+                let preproc_len = preproc.length();
+                let triples_count = preproc_len.beaver_triples;
+                let random_shares_count = preproc_len.random_shr;
 
                 info!(
                     "Server {} has {} triples and {} random shares",

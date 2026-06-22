@@ -147,10 +147,14 @@ where
                     .await?;
                 store.delete(&base).await?;
                 loaded_triples = available;
-                node.preprocessing_material
-                    .lock()
-                    .await
-                    .add(Some(decoded), None, None, None);
+                node.preprocessing_material.lock().await.add(
+                    Some(decoded),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
             }
         }
         if let Some(ref blob) = randoms {
@@ -167,10 +171,14 @@ where
                     .await?;
                 store.delete(&k_rs).await?;
                 loaded_randoms = available;
-                node.preprocessing_material
-                    .lock()
-                    .await
-                    .add(None, Some(decoded), None, None);
+                node.preprocessing_material.lock().await.add(
+                    None,
+                    None,
+                    Some(decoded),
+                    None,
+                    None,
+                    None,
+                );
             }
         }
         if let Some(ref blob) = prandbits {
@@ -187,10 +195,14 @@ where
                     .await?;
                 store.delete(&k_pb).await?;
                 loaded_prandbits = available;
-                node.preprocessing_material
-                    .lock()
-                    .await
-                    .add(None, None, Some(decoded), None);
+                node.preprocessing_material.lock().await.add(
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(decoded),
+                    None,
+                );
             }
         }
         if let Some(ref blob) = prandints {
@@ -207,10 +219,14 @@ where
                     .await?;
                 store.delete(&k_pi).await?;
                 loaded_prandints = available;
-                node.preprocessing_material
-                    .lock()
-                    .await
-                    .add(None, None, None, Some(decoded));
+                node.preprocessing_material.lock().await.add(
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(decoded),
+                );
             }
         }
 
@@ -278,7 +294,9 @@ where
         {
             let node = self.clone_node().await;
             let mut prep = node.preprocessing_material.lock().await;
-            let (n_bt, n_rs, n_pb, n_pi) = prep.len();
+            let _m = prep.length();
+            let (n_bt, n_rs, n_pb, n_pi) =
+                (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
 
             if n_bt > 0 {
                 let items = prep
@@ -325,7 +343,7 @@ where
                 restore_pi = Some(items);
             }
 
-            prep.add(restore_bt, restore_rs, restore_pb, restore_pi);
+            prep.add(restore_bt, None, restore_rs, None, restore_pb, restore_pi);
         }
 
         for (key, blob) in &to_store {
@@ -397,7 +415,7 @@ where
     async fn regenerate_random_shares(&self, needed: usize) -> Result<(), String> {
         let mut node = self.clone_node().await;
         {
-            let current = node.preprocessing_material.lock().await.len().1;
+            let current = node.preprocessing_material.lock().await.length().random_shr;
             let target = current + needed;
             if node.params.n_random_shares < target {
                 node.params.n_random_shares = target;
@@ -413,7 +431,7 @@ where
     async fn regenerate_prandint_shares(&self, needed: usize, ty: ShareType) -> Result<(), String> {
         let mut node = self.clone_node().await;
         {
-            let current = node.preprocessing_material.lock().await.len().3;
+            let current = node.preprocessing_material.lock().await.length().prandint;
             let target = current + needed;
             if node.params.n_prandint < target {
                 node.params.n_prandint = target;
@@ -443,7 +461,7 @@ where
         _ty: ShareType,
     ) -> Result<ShareData, String> {
         let shares = self.reserve_random_shares(1).await?;
-        Self::encode_share(&shares[0]).map(ShareData::Opaque)
+        Self::encode_share(&shares[0]).map(|v| ShareData::Opaque(v.into()))
     }
 
     /// Pull one pre-generated PRandInt share from the preprocessing pool.
@@ -452,6 +470,6 @@ where
         ty: ShareType,
     ) -> Result<ShareData, String> {
         let shares = self.reserve_prandint_shares(1, ty).await?;
-        Self::encode_share(&shares[0]).map(ShareData::Opaque)
+        Self::encode_share(&shares[0]).map(|v| ShareData::Opaque(v.into()))
     }
 }

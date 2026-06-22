@@ -1072,7 +1072,11 @@ async fn test_vm_mesh_large_preprocessing() {
     for (i, server) in servers.iter().enumerate() {
         let material = server.node.preprocessing_material.lock().await;
 
-        let (triples_count, random_shares_count, prandbit_count, prandint_count) = material.len();
+        let material_len = material.length();
+        let triples_count = material_len.beaver_triples;
+        let random_shares_count = material_len.random_shr;
+        let prandbit_count = material_len.prandbit;
+        let prandint_count = material_len.prandint;
 
         info!(
             "  Server {}: {} triples, {} random shares, {} prandbits, {} prandints",
@@ -2488,7 +2492,7 @@ async fn test_vm_mesh_matrix_average_fixed_point_integration() {
             .enumerate()
             .map(|(server_idx, server)| async move {
                 let mut material = server.node.preprocessing_material.lock().await;
-                let share_count = material.len().1;
+                let share_count = material.length().random_shr;
                 let new_shares = if share_count > 0 {
                     material.take_random_shares(share_count).unwrap_or_default()
                 } else {
@@ -2533,7 +2537,7 @@ async fn test_vm_mesh_matrix_average_fixed_point_integration() {
         .map(|(server, shares)| async move {
             let mut material = server.node.preprocessing_material.lock().await;
             let count = shares.len();
-            material.add(None, Some(shares), None, None);
+            material.add(None, None, Some(shares), None, None, None);
             count
         })
         .collect();

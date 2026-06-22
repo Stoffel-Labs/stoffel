@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::fs::File;
+use std::io::BufReader;
 use std::net::SocketAddr;
 use std::process::exit;
 use std::str::FromStr;
@@ -18,7 +19,7 @@ use stoffel_mpc_coordinator::off_chain::node_rpc::{
 use stoffel_mpc_coordinator::off_chain::OffChainCoordinatorClient;
 use stoffel_mpc_coordinator::on_chain;
 use stoffel_mpc_coordinator::on_chain::node_rpc::NodeRPCClient as OnChainNodeRPCClient;
-use stoffel_mpc_coordinator::{Coordinator, Round};
+use stoffel_mpc_coordinator::{Coordinator, NodeRPCError, Round};
 use stoffel_vm::core_vm::VirtualMachine;
 use stoffel_vm::net::curve::{field_from_i64, field_to_i64, SupportedMpcField};
 use stoffel_vm::net::hb_engine::HoneyBadgerMpcEngine;
@@ -36,7 +37,7 @@ use stoffel_vm::runtime_hooks::{HookContext, HookEvent};
 use stoffel_vm::storage::preproc::LmdbPreprocStore;
 use stoffel_vm::storage::RedbLocalStorage;
 use stoffel_vm_types::compiled_binary::{
-    CompiledBinary, MpcCurve, MPC_BACKEND_MANIFEST_FORMAT_VERSION,
+    BinaryError, ClientIoManifest, CompiledBinary, MpcCurve, MPC_BACKEND_MANIFEST_FORMAT_VERSION,
     MPC_CURVE_MANIFEST_FORMAT_VERSION,
 };
 use stoffel_vm_types::core_types::{ShareType, TableRef, Value};
@@ -55,10 +56,9 @@ use x509_parser::prelude::*;
 type HbCoordinatorShare<F> = RobustShare<F>;
 
 fn manifest_client_input_types(
-    binary: &CompiledBinary,
+    manifest: &ClientIoManifest,
 ) -> std::collections::BTreeMap<usize, Vec<ShareType>> {
-    binary
-        .client_io_manifest
+    manifest
         .clients
         .iter()
         .filter_map(|schema| {
@@ -75,6 +75,29 @@ struct PlannedPreprocessing {
     n_random: usize,
     n_prandbit: usize,
     n_prandint: usize,
+}
+
+fn read_trimmed_u64(path: &str) -> Option<u64> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+fn current_process_rss_bytes() -> Option<u64> {
+    fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                let value = line.strip_prefix("VmRSS:")?;
+                let kb = value.split_whitespace().next()?.parse::<u64>().ok()?;
+                Some(kb.saturating_mul(1024))
+            })
+        })
+}
+
+fn current_cgroup_memory_bytes() -> Option<u64> {
+    read_trimmed_u64("/sys/fs/cgroup/memory.current")
+        .or_else(|| read_trimmed_u64("/sys/fs/cgroup/memory/memory.usage_in_bytes"))
 }
 
 /// Round a demand up to a coarse band for privacy: the observable preprocessing
@@ -106,8 +129,10 @@ fn band_pow2(n: u64) -> u64 {
 /// material counts to generate up front. Each count is rounded up to a power of
 /// two for privacy (see `band_pow2`); `dynamic` programs (data-dependent loops,
 /// recursion, runtime-sized batches) get an extra octave of headroom because the
-/// static estimate may undercount them. The triple/random counts absorb the
-/// dependency that prandbit generation itself consumes a triple + random per bit.
+/// static estimate may undercount them. The triple count absorbs the dependency
+/// that prandbit generation itself consumes a triple per bit. The random count
+/// only covers program-visible random material; HoneyBadger generates the
+/// random shares needed to build triples inside `run_preprocessing`.
 /// `STOFFEL_PREPROCESSING_TRIPLES` / `STOFFEL_PREPROCESSING_PRANDBITS` override
 /// the estimate for unusually loop-heavy programs.
 fn plan_preprocessing(
@@ -135,6 +160,7 @@ fn plan_preprocessing(
         .map(band_pow2)
         .unwrap_or_else(|| band_pow2(with_headroom(demand.prandbits)));
     let prandints = band_pow2(with_headroom(demand.prandints));
+    let direct_randoms = band_pow2(with_headroom(demand.randoms));
 
     let direct_triples = env_u64("STOFFEL_PREPROCESSING_TRIPLES")
         .map(band_pow2)
@@ -147,8 +173,12 @@ fn plan_preprocessing(
         triple_target = triple_target.max(2 * threshold as u64 + 1);
     }
     let n_triples = band_pow2(triple_target);
+    // HoneyBadger adds and consumes two random shares per triple internally.
+    // `n_random` is the pool left for direct program use and prandbit generation
+    // after triples have been built; adding `2 * n_triples` here makes the
+    // backend generate an extra full random pool.
     let n_random = band_pow2(
-        2u64.saturating_add(2u64.saturating_mul(n_triples))
+        2u64.saturating_add(direct_randoms)
             .saturating_add(prandbits)
             .saturating_add(n_client_random as u64),
     );
@@ -1957,12 +1987,18 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
         .map(|addr| (addr.ip().to_string(), addr.port()))
         .collect();
     let node_rpc_client: AvssOffChainNodeRpcClient<F, G> =
-        AvssOffChainNodeRpcClient::<F, G>::start_rpc_client(rpc_addrs.len(), t, rpc_addrs, cert_der, key_der)
-            .await
-            .unwrap_or_else(|error| {
-                eprintln!("Failed to connect to AVSS node RPC servers: {error}");
-                exit(13);
-            });
+        AvssOffChainNodeRpcClient::<F, G>::start_rpc_client(
+            rpc_addrs.len(),
+            t,
+            rpc_addrs,
+            cert_der,
+            key_der,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Failed to connect to AVSS node RPC servers: {error}");
+            exit(13);
+        });
     let mut masks = Vec::with_capacity(input_values.len());
     for offset in 0..input_values.len() {
         let index = reserved_index + offset as u64;
@@ -2113,8 +2149,14 @@ async fn run_hb_coordinator_client_for_field<F>(
             .iter()
             .map(|a| (a.ip().to_string(), a.port()))
             .collect();
-        let node_rpc_client =
-            HbOnChainNodeRpcClient::<F>::start_rpc_client(rpc_addrs.len(), t, rpc_addrs, cert_der, key_der).await;
+        let node_rpc_client = HbOnChainNodeRpcClient::<F>::start_rpc_client(
+            rpc_addrs.len(),
+            t,
+            rpc_addrs,
+            cert_der,
+            key_der,
+        )
+        .await;
         let mut masks = Vec::with_capacity(input_values.len());
         for offset in 0..input_values.len() {
             let index = reserved_index + offset as u64;
@@ -2189,12 +2231,18 @@ async fn run_hb_coordinator_client_for_field<F>(
         .map(|a| (a.ip().to_string(), a.port()))
         .collect();
     let node_rpc_client: HbOffChainNodeRpcClient<F> =
-        HbOffChainNodeRpcClient::<F>::start_rpc_client(rpc_addrs.len(), t, rpc_addrs, cert_der, key_der)
-            .await
-            .unwrap_or_else(|error| {
-                eprintln!("Failed to connect to node RPC servers: {error}");
-                exit(13);
-            });
+        HbOffChainNodeRpcClient::<F>::start_rpc_client(
+            rpc_addrs.len(),
+            t,
+            rpc_addrs,
+            cert_der,
+            key_der,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Failed to connect to node RPC servers: {error}");
+            exit(13);
+        });
     let mut masks = Vec::with_capacity(input_values.len());
     for offset in 0..input_values.len() {
         let index = reserved_index + offset as u64;
@@ -2615,6 +2663,23 @@ where
         my_id,
         preprocessing_started_at.elapsed().as_millis()
     );
+    match current_cgroup_memory_bytes() {
+        Some(bytes) => eprintln!(
+            "[party {}] POST_PREPROCESSING_CGROUP_MEM_BYTES: {}",
+            my_id, bytes
+        ),
+        None => eprintln!(
+            "[party {}] POST_PREPROCESSING_CGROUP_MEM_BYTES: unavailable",
+            my_id
+        ),
+    }
+    match current_process_rss_bytes() {
+        Some(bytes) => eprintln!("[party {}] POST_PREPROCESSING_RSS_BYTES: {}", my_id, bytes),
+        None => eprintln!(
+            "[party {}] POST_PREPROCESSING_RSS_BYTES: unavailable",
+            my_id
+        ),
+    }
 
     if n > 1 {
         eprintln!(
@@ -3269,6 +3334,18 @@ where
         .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
         .collect();
 
+    if input_ids.is_empty() {
+        eprintln!(
+            "[party {}] AVSS coordinator mode has no client inputs; executing '{}' without preprocessing",
+            my_id, agreed_entry
+        );
+        let result = vm
+            .execute(agreed_entry)
+            .map_err(|err| format!("Execution error in '{}': {}", agreed_entry, err))?;
+        print_vm_result(vm, result);
+        return Ok(());
+    }
+
     let coord: AvssOffChainCoordinator<F, G> = AvssOffChainCoordinator::<F, G>::start_rpc_client(
         &coord_addr.0,
         coord_addr.1,
@@ -3316,23 +3393,6 @@ where
     .await?;
     engine.enable_client_output_capture().await;
 
-    if input_ids.is_empty() {
-        if as_leader {
-            coord.start_mpc().await.map_err(|e| e.to_string())?;
-        }
-        coord
-            .wait_for_round(Round::MPCExecution)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        eprintln!("Starting VM execution of '{}'...", agreed_entry);
-        let result = vm
-            .execute(agreed_entry)
-            .map_err(|err| format!("Execution error in '{}': {}", agreed_entry, err))?;
-        print_vm_result(vm, result);
-        return Ok(());
-    }
-
     let mut mask_shares = Vec::with_capacity(input_ids.len());
     {
         let node = engine.node_handle().lock().await;
@@ -3378,7 +3438,16 @@ where
             node_rpc
                 .add_reserved_index(cid.clone(), *idx)
                 .await
-                .map_err(|e| format!("add_reserved_index: {:?}", e))?;
+                .or_else(|e| match e {
+                    NodeRPCError::JSONError => {
+                        eprintln!(
+                            "[party {}] add_reserved_index observed a stale client sink for index {}; continuing",
+                            my_id, idx
+                        );
+                        Ok(())
+                    }
+                    other => Err(format!("add_reserved_index: {:?}", other)),
+                })?;
         }
     }
 
@@ -3621,6 +3690,7 @@ async fn main() {
     let mut as_bootnode = false;
     let mut as_leader = false;
     let mut as_client = false;
+    let mut upload_program_bytes = true;
     let mut bind_addr: Option<SocketAddr> = None;
     let mut party_id: Option<usize> = None;
     let mut bootstrap_addr: Option<SocketAddr> = None;
@@ -3670,6 +3740,8 @@ async fn main() {
             as_leader = true;
         } else if arg == "--client" {
             as_client = true;
+        } else if arg == "--no-program-upload" {
+            upload_program_bytes = false;
         } else if arg == "--nat" {
             _enable_nat = true;
         } else if let Some(_rest) = arg.strip_prefix("--bind") {
@@ -3703,6 +3775,7 @@ async fn main() {
         } else if let Some(_rest) = arg.strip_prefix("--preproc-store") {
         } else if let Some(_rest) = arg.strip_prefix("--local-store") {
         } else if let Some(_rest) = arg.strip_prefix("--advertise") {
+        } else if let Some(_rest) = arg.strip_prefix("--no-program-upload") {
         }
     }
 
@@ -3924,6 +3997,7 @@ async fn main() {
                     advertise_addr = Some(v.parse().expect("Invalid --advertise addr"));
                 }
             }
+            "--no-program-upload" => {}
             _ => {}
         }
     }
@@ -4067,25 +4141,28 @@ async fn main() {
     };
 
     let manifest_config = path_opt.as_ref().map(|path| {
-        let mut file = File::open(path).unwrap_or_else(|error| {
+        let file = File::open(path).unwrap_or_else(|error| {
             eprintln!(
                 "Error: failed to open compiled program '{}': {}",
                 path, error
             );
             exit(2);
         });
-        let binary = CompiledBinary::deserialize(&mut file).unwrap_or_else(|error| {
-            eprintln!(
-                "Error: failed to deserialize compiled program '{}': {:?}",
-                path, error
-            );
-            exit(2);
-        });
-        let backend = (binary.version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION)
-            .then_some(MpcBackendKind::from(binary.client_io_manifest.mpc_backend));
-        let curve = (binary.version >= MPC_CURVE_MANIFEST_FORMAT_VERSION).then_some(
-            curve_config_from_manifest(binary.client_io_manifest.mpc_curve),
-        );
+        let (_, bytecode_version, client_io_manifest) =
+            CompiledBinary::try_for_each_vm_function_from_reader(&mut BufReader::new(file), |_| {
+                Ok(())
+            })
+            .unwrap_or_else(|error| {
+                eprintln!(
+                    "Error: failed to deserialize compiled program '{}': {:?}",
+                    path, error
+                );
+                exit(2);
+            });
+        let backend = (bytecode_version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION)
+            .then_some(MpcBackendKind::from(client_io_manifest.mpc_backend));
+        let curve = (bytecode_version >= MPC_CURVE_MANIFEST_FORMAT_VERSION)
+            .then_some(curve_config_from_manifest(client_io_manifest.mpc_curve));
         (backend, curve)
     });
     let manifest_backend = manifest_config.and_then(|(backend, _)| backend);
@@ -4245,8 +4322,15 @@ async fn main() {
             my_id, party_bind, bind, bootnode_connect
         );
 
-        // Register with our own bootnode and wait for session
-        // Leader uploads program bytes so other parties can fetch them
+        // Register with our own bootnode and wait for session. By default the
+        // leader uploads program bytes so parties without a local copy can fetch
+        // them; mounted-program deployments can opt out to avoid a large
+        // discovery message.
+        let program_bytes = if upload_program_bytes {
+            Some(bytes)
+        } else {
+            None
+        };
         let session_info = match register_and_wait_for_session(
             &mut mgr,
             SessionRegistrationConfig {
@@ -4258,7 +4342,7 @@ async fn main() {
                 n_parties: n,
                 threshold: t,
                 timeout: session_registration_timeout(),
-                program_bytes: Some(bytes), // Leader uploads program bytes
+                program_bytes,
             },
         )
         .await
@@ -4333,9 +4417,15 @@ async fn main() {
             my_id, actual_listen, bootnode
         );
 
-        // Register with bootnode and wait for session to be announced
-        // This blocks until all n parties have registered
-        // Upload program bytes so bootnode can distribute to parties that don't have it
+        // Register with bootnode and wait for session to be announced. This
+        // blocks until all n parties have registered. By default parties upload
+        // program bytes so the bootnode can distribute to parties that don't
+        // have a local copy; mounted-program deployments can opt out.
+        let program_bytes = if upload_program_bytes {
+            Some(bytes)
+        } else {
+            None
+        };
         let session_info = match register_and_wait_for_session(
             &mut mgr,
             SessionRegistrationConfig {
@@ -4347,7 +4437,7 @@ async fn main() {
                 n_parties: n,
                 threshold: t,
                 timeout: session_registration_timeout(),
-                program_bytes: Some(bytes), // Upload program bytes
+                program_bytes,
             },
         )
         .await
@@ -4395,22 +4485,6 @@ async fn main() {
         let p = stoffel_vm::net::program_sync::program_path(&program_id);
         p.to_string_lossy().to_string()
     };
-    let mut f = File::open(&load_path).expect("open binary file");
-    let binary = CompiledBinary::deserialize(&mut f).expect("deserialize compiled binary");
-    let client_input_types = manifest_client_input_types(&binary);
-    let preprocessing_demand = binary.client_io_manifest.preprocessing_demand;
-    let functions = match binary.try_to_vm_functions() {
-        Ok(functions) => functions,
-        Err(err) => {
-            eprintln!("Error: invalid compiled program: {:?}", err);
-            exit(3);
-        }
-    };
-    if functions.is_empty() {
-        eprintln!("Error: compiled program contains no functions");
-        exit(3);
-    }
-
     // Initialize VM
     let mut vm_builder = VirtualMachine::builder();
     if let Some(path) = &local_store_path {
@@ -4425,12 +4499,56 @@ async fn main() {
     }
     let mut vm = vm_builder.build();
 
-    // Register all functions
-    for f in functions {
-        if let Err(err) = vm.try_register_function(f) {
-            eprintln!("Error: invalid VM function: {}", err);
-            exit(3);
+    let (function_count, _bytecode_version, client_io_manifest) = if trace_instr {
+        // Instruction tracing hooks need the source Instruction stream for each
+        // program counter. Use the source-preserving loader only in traced mode;
+        // normal execution keeps the low-peak streaming path below.
+        let mut f = File::open(&load_path).expect("open binary file");
+        let compiled = match CompiledBinary::deserialize(&mut f) {
+            Ok(compiled) => compiled,
+            Err(err) => {
+                eprintln!("Error: invalid compiled program: {:?}", err);
+                exit(3);
+            }
+        };
+        let bytecode_version = compiled.version;
+        let client_io_manifest = compiled.client_io_manifest.clone();
+        let functions = match compiled.try_to_vm_functions() {
+            Ok(functions) => functions,
+            Err(err) => {
+                eprintln!("Error: invalid compiled program: {:?}", err);
+                exit(3);
+            }
+        };
+        let function_count = functions.len();
+        for function in functions {
+            if let Err(err) = vm.try_register_function(function) {
+                eprintln!("Error: invalid VM function: {}", err);
+                exit(3);
+            }
         }
+        (function_count, bytecode_version, client_io_manifest)
+    } else {
+        // Register all functions as they are read and lowered to avoid retaining
+        // the compiled function table beside the runtime program.
+        let f = File::open(&load_path).expect("open binary file");
+        match CompiledBinary::try_for_each_vm_function_from_reader(&mut BufReader::new(f), |f| {
+            vm.try_register_function_without_source(f)
+                .map_err(|err| BinaryError::InvalidData(format!("invalid VM function: {err}")))?;
+            Ok(())
+        }) {
+            Ok(result) => result,
+            Err(err) => {
+                eprintln!("Error: invalid compiled program: {:?}", err);
+                exit(3);
+            }
+        }
+    };
+    let client_input_types = manifest_client_input_types(&client_io_manifest);
+    let preprocessing_demand = client_io_manifest.preprocessing_demand;
+    if function_count == 0 {
+        eprintln!("Error: compiled program contains no functions");
+        exit(3);
     }
 
     // Register debugging hooks based on flags
@@ -4583,6 +4701,10 @@ async fn main() {
             },
             0,
         );
+    }
+
+    if !trace_instr {
+        vm.discard_vm_source_instructions();
     }
 
     // =====================================================================
@@ -5377,6 +5499,7 @@ Flags:
   --bootnode              Run as bootnode only (coordinates party discovery)
   --leader                Run as leader: bootnode + party 0 in one process
   --client                Run as client (provide inputs to MPC network)
+  --no-program-upload     Do not upload program bytes during session registration
   --bind <addr:port>      Bind address for bootnode or party listen
   --party-id <usize>      Party id (party mode, 0-indexed)
   --bootstrap <addr:port> Bootnode address (party mode or client mode)
@@ -5517,7 +5640,10 @@ mod tests {
         for n in [1u64, 7, 9, 100, 1000, 60_000, 134_528, 165_696, 200_000] {
             let b = band_pow2(n);
             assert!(b >= n, "band must not under-provision");
-            assert!(b <= n + (n / 8) + 8, "band over-provisions by at most ~1/8 octave");
+            assert!(
+                b <= n + (n / 8) + 8,
+                "band over-provisions by at most ~1/8 octave"
+            );
         }
     }
 
@@ -5542,15 +5668,15 @@ mod tests {
     #[test]
     fn plan_for_single_division_folds_prandbit_cost_into_triples_and_randoms() {
         // 16 prandbits + 1 prandint (one secure fix64 / constant). prandbit
-        // generation consumes a triple + random per bit, so the triple/random
-        // pools must cover that on top of the banded prandbit count. The random
-        // pool (2 + 2*16 triples + 16 prandbits = 50) bands up to the next
-        // eighth of its octave (52).
+        // generation consumes a triple + random per bit, so the planned triple
+        // and random pools must cover the banded prandbit count. HoneyBadger
+        // generates the random shares needed to build triples internally, so the
+        // visible random pool is only the baseline plus prandbits.
         let plan = plan_preprocessing(&demand(0, 16, 1, false), 1, 0);
         assert_eq!(plan.n_prandbit, 16);
         assert_eq!(plan.n_prandint, 1);
         assert_eq!(plan.n_triples, 16);
-        assert_eq!(plan.n_random, 52);
+        assert_eq!(plan.n_random, 18);
     }
 
     #[test]
@@ -5566,12 +5692,13 @@ mod tests {
     fn plan_for_secret_multiplication_floors_to_protocol_triple_batch() {
         // One triple demanded, but the protocol's minimum batch is 2t+1 = 3.
         // Eighth-octave banding leaves 3 as-is (its octave floor is 2, so the
-        // granularity is 1), and the random pool (2 + 2*3 = 8) is already a
-        // clean octave boundary.
+        // granularity is 1). The requested random pool stays at the baseline
+        // because HoneyBadger generates the random shares used to build triples
+        // inside preprocessing.
         let plan = plan_preprocessing(&demand(1, 0, 0, false), 1, 0);
         assert_eq!(plan.n_prandbit, 0);
         assert_eq!(plan.n_triples, 3);
-        assert_eq!(plan.n_random, 8);
+        assert_eq!(plan.n_random, 2);
     }
 
     #[test]

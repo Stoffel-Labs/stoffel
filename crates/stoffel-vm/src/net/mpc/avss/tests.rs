@@ -1072,8 +1072,8 @@ async fn test_avss_input_share_session_allocation_is_consistent_across_parties()
     let (dealer1, sid1) = e1.allocate_input_share_session().expect("session1");
     assert_eq!(dealer0, dealer1, "dealer selection must be deterministic");
     assert_eq!(
-        sid0.as_u64(),
-        sid1.as_u64(),
+        sid0.as_u128(),
+        sid1.as_u128(),
         "session ids must match across parties for the same input_share round"
     );
 
@@ -1084,8 +1084,8 @@ async fn test_avss_input_share_session_allocation_is_consistent_across_parties()
         "dealer selection must stay aligned across rounds"
     );
     assert_eq!(
-        sid0_next.as_u64(),
-        sid1_next.as_u64(),
+        sid0_next.as_u128(),
+        sid1_next.as_u128(),
         "session ids must stay aligned across rounds"
     );
 }

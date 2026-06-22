@@ -854,14 +854,20 @@ impl ShareDataFormat {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ShareData {
-    /// Opaque share bytes (e.g., HoneyBadger RobustShare)
-    Opaque(Vec<u8>),
+    /// Opaque share bytes (e.g., HoneyBadger RobustShare).
+    ///
+    /// Stored as `Arc<[u8]>` so cloning a share — which happens on every
+    /// register read of a secret (`resolve_register`) — is an atomic refcount
+    /// bump rather than a fresh heap allocation + memcpy. Shares are built fresh
+    /// by the MPC codec and never mutated in place, so copy-on-write is never
+    /// needed; this is purely a clone-cheapening.
+    Opaque(Arc<[u8]>),
     /// Feldman share with extractable commitments (AVSS)
     Feldman {
         /// Full serialized FeldmanShamirShare (used by engine for MPC ops)
-        data: Vec<u8>,
+        data: Arc<[u8]>,
         /// Extracted Feldman commitments — commitment\[0\] is the public key
-        commitments: Vec<Vec<u8>>,
+        commitments: Arc<[Vec<u8>]>,
     },
 }
 
@@ -877,8 +883,8 @@ impl ShareData {
     /// Consume and return the share bytes.
     pub fn into_bytes(self) -> Vec<u8> {
         match self {
-            ShareData::Opaque(b) => b,
-            ShareData::Feldman { data, .. } => data,
+            ShareData::Opaque(b) => b.to_vec(),
+            ShareData::Feldman { data, .. } => data.to_vec(),
         }
     }
 
@@ -2358,10 +2364,10 @@ mod tests {
 
     #[test]
     fn share_data_exposes_representation_format() {
-        let opaque = ShareData::Opaque(vec![1, 2, 3]);
+        let opaque = ShareData::Opaque(vec![1, 2, 3].into());
         let feldman = ShareData::Feldman {
-            data: vec![4, 5, 6],
-            commitments: vec![vec![7, 8, 9]],
+            data: vec![4, 5, 6].into(),
+            commitments: vec![vec![7, 8, 9]].into(),
         };
 
         assert_eq!(opaque.format(), ShareDataFormat::Opaque);
@@ -2671,7 +2677,7 @@ mod tests {
     #[test]
     fn value_type_name_covers_vm_value_variants() {
         let closure = Value::Closure(Arc::new(Closure::new("callee", Vec::new())));
-        let share = Value::Share(ShareType::boolean(), ShareData::Opaque(Vec::new()));
+        let share = Value::Share(ShareType::boolean(), ShareData::Opaque(Vec::new().into()));
 
         let cases = [
             (Value::I64(1), "int64"),

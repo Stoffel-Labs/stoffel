@@ -26,7 +26,7 @@ opentelemetry_sdk = { version = "0.32.1", default-features = false, features = [
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-stoffelnet = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-networking.git", branch = "main" }
+stoffelnet = "0.1.0"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1.47.1", features = ["rt", "sync", "time"] }
@@ -36,10 +36,10 @@ tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
 stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
-stoffel-mpc-coordinator = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev", default-features = false, features = ["off-chain", "on-chain"] }
+stoffel-mpc-coordinator = { version = "0.1.0", path = "../../../stoffel-mpc-coordinator", default-features = false, features = ["off-chain", "on-chain"] }
 stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
-stoffelmpc-mpc = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "temp/monorepo-network-dep" }
+stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "main" }
 
 [dev-dependencies]
 aes = "0.8"

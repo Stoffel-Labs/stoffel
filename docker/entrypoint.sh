@@ -25,10 +25,10 @@ echo "=========================================="
 echo "StoffelVM Node Startup"
 echo "=========================================="
 echo "Role: ${STOFFEL_ROLE}"
-if [ "${STOFFEL_ROLE}" = "client" ]; then
-    echo "Inputs: ${STOFFEL_INPUTS}"
-    echo "Client Index: ${STOFFEL_CLIENT_INDEX:-unset}"
-    echo "Servers: ${STOFFEL_SERVERS}"
+    if [ "${STOFFEL_ROLE}" = "client" ]; then
+        echo "Inputs: ${STOFFEL_INPUTS}"
+        echo "Client Index: ${STOFFEL_CLIENT_INDEX:-unset}"
+        echo "Servers: ${STOFFEL_SERVERS}"
 else
     echo "Party ID: ${STOFFEL_PARTY_ID}"
     echo "Bind Address: ${STOFFEL_BIND_ADDR}"
@@ -43,6 +43,8 @@ echo "Entry: ${STOFFEL_ENTRY}"
 echo "Coordinator: ${STOFFEL_COORD_ADDR:-N/A}"
 echo "Preproc Store: ${STOFFEL_PREPROC_STORE:-none}"
 echo "Local Store: ${STOFFEL_LOCAL_STORE:-none}"
+echo "Profiler: ${STOFFEL_PROFILE:-none}"
+echo "Upload Program Bytes: ${STOFFEL_UPLOAD_PROGRAM_BYTES:-true}"
 echo "Auth Token: $( [ -n "${STOFFEL_AUTH_TOKEN:-}" ] && echo "configured" || echo "not set" )"
 echo "=========================================="
 
@@ -79,6 +81,27 @@ wait_for_host() {
 
     echo "ERROR: ${host}:${port} did not become available after ${max_attempts} attempts"
     return 1
+}
+
+resolve_socket_addr() {
+    local addr=$1
+    local host
+    local port
+    local resolved
+
+    host=$(echo "$addr" | cut -d: -f1)
+    port=$(echo "$addr" | cut -d: -f2)
+
+    resolved=$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}')
+    if [ -z "$resolved" ]; then
+        resolved=$(ping -c 1 "$host" 2>/dev/null | sed -n 's/^PING [^(]*(\([^)]*\)).*/\1/p' | head -n 1)
+    fi
+
+    if [ -z "$resolved" ]; then
+        echo "$addr"
+    else
+        echo "${resolved}:${port}"
+    fi
 }
 
 # Build command based on role
@@ -120,6 +143,10 @@ build_command() {
     # Add program path and entry function for non-client modes
     cmd="${cmd} ${STOFFEL_PROGRAM} ${STOFFEL_ENTRY}"
 
+    if [ "${STOFFEL_UPLOAD_PROGRAM_BYTES:-true}" = "false" ]; then
+        cmd="${cmd} --no-program-upload"
+    fi
+
     if [ "${STOFFEL_ROLE}" = "leader" ]; then
         # Leader mode: runs bootnode + party 0
         cmd="${cmd} --leader"
@@ -136,8 +163,9 @@ build_command() {
         cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
     else
         # Regular party mode
+        RESOLVED_BOOTSTRAP_ADDR=$(resolve_socket_addr "${STOFFEL_BOOTSTRAP_ADDR}")
         cmd="${cmd} --party-id ${STOFFEL_PARTY_ID}"
-        cmd="${cmd} --bootstrap ${STOFFEL_BOOTSTRAP_ADDR}"
+        cmd="${cmd} --bootstrap ${RESOLVED_BOOTSTRAP_ADDR}"
         cmd="${cmd} --bind ${STOFFEL_BIND_ADDR}"
         cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
         cmd="${cmd} --threshold ${STOFFEL_THRESHOLD}"
@@ -214,6 +242,46 @@ build_command() {
     echo "$cmd"
 }
 
+run_command() {
+    local cmd="$1"
+    local profile="${STOFFEL_PROFILE:-}"
+    local profile_party="${STOFFEL_PROFILE_PARTY_ID:-0}"
+    local party_id="${STOFFEL_PARTY_ID:-client}"
+    local out_dir="${STOFFEL_PROFILE_DIR:-/app/profiles}"
+    local label="${STOFFEL_PROFILE_LABEL:-party${party_id}}"
+
+    if [ -z "$profile" ] || [ "$profile" = "none" ] || [ "$party_id" != "$profile_party" ]; then
+        exec $cmd
+    fi
+
+    mkdir -p "$out_dir"
+    echo "Profiling party ${party_id} with ${profile}; output dir: ${out_dir}"
+
+    case "$profile" in
+        heaptrack)
+            exec heaptrack -o "${out_dir}/${label}.heaptrack" $cmd
+            ;;
+        massif)
+            exec valgrind \
+                --tool=massif \
+                --pages-as-heap=yes \
+                --massif-out-file="${out_dir}/${label}.massif" \
+                $cmd
+            ;;
+        perf)
+            exec perf record \
+                -F "${STOFFEL_PERF_FREQUENCY:-99}" \
+                -g \
+                -o "${out_dir}/${label}.perf.data" \
+                -- $cmd
+            ;;
+        *)
+            echo "ERROR: unknown STOFFEL_PROFILE '${profile}' (expected heaptrack, massif, perf, or none)" >&2
+            exit 2
+            ;;
+    esac
+}
+
 # Main execution logic
 main() {
     # Handle client mode
@@ -242,11 +310,11 @@ main() {
         echo "=========================================="
         echo ""
 
-        exec $CMD
+        run_command "$CMD"
     fi
 
     # If we're a party (not leader), wait for the bootnode to be ready
-    if [ "${STOFFEL_ROLE}" = "party" ] && [ -n "${STOFFEL_BOOTSTRAP_ADDR}" ]; then
+    if [ "${STOFFEL_ROLE}" = "party" ] && [ -n "${STOFFEL_BOOTSTRAP_ADDR}" ] && [ "${STOFFEL_SKIP_HOST_WAIT:-false}" != "true" ]; then
         # Parse host and port from bootstrap address
         BOOTSTRAP_HOST=$(echo "${STOFFEL_BOOTSTRAP_ADDR}" | cut -d: -f1)
         BOOTSTRAP_PORT=$(echo "${STOFFEL_BOOTSTRAP_ADDR}" | cut -d: -f2)
@@ -269,7 +337,7 @@ main() {
     echo "=========================================="
     echo ""
 
-    exec $CMD
+    run_command "$CMD"
 }
 
 main "$@"

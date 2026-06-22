@@ -652,7 +652,20 @@ impl CodeGenerator {
                 &precolored,
                 &unspillable,
             ) {
-                Ok(allocation) => return Ok(allocation),
+                Ok(allocation) => {
+                    if std::env::var("STOFFEL_RA_CHECK").is_ok() {
+                        Self::ra_interference_check(&allocation, &intervals, diagnostic_name);
+                        Self::ra_liveness_coverage_check(instructions, &intervals, diagnostic_name);
+                        Self::ra_pool_check(
+                            &allocation,
+                            secrecy_map,
+                            k_clear,
+                            k_secret,
+                            diagnostic_name,
+                        );
+                    }
+                    return Ok(allocation);
+                }
                 Err(AllocationError::NeedsSpilling(spilled_vrs)) => {
                     let first_new_vr = *next_virtual_reg;
                     let old_instructions = std::mem::take(instructions);
@@ -685,6 +698,127 @@ impl CodeGenerator {
             "Register allocation failed for {diagnostic_name}: object spill lowering did not converge"
         ))
         .with_hint("Try splitting the function into smaller helper functions."))
+    }
+
+    /// DEBUG: verify the RA's final assignment has no two genuinely-overlapping live
+    /// intervals sharing a physical register (an interference violation). Uses the RA's
+    /// own non-interference rule — `earlier.end <= later.start` may share (read-before-
+    /// write at the boundary instruction); `earlier.end > later.start` is a real overlap.
+    #[allow(dead_code)]
+    fn ra_interference_check(
+        allocation: &register_allocator::Allocation,
+        intervals: &HashMap<register_allocator::VirtualRegister, register_allocator::LiveInterval>,
+        name: &str,
+    ) {
+        let mut by_reg: HashMap<
+            register_allocator::PhysicalRegister,
+            Vec<(usize, usize, register_allocator::VirtualRegister)>,
+        > = HashMap::new();
+        for (vr, phys) in allocation {
+            if let Some(iv) = intervals.get(vr) {
+                by_reg
+                    .entry(*phys)
+                    .or_default()
+                    .push((iv.start, iv.end, *vr));
+            }
+        }
+        let mut total = 0usize;
+        for (phys, mut lst) in by_reg {
+            lst.sort_by_key(|x| x.0);
+            // Active-set sweep: VRs started but not yet ended (end > current start).
+            let mut active: Vec<(usize, register_allocator::VirtualRegister)> = Vec::new();
+            for (s, e, vr) in &lst {
+                active.retain(|(ae, _)| *ae > *s);
+                for (_, avr) in &active {
+                    total += 1;
+                    if total <= 12 {
+                        eprintln!(
+                            "RA_INTERFERENCE {name} phys={} overlaps vr={:?}[{},{}] and avr={:?}",
+                            phys.0, vr, s, e, avr
+                        );
+                    }
+                }
+                active.push((*e, *vr));
+            }
+        }
+        if total > 0 {
+            eprintln!("RA_INTERFERENCE {name} total violations: {total}");
+        }
+    }
+
+    /// DEBUG: verify every instruction's used VR is inside its computed live interval —
+    /// a use outside the interval means liveness under-approximated the live range (the
+    /// RA would then reuse that register before the real last use -> value corruption).
+    #[allow(dead_code)]
+    fn ra_liveness_coverage_check(
+        instructions: &[Instruction],
+        intervals: &HashMap<register_allocator::VirtualRegister, register_allocator::LiveInterval>,
+        name: &str,
+    ) {
+        use crate::register_allocator::InstructionRegisterAnalysis;
+        let mut total = 0usize;
+        for (ip, inst) in instructions.iter().enumerate() {
+            for used_vr in inst.uses() {
+                if let Some(iv) = intervals.get(&used_vr) {
+                    if ip < iv.start || ip > iv.end {
+                        total += 1;
+                        if total <= 12 {
+                            eprintln!(
+                                "LIVENESS_MISS {name} ip={ip} vr={used_vr:?} interval=[{},{}] (use outside interval)",
+                                iv.start, iv.end
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if total > 0 {
+            eprintln!("LIVENESS_MISS {name} total violations: {total}");
+        }
+    }
+
+    /// DEBUG: verify every VR's secrecy matches its physical register's pool. A secret
+    /// VR placed in a clear register (or vice versa) makes the VM mis-execute MOVs
+    /// (reveal vs copy) and MPC ops on it.
+    #[allow(dead_code)]
+    fn ra_pool_check(
+        allocation: &register_allocator::Allocation,
+        secrecy_map: &HashMap<register_allocator::VirtualRegister, bool>,
+        k_clear: usize,
+        k_secret: usize,
+        name: &str,
+    ) {
+        let secret_end = k_clear + k_secret;
+        let mut total = 0usize;
+        for (vr, phys) in allocation {
+            // R0 (0) is the ABI register; skip it.
+            if phys.0 == 0 {
+                continue;
+            }
+            let is_secret = secrecy_map.get(vr).copied().unwrap_or(false);
+            let in_secret_pool = (k_clear..secret_end).contains(&phys.0);
+            let in_clear_pool = (1..k_clear).contains(&phys.0);
+            if is_secret && !in_secret_pool {
+                total += 1;
+                if total <= 12 {
+                    eprintln!(
+                        "POOL_MISMATCH {name} secret vr={vr:?} in non-secret phys={} (clear_pool={in_clear_pool})",
+                        phys.0
+                    );
+                }
+            } else if !is_secret && !in_clear_pool {
+                total += 1;
+                if total <= 12 {
+                    eprintln!(
+                        "POOL_MISMATCH {name} clear vr={vr:?} in non-clear phys={}",
+                        phys.0
+                    );
+                }
+            }
+        }
+        if total > 0 {
+            eprintln!("POOL_MISMATCH {name} total violations: {total}");
+        }
     }
 
     fn record_client_io_call(&mut self, function_name: &str, arguments: &[AstNode]) {
@@ -2304,8 +2438,13 @@ impl CodeGenerator {
                         .map(|n| SymbolType::from_ast_with_type_params(n, type_params))
                         .unwrap_or(SymbolType::Unknown);
                     let param_is_secret = param_type.uses_secret_register();
-                    // Allocate a virtual register for the parameter. These will typically
-                    let param_vr = function_generator.allocate_virtual_register(param_is_secret);
+                    // Function arguments enter in the clear ABI parameter slots
+                    // (R0..Rn-1). The prologue copies them into typed locals below,
+                    // which converts clear-to-secret when the source parameter is
+                    // secret. Model the incoming ABI slot as clear so precoloring it
+                    // to R0..Rn-1 cannot put a secret virtual register in the clear
+                    // physical bank.
+                    let param_vr = function_generator.allocate_virtual_register(false);
                     let local_vr = function_generator.allocate_virtual_register(param_is_secret);
                     function_generator.emit(Instruction::MOV(local_vr.0, param_vr.0));
                     function_generator

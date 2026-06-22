@@ -5,8 +5,8 @@ use super::{
 use crate::error::{VmError, VmResult};
 use crate::runtime_hooks::HookEvent;
 use crate::runtime_instruction::{
-    JumpTarget, RuntimeBinaryOp, RuntimeInstruction, RuntimeJumpCondition, RuntimeRegister,
-    RuntimeShiftOp, RuntimeUnaryOp, StackOffset,
+    FetchedInstruction, JumpTarget, RuntimeBinaryOp, RuntimeInstruction, RuntimeJumpCondition,
+    RuntimeRegister, RuntimeShiftOp, RuntimeUnaryOp, StackOffset,
 };
 use crate::runtime_value_ops;
 use stoffel_vm_types::activations::{CompareFlag, InstructionPointer};
@@ -18,6 +18,8 @@ use stoffel_vm_types::registers::{
 
 #[cfg(test)]
 use super::mpc_operation::PendingMpcOperation;
+#[cfg(test)]
+use crate::runtime_instruction::RuntimeImmediate;
 
 #[cfg(test)]
 pub(super) trait InstructionRuntime {
@@ -144,7 +146,7 @@ impl<'state, 'instruction, R: InstructionRuntime + ?Sized>
             }
             RuntimeInstruction::LoadImmediate { dest, value } => {
                 self.state
-                    .execute_ldi(*dest, value.clone(), hooks_enabled)?;
+                    .execute_ldi(*dest, value.direct_value()?.clone(), hooks_enabled)?;
             }
             RuntimeInstruction::Move { dest, src } => {
                 self.state.execute_mov(*dest, *src, hooks_enabled)?;
@@ -169,7 +171,9 @@ impl<'state, 'instruction, R: InstructionRuntime + ?Sized>
                 self.state.execute_jump(*condition, *target)?;
             }
             RuntimeInstruction::Call { function } => {
-                return self.state.execute_call(function.as_ref(), hooks_enabled);
+                return self
+                    .state
+                    .execute_call(function.direct_function_name()?, hooks_enabled);
             }
             RuntimeInstruction::Return { src } => {
                 return self.state.execute_ret(
@@ -320,88 +324,93 @@ impl InstructionRuntime for VMState {
 }
 
 impl VMState {
-    pub(super) fn execute_effect_instruction_without_hooks(
+    pub(super) fn execute_effect_fetched_instruction_without_hooks(
         &mut self,
-        instruction: &RuntimeInstruction,
+        fetched: FetchedInstruction<'_>,
         checkpoint: CallStackCheckpoint,
     ) -> VmResult<InstructionEffect> {
-        if let Some(operation) = self.plan_async_mpc_operation(instruction, false)? {
+        if let Some(operation) = self.plan_async_mpc_operation_for_fetched(fetched, false)? {
             return Ok(InstructionEffect::PendingMpc(operation));
         }
 
-        self.execute_local_instruction_without_hooks(instruction, checkpoint)
+        self.execute_local_fetched_instruction_without_hooks(fetched, checkpoint)
             .map(InstructionEffect::Completed)
     }
 
     pub(super) fn execute_effect_instruction(
         &mut self,
-        instruction: &RuntimeInstruction,
+        fetched: FetchedInstruction<'_>,
         hook_instruction: &Instruction,
         context: ExecutionContext,
     ) -> VmResult<InstructionEffect> {
         if !context.hooks_enabled() {
             return self
-                .execute_effect_instruction_without_hooks(instruction, context.checkpoint());
+                .execute_effect_fetched_instruction_without_hooks(fetched, context.checkpoint());
         }
 
         if let Some(operation) =
-            self.plan_async_mpc_operation(instruction, context.hooks_enabled())?
+            self.plan_async_mpc_operation_for_fetched(fetched, context.hooks_enabled())?
         {
             return Ok(InstructionEffect::PendingMpc(operation));
         }
 
-        self.execute_local_instruction(instruction, hook_instruction, context)
+        self.execute_local_instruction(fetched, hook_instruction, context)
             .map(InstructionEffect::Completed)
     }
 
-    pub(super) fn execute_local_instruction_without_hooks(
+    pub(super) fn execute_local_fetched_instruction_without_hooks(
         &mut self,
-        instruction: &RuntimeInstruction,
+        fetched: FetchedInstruction<'_>,
         checkpoint: CallStackCheckpoint,
     ) -> VmResult<InstructionOutcome> {
-        self.execute_local_instruction_with_hook_mode::<false>(instruction, None, checkpoint)
+        self.execute_local_fetched_instruction_with_hook_mode::<false>(fetched, None, checkpoint)
     }
 
     pub(super) fn execute_local_instruction(
         &mut self,
-        instruction: &RuntimeInstruction,
+        fetched: FetchedInstruction<'_>,
         hook_instruction: &Instruction,
         context: ExecutionContext,
     ) -> VmResult<InstructionOutcome> {
         if !context.hooks_enabled() {
-            return self.execute_local_instruction_without_hooks(instruction, context.checkpoint());
+            return self
+                .execute_local_fetched_instruction_without_hooks(fetched, context.checkpoint());
         }
 
-        self.execute_local_instruction_with_hook_mode::<true>(
-            instruction,
+        self.execute_local_fetched_instruction_with_hook_mode::<true>(
+            fetched,
             Some(hook_instruction),
             context.checkpoint(),
         )
     }
 
     #[inline]
-    fn execute_local_instruction_with_hook_mode<const HOOKS_ENABLED: bool>(
+    fn execute_local_fetched_instruction_with_hook_mode<const HOOKS_ENABLED: bool>(
         &mut self,
-        instruction: &RuntimeInstruction,
+        fetched: FetchedInstruction<'_>,
         hook_instruction: Option<&Instruction>,
         checkpoint: CallStackCheckpoint,
     ) -> VmResult<InstructionOutcome> {
-        match instruction {
+        match fetched.runtime_instruction() {
             RuntimeInstruction::Noop => {}
             RuntimeInstruction::LoadStack { dest, offset } => {
-                self.execute_ld(*dest, *offset, HOOKS_ENABLED)?;
+                self.execute_ld(dest, offset, HOOKS_ENABLED)?;
             }
             RuntimeInstruction::LoadImmediate { dest, value } => {
-                self.execute_ldi(*dest, value.clone(), HOOKS_ENABLED)?;
+                self.execute_ldi(
+                    dest,
+                    fetched.load_immediate_value(&value)?.clone(),
+                    HOOKS_ENABLED,
+                )?;
             }
             RuntimeInstruction::Move { dest, src } => {
-                self.execute_mov(*dest, *src, HOOKS_ENABLED)?;
+                self.execute_mov(dest, src, HOOKS_ENABLED)?;
             }
             RuntimeInstruction::Binary { op, dest, lhs, rhs } => {
-                self.execute_binary_op(*op, *dest, *lhs, *rhs, HOOKS_ENABLED)?;
+                self.execute_binary_op(op, dest, lhs, rhs, HOOKS_ENABLED)?;
             }
             RuntimeInstruction::Unary { op, dest, src } => {
-                self.execute_unary_op(*op, *dest, *src, HOOKS_ENABLED)?;
+                self.execute_unary_op(op, dest, src, HOOKS_ENABLED)?;
             }
             RuntimeInstruction::Shift {
                 op,
@@ -409,35 +418,35 @@ impl VMState {
                 src,
                 amount,
             } => {
-                self.execute_shift_op(*op, *dest, *src, *amount, HOOKS_ENABLED)?;
+                self.execute_shift_op(op, dest, src, amount, HOOKS_ENABLED)?;
             }
             RuntimeInstruction::Jump { condition, target } => {
-                self.execute_jump(*condition, *target)?;
+                self.execute_jump(condition, target)?;
             }
             RuntimeInstruction::Call { function } => {
-                return self.execute_call(function.as_ref(), HOOKS_ENABLED);
+                return self.execute_call(fetched.call_target_name(&function)?, HOOKS_ENABLED);
             }
             RuntimeInstruction::Return { src } => {
                 if HOOKS_ENABLED {
                     let instruction =
                         hook_instruction.expect("hook instruction is required when hooks run");
-                    return self.execute_ret(*src, instruction, true, checkpoint);
+                    return self.execute_ret(src, instruction, true, checkpoint);
                 }
 
-                let return_value = self.resolve_register(*src)?.into_value();
+                let return_value = self.resolve_register(src)?.into_value();
                 return self.return_current_frame(return_value, None, false, checkpoint);
             }
             RuntimeInstruction::PushArg { src } => {
-                self.execute_pusharg(*src, HOOKS_ENABLED)?;
+                self.execute_pusharg(src, HOOKS_ENABLED)?;
             }
             RuntimeInstruction::Compare { lhs, rhs } => {
-                self.execute_cmp(*lhs, *rhs)?;
+                self.execute_cmp(lhs, rhs)?;
             }
             RuntimeInstruction::SpillLoad { dest, slot } => {
-                self.execute_lds(*dest, *slot, HOOKS_ENABLED)?;
+                self.execute_lds(dest, slot, HOOKS_ENABLED)?;
             }
             RuntimeInstruction::SpillStore { slot, src } => {
-                self.execute_sts(*slot, *src, HOOKS_ENABLED)?;
+                self.execute_sts(slot, src, HOOKS_ENABLED)?;
             }
         }
 
@@ -1562,15 +1571,15 @@ mod tests {
         let mut runtime = FakeInstructionRuntime {
             pending_operation: Some(PendingMpcOperation::Multiply {
                 share_type: ShareType::secret_int(64),
-                left_data: ShareData::Opaque(vec![1]),
-                right_data: ShareData::Opaque(vec![2]),
+                left_data: ShareData::Opaque(vec![1].into()),
+                right_data: ShareData::Opaque(vec![2].into()),
                 dest: runtime_reg(0),
             }),
             ..Default::default()
         };
         let instruction = RuntimeInstruction::LoadImmediate {
             dest: runtime_reg(0),
-            value: Value::I64(7),
+            value: RuntimeImmediate::inline(Value::I64(7)),
         };
         let hook_instruction = Instruction::LDI(0, Value::I64(7));
 

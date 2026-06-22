@@ -172,7 +172,7 @@ impl ClientShare {
     pub fn untyped_bytes(bytes: Vec<u8>) -> Self {
         Self {
             share_type: None,
-            data: ShareData::Opaque(bytes),
+            data: ShareData::Opaque(bytes.into()),
         }
     }
 

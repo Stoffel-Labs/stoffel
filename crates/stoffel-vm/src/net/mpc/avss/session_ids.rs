@@ -76,10 +76,10 @@ fn allocate_local_avss_session(
         .map_err(|_| "AVSS session exec counter exceeds u8::MAX".to_string())?;
     let round_id = u8::try_from(counter16 & 0x00ff)
         .map_err(|_| "AVSS session round counter exceeds u8::MAX".to_string())?;
-    let slot24 = AvssSessionId::pack_slot24(exec_id, dealer_id, round_id);
+    let slot = AvssSessionId::pack_slot(u64::from(exec_id), dealer_id, round_id);
     Ok(AvssSessionId::new(
         AvssProtocolType::Avss,
-        slot24,
+        slot,
         instance_id,
     ))
 }
@@ -128,8 +128,8 @@ mod tests {
             .expect("high instance session");
 
         assert_ne!(
-            low_instance.as_u64(),
-            high_instance.as_u64(),
+            low_instance.as_u128(),
+            high_instance.as_u128(),
             "full session id must include instance ids that differ outside low slot bits"
         );
     }
@@ -153,8 +153,8 @@ mod tests {
         let (dealer1, sid1) = second.next_input_share_session().expect("session1");
         assert_eq!(dealer0, dealer1, "dealer selection must be deterministic");
         assert_eq!(
-            sid0.as_u64(),
-            sid1.as_u64(),
+            sid0.as_u128(),
+            sid1.as_u128(),
             "session ids must match across parties for the same input_share round"
         );
         assert_eq!(
@@ -170,8 +170,8 @@ mod tests {
             "dealer selection must stay aligned across rounds"
         );
         assert_eq!(
-            sid0_next.as_u64(),
-            sid1_next.as_u64(),
+            sid0_next.as_u128(),
+            sid1_next.as_u128(),
             "session ids must stay aligned across rounds"
         );
         assert_eq!(

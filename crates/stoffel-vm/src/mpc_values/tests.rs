@@ -66,7 +66,10 @@ fn share_object_metadata_errors_are_typed() {
         .set_table_field(
             table_ref,
             Value::String(share_fields::DATA.to_string()),
-            Value::Share(ShareType::default_secret_int(), ShareData::Opaque(vec![])),
+            Value::Share(
+                ShareType::default_secret_int(),
+                ShareData::Opaque(vec![].into()),
+            ),
         )
         .expect("set share data");
 
@@ -84,7 +87,7 @@ fn share_object_party_id_errors_are_typed() {
     let share_ref = share_object::create_share_object_ref(
         &mut store,
         ShareType::default_secret_int(),
-        ShareData::Opaque(vec![]),
+        ShareData::Opaque(vec![].into()),
         1,
     )
     .expect("create Share object");
@@ -109,7 +112,7 @@ fn share_object_party_id_errors_are_typed() {
 fn share_object_typed_ref_helpers_avoid_value_wrapping() {
     let mut store = ObjectStore::new();
     let share_type = ShareType::default_secret_int();
-    let share_data = ShareData::Opaque(vec![7, 8]);
+    let share_data = ShareData::Opaque(vec![7, 8].into());
     let share_ref =
         share_object::create_share_object_ref(&mut store, share_type, share_data.clone(), 3)
             .expect("create Share object");
@@ -158,7 +161,7 @@ fn share_array_extraction_reports_missing_elements() {
     let share_ref = share_object::create_share_object_ref(
         &mut store,
         ShareType::default_secret_int(),
-        ShareData::Opaque(vec![1]),
+        ShareData::Opaque(vec![1].into()),
         0,
     )
     .expect("create Share object");
@@ -189,14 +192,14 @@ fn homogeneous_share_array_rejects_type_mismatch() {
     let int_share_ref = share_object::create_share_object_ref(
         &mut store,
         ShareType::default_secret_int(),
-        ShareData::Opaque(vec![1]),
+        ShareData::Opaque(vec![1].into()),
         0,
     )
     .expect("create integer Share object");
     let fixed_share_ref = share_object::create_share_object_ref(
         &mut store,
         ShareType::default_secret_fixed_point(),
-        ShareData::Opaque(vec![2]),
+        ShareData::Opaque(vec![2].into()),
         0,
     )
     .expect("create fixed-point Share object");
@@ -228,14 +231,14 @@ fn matching_share_pair_reports_typed_mismatch_context() {
     let left_ref = share_object::create_share_object_ref(
         &mut store,
         ShareType::default_secret_int(),
-        ShareData::Opaque(vec![1]),
+        ShareData::Opaque(vec![1].into()),
         0,
     )
     .expect("create integer Share object");
     let right_ref = share_object::create_share_object_ref(
         &mut store,
         ShareType::default_secret_fixed_point(),
-        ShareData::Opaque(vec![2]),
+        ShareData::Opaque(vec![2].into()),
         0,
     )
     .expect("create fixed-point Share object");

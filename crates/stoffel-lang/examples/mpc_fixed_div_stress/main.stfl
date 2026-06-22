@@ -1,0 +1,16 @@
+# Stress test: many secret fixed-point divisions in a loop.
+#
+# `secret fix64 / constant` runs the HoneyBadger fixed-point division protocol
+# (reciprocal + probabilistic truncation), which consumes prandbits/prandints and
+# advances the fpdiv_const / prand_bit / prand_int / trunc exec counters once per
+# call. A long loop drives those counters past 256 to exercise the u8 wrap path.
+#
+# Loop count is set high enough to wrap a u8 counter (>256 iterations).
+
+def main() -> fix64:
+  var acc = ClientStore.take_share_fixed(0, 0)
+  var i: int64 = 0
+  while i < 50:
+    acc = acc / 2
+    i = i + 1
+  return acc.open_fixed()

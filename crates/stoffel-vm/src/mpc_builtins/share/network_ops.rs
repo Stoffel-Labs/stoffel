@@ -1,4 +1,4 @@
-use super::result::create_result_share_object;
+use super::result::{create_result_share_object, create_result_share_value};
 use crate::core_vm::VirtualMachine;
 use crate::foreign_functions::{
     ForeignFunctionCallbackResult, ForeignFunctionContext, MpcOnlineBuiltin,
@@ -63,7 +63,7 @@ fn share_mul(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<V
     };
 
     let result_data = ctx.secret_share_mul_data(share_type, &left_data, &right_data)?;
-    create_result_share_object(&mut ctx, share_type, result_data)
+    create_result_share_value(share_type, result_data)
 }
 
 fn share_batch_mul(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {

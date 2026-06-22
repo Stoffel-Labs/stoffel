@@ -14,10 +14,57 @@ use stoffelmpc_mpc::common::types::fixed::{
 use stoffelmpc_mpc::common::{MPCProtocol, MPCTypeOps, SecretSharingScheme};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 
-const MAX_HONEYBADGER_MUL_BATCH_RECON_CHUNKS: usize = 32;
+/// Env var overriding how many secret-pair multiply operands are fed to a
+/// single HoneyBadger `mul()` session. See [`max_honeybadger_mul_pairs_per_session`].
+const STOFFEL_HB_MUL_MAX_PAIRS_PER_SESSION_ENV: &str = "STOFFEL_HB_MUL_MAX_PAIRS_PER_SESSION";
 
+/// Default multiplier on `(threshold + 1)` for the pairs fed to one `mul()`
+/// session. Matches `mpc-protocols`' own per-session deserialization bound
+/// (`128 * (t+1)`), so the default stays within what the protocol already
+/// supports without a change. See [`max_honeybadger_mul_pairs_per_session`].
+const DEFAULT_MAX_HONEYBADGER_MUL_BATCH_RECON_CHUNKS: usize = 128;
+
+/// Maximum secret-pair multiply operands fed to a single HoneyBadger `mul()`
+/// session.
+///
+/// `batch_multiply_share_async` calls `node.mul()` once per chunk of this size
+/// and *awaits each call before starting the next*, so each chunk is a
+/// sequential communication round. Raising this packs more same-depth
+/// multiplications into one round and directly cuts the round count for wide
+/// depth-levels (e.g. a layer with 144 independent muls is 1 round at the
+/// default `256` but 3 rounds at a cap of `64`).
+///
+/// The protocol itself imposes no fixed width here: `batch_recon` packs any
+/// number of `(t+1)`-groups into a single send + broadcast, and `mpc-protocols`'s
+/// own `node.mul` further chunks into independent sessions whose rounds overlap.
+/// The only hard ceiling is the deserialization bound on one opened-values
+/// message, `128 * (t+1)` in `mpc-protocols::honeybadger::max_mul_pairs_per_session`.
+/// The default matches that bound, so it is the highest value that needs no
+/// protocol change; going beyond `128*(t+1)` requires raising that mpc-protocols
+/// cap (and the matching `deser_bounded_vec` bound). Measured on the AES-128
+/// circuit (t=1): raising the cap `64 -> 256` cut online rounds 702 -> 426
+/// (−39%) and online time ~1.11s -> ~0.96s with identical NIST output.
+///
+/// The `(t+1)` factor only keeps the count a clean multiple so there is no RBC
+/// remainder; an explicit override (below) is used as-is.
 pub(crate) fn max_honeybadger_mul_pairs_per_session(threshold: usize) -> usize {
-    MAX_HONEYBADGER_MUL_BATCH_RECON_CHUNKS.saturating_mul(threshold.saturating_add(1))
+    let from_env = std::env::var(STOFFEL_HB_MUL_MAX_PAIRS_PER_SESSION_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok().map(|v| v.max(1)));
+    from_env.unwrap_or_else(|| max_honeybadger_mul_pairs_per_session_with(threshold, None))
+}
+
+/// Pure (env-free) core of [`max_honeybadger_mul_pairs_per_session`], factored
+/// out so the default formula is unit-testable without touching process-global
+/// environment state. `override_pairs = Some(n)` forces the result to `n`.
+pub(crate) fn max_honeybadger_mul_pairs_per_session_with(
+    threshold: usize,
+    override_pairs: Option<usize>,
+) -> usize {
+    if let Some(value) = override_pairs {
+        return value.max(1);
+    }
+    DEFAULT_MAX_HONEYBADGER_MUL_BATCH_RECON_CHUNKS.saturating_mul(threshold.saturating_add(1))
 }
 
 impl<F, G> HoneyBadgerMpcEngine<F, G>
@@ -68,7 +115,7 @@ where
                 .mul_fixed(x, y, self.net.clone())
                 .await
                 .map_err(|e| format!("MPC fixed-point multiply failed: {:?}", e))?;
-            return Self::encode_share(result.value()).map(ShareData::Opaque);
+            return Self::encode_share(result.value()).map(|v| ShareData::Opaque(v.into()));
         }
 
         match ty {
@@ -91,8 +138,9 @@ where
                 let trace = Self::trace_multiply_enabled();
                 let started_at = Instant::now();
                 if trace {
+                    let _m = node.preprocessing_material.lock().await.length();
                     let (triples, randoms, bits, exp_points) =
-                        node.preprocessing_material.lock().await.len();
+                        (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
                     eprintln!(
                         "[hb multiply start] party={} items=1 ty={:?} material=triples:{} randoms:{} bits:{} exp_points:{}",
                         self.topology.party_id(),
@@ -108,8 +156,9 @@ where
                     .await
                     .map_err(|e| format!("MPC multiplication failed: {:?}", e))?;
                 if trace {
+                    let _m = node.preprocessing_material.lock().await.length();
                     let (triples, randoms, bits, exp_points) =
-                        node.preprocessing_material.lock().await.len();
+                        (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
                     eprintln!(
                         "[hb multiply done] party={} items=1 elapsed_ms={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                         self.topology.party_id(),
@@ -126,7 +175,7 @@ where
                     .next()
                     .ok_or_else(|| "Multiplication returned no shares".to_string())?;
 
-                Self::encode_share(&result_share).map(ShareData::Opaque)
+                Self::encode_share(&result_share).map(|v| ShareData::Opaque(v.into()))
             }
         }
     }
@@ -193,7 +242,7 @@ where
             .await
             .map_err(|e| format!("MPC fixed-point division failed: {:?}", e))?;
 
-        Self::encode_share(result.value()).map(ShareData::Opaque)
+        Self::encode_share(result.value()).map(|v| ShareData::Opaque(v.into()))
     }
 
     pub async fn batch_multiply_share_async(
@@ -240,8 +289,9 @@ where
 
                     let chunk_started_at = Instant::now();
                     if trace {
+                        let _m = node.preprocessing_material.lock().await.length();
                         let (triples, randoms, bits, exp_points) =
-                            node.preprocessing_material.lock().await.len();
+                            (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
                         eprintln!(
                             "[hb batch_multiply chunk start] party={} chunk={} items={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                             self.topology.party_id(),
@@ -259,8 +309,9 @@ where
                         .await
                         .map_err(|e| format!("MPC batch multiplication failed: {:?}", e))?;
                     if trace {
+                        let _m = node.preprocessing_material.lock().await.length();
                         let (triples, randoms, bits, exp_points) =
-                            node.preprocessing_material.lock().await.len();
+                            (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
                         eprintln!(
                             "[hb batch_multiply chunk done] party={} chunk={} items={} elapsed_ms={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                             self.topology.party_id(),
@@ -283,7 +334,8 @@ where
                     }
 
                     for share in result_shares {
-                        encoded_results.push(Self::encode_share(&share).map(ShareData::Opaque)?);
+                        encoded_results
+                            .push(Self::encode_share(&share).map(|v| ShareData::Opaque(v.into()))?);
                     }
                 }
                 if trace {
@@ -819,12 +871,27 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::max_honeybadger_mul_pairs_per_session;
+    use super::max_honeybadger_mul_pairs_per_session_with;
 
     #[test]
-    fn max_mul_pairs_per_session_tracks_batch_recon_child_session_space() {
-        assert_eq!(max_honeybadger_mul_pairs_per_session(0), 32);
-        assert_eq!(max_honeybadger_mul_pairs_per_session(1), 64);
-        assert_eq!(max_honeybadger_mul_pairs_per_session(3), 128);
+    fn default_max_mul_pairs_per_session_matches_protocol_deserialization_bound() {
+        // Default (no override): 128 * (t+1), matching mpc-protocols' own
+        // per-session deserialization bound — one `mul()` session opens all its
+        // (t+1)-groups through a single batch_recon, so the width is bounded by
+        // that deser limit, not by child-session id space.
+        assert_eq!(max_honeybadger_mul_pairs_per_session_with(0, None), 128);
+        assert_eq!(max_honeybadger_mul_pairs_per_session_with(1, None), 256);
+        assert_eq!(max_honeybadger_mul_pairs_per_session_with(3, None), 512);
+    }
+
+    #[test]
+    fn override_forces_pairs_per_session_directly() {
+        // An explicit override is used as-is (not forced to a multiple of t+1).
+        assert_eq!(
+            max_honeybadger_mul_pairs_per_session_with(1, Some(256)),
+            256
+        );
+        // A floor of 1 keeps an accidental 0 from starving every multiply.
+        assert_eq!(max_honeybadger_mul_pairs_per_session_with(1, Some(0)), 1);
     }
 }

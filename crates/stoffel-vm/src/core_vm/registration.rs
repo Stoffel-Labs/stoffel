@@ -47,9 +47,31 @@ impl VirtualMachine {
             .ensure_function_names_available(names, group_name)
     }
 
+    /// Release VM source instruction streams after registration.
+    ///
+    /// The lowered runtime instructions remain executable. Call this only when
+    /// no instruction hooks will be registered later, because those hook events
+    /// need the original source instructions.
+    pub fn discard_vm_source_instructions(&mut self) {
+        self.state.discard_vm_source_instructions();
+    }
+
     /// Register a VM function.
     pub fn try_register_function(&mut self, function: VMFunction) -> VirtualMachineResult<()> {
         Ok(self.state.try_insert_function(Function::vm(function))?)
+    }
+
+    /// Register a VM function without retaining its source instruction stream.
+    ///
+    /// The lowered runtime instructions remain executable, but instruction
+    /// hooks cannot inspect source instructions for this function afterward.
+    pub fn try_register_function_without_source(
+        &mut self,
+        function: VMFunction,
+    ) -> VirtualMachineResult<()> {
+        Ok(self
+            .state
+            .try_insert_function_without_vm_source(Function::vm(function))?)
     }
 
     #[track_caller]

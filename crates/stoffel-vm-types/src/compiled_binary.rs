@@ -15,9 +15,11 @@
 
 use crate::core_types::{F64, FixedPointPrecision, ShareType, Value};
 use crate::functions::{FunctionError, VMFunction};
-use crate::instructions::{Instruction, ReducedOpcode};
+use crate::instructions::{Instruction, ReducedOpcode, ResolvedInstruction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Write};
 
 // Magic bytes that identify a StoffelVM bytecode file
@@ -33,6 +35,12 @@ pub const FUNCTION_TYPE_METADATA_FORMAT_VERSION: u16 = 5;
 pub const PREPROCESSING_DEMAND_MANIFEST_FORMAT_VERSION: u16 = 8;
 
 const MAX_BINARY_COLLECTION_LEN: usize = 1_000_000;
+/// Per-function instruction vectors are allowed to grow far larger than the
+/// generic collection bound: a fully-unrolled MPC circuit (e.g. AES-128 at -O3
+/// with raised inline/unroll budgets) legitimately reaches ~2M instructions.
+/// Keep this finite as a guardrail against a corrupt length field triggering a
+/// multi-GB allocation, but size it with headroom over the largest real circuit.
+const MAX_INSTRUCTION_COUNT: usize = 8_000_000;
 const MAX_BINARY_STRING_BYTES: usize = 16 * 1024 * 1024;
 
 /// Error types that can occur during serialization or deserialization
@@ -72,6 +80,23 @@ fn normalized_parameter_types(function: &CompiledFunction) -> Vec<FunctionType> 
     parameter_types.resize(function.parameters.len(), FunctionType::Unknown);
     parameter_types.truncate(function.parameters.len());
     parameter_types
+}
+
+fn resolve_compiled_label(
+    label: &str,
+    labels: &HashMap<String, usize>,
+    instruction_count: usize,
+) -> BinaryResult<usize> {
+    let target = labels
+        .get(label)
+        .copied()
+        .ok_or_else(|| invalid_data(format!("unknown label '{label}'")))?;
+    if target > instruction_count {
+        return Err(invalid_data(format!(
+            "label '{label}' points past the instruction stream: {target} > {instruction_count}"
+        )));
+    }
+    Ok(target)
 }
 
 fn usize_to_u16(value: usize, field: &str) -> BinaryResult<u16> {
@@ -233,7 +258,9 @@ pub struct ClientIoManifest {
 pub struct PreprocessingDemand {
     /// Beaver triples — one per secret*secret multiplication.
     pub triples: u64,
-    /// Random shares — masks for inputs/reveals and triple generation.
+    /// Program-visible random shares — masks for inputs/reveals and direct
+    /// random-share requests. Backends may allocate extra internal randoms for
+    /// derived material such as triples.
     pub randoms: u64,
     /// Random bits — `frac_bits` per secret fixed-point division (truncation).
     pub prandbits: u64,
@@ -405,7 +432,7 @@ pub struct CompiledFunction {
 ///
 /// This enum mirrors the Instruction enum but uses indices into the constant pool
 /// instead of embedding values directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CompiledInstruction {
     // No operation
     NOP,
@@ -679,6 +706,86 @@ impl CompiledBinary {
         Ok(vm_function)
     }
 
+    fn compiled_instruction_into_resolved_instruction<F>(
+        instruction: CompiledInstruction,
+        labels: &HashMap<String, usize>,
+        instruction_count: usize,
+        constants: &mut Vec<Value>,
+        call_target_names: &mut Vec<String>,
+        mut constant_lookup: F,
+    ) -> BinaryResult<ResolvedInstruction>
+    where
+        F: FnMut(usize) -> BinaryResult<Value>,
+    {
+        Ok(match instruction {
+            CompiledInstruction::NOP => ResolvedInstruction::NOP,
+            CompiledInstruction::LD(reg, offset) => ResolvedInstruction::LD(reg, offset),
+            CompiledInstruction::LDI(reg, const_idx) => {
+                let value = constant_lookup(const_idx)?;
+                let local_const_idx = constants.len();
+                constants.push(value);
+                ResolvedInstruction::LDI(reg, local_const_idx)
+            }
+            CompiledInstruction::MOV(target, source) => ResolvedInstruction::MOV(target, source),
+            CompiledInstruction::ADD(target, src1, src2) => {
+                ResolvedInstruction::ADD(target, src1, src2)
+            }
+            CompiledInstruction::SUB(target, src1, src2) => {
+                ResolvedInstruction::SUB(target, src1, src2)
+            }
+            CompiledInstruction::MUL(target, src1, src2) => {
+                ResolvedInstruction::MUL(target, src1, src2)
+            }
+            CompiledInstruction::DIV(target, src1, src2) => {
+                ResolvedInstruction::DIV(target, src1, src2)
+            }
+            CompiledInstruction::MOD(target, src1, src2) => {
+                ResolvedInstruction::MOD(target, src1, src2)
+            }
+            CompiledInstruction::AND(target, src1, src2) => {
+                ResolvedInstruction::AND(target, src1, src2)
+            }
+            CompiledInstruction::OR(target, src1, src2) => {
+                ResolvedInstruction::OR(target, src1, src2)
+            }
+            CompiledInstruction::XOR(target, src1, src2) => {
+                ResolvedInstruction::XOR(target, src1, src2)
+            }
+            CompiledInstruction::NOT(target, source) => ResolvedInstruction::NOT(target, source),
+            CompiledInstruction::SHL(target, src1, src2) => {
+                ResolvedInstruction::SHL(target, src1, src2)
+            }
+            CompiledInstruction::SHR(target, src1, src2) => {
+                ResolvedInstruction::SHR(target, src1, src2)
+            }
+            CompiledInstruction::JMP(label) => {
+                ResolvedInstruction::JMP(resolve_compiled_label(&label, labels, instruction_count)?)
+            }
+            CompiledInstruction::JMPEQ(label) => ResolvedInstruction::JMPEQ(
+                resolve_compiled_label(&label, labels, instruction_count)?,
+            ),
+            CompiledInstruction::JMPNEQ(label) => ResolvedInstruction::JMPNEQ(
+                resolve_compiled_label(&label, labels, instruction_count)?,
+            ),
+            CompiledInstruction::JMPLT(label) => ResolvedInstruction::JMPLT(
+                resolve_compiled_label(&label, labels, instruction_count)?,
+            ),
+            CompiledInstruction::JMPGT(label) => ResolvedInstruction::JMPGT(
+                resolve_compiled_label(&label, labels, instruction_count)?,
+            ),
+            CompiledInstruction::CALL(function_name) => {
+                let call_idx = call_target_names.len();
+                call_target_names.push(function_name);
+                ResolvedInstruction::CALL(call_idx)
+            }
+            CompiledInstruction::RET(reg) => ResolvedInstruction::RET(reg),
+            CompiledInstruction::PUSHARG(reg) => ResolvedInstruction::PUSHARG(reg),
+            CompiledInstruction::CMP(reg1, reg2) => ResolvedInstruction::CMP(reg1, reg2),
+            CompiledInstruction::LDS(reg, slot) => ResolvedInstruction::LDS(reg, slot),
+            CompiledInstruction::STS(slot, reg) => ResolvedInstruction::STS(slot, reg),
+        })
+    }
+
     fn try_to_raw_vm_functions(&self) -> BinaryResult<Vec<VMFunction>> {
         let mut vm_functions = Vec::with_capacity(self.functions.len());
         for function in &self.functions {
@@ -729,6 +836,43 @@ impl CompiledBinary {
         }
 
         Ok(vm_functions)
+    }
+
+    /// Consumes the compiled binary and converts it to source-preserving VM
+    /// functions.
+    pub fn try_into_vm_functions(self) -> BinaryResult<Vec<VMFunction>> {
+        let CompiledBinary {
+            version,
+            constants,
+            functions,
+            client_io_manifest,
+        } = self;
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut unique_functions: Vec<CompiledFunction> = Vec::new();
+
+        for function in functions {
+            if let Some(existing_index) = seen.get(function.name.as_str()) {
+                if unique_functions[*existing_index] == function {
+                    continue;
+                }
+
+                return Err(invalid_data(format!(
+                    "duplicate function '{}' has conflicting definitions",
+                    function.name
+                )));
+            }
+
+            seen.insert(function.name.clone(), unique_functions.len());
+            unique_functions.push(function);
+        }
+
+        CompiledBinary {
+            version,
+            constants,
+            functions: unique_functions,
+            client_io_manifest,
+        }
+        .try_to_raw_vm_functions()
     }
 
     /// Serializes the compiled binary to a writer
@@ -1255,6 +1399,79 @@ impl CompiledBinary {
         })
     }
 
+    /// Streams a compiled binary from `reader`, lowering and yielding each VM
+    /// function without retaining the full compiled function table.
+    ///
+    /// The bytecode manifest is stored after the function table, so it is
+    /// returned once all functions have been read and yielded. Identical
+    /// duplicate function records are skipped; conflicting duplicates are
+    /// rejected, matching `try_into_vm_functions`.
+    pub fn try_for_each_vm_function_from_reader<R, F>(
+        reader: &mut R,
+        mut callback: F,
+    ) -> BinaryResult<(usize, u16, ClientIoManifest)>
+    where
+        R: Read,
+        F: FnMut(VMFunction) -> BinaryResult<()>,
+    {
+        let mut magic = [0u8; 4];
+        reader.read_exact(&mut magic)?;
+        if magic != *MAGIC_BYTES {
+            return Err(BinaryError::InvalidMagicBytes);
+        }
+
+        let version = read_u16(reader)?;
+        if version > FORMAT_VERSION {
+            return Err(BinaryError::UnsupportedVersion(version));
+        }
+
+        let constant_count =
+            read_u32_len_bounded(reader, "constant count", MAX_BINARY_COLLECTION_LEN)?;
+
+        let mut constants = Vec::new();
+        reserve_vec(&mut constants, constant_count, "constant count")?;
+        for _ in 0..constant_count {
+            constants.push(Self::deserialize_value(reader)?);
+        }
+
+        let function_record_count =
+            read_u32_len_bounded(reader, "function count", MAX_BINARY_COLLECTION_LEN)?;
+        let mut seen: HashMap<String, u64> = HashMap::new();
+        let mut function_count = 0;
+
+        for _ in 0..function_record_count {
+            let (vm_function, fingerprint) =
+                Self::deserialize_vm_function(reader, version, &constants)?;
+            if let Some(existing_fingerprint) = seen.get(vm_function.name()) {
+                if *existing_fingerprint == fingerprint {
+                    continue;
+                }
+
+                return Err(invalid_data(format!(
+                    "duplicate function '{}' has conflicting definitions",
+                    vm_function.name()
+                )));
+            }
+
+            seen.insert(vm_function.name().to_string(), fingerprint);
+            callback(vm_function)?;
+            function_count += 1;
+        }
+
+        let client_io_manifest = if version >= CLIENT_IO_MANIFEST_FORMAT_VERSION {
+            Self::deserialize_client_io_manifest(
+                reader,
+                version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION,
+                version >= MPC_CURVE_MANIFEST_FORMAT_VERSION,
+                version >= PREPROCESSING_DEMAND_MANIFEST_FORMAT_VERSION,
+            )?
+        } else {
+            ClientIoManifest::default()
+        };
+
+        Ok((function_count, version, client_io_manifest))
+    }
+
     fn deserialize_client_io_manifest<R: Read>(
         reader: &mut R,
         has_backend: bool,
@@ -1576,7 +1793,7 @@ impl CompiledBinary {
 
         // Read instructions
         let instruction_count =
-            read_u32_len_bounded(reader, "instruction count", MAX_BINARY_COLLECTION_LEN)?;
+            read_u32_len_bounded(reader, "instruction count", MAX_INSTRUCTION_COUNT)?;
 
         let mut instructions = Vec::new();
         reserve_vec(&mut instructions, instruction_count, "instruction count")?;
@@ -1596,6 +1813,155 @@ impl CompiledBinary {
             labels,
             instructions,
         })
+    }
+
+    fn deserialize_vm_function<R: Read>(
+        reader: &mut R,
+        version: u16,
+        constants: &[Value],
+    ) -> BinaryResult<(VMFunction, u64)> {
+        let name = read_len_prefixed_string_u16(
+            reader,
+            "function name length",
+            "Invalid UTF-8 in function name",
+        )?;
+        let mut hasher = DefaultHasher::new();
+        name.hash(&mut hasher);
+
+        let register_count = usize::from(read_u16(reader)?);
+        register_count.hash(&mut hasher);
+
+        let param_count = usize::from(read_u16(reader)?);
+        let mut parameters = Vec::new();
+        reserve_vec(&mut parameters, param_count, "parameter count")?;
+        for _ in 0..param_count {
+            parameters.push(read_len_prefixed_string_u16(
+                reader,
+                "parameter name length",
+                "Invalid UTF-8 in parameter name",
+            )?);
+        }
+        parameters.hash(&mut hasher);
+
+        let (parameter_types, return_type) = if version >= FUNCTION_TYPE_METADATA_FORMAT_VERSION {
+            let type_count = usize::from(read_u16(reader)?);
+            if type_count != parameters.len() {
+                return Err(invalid_data(format!(
+                    "function '{}' declares {} parameter name(s) but {} parameter type(s)",
+                    name,
+                    parameters.len(),
+                    type_count
+                )));
+            }
+            let mut parameter_types = Vec::new();
+            reserve_vec(&mut parameter_types, type_count, "parameter type count")?;
+            for _ in 0..type_count {
+                parameter_types.push(Self::deserialize_function_type(reader)?);
+            }
+            let return_type = Self::deserialize_function_type(reader)?;
+            (parameter_types, return_type)
+        } else {
+            (
+                vec![FunctionType::Unknown; parameters.len()],
+                FunctionType::Unknown,
+            )
+        };
+        parameter_types.hash(&mut hasher);
+        return_type.hash(&mut hasher);
+
+        let upvalue_count = usize::from(read_u16(reader)?);
+        let mut upvalues = Vec::new();
+        reserve_vec(&mut upvalues, upvalue_count, "upvalue count")?;
+        for _ in 0..upvalue_count {
+            upvalues.push(read_len_prefixed_string_u16(
+                reader,
+                "upvalue name length",
+                "Invalid UTF-8 in upvalue name",
+            )?);
+        }
+        upvalues.hash(&mut hasher);
+
+        let mut has_parent_byte = [0u8; 1];
+        reader.read_exact(&mut has_parent_byte)?;
+        let parent = match has_parent_byte[0] {
+            0 => None,
+            1 => Some(read_len_prefixed_string_u16(
+                reader,
+                "parent function name length",
+                "Invalid UTF-8 in parent function name",
+            )?),
+            other => {
+                return Err(invalid_data(format!(
+                    "Invalid parent presence flag: {other}"
+                )));
+            }
+        };
+        parent.hash(&mut hasher);
+
+        let label_count = usize::from(read_u16(reader)?);
+        let mut labels = HashMap::new();
+        labels.try_reserve(label_count).map_err(|err| {
+            invalid_data(format!(
+                "label count {label_count} could not be allocated: {err}"
+            ))
+        })?;
+        for _ in 0..label_count {
+            let label = read_len_prefixed_string_u16(
+                reader,
+                "label name length",
+                "Invalid UTF-8 in label name",
+            )?;
+            let offset = read_usize_u32(reader, "label offset")?;
+            labels.insert(label, offset);
+        }
+        let mut sorted_labels: Vec<_> = labels.iter().collect();
+        sorted_labels.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        sorted_labels.len().hash(&mut hasher);
+        for (label, offset) in sorted_labels {
+            label.hash(&mut hasher);
+            offset.hash(&mut hasher);
+        }
+
+        let instruction_count =
+            read_u32_len_bounded(reader, "instruction count", MAX_INSTRUCTION_COUNT)?;
+        instruction_count.hash(&mut hasher);
+        let mut resolved_instructions = Vec::with_capacity(instruction_count);
+        let mut constant_values = Vec::new();
+        let mut call_target_names = Vec::new();
+        for instruction_index in 0..instruction_count {
+            let instruction = Self::deserialize_instruction(reader)?;
+            instruction.hash(&mut hasher);
+            resolved_instructions.push(Self::compiled_instruction_into_resolved_instruction(
+                instruction,
+                &labels,
+                instruction_count,
+                &mut constant_values,
+                &mut call_target_names,
+                |const_idx| {
+                    constants.get(const_idx).cloned().ok_or_else(|| {
+                        invalid_data(format!(
+                            "Function {} instruction {} references constant {} but constant pool has {} values",
+                            name,
+                            instruction_index,
+                            const_idx,
+                            constants.len()
+                        ))
+                    })
+                },
+            )?);
+        }
+
+        let vm_function = VMFunction::try_new_resolved_with_call_targets(
+            name,
+            parameters,
+            upvalues,
+            parent,
+            register_count,
+            resolved_instructions,
+            constant_values,
+            call_target_names,
+        )?;
+        Ok((vm_function, hasher.finish()))
     }
 
     fn deserialize_function_type<R: Read>(reader: &mut R) -> BinaryResult<FunctionType> {
@@ -2604,9 +2970,7 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes()); // constants
         bytes.extend_from_slice(&1u32.to_le_bytes()); // functions
         append_empty_function_prefix(&mut bytes);
-        bytes.extend_from_slice(
-            &(u32::try_from(MAX_BINARY_COLLECTION_LEN).unwrap() + 1).to_le_bytes(),
-        );
+        bytes.extend_from_slice(&(u32::try_from(MAX_INSTRUCTION_COUNT).unwrap() + 1).to_le_bytes());
 
         assert_invalid_data(
             CompiledBinary::deserialize(&mut Cursor::new(bytes)),
@@ -2722,5 +3086,223 @@ mod tests {
         let vm_functions = binary.to_vm_functions();
 
         assert_eq!(vm_functions[0].register_count(), 17);
+    }
+
+    #[test]
+    fn try_into_vm_functions_expands_compact_secret_register_counts() {
+        let binary = CompiledBinary {
+            version: FORMAT_VERSION,
+            constants: vec![Value::I64(42)],
+            functions: vec![CompiledFunction {
+                name: "uses_secret_bank".to_string(),
+                register_count: 2,
+                parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
+                upvalues: vec![],
+                parent: None,
+                labels: HashMap::new(),
+                instructions: vec![
+                    CompiledInstruction::LDI(16, 0),
+                    CompiledInstruction::RET(16),
+                ],
+            }],
+            client_io_manifest: ClientIoManifest::default(),
+        };
+
+        let vm_functions = binary.try_into_vm_functions().unwrap();
+
+        assert_eq!(vm_functions[0].register_count(), 17);
+    }
+
+    #[test]
+    fn try_for_each_vm_function_from_reader_expands_compact_secret_register_counts() {
+        let binary = CompiledBinary {
+            version: FORMAT_VERSION,
+            constants: vec![Value::I64(42)],
+            functions: vec![CompiledFunction {
+                name: "uses_secret_bank".to_string(),
+                register_count: 2,
+                parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
+                upvalues: vec![],
+                parent: None,
+                labels: HashMap::new(),
+                instructions: vec![
+                    CompiledInstruction::LDI(16, 0),
+                    CompiledInstruction::RET(16),
+                ],
+            }],
+            client_io_manifest: ClientIoManifest::default(),
+        };
+        let mut bytes = Vec::new();
+        binary.serialize(&mut bytes).unwrap();
+
+        let mut register_counts = Vec::new();
+        let (count, _version, _manifest) = CompiledBinary::try_for_each_vm_function_from_reader(
+            &mut Cursor::new(bytes),
+            |function| {
+                register_counts.push(function.register_count());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(register_counts, vec![17]);
+    }
+
+    #[test]
+    fn try_for_each_vm_function_from_reader_streams_functions_and_returns_manifest() {
+        let binary = CompiledBinary {
+            version: FORMAT_VERSION,
+            constants: vec![Value::I64(42)],
+            functions: vec![CompiledFunction {
+                name: "uses_secret_bank".to_string(),
+                register_count: 2,
+                parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
+                upvalues: vec![],
+                parent: None,
+                labels: HashMap::new(),
+                instructions: vec![
+                    CompiledInstruction::LDI(16, 0),
+                    CompiledInstruction::RET(16),
+                ],
+            }],
+            client_io_manifest: ClientIoManifest {
+                preprocessing_demand: PreprocessingDemand {
+                    triples: 7,
+                    randoms: 2,
+                    prandbits: 0,
+                    prandints: 0,
+                    dynamic: false,
+                },
+                ..ClientIoManifest::default()
+            },
+        };
+        let mut bytes = Vec::new();
+        binary.serialize(&mut bytes).unwrap();
+
+        let mut register_counts = Vec::new();
+        let (count, version, manifest) = CompiledBinary::try_for_each_vm_function_from_reader(
+            &mut Cursor::new(bytes),
+            |function| {
+                register_counts.push(function.register_count());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(version, FORMAT_VERSION);
+        assert_eq!(register_counts, vec![17]);
+        assert_eq!(manifest.preprocessing_demand.triples, 7);
+        assert_eq!(manifest.preprocessing_demand.randoms, 2);
+    }
+
+    #[test]
+    fn try_to_vm_functions_preserves_source_instructions_for_tracing() {
+        let binary = CompiledBinary {
+            version: FORMAT_VERSION,
+            constants: vec![Value::I64(42)],
+            functions: vec![CompiledFunction {
+                name: "traceable".to_string(),
+                register_count: 1,
+                parameters: vec![],
+                parameter_types: vec![],
+                return_type: FunctionType::Unknown,
+                upvalues: vec![],
+                parent: None,
+                labels: HashMap::new(),
+                instructions: vec![CompiledInstruction::LDI(0, 0), CompiledInstruction::RET(0)],
+            }],
+            client_io_manifest: ClientIoManifest::default(),
+        };
+
+        let functions = binary.try_to_vm_functions().unwrap();
+
+        assert_eq!(functions.len(), 1);
+        let instructions = functions[0].instructions();
+        assert_eq!(instructions.len(), 2);
+        assert!(matches!(
+            instructions[0],
+            Instruction::LDI(0, Value::I64(42))
+        ));
+        assert!(matches!(instructions[1], Instruction::RET(0)));
+    }
+
+    #[test]
+    fn try_for_each_vm_function_from_reader_skips_identical_duplicate_records() {
+        let function = CompiledFunction {
+            name: "same".to_string(),
+            register_count: 1,
+            parameters: vec![],
+            parameter_types: vec![],
+            return_type: FunctionType::Unknown,
+            upvalues: vec![],
+            parent: None,
+            labels: HashMap::new(),
+            instructions: vec![CompiledInstruction::RET(0)],
+        };
+        let binary = CompiledBinary {
+            version: FORMAT_VERSION,
+            constants: vec![],
+            functions: vec![function.clone(), function],
+            client_io_manifest: ClientIoManifest::default(),
+        };
+        let mut bytes = Vec::new();
+        binary.serialize(&mut bytes).unwrap();
+
+        let mut names = Vec::new();
+        let (count, _version, _manifest) = CompiledBinary::try_for_each_vm_function_from_reader(
+            &mut Cursor::new(bytes),
+            |function| {
+                names.push(function.name().to_string());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(names, vec!["same"]);
+    }
+
+    #[test]
+    fn try_for_each_vm_function_from_reader_rejects_conflicting_duplicate_records() {
+        let mut first = CompiledFunction {
+            name: "same".to_string(),
+            register_count: 1,
+            parameters: vec![],
+            parameter_types: vec![],
+            return_type: FunctionType::Unknown,
+            upvalues: vec![],
+            parent: None,
+            labels: HashMap::new(),
+            instructions: vec![CompiledInstruction::RET(0)],
+        };
+        let mut second = first.clone();
+        second.instructions = vec![CompiledInstruction::LDI(0, 0), CompiledInstruction::RET(0)];
+        first.instructions = vec![CompiledInstruction::RET(0)];
+        let binary = CompiledBinary {
+            version: FORMAT_VERSION,
+            constants: vec![Value::I64(42)],
+            functions: vec![first, second],
+            client_io_manifest: ClientIoManifest::default(),
+        };
+        let mut bytes = Vec::new();
+        binary.serialize(&mut bytes).unwrap();
+
+        let err =
+            CompiledBinary::try_for_each_vm_function_from_reader(&mut Cursor::new(bytes), |_| {
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(
+            matches!(err, BinaryError::InvalidData(message) if message.contains("duplicate function 'same'"))
+        );
     }
 }

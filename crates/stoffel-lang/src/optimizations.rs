@@ -124,7 +124,10 @@ fn collect_referenced_vars(node: &AstNode, vars: &mut HashSet<String>) {
                 collect_referenced_vars(else_b, vars);
             }
         }
-        _ => {}
+        // Any other node kind: still recurse so a variable buried in an
+        // unhandled node type is tracked (a miss here would skip invalidation in
+        // CSE/GVN and produce a stale alias).
+        _ => for_each_child(node, &mut |c| collect_referenced_vars(c, vars)),
     }
 }
 
@@ -1804,6 +1807,7 @@ pub fn optimize_all(node: AstNode, optimization_level: u8) -> AstNode {
     let node = optimize_multiplies(node);
     let node = reorder_for_reveal_batching(node);
     let node = optimize_licm_cse(node);
+    let node = optimize_gvn(node);
     // Finally, drop bindings whose value is never used (a pure dead store). This
     // sweeps up the intermediate temporaries that inlining, unrolling, and the
     // batchers leave behind — reducing live values (register pressure / spills)
@@ -1815,19 +1819,19 @@ pub fn optimize_all(node: AstNode, optimization_level: u8) -> AstNode {
 // ===========================================================================
 // Round-minimizing list scheduler
 //
-// Reorders statements *within a side-effect-free region* of a block so that all
+// Reorders analyzable statements within a straight-line region of a block so that all
 // mutually-independent multiplies at the same dependency depth become
 // consecutive — letting the greedy multiply batcher coalesce them into one
 // `Share.batch_mul` (one MPC round). The reorder is a topological schedule of a
 // precise dependency graph, so it preserves every observed value:
 //
-//   * Data deps: RAW / WAR / WAW over variable keys, with *mutator-aware* writes
-//     (`append`/`insert`/`extend`/`array_push`/`set_field` write their receiver,
-//     and index/field assignment writes its base) so a `batch_mul` reading a
-//     list that was built by `append`s stays after them.
-//   * Effect order: every effectful statement is chained in original order.
-//   * Barriers: control flow, returns, reveals, and any unanalyzable/unknown
-//     call split the block into independently-scheduled regions and never move.
+//   * Data deps: RAW / WAR / WAW over scalar and heap keys. Assignments write
+//     their target key, and known mutators write/read their receiver heap key.
+//   * Logical deps: pure temporaries remember their source inputs, so an
+//     effectful commit like `append(out, tmp)` cannot move after a later write
+//     to the state used to compute `tmp`.
+//   * Effects: observable mutators are ordered per receiver/effect key; unknown
+//     calls, reveals, control flow, and unresolved aliasing split the block.
 //
 // Multiplies are clustered by a list scheduler: drain all ready non-multiply
 // statements, then fire every currently-ready multiply as one round, repeat.
@@ -1852,7 +1856,10 @@ fn value_is_multiply(value: &AstNode) -> bool {
     match value {
         AstNode::BinaryOperation { op, .. } => matches!(op.as_str(), "and" | "or" | "xor"),
         AstNode::FunctionCall { .. } => {
-            matches!(call_name(value).map(builtin_base_name), Some("mul") | Some("batch_mul"))
+            matches!(
+                call_name(value).map(builtin_base_name),
+                Some("mul") | Some("batch_mul")
+            )
         }
         _ => false,
     }
@@ -1860,10 +1867,46 @@ fn value_is_multiply(value: &AstNode) -> bool {
 
 /// Per-statement scheduling facts.
 struct SchedInfo {
-    reads: HashSet<String>,
+    direct_reads: HashSet<String>,
+    logical_reads: HashSet<String>,
     writes: HashSet<String>,
+    effects: HashSet<String>,
     is_multiply: bool,
-    is_effectful: bool,
+}
+
+fn scalar_key(name: &str) -> String {
+    format!("var:{name}")
+}
+
+fn heap_key(name: &str) -> String {
+    format!("heap:{name}")
+}
+
+fn global_key() -> String {
+    "global:*".to_string()
+}
+
+fn collect_direct_read_keys(node: &AstNode, out: &mut HashSet<String>) {
+    let mut vars = HashSet::new();
+    collect_referenced_vars(node, &mut vars);
+    for var in vars {
+        out.insert(scalar_key(&var));
+        out.insert(heap_key(&var));
+    }
+}
+
+fn expr_logical_reads(node: &AstNode, env: &HashMap<String, HashSet<String>>) -> HashSet<String> {
+    let mut vars = HashSet::new();
+    collect_referenced_vars(node, &mut vars);
+    let mut out = HashSet::new();
+    for var in vars {
+        out.insert(scalar_key(&var));
+        out.insert(heap_key(&var));
+        if let Some(deps) = env.get(&var) {
+            out.extend(deps.iter().cloned());
+        }
+    }
+    out
 }
 
 /// Whether a statement can participate in reordering. Anything else is a barrier
@@ -1874,90 +1917,124 @@ fn stmt_is_schedulable(stmt: &AstNode, pure_fns: &HashSet<String>) -> bool {
             value.as_deref().is_none_or(|v| expr_is_pure(v, pure_fns))
         }
         AstNode::Assignment { target, value, .. } => {
-            expr_is_pure(value, pure_fns) && expr_is_pure(target, pure_fns)
+            (matches!(target.as_ref(), AstNode::Identifier(_, _)) || root_var(target).is_some())
+                && expr_is_pure(target, pure_fns)
+                && expr_is_pure(value, pure_fns)
         }
-        AstNode::FunctionCall { .. } | AstNode::DiscardStatement { .. } => {
-            let call = match stmt {
-                AstNode::DiscardStatement { expression, .. } => expression.as_ref(),
-                other => other,
-            };
-            match call_name(call) {
-                // Recognized in-place mutators with pure arguments are schedulable
-                // (their effect — extending the receiver — is modeled below).
-                Some(name) if is_mutator_call_name(name) || name == "insert" || name == "extend" => {
-                    if let AstNode::FunctionCall { arguments, .. } = call {
-                        arguments.iter().all(|a| expr_is_pure(a, pure_fns))
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            }
-        }
+        AstNode::FunctionCall { arguments, .. } => call_name(stmt).is_some_and(|name| {
+            is_mutator_call_name(name) && arguments.iter().all(|arg| expr_is_pure(arg, pure_fns))
+        }),
+        AstNode::DiscardStatement { expression, .. } => match expression.as_ref() {
+            AstNode::FunctionCall { .. } => stmt_is_schedulable(expression, pure_fns),
+            _ => false,
+        },
         _ => false,
     }
 }
 
 /// Compute reads/writes/effect facts for a schedulable statement.
-fn sched_info(stmt: &AstNode) -> SchedInfo {
-    let mut reads = HashSet::new();
+fn sched_info(stmt: &AstNode, env: &HashMap<String, HashSet<String>>) -> SchedInfo {
+    let mut direct_reads = HashSet::new();
+    let mut logical_reads = HashSet::new();
     let mut writes = HashSet::new();
+    let mut effects = HashSet::new();
     let mut is_multiply = false;
-    let mut is_effectful = false;
 
     match stmt {
         AstNode::VariableDeclaration { name, value, .. } => {
-            writes.insert(name.clone());
+            writes.insert(scalar_key(name));
             if let Some(v) = value.as_deref() {
-                collect_referenced_vars(v, &mut reads);
+                collect_direct_read_keys(v, &mut direct_reads);
                 is_multiply = value_is_multiply(v);
             }
         }
         AstNode::Assignment { target, value, .. } => {
-            collect_referenced_vars(value, &mut reads);
+            collect_direct_read_keys(value, &mut direct_reads);
             is_multiply = value_is_multiply(value);
             match target.as_ref() {
                 AstNode::Identifier(name, _) => {
-                    writes.insert(name.clone());
+                    writes.insert(scalar_key(name));
                 }
                 // Index/field assignment mutates (and reads) the base object.
                 other => {
                     if let Some(root) = root_var(other) {
-                        writes.insert(root.clone());
-                        reads.insert(root);
+                        let key = heap_key(&root);
+                        writes.insert(key.clone());
+                        direct_reads.insert(key.clone());
+                        effects.insert(key);
+                    } else {
+                        writes.insert(global_key());
+                        effects.insert(global_key());
                     }
-                    collect_referenced_vars(other, &mut reads);
+                    collect_direct_read_keys(other, &mut direct_reads);
                 }
             }
         }
         AstNode::DiscardStatement { expression, .. } => {
-            return sched_info(expression);
+            return sched_info(expression, env);
         }
         AstNode::FunctionCall { arguments, .. } => {
             // A recognized mutator: first argument is the receiver (read+written),
             // the rest are read.
-            is_effectful = true;
             if let Some(receiver) = arguments.first() {
                 if let Some(root) = root_var(receiver) {
-                    writes.insert(root.clone());
-                    reads.insert(root);
+                    let key = heap_key(&root);
+                    writes.insert(key.clone());
+                    direct_reads.insert(key.clone());
+                    effects.insert(key);
+                } else {
+                    writes.insert(global_key());
+                    effects.insert(global_key());
                 }
-                collect_referenced_vars(receiver, &mut reads);
+                collect_direct_read_keys(receiver, &mut direct_reads);
             }
             for arg in arguments.iter().skip(1) {
-                collect_referenced_vars(arg, &mut reads);
+                collect_direct_read_keys(arg, &mut direct_reads);
+                logical_reads.extend(expr_logical_reads(arg, env));
             }
         }
         _ => {
-            collect_referenced_vars(stmt, &mut reads);
+            collect_direct_read_keys(stmt, &mut direct_reads);
         }
     }
 
     SchedInfo {
-        reads,
+        direct_reads,
+        logical_reads,
         writes,
+        effects,
         is_multiply,
-        is_effectful,
+    }
+}
+
+fn update_sched_env(stmt: &AstNode, env: &mut HashMap<String, HashSet<String>>) {
+    match stmt {
+        AstNode::VariableDeclaration { name, value, .. } => {
+            let deps = value
+                .as_deref()
+                .map(|v| expr_logical_reads(v, env))
+                .unwrap_or_default();
+            env.insert(name.clone(), deps);
+        }
+        AstNode::Assignment { target, value, .. } => {
+            if let AstNode::Identifier(name, _) = target.as_ref() {
+                let deps = expr_logical_reads(value, env);
+                env.insert(name.clone(), deps);
+            } else if let Some(root) = root_var(target) {
+                env.remove(&root);
+            } else {
+                env.clear();
+            }
+        }
+        AstNode::DiscardStatement { expression, .. } => update_sched_env(expression, env),
+        AstNode::FunctionCall { arguments, .. } => {
+            if let Some(receiver) = arguments.first().and_then(root_var) {
+                env.remove(&receiver);
+            } else {
+                env.clear();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2089,7 +2166,7 @@ fn schedule_statement_list(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> V
     out
 }
 
-/// Reorder one side-effect-free run via dependency-graph list scheduling,
+/// Reorder one analyzable straight-line run via dependency-graph list scheduling,
 /// clustering same-depth multiplies. Falls back to the original order if a
 /// dependency cycle is somehow present (never expected).
 fn schedule_run(stmts: Vec<AstNode>) -> Vec<AstNode> {
@@ -2098,7 +2175,15 @@ fn schedule_run(stmts: Vec<AstNode>) -> Vec<AstNode> {
         return stmts;
     }
 
-    let infos: Vec<SchedInfo> = stmts.iter().map(sched_info).collect();
+    let mut env: HashMap<String, HashSet<String>> = HashMap::new();
+    let infos: Vec<SchedInfo> = stmts
+        .iter()
+        .map(|stmt| {
+            let info = sched_info(stmt, &env);
+            update_sched_env(stmt, &mut env);
+            info
+        })
+        .collect();
 
     // Build the dependency DAG (deduplicated successor sets).
     let mut succ: Vec<HashSet<usize>> = vec![HashSet::new(); n];
@@ -2106,15 +2191,24 @@ fn schedule_run(stmts: Vec<AstNode>) -> Vec<AstNode> {
 
     let mut last_write: HashMap<String, usize> = HashMap::new();
     let mut readers: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut effect_prev: Option<usize> = None;
+    let mut effect_prev: HashMap<String, usize> = HashMap::new();
 
     for i in 0..n {
-        for r in &infos[i].reads {
+        for r in infos[i]
+            .direct_reads
+            .iter()
+            .chain(infos[i].logical_reads.iter())
+        {
             if let Some(&w) = last_write.get(r) {
                 if w != i && succ[w].insert(i) {
                     indeg[i] += 1;
                 }
             }
+        }
+        for r in &infos[i].direct_reads {
+            readers.entry(r.clone()).or_default().push(i);
+        }
+        for r in &infos[i].logical_reads {
             readers.entry(r.clone()).or_default().push(i);
         }
         for w in &infos[i].writes {
@@ -2132,13 +2226,13 @@ fn schedule_run(stmts: Vec<AstNode>) -> Vec<AstNode> {
             }
             last_write.insert(w.clone(), i);
         }
-        if infos[i].is_effectful {
-            if let Some(pe) = effect_prev {
+        for effect in &infos[i].effects {
+            if let Some(&pe) = effect_prev.get(effect) {
                 if pe != i && succ[pe].insert(i) {
                     indeg[i] += 1;
                 }
             }
-            effect_prev = Some(i);
+            effect_prev.insert(effect.clone(), i);
         }
     }
 
@@ -2259,9 +2353,7 @@ fn drop_dead_bindings(
             for stmt in stmts {
                 if let AstNode::VariableDeclaration { name, value, .. } = &stmt {
                     let unused = counts.get(name).copied().unwrap_or(0) == 0;
-                    let pure = value
-                        .as_deref()
-                        .is_none_or(|v| expr_is_pure(v, pure_fns));
+                    let pure = value.as_deref().is_none_or(|v| expr_is_pure(v, pure_fns));
                     if unused && pure {
                         *changed = true;
                         continue;
@@ -2797,34 +2889,88 @@ fn lift_inlinable_call_args(
         }
     };
     match expr {
-        AstNode::FunctionCall { function, arguments, location, resolved_return_type } => {
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            resolved_return_type,
+        } => {
             let arguments = arguments.into_iter().map(|a| lift(a, prelude)).collect();
-            AstNode::FunctionCall { function, arguments, location, resolved_return_type }
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                location,
+                resolved_return_type,
+            }
         }
-        AstNode::VariableDeclaration { name, type_annotation, value, is_mutable, is_secret, location } => {
-            AstNode::VariableDeclaration { name, type_annotation, value: value.map(|v| Box::new(lift_inlinable_call_args(*v, fns, prelude))), is_mutable, is_secret, location }
-        }
-        AstNode::Assignment { target, value, location } => {
-            AstNode::Assignment { target, value: Box::new(lift_inlinable_call_args(*value, fns, prelude)), location }
-        }
-        AstNode::Return { value, location } => {
-            AstNode::Return { value: value.map(|v| Box::new(lift_inlinable_call_args(*v, fns, prelude))), location }
-        }
-        AstNode::DiscardStatement { expression, location } => {
-            AstNode::DiscardStatement { expression: Box::new(lift_inlinable_call_args(*expression, fns, prelude)), location }
-        }
-        AstNode::BinaryOperation { op, left, right, location } => {
-            AstNode::BinaryOperation { op, left: Box::new(lift(*left, prelude)), right: Box::new(lift(*right, prelude)), location }
-        }
-        AstNode::UnaryOperation { op, operand, location } => {
-            AstNode::UnaryOperation { op, operand: Box::new(lift(*operand, prelude)), location }
-        }
-        AstNode::IndexAccess { base, index, location } => {
-            AstNode::IndexAccess { base: Box::new(lift(*base, prelude)), index: Box::new(lift(*index, prelude)), location }
-        }
-        AstNode::ListLiteral { elements, location } => {
-            AstNode::ListLiteral { elements: elements.into_iter().map(|e| lift(e, prelude)).collect(), location }
-        }
+        AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value,
+            is_mutable,
+            is_secret,
+            location,
+        } => AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value: value.map(|v| Box::new(lift_inlinable_call_args(*v, fns, prelude))),
+            is_mutable,
+            is_secret,
+            location,
+        },
+        AstNode::Assignment {
+            target,
+            value,
+            location,
+        } => AstNode::Assignment {
+            target,
+            value: Box::new(lift_inlinable_call_args(*value, fns, prelude)),
+            location,
+        },
+        AstNode::Return { value, location } => AstNode::Return {
+            value: value.map(|v| Box::new(lift_inlinable_call_args(*v, fns, prelude))),
+            location,
+        },
+        AstNode::DiscardStatement {
+            expression,
+            location,
+        } => AstNode::DiscardStatement {
+            expression: Box::new(lift_inlinable_call_args(*expression, fns, prelude)),
+            location,
+        },
+        AstNode::BinaryOperation {
+            op,
+            left,
+            right,
+            location,
+        } => AstNode::BinaryOperation {
+            op,
+            left: Box::new(lift(*left, prelude)),
+            right: Box::new(lift(*right, prelude)),
+            location,
+        },
+        AstNode::UnaryOperation {
+            op,
+            operand,
+            location,
+        } => AstNode::UnaryOperation {
+            op,
+            operand: Box::new(lift(*operand, prelude)),
+            location,
+        },
+        AstNode::IndexAccess {
+            base,
+            index,
+            location,
+        } => AstNode::IndexAccess {
+            base: Box::new(lift(*base, prelude)),
+            index: Box::new(lift(*index, prelude)),
+            location,
+        },
+        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
+            elements: elements.into_iter().map(|e| lift(e, prelude)).collect(),
+            location,
+        },
         other => other,
     }
 }
@@ -3242,7 +3388,8 @@ fn builtin_base_name(name: &str) -> &str {
 fn is_len_safe_call(name: &str) -> bool {
     matches!(
         builtin_base_name(name),
-        "len" | "array_length"
+        "len"
+            | "array_length"
             | "length"
             | "append"
             | "array_push"
@@ -3585,7 +3732,10 @@ fn bind_loop_var(env: &mut LenEnv, variables: &[String], iterable: &AstNode) {
         env.shapes.remove(v);
         env.ints.remove(v);
     }
-    if let (Some(first), false) = (variables.first(), matches!(iterable, AstNode::BinaryOperation { op, .. } if op == "..")) {
+    if let (Some(first), false) = (
+        variables.first(),
+        matches!(iterable, AstNode::BinaryOperation { op, .. } if op == ".."),
+    ) {
         let elem = eval_shape(iterable, env).element();
         if let Shape::List { .. } = elem {
             env.shapes.insert(first.clone(), elem);
@@ -4158,8 +4308,18 @@ fn is_effectful_call_name(name: &str) -> bool {
 }
 
 /// In-place mutators: pure only when their target is a fresh local (not a parameter alias).
+/// These names are matched on the unqualified base name, so both `list.append(...)`
+/// (UFCS) and a bare `append(...)` spelling are recognized. `insert` and `extend`
+/// MUST be here too: they mutate their receiver, so CSE/LICM/GVN invalidation and
+/// the `mutated`-set computation must treat a following read of the receiver as
+/// potentially stale. (Omitting them caused a stale-alias bug: the CTR counter is
+/// built with `out.insert(0, ...)`, and an available `out`-reading expression was
+/// never invalidated across the insert, corrupting block-1's keystream under -O3.)
 fn is_mutator_call_name(name: &str) -> bool {
-    matches!(name, "append" | "array_push" | "set_field")
+    matches!(
+        builtin_base_name(name),
+        "append" | "array_push" | "set_field" | "insert" | "extend"
+    )
 }
 
 /// Builtins known to be pure value computations (no effects, deterministic).
@@ -4172,7 +4332,8 @@ fn is_mutator_call_name(name: &str) -> bool {
 fn is_pure_builtin(name: &str) -> bool {
     matches!(
         builtin_base_name(name),
-        "add" | "sub"
+        "add"
+            | "sub"
             | "mul"
             | "mul_scalar"
             | "batch_mul"
@@ -4990,12 +5151,19 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
 fn transform_licm_cse(node: AstNode, pure_fns: &HashSet<String>) -> AstNode {
     match node {
         AstNode::Block(stmts) => {
-            let stmts: Vec<AstNode> = stmts
+            let mut stmts: Vec<AstNode> = stmts
                 .into_iter()
                 .map(|s| transform_licm_cse(s, pure_fns))
                 .collect();
-            let stmts = block_licm(stmts, pure_fns);
-            let stmts = block_cse(stmts, pure_fns);
+            // Local fixpoint: a second pass picks up CSE opportunities that LICM
+            // hoisting exposes (and vice versa) within this block. Each block
+            // converges on its own, so the whole program needs only one traversal
+            // — no global fixpoint re-traversal (which is what made this pass
+            // superlinear on huge flattened functions).
+            for _ in 0..2 {
+                stmts = block_licm(stmts, pure_fns);
+                stmts = block_cse(stmts, pure_fns);
+            }
             AstNode::Block(stmts)
         }
         AstNode::FunctionDefinition {
@@ -5054,17 +5222,480 @@ fn transform_licm_cse(node: AstNode, pure_fns: &HashSet<String>) -> AstNode {
 
 /// Entry point: loop-invariant code motion + common subexpression elimination.
 ///
-/// LICM and CSE expose each other's opportunities (hoisting one invariant binding
-/// can make a dependent binding invariant; deduplicating a value can make a loop
-/// body smaller and another binding invariant), so the transform is applied
-/// repeatedly until it reaches a fixpoint. `transform_licm_cse` only moves and
-/// aliases existing nodes (it never mints fresh names), so structural equality is
-/// a sound convergence test.
+/// `transform_licm_cse` walks the program once; each block runs `block_licm` +
+/// `block_cse` to a local fixpoint (a bounded second pass catches the CSE that
+/// LICM hoisting exposes). A single traversal is enough because LICM and CSE
+/// only interact *within* a function body, and the traversal visits nested
+/// blocks before the enclosing one. This avoids re-traversing the whole program
+/// to a global fixpoint (which re-cloned and re-walked the entire AST up to 16x
+/// — superlinear on a huge flattened function). `transform_licm_cse` only moves
+/// and aliases existing nodes (never mints fresh names), so this is sound.
 pub fn optimize_licm_cse(node: AstNode) -> AstNode {
     let pure_fns = compute_pure_functions(&node);
+    transform_licm_cse(node, &pure_fns)
+}
+
+// ===========================================================================
+// Global Value Numbering (GVN)
+//
+// Generalizes the local CSE above (`block_cse`) to the whole function: a pure
+// value computed once that *dominates* a later identical pure computation is
+// reused by aliasing (`var b = <E>` -> `var b = Identifier(a)`), even when the
+// two are separated by control flow (an `if`, a `while`/`for`, a nested block).
+//
+// Like `block_cse`, GVN is alias-only — it never mints fresh names — so the
+// structural-equality fixpoint test in `optimize_gvn` is sound, and it dedups
+// *inter-statement / cross-control-flow* redundancy (not intra-expression
+// redundancy such as `(x+y)*(x+y)`, which would require introducing temporaries
+// and would break the no-fresh-names convergence guarantee).
+//
+// Soundness rests on threading a value-availability environment (`GvnEnv`)
+// through the AST and joining/invalidating it at control-flow boundaries:
+//   * `if`: fork the env into both branches; at the merge keep an entry only
+//     when the SAME binding holds the value on both paths AND that binding
+//     dominated the branch entry (so a branch-local name can never be aliased
+//     out of scope after the merge).
+//   * loops: the body runs 0+ times, so only *loop-invariant* entries (neither
+//     the binding nor any operand is written by the body) are visible inside
+//     the body; body-computed availability never crosses the back-edge, and the
+//     post-loop env drops anything the body touches.
+//   * nested block: entries flow in (straight-line, runs once), but block-local
+//     names are dropped on exit so they can't be aliased out of scope.
+//   * function: a fresh empty env (separate scope; matches `block_cse`).
+//
+// The per-statement aliasing/invalidation step mirrors `block_cse` exactly
+// (staged commit after invalidation, precise write-invalidation via the ref
+// index, conservative clear on effect).
+// ===========================================================================
+
+#[derive(Clone)]
+struct GvnEnv {
+    /// Canonical expr key (value number) -> source binding currently holding it.
+    key_to_src: HashMap<String, String>,
+    /// Source binding -> its value number (inverse, for eviction by name).
+    src_key: HashMap<String, String>,
+    /// Source binding -> vars its value reads (kept to rebuild the ref index
+    /// after a join, which `block_cse`'s local maps don't need).
+    src_refs: HashMap<String, HashSet<String>>,
+    /// Referenced var -> source bindings whose value reads it (fast invalidation).
+    ref_index: HashMap<String, Vec<String>>,
+}
+
+impl GvnEnv {
+    fn new() -> Self {
+        GvnEnv {
+            key_to_src: HashMap::new(),
+            src_key: HashMap::new(),
+            src_refs: HashMap::new(),
+            ref_index: HashMap::new(),
+        }
+    }
+
+    /// Record `key -> name` as available, with the vars `name`'s value reads.
+    /// Mirrors the commit `block_cse` does after invalidation.
+    fn commit(&mut self, key: String, name: String, refs: HashSet<String>) {
+        // Defensive eviction of any stale entry for this key/name (normally absent).
+        if let Some(old) = self.key_to_src.get(&key).cloned() {
+            if old != name {
+                self.src_key.remove(&old);
+                self.src_refs.remove(&old);
+            }
+        }
+        if let Some(old_key) = self.src_key.get(&name).cloned() {
+            if self.key_to_src.get(&old_key).map(String::as_str) == Some(name.as_str()) {
+                self.key_to_src.remove(&old_key);
+            }
+        }
+        for r in &refs {
+            self.ref_index
+                .entry(r.clone())
+                .or_default()
+                .push(name.clone());
+        }
+        self.src_key.insert(name.clone(), key.clone());
+        self.src_refs.insert(name.clone(), refs);
+        self.key_to_src.insert(key, name);
+    }
+
+    /// Drop entries invalidated by `writes` (mirrors `block_cse`'s invalidation).
+    fn invalidate(&mut self, writes: &HashSet<String>) {
+        for w in writes {
+            // Entries whose value reads `w` are now stale.
+            if let Some(srcs) = self.ref_index.remove(w) {
+                for s in srcs {
+                    if let Some(k) = self.src_key.remove(&s) {
+                        if self.key_to_src.get(&k).map(String::as_str) == Some(s.as_str()) {
+                            self.key_to_src.remove(&k);
+                        }
+                        self.src_refs.remove(&s);
+                    }
+                }
+            }
+            // `w` itself, if it is a source binding, is overwritten.
+            if let Some(k) = self.src_key.remove(w) {
+                if self.key_to_src.get(&k).map(String::as_str) == Some(w.as_str()) {
+                    self.key_to_src.remove(&k);
+                }
+                self.src_refs.remove(w);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.key_to_src.clear();
+        self.src_key.clear();
+        self.src_refs.clear();
+        self.ref_index.clear();
+    }
+
+    /// Names of bindings currently held available (dominate this point).
+    fn dominating_names(&self) -> HashSet<String> {
+        self.key_to_src.values().cloned().collect()
+    }
+
+    /// Join of two branch envs at an `if` merge: keep `key -> name` only when
+    /// both branches map that key to the same name AND `name` dominated the
+    /// branch entry (`dominate`), so a branch-local binding is never referenced
+    /// past the merge.
+    fn intersect_dominating(&self, other: &GvnEnv, dominate: &HashSet<String>) -> GvnEnv {
+        let mut out = GvnEnv::new();
+        for (k, n) in &self.key_to_src {
+            if other.key_to_src.get(k).map(String::as_str) == Some(n.as_str())
+                && dominate.contains(n)
+            {
+                if let Some(refs) = self.src_refs.get(n) {
+                    out.commit(k.clone(), n.clone(), refs.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// View containing only entries safe to reuse inside a loop body: keep
+    /// `key -> name` iff `name` and none of its referenced vars are in `touched`
+    /// (written by the loop body/condition). The body runs 0+ times, so only
+    /// genuinely invariant values may be reused inside it.
+    fn restrict_to_invariants(&self, touched: &HashSet<String>) -> GvnEnv {
+        let mut out = GvnEnv::new();
+        for (k, n) in &self.key_to_src {
+            if touched.contains(n) {
+                continue;
+            }
+            let Some(refs) = self.src_refs.get(n) else {
+                continue;
+            };
+            if refs.iter().any(|r| touched.contains(r)) {
+                continue;
+            }
+            out.commit(k.clone(), n.clone(), refs.clone());
+        }
+        out
+    }
+
+    /// View containing only entries whose source binding already dominated this
+    /// point (was available on entry). Used at a nested-block exit so a binding
+    /// introduced inside the block can't be aliased once it is out of scope.
+    fn restrict_to_dominators(&self, dominate: &HashSet<String>) -> GvnEnv {
+        let mut out = GvnEnv::new();
+        for (k, n) in &self.key_to_src {
+            if dominate.contains(n) {
+                if let Some(refs) = self.src_refs.get(n) {
+                    out.commit(k.clone(), n.clone(), refs.clone());
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Recursively apply GVN, threading availability `env` through control flow.
+/// Returns the transformed node and the env flowing out of it.
+fn transform_gvn(node: AstNode, mut env: GvnEnv, pure_fns: &HashSet<String>) -> (AstNode, GvnEnv) {
+    match node {
+        AstNode::Block(stmts) => {
+            // A binding introduced inside this block does not dominate its exit,
+            // so drop block-local names on the way out (prevents aliasing an
+            // out-of-scope name). Parent-defined names remain available.
+            let dominating = env.dominating_names();
+            let (out_stmts, env_out) = block_gvn(stmts, env, pure_fns);
+            (
+                AstNode::Block(out_stmts),
+                env_out.restrict_to_dominators(&dominating),
+            )
+        }
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            // The condition is evaluated before the fork; apply its writes/effects.
+            let mut cw = HashSet::new();
+            collect_written_vars(&condition, &mut cw);
+            env.invalidate(&cw);
+            if stmt_has_effect(&condition, pure_fns) {
+                env.clear();
+            }
+            // Bindings available at branch entry dominate the merge.
+            let dominating = env.dominating_names();
+            let (then_b, then_out) = transform_gvn(*then_branch, env.clone(), pure_fns);
+            let (else_b, else_out) = match else_branch {
+                Some(e) => {
+                    let (e_b, e_out) = transform_gvn(*e, env.clone(), pure_fns);
+                    (Some(Box::new(e_b)), e_out)
+                }
+                // No else branch: the else path is a no-op, so it contributes the
+                // env as it entered the branch unchanged.
+                None => (None, env.clone()),
+            };
+            let env_out = then_out.intersect_dominating(&else_out, &dominating);
+            (
+                AstNode::IfExpression {
+                    condition,
+                    then_branch: Box::new(then_b),
+                    else_branch: else_b,
+                },
+                env_out,
+            )
+        }
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => {
+            let mut touched = HashSet::new();
+            collect_written_vars(&condition, &mut touched);
+            collect_written_vars(&body, &mut touched);
+            let effect = stmt_has_effect(&condition, pure_fns) || stmt_has_effect(&body, pure_fns);
+            // Only genuinely loop-invariant values may be reused inside the body.
+            let body_env = if effect {
+                GvnEnv::new()
+            } else {
+                env.restrict_to_invariants(&touched)
+            };
+            let (body_b, _) = transform_gvn(*body, body_env, pure_fns);
+            // Post-loop: drop anything the body/condition may touch.
+            env.invalidate(&touched);
+            if effect {
+                env.clear();
+            }
+            (
+                AstNode::WhileLoop {
+                    condition,
+                    body: Box::new(body_b),
+                    location,
+                },
+                env,
+            )
+        }
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => {
+            // The loop variables are reassigned each iteration; the iterable once.
+            let mut touched: HashSet<String> = variables.iter().cloned().collect();
+            collect_written_vars(&iterable, &mut touched);
+            collect_written_vars(&body, &mut touched);
+            let effect = stmt_has_effect(&iterable, pure_fns) || stmt_has_effect(&body, pure_fns);
+            let body_env = if effect {
+                GvnEnv::new()
+            } else {
+                env.restrict_to_invariants(&touched)
+            };
+            let (body_b, _) = transform_gvn(*body, body_env, pure_fns);
+            env.invalidate(&touched);
+            if effect {
+                env.clear();
+            }
+            (
+                AstNode::ForLoop {
+                    variables,
+                    iterable,
+                    body: Box::new(body_b),
+                    location,
+                },
+                env,
+            )
+        }
+        AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body,
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        } => {
+            // A function body is a fresh scope; the caller's availability is
+            // unaffected (matches `block_cse`, which is local per function).
+            let (body_b, _) = transform_gvn(*body, GvnEnv::new(), pure_fns);
+            (
+                AstNode::FunctionDefinition {
+                    name,
+                    type_params,
+                    parameters,
+                    return_type,
+                    body: Box::new(body_b),
+                    is_secret,
+                    pragmas,
+                    location,
+                    node_id,
+                },
+                env,
+            )
+        }
+        AstNode::TryCatch {
+            try_block,
+            catch_clauses,
+            finally_block,
+            location,
+        } => {
+            // Exceptions make carried availability unsound; transform the bodies
+            // for local effect but discard availability afterwards.
+            let (try_b, _) = transform_gvn(*try_block, env.clone(), pure_fns);
+            let mut catches = Vec::with_capacity(catch_clauses.len());
+            for c in catch_clauses {
+                let (cb, _) = transform_gvn(*c.body, env.clone(), pure_fns);
+                catches.push(crate::ast::CatchClause {
+                    body: Box::new(cb),
+                    ..c
+                });
+            }
+            let finally_b = match finally_block {
+                Some(f) => {
+                    let (fb, _) = transform_gvn(*f, env.clone(), pure_fns);
+                    Some(Box::new(fb))
+                }
+                None => None,
+            };
+            env.clear();
+            (
+                AstNode::TryCatch {
+                    try_block: Box::new(try_b),
+                    catch_clauses: catches,
+                    finally_block: finally_b,
+                    location,
+                },
+                env,
+            )
+        }
+        // Plain expressions / simple statements reached directly (not via a
+        // block's statement list) don't change availability here; any effects
+        // they have are handled by the enclosing statement in `block_gvn`.
+        other => (other, env),
+    }
+}
+
+/// GVN over one flat statement list, threading availability `env` through.
+/// Compound statements (if / loop / function / nested block / try) are handed
+/// to `transform_gvn` so availability flows across them; simple statements use
+/// the same staged-commit CSE step as `block_cse`.
+fn block_gvn(
+    stmts: Vec<AstNode>,
+    mut env: GvnEnv,
+    pure_fns: &HashSet<String>,
+) -> (Vec<AstNode>, GvnEnv) {
+    // Names mutated anywhere in this block (computed once, as in `block_cse`),
+    // so single-assignment is testable in O(1) per statement.
+    let mut mutated: HashSet<String> = HashSet::new();
+    for stmt in &stmts {
+        collect_block_mutated_names(stmt, &mut mutated);
+    }
+
+    let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        let is_compound = matches!(
+            &stmt,
+            AstNode::IfExpression { .. }
+                | AstNode::WhileLoop { .. }
+                | AstNode::ForLoop { .. }
+                | AstNode::FunctionDefinition { .. }
+                | AstNode::Block(_)
+                | AstNode::TryCatch { .. }
+        );
+        if is_compound {
+            let (s, env_out) = transform_gvn(stmt, env, pure_fns);
+            env = env_out;
+            out.push(s);
+            continue;
+        }
+
+        // Simple statement: mirror `block_cse`'s staged-commit CSE step exactly.
+        // Look up THIS declaration's value before invalidating with its own write;
+        // stage any new entry and commit it *after* invalidation (the declaration's
+        // own name is in its `writes`, so committing earlier would evict it).
+        let mut new_stmt = stmt.clone();
+        let mut staged: Option<(String, String, HashSet<String>)> = None; // (key, name, refs)
+        if let AstNode::VariableDeclaration {
+            name,
+            value: Some(value),
+            ..
+        } = &stmt
+        {
+            if expr_is_pure(value, pure_fns) && !mutated.contains(name) {
+                let mut key = String::new();
+                if expr_key(value, &mut key) {
+                    if let Some(src) = env.key_to_src.get(&key).cloned() {
+                        // Replace the redundant computation with an alias to the
+                        // earlier dominating result.
+                        if let AstNode::VariableDeclaration {
+                            name,
+                            type_annotation,
+                            is_mutable,
+                            is_secret,
+                            location,
+                            ..
+                        } = stmt.clone()
+                        {
+                            new_stmt = AstNode::VariableDeclaration {
+                                name,
+                                type_annotation,
+                                value: Some(Box::new(AstNode::Identifier(src, location.clone()))),
+                                is_mutable,
+                                is_secret,
+                                location,
+                            };
+                        }
+                    } else {
+                        let mut refs = HashSet::new();
+                        collect_referenced_vars(value, &mut refs);
+                        staged = Some((key, name.clone(), refs));
+                    }
+                }
+            }
+        }
+
+        // Invalidate entries clobbered by this statement's writes.
+        let mut writes = HashSet::new();
+        collect_written_vars(&stmt, &mut writes);
+        env.invalidate(&writes);
+        if stmt_has_effect(&stmt, pure_fns) {
+            // An effect may change get_field reads etc.; drop everything.
+            env.clear();
+        } else if let Some((key, name, refs)) = staged {
+            env.commit(key, name, refs);
+        }
+
+        out.push(new_stmt);
+    }
+    (out, env)
+}
+
+/// Entry point: global value numbering (alias-only), iterated to a fixpoint.
+/// GVN never mints fresh names, so structural equality is a sound convergence
+/// test (mirrors `optimize_licm_cse`).
+pub fn optimize_gvn(node: AstNode) -> AstNode {
+    let pure_fns = compute_pure_functions(&node);
     let mut node = node;
-    for _ in 0..16 {
-        let next = transform_licm_cse(node.clone(), &pure_fns);
+    // GVN is alias-only (it never mints fresh names), so a couple of passes reach
+    // the fixpoint — bounded here instead of the previous up-to-16x re-traversal,
+    // which re-cloned and re-walked the whole AST each iteration (superlinear on a
+    // huge flattened function).
+    for _ in 0..2 {
+        let (next, _) = transform_gvn(node.clone(), GvnEnv::new(), &pure_fns);
         if next == node {
             break;
         }
@@ -5105,7 +5736,10 @@ mod tests {
             decl("a", and()),
             decl("b", and()),
             AstNode::FunctionCall {
-                function: Box::new(AstNode::Identifier("print".into(), SourceLocation::default())),
+                function: Box::new(AstNode::Identifier(
+                    "print".into(),
+                    SourceLocation::default(),
+                )),
                 arguments: vec![
                     AstNode::Identifier("a".into(), SourceLocation::default()),
                     AstNode::Identifier("b".into(), SourceLocation::default()),
@@ -5115,16 +5749,301 @@ mod tests {
             },
         ]);
         let out = optimize_licm_cse(block);
-        let AstNode::Block(stmts) = &out else { panic!("block") };
+        let AstNode::Block(stmts) = &out else {
+            panic!("block")
+        };
         // `b`'s value must now be the identifier `a`, not a recomputed `and`.
         let b_val = stmts.iter().find_map(|s| match s {
-            AstNode::VariableDeclaration { name, value: Some(v), .. } if name == "b" => Some(v.as_ref()),
+            AstNode::VariableDeclaration {
+                name,
+                value: Some(v),
+                ..
+            } if name == "b" => Some(v.as_ref()),
             _ => None,
         });
         assert!(
             matches!(b_val, Some(AstNode::Identifier(n, _)) if n == "a"),
             "CSE should alias the redundant `x and y` to `a`, got {b_val:?}"
         );
+    }
+
+    // ---- GVN helpers ----
+
+    fn gvn_binop(op: &str, left: AstNode, right: AstNode) -> AstNode {
+        AstNode::BinaryOperation {
+            op: op.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+            location: make_loc(),
+        }
+    }
+
+    fn gvn_assign(name: &str, value: AstNode) -> AstNode {
+        AstNode::Assignment {
+            target: Box::new(make_identifier(name)),
+            value: Box::new(value),
+            location: make_loc(),
+        }
+    }
+
+    /// Initializer of the first `var <name> = ...` anywhere in `node` (cloned).
+    fn gvn_decl_value(node: &AstNode, name: &str) -> Option<AstNode> {
+        fn walk(node: &AstNode, name: &str) -> Option<AstNode> {
+            match node {
+                AstNode::Block(stmts) => stmts.iter().find_map(|s| walk(s, name)),
+                AstNode::VariableDeclaration {
+                    name: n,
+                    value: Some(v),
+                    ..
+                } if n == name => Some((**v).clone()),
+                AstNode::IfExpression {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => walk(then_branch, name)
+                    .or_else(|| else_branch.as_ref().and_then(|e| walk(e, name))),
+                AstNode::WhileLoop { body, .. } | AstNode::ForLoop { body, .. } => walk(body, name),
+                _ => None,
+            }
+        }
+        walk(node, name)
+    }
+
+    /// Number of `var <target> = <alias>` declarations anywhere in `node`.
+    fn gvn_count_alias(node: &AstNode, target: &str, alias: &str) -> usize {
+        fn walk(node: &AstNode, target: &str, alias: &str) -> usize {
+            match node {
+                AstNode::VariableDeclaration {
+                    name,
+                    value: Some(v),
+                    ..
+                } => {
+                    let self_match = if name == target
+                        && matches!(v.as_ref(), AstNode::Identifier(n, _) if n == alias)
+                    {
+                        1
+                    } else {
+                        0
+                    };
+                    self_match + walk(v, target, alias)
+                }
+                AstNode::Block(stmts) => stmts.iter().map(|s| walk(s, target, alias)).sum(),
+                AstNode::IfExpression {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    walk(then_branch, target, alias)
+                        + else_branch
+                            .iter()
+                            .map(|e| walk(e, target, alias))
+                            .sum::<usize>()
+                }
+                AstNode::WhileLoop { body, .. } | AstNode::ForLoop { body, .. } => {
+                    walk(body, target, alias)
+                }
+                AstNode::Assignment { value, .. } => walk(value, target, alias),
+                AstNode::BinaryOperation { left, right, .. } => {
+                    walk(left, target, alias) + walk(right, target, alias)
+                }
+                _ => 0,
+            }
+        }
+        walk(node, target, alias)
+    }
+
+    #[test]
+    fn gvn_reuses_across_both_if_branches() {
+        // var a = x & y; if c { var b = x & y } else { var b = x & y }
+        // -> `a` dominates both branches, so each `b` aliases `a`.
+        let xy = || gvn_binop("and", make_identifier("x"), make_identifier("y"));
+        let branch = || AstNode::Block(vec![make_var_decl("b", xy())]);
+        let block = AstNode::Block(vec![
+            make_var_decl("a", xy()),
+            AstNode::IfExpression {
+                condition: Box::new(make_identifier("c")),
+                then_branch: Box::new(branch()),
+                else_branch: Some(Box::new(branch())),
+            },
+        ]);
+        let out = optimize_gvn(block);
+        assert_eq!(
+            gvn_count_alias(&out, "b", "a"),
+            2,
+            "both if branches should alias b to the dominating a"
+        );
+    }
+
+    #[test]
+    fn gvn_reuses_after_merge() {
+        // var a = x & y; if c { var z = p | q }; var b = x & y
+        // -> `a` survives both paths (the then branch doesn't touch x/y/a, the
+        // else path is a no-op), so post-merge `b` aliases `a`.
+        let xy = || gvn_binop("and", make_identifier("x"), make_identifier("y"));
+        let block = AstNode::Block(vec![
+            make_var_decl("a", xy()),
+            AstNode::IfExpression {
+                condition: Box::new(make_identifier("c")),
+                then_branch: Box::new(AstNode::Block(vec![make_var_decl(
+                    "z",
+                    gvn_binop("or", make_identifier("p"), make_identifier("q")),
+                )])),
+                else_branch: None,
+            },
+            make_var_decl("b", xy()),
+        ]);
+        let out = optimize_gvn(block);
+        let b_val = gvn_decl_value(&out, "b");
+        assert!(
+            matches!(&b_val, Some(AstNode::Identifier(n, _)) if n == "a"),
+            "post-merge b should alias the dominating a, got {b_val:?}"
+        );
+    }
+
+    #[test]
+    fn gvn_no_alias_to_non_dominating_branch_local() {
+        // if c { var t = x & y }; var b = x & y
+        // -> `t` is branch-local and does NOT dominate the merge, so `b` must
+        // NOT be aliased to `t` (it would be out of scope at `b`).
+        let xy = || gvn_binop("and", make_identifier("x"), make_identifier("y"));
+        let block = AstNode::Block(vec![
+            AstNode::IfExpression {
+                condition: Box::new(make_identifier("c")),
+                then_branch: Box::new(AstNode::Block(vec![make_var_decl("t", xy())])),
+                else_branch: None,
+            },
+            make_var_decl("b", xy()),
+        ]);
+        let out = optimize_gvn(block);
+        let b_val = gvn_decl_value(&out, "b");
+        assert!(
+            !matches!(&b_val, Some(AstNode::Identifier(n, _)) if n == "t"),
+            "GVN must not alias b to the branch-local t: {b_val:?}"
+        );
+    }
+
+    #[test]
+    fn gvn_invalidates_across_branch_write() {
+        // var a = x & y; if c { x = 5 }; var b = x & y
+        // -> `a`'s operand `x` is redefined on the then path, so `a` does not
+        // survive the merge and `b` must NOT alias it.
+        let xy = || gvn_binop("and", make_identifier("x"), make_identifier("y"));
+        let block = AstNode::Block(vec![
+            make_var_decl("a", xy()),
+            AstNode::IfExpression {
+                condition: Box::new(make_identifier("c")),
+                then_branch: Box::new(AstNode::Block(vec![gvn_assign("x", make_int_literal(5))])),
+                else_branch: None,
+            },
+            make_var_decl("b", xy()),
+        ]);
+        let out = optimize_gvn(block);
+        let b_val = gvn_decl_value(&out, "b");
+        assert!(
+            !matches!(&b_val, Some(AstNode::Identifier(n, _)) if n == "a"),
+            "GVN must not alias b to a after a branch redefines x: {b_val:?}"
+        );
+    }
+
+    #[test]
+    fn gvn_loop_drops_non_invariant_value() {
+        // var a = x & y; while c { var b = x & y; x = 5 }; var d = x & y
+        // -> the body mutates `x` (an operand of `a`), so `a` is NOT
+        // loop-invariant: inside the body `b` must not alias `a`, and after the
+        // loop `d` must not alias `a` either.
+        let xy = || gvn_binop("and", make_identifier("x"), make_identifier("y"));
+        let body = AstNode::Block(vec![
+            make_var_decl("b", xy()),
+            gvn_assign("x", make_int_literal(5)),
+        ]);
+        let block = AstNode::Block(vec![
+            make_var_decl("a", xy()),
+            AstNode::WhileLoop {
+                condition: Box::new(make_identifier("c")),
+                body: Box::new(body),
+                location: make_loc(),
+            },
+            make_var_decl("d", xy()),
+        ]);
+        let out = optimize_gvn(block);
+        assert_eq!(
+            gvn_count_alias(&out, "b", "a"),
+            0,
+            "loop body must not alias b to the non-invariant a"
+        );
+        let d_val = gvn_decl_value(&out, "d");
+        assert!(
+            !matches!(&d_val, Some(AstNode::Identifier(n, _)) if n == "a"),
+            "after the loop d must not alias a: {d_val:?}"
+        );
+    }
+
+    #[test]
+    fn gvn_loop_reuses_invariant_inside() {
+        // var a = x & y; while c { var b = x & y }
+        // -> the body never touches x/y/a, so `a` is loop-invariant and the
+        // body's `b` aliases `a`.
+        let xy = || gvn_binop("and", make_identifier("x"), make_identifier("y"));
+        let body = AstNode::Block(vec![make_var_decl("b", xy())]);
+        let block = AstNode::Block(vec![
+            make_var_decl("a", xy()),
+            AstNode::WhileLoop {
+                condition: Box::new(make_identifier("c")),
+                body: Box::new(body),
+                location: make_loc(),
+            },
+        ]);
+        let out = optimize_gvn(block);
+        assert_eq!(
+            gvn_count_alias(&out, "b", "a"),
+            1,
+            "loop-invariant a should be reused inside the body"
+        );
+    }
+
+    #[test]
+    fn gvn_effectful_call_blocks_alias() {
+        // var a = x & y; var r = Share.random(); var b = x & y
+        // -> the effectful Share.random() between them clears availability, so
+        // `b` must NOT alias `a`.
+        let xy = || gvn_binop("and", make_identifier("x"), make_identifier("y"));
+        let rand = || AstNode::FunctionCall {
+            function: Box::new(make_identifier("Share.random")),
+            arguments: vec![],
+            location: make_loc(),
+            resolved_return_type: None,
+        };
+        let block = AstNode::Block(vec![
+            make_var_decl("a", xy()),
+            make_var_decl("r", rand()),
+            make_var_decl("b", xy()),
+        ]);
+        let out = optimize_gvn(block);
+        let b_val = gvn_decl_value(&out, "b");
+        assert!(
+            !matches!(&b_val, Some(AstNode::Identifier(n, _)) if n == "a"),
+            "effectful Share.random between must block aliasing b to a: {b_val:?}"
+        );
+    }
+
+    #[test]
+    fn gvn_reaches_fixpoint_in_one_pass() {
+        // GVN is alias-only and threads availability globally in one top-down
+        // pass, so a second pass must not change the result.
+        let mk = || {
+            let xy = || gvn_binop("and", make_identifier("x"), make_identifier("y"));
+            AstNode::Block(vec![
+                make_var_decl("a", xy()),
+                AstNode::IfExpression {
+                    condition: Box::new(make_identifier("c")),
+                    then_branch: Box::new(AstNode::Block(vec![make_var_decl("b", xy())])),
+                    else_branch: Some(Box::new(AstNode::Block(vec![make_var_decl("b", xy())]))),
+                },
+            ])
+        };
+        let once = optimize_gvn(mk());
+        let twice = optimize_gvn(once.clone());
+        assert_eq!(once, twice, "GVN should be idempotent");
     }
 
     fn make_identifier(name: &str) -> AstNode {
@@ -5808,6 +6727,23 @@ mod tests {
         }
     }
 
+    fn make_assignment(name: &str, value: AstNode) -> AstNode {
+        AstNode::Assignment {
+            target: Box::new(make_identifier(name)),
+            value: Box::new(value),
+            location: make_loc(),
+        }
+    }
+
+    fn make_insert(list: &str, index: AstNode, value: AstNode) -> AstNode {
+        AstNode::FunctionCall {
+            function: Box::new(make_identifier("insert")),
+            arguments: vec![make_identifier(list), index, value],
+            location: make_loc(),
+            resolved_return_type: None,
+        }
+    }
+
     /// Count `ForLoop` nodes anywhere in a subtree.
     fn count_for_loops(node: &AstNode) -> usize {
         let mut n = usize::from(matches!(node, AstNode::ForLoop { .. }));
@@ -5873,10 +6809,7 @@ mod tests {
         assert_eq!(stmts.len(), 4);
 
         // The two `t` declarations must have distinct fresh names.
-        let names: Vec<&str> = stmts
-            .iter()
-            .filter_map(get_var_decl_name)
-            .collect();
+        let names: Vec<&str> = stmts.iter().filter_map(get_var_decl_name).collect();
         assert_eq!(names.len(), 2);
         assert_ne!(names[0], names[1], "each iteration's local must be unique");
         assert!(names.iter().all(|n| n.contains("__unroll")));
@@ -5939,7 +6872,11 @@ mod tests {
         let block = AstNode::Block(vec![make_for("i", make_range(0, 2), vec![inner])]);
 
         let unrolled = unroll_literal_loops(block);
-        assert_eq!(count_for_loops(&unrolled), 0, "nested loops fully flattened");
+        assert_eq!(
+            count_for_loops(&unrolled),
+            0,
+            "nested loops fully flattened"
+        );
         let AstNode::Block(stmts) = &unrolled else {
             panic!("expected block");
         };
@@ -6020,7 +6957,10 @@ mod tests {
                 },
             )],
         );
-        let block = AstNode::Block(vec![make_var_decl("a", make_int_list(&[10, 20, 30])), loop_stmt]);
+        let block = AstNode::Block(vec![
+            make_var_decl("a", make_int_list(&[10, 20, 30])),
+            loop_stmt,
+        ]);
 
         let unrolled = unroll_literal_loops(block);
         assert_eq!(
@@ -6046,7 +6986,11 @@ mod tests {
         };
         let block = AstNode::Block(vec![
             make_var_decl("bits", make_int_list(&[0, 0, 0, 0, 0, 0, 0, 0])),
-            make_for("i", div_range, vec![make_append("out", make_identifier("i"))]),
+            make_for(
+                "i",
+                div_range,
+                vec![make_append("out", make_identifier("i"))],
+            ),
         ]);
 
         let unrolled = unroll_literal_loops(block);
@@ -6065,8 +7009,16 @@ mod tests {
     fn test_appends_grow_tracked_length_for_later_loop() {
         // var src = []; for i in 0..3: src.append(i)   (grows src to length 3)
         // for j in 0..src.len(): out.append(j)         (must see length 3)
-        let grow = make_for("i", make_range(0, 3), vec![make_append("src", make_identifier("i"))]);
-        let consume = make_for("j", make_len_range("src"), vec![make_append("out", make_identifier("j"))]);
+        let grow = make_for(
+            "i",
+            make_range(0, 3),
+            vec![make_append("src", make_identifier("i"))],
+        );
+        let consume = make_for(
+            "j",
+            make_len_range("src"),
+            vec![make_append("out", make_identifier("j"))],
+        );
         let block = AstNode::Block(vec![
             make_var_decl("src", make_int_list(&[])),
             grow,
@@ -6089,7 +7041,11 @@ mod tests {
         let block = AstNode::Block(vec![
             make_var_decl("a", make_int_list(&[1, 2, 3])),
             make_call("mystery", vec![make_identifier("a")]),
-            make_for("i", make_len_range("a"), vec![make_append("out", make_identifier("i"))]),
+            make_for(
+                "i",
+                make_len_range("a"),
+                vec![make_append("out", make_identifier("i"))],
+            ),
         ]);
 
         let unrolled = unroll_literal_loops(block);
@@ -6108,7 +7064,11 @@ mod tests {
             make_var_decl("a", make_int_list(&[])),
             make_var_decl("b", make_identifier("a")),
             make_append("b", make_int_literal(7)),
-            make_for("i", make_len_range("a"), vec![make_append("out", make_identifier("i"))]),
+            make_for(
+                "i",
+                make_len_range("a"),
+                vec![make_append("out", make_identifier("i"))],
+            ),
         ]);
 
         let unrolled = unroll_literal_loops(block);
@@ -6196,10 +7156,22 @@ mod tests {
         // The scheduler should cluster by depth: [a1, b1, a2, b2] so the batcher
         // can fuse {a1,b1} into one round and {a2,b2} into the next.
         let block = AstNode::Block(vec![
-            make_var_decl("a1", make_binary_op(make_identifier("x1"), "and", make_identifier("y1"))),
-            make_var_decl("a2", make_binary_op(make_identifier("a1"), "and", make_identifier("z1"))),
-            make_var_decl("b1", make_binary_op(make_identifier("x2"), "and", make_identifier("y2"))),
-            make_var_decl("b2", make_binary_op(make_identifier("b1"), "and", make_identifier("z2"))),
+            make_var_decl(
+                "a1",
+                make_binary_op(make_identifier("x1"), "and", make_identifier("y1")),
+            ),
+            make_var_decl(
+                "a2",
+                make_binary_op(make_identifier("a1"), "and", make_identifier("z1")),
+            ),
+            make_var_decl(
+                "b1",
+                make_binary_op(make_identifier("x2"), "and", make_identifier("y2")),
+            ),
+            make_var_decl(
+                "b2",
+                make_binary_op(make_identifier("b1"), "and", make_identifier("z2")),
+            ),
         ]);
         let scheduled = schedule_for_batching(block);
         let AstNode::Block(stmts) = &scheduled else {
@@ -6221,18 +7193,179 @@ mod tests {
         let block = AstNode::Block(vec![
             make_var_decl("acc", make_int_list(&[])),
             make_append("acc", make_identifier("p")),
-            make_var_decl("r", make_binary_op(make_identifier("acc"), "and", make_identifier("q"))),
+            make_var_decl(
+                "r",
+                make_binary_op(make_identifier("acc"), "and", make_identifier("q")),
+            ),
         ]);
         let scheduled = schedule_for_batching(block);
         let AstNode::Block(stmts) = &scheduled else {
             panic!("expected block");
         };
         // Find positions of the append and the `r` declaration.
-        let append_pos = stmts.iter().position(|s| {
-            matches!(s, AstNode::FunctionCall { .. })
-        });
+        let append_pos = stmts
+            .iter()
+            .position(|s| matches!(s, AstNode::FunctionCall { .. }));
         let r_pos = stmts.iter().position(|s| get_var_decl_name(s) == Some("r"));
-        assert!(append_pos < r_pos, "append on acc must precede the multiply reading acc");
+        assert!(
+            append_pos < r_pos,
+            "append on acc must precede the multiply reading acc"
+        );
+    }
+
+    #[test]
+    fn test_scheduler_keeps_effectful_commit_before_logical_source_update() {
+        // Reduced CTR shape:
+        //   tmp = byte_bit xor carry
+        //   out.append(tmp)
+        //   carry = byte_bit and carry
+        // The append directly reads `tmp`, but it also logically commits the
+        // old `carry` value used to compute `tmp`; it must not move after the
+        // carry update while clustering multiplies.
+        let block = AstNode::Block(vec![
+            make_var_decl("out", make_int_list(&[])),
+            make_var_decl("carry", make_identifier("carry_in")),
+            make_var_decl(
+                "tmp",
+                make_binary_op(make_identifier("byte_bit"), "xor", make_identifier("carry")),
+            ),
+            make_append("out", make_identifier("tmp")),
+            make_assignment(
+                "carry",
+                make_binary_op(make_identifier("byte_bit"), "and", make_identifier("carry")),
+            ),
+        ]);
+        let scheduled = schedule_for_batching(block);
+        let AstNode::Block(stmts) = &scheduled else {
+            panic!("expected block");
+        };
+        let append_pos = stmts
+            .iter()
+            .position(|s| matches!(s, AstNode::FunctionCall { .. }))
+            .expect("append present");
+        let carry_assign_pos = stmts
+            .iter()
+            .position(|s| {
+                matches!(s, AstNode::Assignment { target, .. }
+                if matches!(target.as_ref(), AstNode::Identifier(name, _) if name == "carry"))
+            })
+            .expect("carry assignment present");
+        assert!(
+            append_pos < carry_assign_pos,
+            "append committing tmp must stay before updating tmp's source carry"
+        );
+    }
+
+    #[test]
+    fn test_scheduler_clusters_independent_chains_across_safe_assignment() {
+        let block = AstNode::Block(vec![
+            make_var_decl(
+                "a1",
+                make_binary_op(make_identifier("x1"), "and", make_identifier("y1")),
+            ),
+            make_assignment(
+                "scratch",
+                make_binary_op(make_identifier("u"), "+", make_int_literal(1)),
+            ),
+            make_var_decl(
+                "a2",
+                make_binary_op(make_identifier("a1"), "and", make_identifier("z1")),
+            ),
+            make_var_decl(
+                "b1",
+                make_binary_op(make_identifier("x2"), "and", make_identifier("y2")),
+            ),
+            make_var_decl(
+                "b2",
+                make_binary_op(make_identifier("b1"), "and", make_identifier("z2")),
+            ),
+        ]);
+        let scheduled = schedule_for_batching(block);
+        let AstNode::Block(stmts) = &scheduled else {
+            panic!("expected block");
+        };
+        let names: Vec<&str> = stmts.iter().filter_map(get_var_decl_name).collect();
+        assert_eq!(
+            names,
+            vec!["a1", "b1", "a2", "b2"],
+            "independent multiplies should still cluster across a safe assignment"
+        );
+    }
+
+    #[test]
+    fn test_scheduler_allows_independent_mutators_to_different_roots() {
+        let block = AstNode::Block(vec![
+            make_var_decl("left", make_int_list(&[])),
+            make_var_decl("right", make_int_list(&[])),
+            make_var_decl(
+                "p",
+                make_binary_op(make_identifier("x"), "and", make_identifier("y")),
+            ),
+            make_append("left", make_identifier("p")),
+            make_append("right", make_identifier("b")),
+        ]);
+        let scheduled = schedule_for_batching(block);
+        let AstNode::Block(stmts) = &scheduled else {
+            panic!("expected block");
+        };
+        let p_pos = stmts
+            .iter()
+            .position(|s| get_var_decl_name(s) == Some("p"))
+            .expect("p present");
+        let right_append_pos = stmts
+            .iter()
+            .position(|s| matches!(s, AstNode::FunctionCall { arguments, .. }
+                if matches!(arguments.first(), Some(AstNode::Identifier(name, _)) if name == "right")))
+            .expect("right append present");
+        assert!(
+            right_append_pos < p_pos,
+            "right append should not wait for left append's multiply argument"
+        );
+    }
+
+    #[test]
+    fn test_scheduler_preserves_same_root_mutator_order() {
+        let block = AstNode::Block(vec![
+            make_var_decl("out", make_int_list(&[])),
+            make_append("out", make_identifier("first")),
+            make_insert("out", make_int_literal(0), make_identifier("second")),
+        ]);
+        let scheduled = schedule_for_batching(block);
+        let AstNode::Block(stmts) = &scheduled else {
+            panic!("expected block");
+        };
+        let mut mutators = stmts.iter().filter_map(|s| match s {
+            AstNode::FunctionCall { function, .. } => match function.as_ref() {
+                AstNode::Identifier(name, _) => Some(name.as_str()),
+                _ => None,
+            },
+            _ => None,
+        });
+        assert_eq!(mutators.next(), Some("append"));
+        assert_eq!(mutators.next(), Some("insert"));
+    }
+
+    #[test]
+    fn test_scheduler_keeps_unknown_calls_as_barriers() {
+        let block = AstNode::Block(vec![
+            make_var_decl(
+                "a1",
+                make_binary_op(make_identifier("x1"), "and", make_identifier("y1")),
+            ),
+            make_call("user_effect", vec![make_identifier("a1")]),
+            make_var_decl(
+                "b1",
+                make_binary_op(make_identifier("x2"), "and", make_identifier("y2")),
+            ),
+        ]);
+        let scheduled = schedule_for_batching(block);
+        let AstNode::Block(stmts) = &scheduled else {
+            panic!("expected block");
+        };
+        assert_eq!(get_var_decl_name(&stmts[0]), Some("a1"));
+        assert!(matches!(&stmts[1], AstNode::FunctionCall { function, .. }
+            if matches!(function.as_ref(), AstNode::Identifier(name, _) if name == "user_effect")));
+        assert_eq!(get_var_decl_name(&stmts[2]), Some("b1"));
     }
 
     #[test]
