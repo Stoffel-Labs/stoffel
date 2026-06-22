@@ -17,7 +17,8 @@ The workspace currently includes:
 - `crates/stoffel-cli`: the Cargo-like `stoffel` project CLI
 - `crates/stoffel-lang`: the Stoffel-Lang compiler
 - `crates/stoffel-rust-sdk`: the Rust SDK used by the CLI and applications
-- `crates/stoffel-vm`: the runtime, networking layer, MPC integrations, CLI binaries, and C FFI
+- `crates/stoffel-vm`: the runtime, networking layer, MPC integrations, and C FFI
+- `crates/stoffel-vm-runner`: the `stoffel-run` binary and local runner
 - `crates/stoffel-vm-types`: shared VM types, instruction definitions, and the compiled bytecode format
 - `include/`: the public C header and FFI notes
 
@@ -199,7 +200,7 @@ cargo test -- --ignored
 Build the runtime and CLI in release mode:
 
 ```bash
-cargo build --release -p stoffel-vm
+cargo build --release -p stoffel-vm -p stoffel-vm-runner
 ```
 
 HoneyBadger and AVSS backend code is built by default. Distributed party runs select the backend
@@ -243,7 +244,7 @@ provided. Use `--output` when compiling a single file.
 Run local MPC development mode when `stoffel-run` is available:
 
 ```bash
-cargo build -p stoffel-vm --bin stoffel-run
+cargo build -p stoffel-vm-runner --bin stoffel-run
 stoffel dev --runner /path/to/StoffelVM/target/debug/stoffel-run --parties 5 --threshold 1 --input a=40 --input b=2
 ```
 
@@ -303,13 +304,13 @@ A CLI is included to run a compiled Stoffel bytecode file locally or as part of 
 Build the CLI:
 
 ```bash
-cargo build --release -p stoffel-vm
+cargo build --release -p stoffel-vm-runner
 ```
 
 Show the available flags:
 
 ```bash
-cargo run -p stoffel-vm --bin stoffel-run -- --help
+cargo run -p stoffel-vm-runner --bin stoffel-run -- --help
 ```
 
 Run a compiled program locally (default entry function is `main`):
