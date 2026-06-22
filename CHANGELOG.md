@@ -12,4 +12,4 @@ All notable changes to the Stoffel crates are tracked here.
 ### Notes
 
 - `stoffel-cli`, `stoffel-rust-sdk`, and `stoffel-bindgen` are currently marked `publish = false`.
-- The workspace still depends on branch-based Git dependencies for `stoffel-mpc-coordinator` and `stoffelcrypto`, which must be pinned or published before crates.io publication of dependent crates.
+- Publish order for the initial crate release is `stoffel-vm-types`, `stoffellang`, then downstream runtime/SDK crates such as `stoffel-vm`.
