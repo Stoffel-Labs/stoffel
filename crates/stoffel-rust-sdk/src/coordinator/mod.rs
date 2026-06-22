@@ -5,15 +5,17 @@
 //! no-provider on-chain handle for address-only wiring.
 
 pub mod offchain;
+#[cfg(feature = "on-chain")]
 pub mod onchain;
 
 pub use offchain::{
     ClientIdentity, OffChainCoordinator, OffChainCoordinatorClient, OffChainCoordinatorServer,
 };
+#[cfg(feature = "on-chain")]
 pub use onchain::{
     node_rpc, setup_coord, ws_connect, BlsOnChainAvssCoordinator, CoordinatorEvent,
     CoordinatorEventStream, HoneyBadgerOnChainCoordinator, OnChainClientIdentity,
     OnChainCoordinator, OnChainCoordinatorConfig, OnChainCoordinatorConfigBuilder,
     OnChainCoordinatorConfigSummary, OnChainCoordinatorHandle, OnChainCoordinatorSummary,
 };
-pub use stoffel_mpc_coordinator::{Coordinator, CoordinatorError, Round, ShareBound};
+pub use stoffel_mpc_coordinator_shared::{Coordinator, CoordinatorError, Round, ShareBound};

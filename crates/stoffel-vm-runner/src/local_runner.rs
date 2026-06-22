@@ -8,15 +8,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::{BigInteger, PrimeField};
-use stoffel_mpc_coordinator::off_chain::{
+use stoffel_mpc_coordinator_off_chain::{
     node_rpc::NodeRPCClient as OffChainNodeRPCClient, OffChainCoordinatorClient,
     OffChainCoordinatorServer,
 };
-use stoffel_mpc_coordinator::self_signed_certs;
-use stoffel_mpc_coordinator::tests::fake_coord::off_chain::{
+use stoffel_mpc_coordinator_shared::self_signed_certs;
+use stoffel_mpc_coordinator_off_chain::tests::fake_coord::{
     HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
 };
-use stoffel_mpc_coordinator::Coordinator;
+use stoffel_mpc_coordinator_shared::Coordinator;
 use stoffel_vm_types::compiled_binary::{utils::save_to_file, CompiledBinary};
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -37,7 +37,7 @@ pub enum LocalCoordinatorRunnerError {
     #[error("local coordinator runner IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("local coordinator error: {0}")]
-    Coordinator(#[from] stoffel_mpc_coordinator::CoordinatorError),
+    Coordinator(#[from] stoffel_mpc_coordinator_shared::CoordinatorError),
     #[error("local coordinator runner timed out after {0:?}")]
     Timeout(Duration),
     #[error("local party {name} timed out after {timeout:?}: {output}")]
@@ -1160,7 +1160,7 @@ async fn send_avss_masked_input_when_ready(
     }
 }
 
-fn coordinator_wrong_round(error: &stoffel_mpc_coordinator::CoordinatorError) -> bool {
+fn coordinator_wrong_round(error: &stoffel_mpc_coordinator_shared::CoordinatorError) -> bool {
     let message = error.to_string();
     message.contains("WrongRound")
         || message.contains("Need round")

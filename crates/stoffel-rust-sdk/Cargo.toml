@@ -10,6 +10,9 @@ keywords = ["mpc", "sdk", "compiler", "vm", "cryptography"]
 categories = ["api-bindings", "compilers", "cryptography"]
 publish = false
 
+[features]
+on-chain = ["dep:stoffel-mpc-coordinator-on-chain"]
+
 [lib]
 name = "stoffel"
 
@@ -36,11 +39,13 @@ tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
 stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
-stoffel-mpc-coordinator = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev", default-features = false, features = ["off-chain", "on-chain"] }
+stoffel-mpc-coordinator-shared = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev" }
+stoffel-mpc-coordinator-off-chain = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev" }
+stoffel-mpc-coordinator-on-chain = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev", optional = true }
 stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
 stoffel-vm-runner = { version = "0.1.0", path = "../stoffel-vm-runner" }
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
-stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "main" }
+stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
 
 [dev-dependencies]
 aes = "0.8"

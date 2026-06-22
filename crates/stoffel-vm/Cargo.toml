@@ -10,7 +10,7 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 libc = "0.2"
-stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "main" }
+stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
 stoffelnet = "0.1.0"
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
 alloy = "1.7.3"

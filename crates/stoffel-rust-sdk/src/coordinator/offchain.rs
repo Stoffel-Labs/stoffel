@@ -4,7 +4,7 @@
 //! coordinator RPC behavior should use the concrete coordinator crate types
 //! re-exported here.
 
-pub use stoffel_mpc_coordinator::off_chain::{
+pub use stoffel_mpc_coordinator_off_chain::{
     ClientIdentity, OffChainCoordinatorClient, OffChainCoordinatorServer,
 };
 

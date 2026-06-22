@@ -13,13 +13,13 @@ use std::process::exit;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use stoffel_mpc_coordinator::off_chain::node_rpc::{
+use stoffel_mpc_coordinator_off_chain::node_rpc::{
     NodeRPCClient as OffChainNodeRPCClient, NodeRPCServer as OffChainNodeRPCServer,
 };
-use stoffel_mpc_coordinator::off_chain::OffChainCoordinatorClient;
-use stoffel_mpc_coordinator::on_chain;
-use stoffel_mpc_coordinator::on_chain::node_rpc::NodeRPCClient as OnChainNodeRPCClient;
-use stoffel_mpc_coordinator::{Coordinator, NodeRPCError, Round};
+use stoffel_mpc_coordinator_off_chain::OffChainCoordinatorClient;
+use stoffel_mpc_coordinator_on_chain as on_chain;
+use stoffel_mpc_coordinator_on_chain::node_rpc::NodeRPCClient as OnChainNodeRPCClient;
+use stoffel_mpc_coordinator_shared::{Coordinator, NodeRPCError, Round};
 use stoffel_vm::core_vm::VirtualMachine;
 use stoffel_vm::net::curve::{field_from_i64, field_to_i64, SupportedMpcField};
 use stoffel_vm::net::hb_engine::HoneyBadgerMpcEngine;

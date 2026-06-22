@@ -22,7 +22,7 @@ use crate::config::{Curve, MpcBackend};
 use crate::error::{Error, Result};
 use crate::types::{ClientId, FieldElement, MaskIndex, Round, Value};
 
-pub use stoffel_mpc_coordinator::on_chain::{
+pub use stoffel_mpc_coordinator_on_chain::{
     node_rpc, setup_coord, ws_connect, ClientIdentity as OnChainClientIdentity, OnChainCoordinator,
 };
 

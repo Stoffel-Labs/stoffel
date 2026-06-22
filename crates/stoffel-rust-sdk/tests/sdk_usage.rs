@@ -89,22 +89,25 @@ fn public_sdk_types_are_send_and_sync_where_expected() {
     assert_send_sync::<TracingConfigBuilder>();
     assert_send_sync::<TracingConfigSummary>();
     assert_send_sync::<OpenTelemetryGuard>();
-    assert_send_sync::<OnChainClientIdentity>();
-    assert_send_sync::<OnChainCoordinatorHandle>();
-    assert_send_sync::<OnChainCoordinatorSummary>();
-    assert_send_sync::<OnChainCoordinatorConfig>();
-    assert_send_sync::<OnChainCoordinatorConfigBuilder>();
-    assert_send_sync::<OnChainCoordinatorConfigSummary>();
-    assert_send_sync::<CoordinatorEventStream>();
-    assert_send_sync::<CoordinatorEvent>();
-    assert_send_sync::<stoffel::OnChainClientIdentity>();
-    assert_send_sync::<stoffel::OnChainCoordinatorHandle>();
-    assert_send_sync::<stoffel::OnChainCoordinatorSummary>();
-    assert_send_sync::<stoffel::OnChainCoordinatorConfig>();
-    assert_send_sync::<stoffel::OnChainCoordinatorConfigBuilder>();
-    assert_send_sync::<stoffel::OnChainCoordinatorConfigSummary>();
-    assert_send_sync::<stoffel::CoordinatorEventStream>();
-    assert_send_sync::<stoffel::CoordinatorEvent>();
+    #[cfg(feature = "on-chain")]
+    {
+        assert_send_sync::<OnChainClientIdentity>();
+        assert_send_sync::<OnChainCoordinatorHandle>();
+        assert_send_sync::<OnChainCoordinatorSummary>();
+        assert_send_sync::<OnChainCoordinatorConfig>();
+        assert_send_sync::<OnChainCoordinatorConfigBuilder>();
+        assert_send_sync::<OnChainCoordinatorConfigSummary>();
+        assert_send_sync::<CoordinatorEventStream>();
+        assert_send_sync::<CoordinatorEvent>();
+        assert_send_sync::<stoffel::OnChainClientIdentity>();
+        assert_send_sync::<stoffel::OnChainCoordinatorHandle>();
+        assert_send_sync::<stoffel::OnChainCoordinatorSummary>();
+        assert_send_sync::<stoffel::OnChainCoordinatorConfig>();
+        assert_send_sync::<stoffel::OnChainCoordinatorConfigBuilder>();
+        assert_send_sync::<stoffel::OnChainCoordinatorConfigSummary>();
+        assert_send_sync::<stoffel::CoordinatorEventStream>();
+        assert_send_sync::<stoffel::CoordinatorEvent>();
+    }
 }
 
 #[test]
@@ -134,10 +137,13 @@ fn crate_root_reexports_common_reference_sdk_types() {
     assert!(type_name::<stoffel::TracingConfigSummary>().contains("TracingConfigSummary"));
     assert!(type_name::<stoffel::QuicNetworkConfig>().contains("QuicNetworkConfig"));
     assert!(type_name::<stoffel::AvssEngine>().contains("AvssEngine"));
-    assert!(type_name::<stoffel::OnChainClientIdentity>().contains("Address"));
-    assert!(type_name::<stoffel::OnChainCoordinatorHandle>().contains("OnChainCoordinatorHandle"));
-    assert!(type_name::<stoffel::OnChainCoordinatorSummary>().contains("OnChainCoordinatorSummary"));
-    assert!(type_name::<stoffel::CoordinatorEventStream>().contains("CoordinatorEventStream"));
+    #[cfg(feature = "on-chain")]
+    {
+        assert!(type_name::<stoffel::OnChainClientIdentity>().contains("Address"));
+        assert!(type_name::<stoffel::OnChainCoordinatorHandle>().contains("OnChainCoordinatorHandle"));
+        assert!(type_name::<stoffel::OnChainCoordinatorSummary>().contains("OnChainCoordinatorSummary"));
+        assert!(type_name::<stoffel::CoordinatorEventStream>().contains("CoordinatorEventStream"));
+    }
     assert!(type_name::<stoffel::LocalNetworkBuilder<'static>>().contains("LocalNetworkBuilder"));
 
     let _party_id: stoffel::PartyId = 0;
@@ -3751,8 +3757,8 @@ async fn participants_can_carry_verified_ordering_from_networking() -> stoffel::
 fn offchain_coordinator_surface_reexports_core_types() {
     let _ = std::any::type_name::<
         stoffel::coordinator::OffChainCoordinator<
-            stoffel_mpc_coordinator::tests::fake_coord::HoneyBadgerShareValueType,
-            stoffel_mpc_coordinator::tests::fake_coord::HoneyBadgerShareType,
+            stoffel_mpc_coordinator_shared::tests::fake_coord::HoneyBadgerShareValueType,
+            stoffel_mpc_coordinator_shared::tests::fake_coord::HoneyBadgerShareType,
         >,
     >();
 
@@ -4495,6 +4501,7 @@ fn tracing_can_be_initialized_from_sdk_config() -> stoffel::Result<()> {
     }
 }
 
+#[cfg(feature = "on-chain")]
 #[tokio::test]
 async fn onchain_coordinator_surface_uses_core_round_type() -> stoffel::Result<()> {
     let coordinator =
@@ -4502,7 +4509,7 @@ async fn onchain_coordinator_surface_uses_core_round_type() -> stoffel::Result<(
 
     assert_eq!(
         stoffel::Round::Preprocessing,
-        stoffel_mpc_coordinator::Round::Preprocessing
+        stoffel_mpc_coordinator_shared::Round::Preprocessing
     );
     let _ = stoffel::coordinator::ws_connect;
     let _ = std::any::type_name::<stoffel::coordinator::OnChainClientIdentity>();
@@ -4546,6 +4553,7 @@ async fn onchain_coordinator_surface_uses_core_round_type() -> stoffel::Result<(
     Ok(())
 }
 
+#[cfg(feature = "on-chain")]
 #[test]
 fn onchain_coordinator_config_builder_validates_provider_setup() -> stoffel::Result<()> {
     let private_key = "0x1111111111111111111111111111111111111111111111111111111111111111";
@@ -4622,6 +4630,7 @@ fn onchain_coordinator_config_builder_validates_provider_setup() -> stoffel::Res
     Ok(())
 }
 
+#[cfg(feature = "on-chain")]
 #[tokio::test]
 async fn onchain_connect_methods_validate_backend_before_networking() -> stoffel::Result<()> {
     let private_key = "0x1111111111111111111111111111111111111111111111111111111111111111";
@@ -4657,6 +4666,7 @@ async fn onchain_connect_methods_validate_backend_before_networking() -> stoffel
     Ok(())
 }
 
+#[cfg(feature = "on-chain")]
 #[tokio::test]
 #[ignore = "requires STOFFEL_ONCHAIN_WS and STOFFEL_ONCHAIN_PRIVATE_KEY for provider-backed coordinator validation"]
 async fn onchain_provider_backed_connect_uses_real_coordinator_api_when_configured(
