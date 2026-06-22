@@ -4021,7 +4021,7 @@ async fn main() {
                     coordinator_output_format,
                     server_addrs,
                     coord_addr,
-                None,
+                    None,
                     cert_der.expect("--cert required in client mode"),
                     key_der.expect("--key required in client mode"),
                     threshold,
@@ -4903,10 +4903,7 @@ async fn main() {
                                 eprintln!("[party {my_id}] coordinator -> InputCollection");
                                 coord.collect_inputs().await.unwrap();
                             }
-                            coord
-                                .wait_for_round(Round::InputCollection)
-                                .await
-                                .unwrap();
+                            coord.wait_for_round(Round::InputCollection).await.unwrap();
 
                             eprintln!("[party {my_id}] waiting for masked client inputs");
                             let client_inputs = coord
@@ -4924,7 +4921,6 @@ async fn main() {
                             );
                         }
                     }
-
                 } else {
                     // No coordinator or non-Bls12_381 curves
                     match curve_config {
@@ -5060,10 +5056,7 @@ async fn main() {
             eprintln!("[party] coordinator -> MPCExecution");
             coord.start_mpc().await.unwrap();
         }
-        coord
-            .wait_for_round(Round::MPCExecution)
-            .await
-            .unwrap();
+        coord.wait_for_round(Round::MPCExecution).await.unwrap();
     }
 
     eprintln!("Starting VM execution of '{}'...", agreed_entry);

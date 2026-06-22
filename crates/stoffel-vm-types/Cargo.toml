@@ -2,6 +2,12 @@
 name = "stoffel-vm-types"
 version = "0.1.0"
 edition = "2024"
+description = "Shared bytecode, instruction, and runtime value types for the Stoffel virtual machine"
+license = "Apache-2.0"
+repository = "https://github.com/Stoffel-Labs/StoffelVM"
+homepage = "https://stoffelmpc.com"
+keywords = ["mpc", "bytecode", "vm", "compiler", "runtime"]
+categories = ["compilers", "cryptography", "data-structures"]
 
 [dependencies]
 rustc-hash = "2.1.1"

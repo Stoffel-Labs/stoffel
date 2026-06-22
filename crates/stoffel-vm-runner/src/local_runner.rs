@@ -8,14 +8,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::{BigInteger, PrimeField};
+use stoffel_mpc_coordinator_off_chain::tests::fake_coord::{
+    HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
+};
 use stoffel_mpc_coordinator_off_chain::{
     node_rpc::NodeRPCClient as OffChainNodeRPCClient, OffChainCoordinatorClient,
     OffChainCoordinatorServer,
 };
 use stoffel_mpc_coordinator_shared::self_signed_certs;
-use stoffel_mpc_coordinator_off_chain::tests::fake_coord::{
-    HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
-};
 use stoffel_mpc_coordinator_shared::Coordinator;
 use stoffel_vm_types::compiled_binary::{utils::save_to_file, CompiledBinary};
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;

@@ -288,11 +288,16 @@ pub struct ClientIoSchema {
     pub outputs: Vec<ShareType>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FunctionType {
-    Int { signed: bool, bits: u8 },
+    Int {
+        signed: bool,
+        bits: u8,
+    },
     Float,
-    Fixed { bits: u8 },
+    Fixed {
+        bits: u8,
+    },
     String,
     Bool,
     Nil,
@@ -303,6 +308,7 @@ pub enum FunctionType {
     Object(String),
     Generic(String, Vec<FunctionType>),
     TypeVar(String),
+    #[default]
     Unknown,
 }
 
@@ -341,12 +347,6 @@ impl FunctionType {
             self.underlying_type(),
             FunctionType::Unknown | FunctionType::TypeVar(_) | FunctionType::Generic(_, _)
         )
-    }
-}
-
-impl Default for FunctionType {
-    fn default() -> Self {
-        Self::Unknown
     }
 }
 
@@ -1915,7 +1915,7 @@ impl CompiledBinary {
             labels.insert(label, offset);
         }
         let mut sorted_labels: Vec<_> = labels.iter().collect();
-        sorted_labels.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        sorted_labels.sort_unstable_by_key(|(label, _)| *label);
         sorted_labels.len().hash(&mut hasher);
         for (label, offset) in sorted_labels {
             label.hash(&mut hasher);

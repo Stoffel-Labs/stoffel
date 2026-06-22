@@ -1,9 +1,14 @@
 [package]
 name = "stoffellang"
-description = "The compiler for Stoffel Lang, ideally a simple compiler with optimizations for Stoffel VM."
+description = "Compiler for Stoffel programs targeting the Stoffel VM bytecode format"
 authors = ["Gabriel Arrouye"]
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Stoffel-Labs/stoffel"
+homepage = "https://stoffelmpc.com"
+keywords = ["mpc", "compiler", "bytecode", "language", "cryptography"]
+categories = ["compilers", "cryptography", "parser-implementations"]
 
 [lib]
 name = "stoffellang"

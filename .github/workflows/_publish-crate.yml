@@ -1,0 +1,141 @@
+name: _publish-crate
+
+# Reusable publish logic for a single workspace crate. Don't trigger this
+# directly — each crate has a thin caller workflow (publish-<crate>.yml) that
+# invokes it with the crate name. Tags are of the form <crate>-v<semver>,
+# e.g. stoffel-vm-types-v0.1.0, so each crate versions independently.
+
+on:
+  workflow_call:
+    inputs:
+      crate:
+        description: "Workspace package name to publish"
+        required: true
+        type: string
+      tag:
+        description: "Tag for manual runs; empty on tag-push (falls back to ref)"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        required: true
+
+jobs:
+  publish:
+    name: Publish ${{ inputs.crate }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve crate, tag, version
+        id: ref
+        env:
+          CRATE: ${{ inputs.crate }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then tag="$INPUT_TAG"; else tag="${GITHUB_REF_NAME}"; fi
+          version="${tag#${CRATE}-v}"
+          if [ "$version" = "$tag" ]; then
+            echo "Tag '$tag' is not of the form '${CRATE}-v<version>'"; exit 1
+          fi
+          echo "crate=$CRATE"     >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      # Fails fast with a clear reason if the crate is at the wrong version,
+      # lacks description/license (crates.io rejects those), or is publish=false.
+      - name: Validate crate
+        env:
+          CRATE: ${{ steps.ref.outputs.crate }}
+          VERSION: ${{ steps.ref.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, os, sys
+          crate = os.environ["CRATE"]; want = os.environ["VERSION"]
+          md = json.loads(subprocess.check_output(
+              ["cargo", "metadata", "--no-deps", "--format-version", "1"]))
+          p = {x["name"]: x for x in md["packages"]}.get(crate)
+          if p is None:
+              sys.exit(f"{crate}: not a workspace member")
+          errs = []
+          if p["version"] != want:
+              errs.append(f"version {p['version']} != tag {want}")
+          if not p.get("description"):
+              errs.append("missing `description` (crates.io requires it)")
+          if not p.get("license") and not p.get("license_file"):
+              errs.append("missing `license` (crates.io requires it)")
+          if p.get("publish") == []:
+              errs.append("marked publish=false")
+          if errs:
+              sys.exit(f"Cannot publish {crate}:\n  " + "\n  ".join(errs))
+          print(f"OK: {crate} {want}")
+          PY
+
+      - name: Check tag commit is contained in main
+        run: |
+          git fetch origin main
+          git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/main'
+
+      # Packages and verifies the crate (and resolves its registry deps), so a
+      # missing upstream version — e.g. stoffellang needing stoffel-vm-types on
+      # crates.io first — fails here rather than mid-publish. No token needed.
+      - name: Verify packaging (dry run)
+        env:
+          CRATE: ${{ steps.ref.outputs.crate }}
+        run: cargo publish -p "$CRATE" --dry-run
+
+      - name: Check whether already published
+        id: published
+        env:
+          CRATE: ${{ steps.ref.outputs.crate }}
+          VERSION: ${{ steps.ref.outputs.version }}
+        run: |
+          code="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -A "stoffel-release-ci (+https://github.com/${{ github.repository }})" \
+            "https://crates.io/api/v1/crates/$CRATE/$VERSION")"
+          echo "$CRATE@$VERSION -> HTTP $code"
+          if [ "$code" = "200" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to crates.io
+        if: steps.published.outputs.exists == 'false'
+        env:
+          CRATE: ${{ steps.ref.outputs.crate }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p "$CRATE"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CRATE: ${{ steps.ref.outputs.crate }}
+          VERSION: ${{ steps.ref.outputs.version }}
+          TAG: ${{ steps.ref.outputs.tag }}
+        run: |
+          notes_file="$(mktemp)"
+          {
+            echo "$CRATE $VERSION"
+            echo
+            echo "crates.io: https://crates.io/crates/$CRATE/$VERSION"
+            echo "commit: https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+          } > "$notes_file"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file "$notes_file"
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file "$notes_file"
+          fi
