@@ -1,0 +1,50 @@
+[package]
+name = "stoffel-vm-runner"
+version = "0.1.0"
+edition = "2021"
+description = "Local runner and CLI binary for executing Stoffel VM programs"
+license = "Apache-2.0"
+repository = "https://github.com/Stoffel-Labs/StoffelVM"
+homepage = "https://stoffelmpc.com"
+keywords = ["mpc", "vm", "runner", "cryptography"]
+categories = ["command-line-utilities", "cryptography"]
+publish = true
+
+[[bin]]
+name = "stoffel-run"
+path = "src/bin/stoffel-run.rs"
+
+[dependencies]
+stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
+stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
+stoffel-mpc-coordinator-shared = "0.1.0"
+stoffel-mpc-coordinator-off-chain = "0.1.0"
+stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
+stoffelnet = "0.1.0"
+ark-bls12-381 = "0.5.0"
+ark-bn254 = "0.5.0"
+ark-curve25519 = "0.5.0"
+ark-ed25519 = "0.5.0"
+ark-secp256k1 = "0.5.0"
+ark-secp256r1 = "0.5.0"
+ark-ec = "0.5.0"
+ark-ff = "0.5.0"
+ark-serialize = "0.5.0"
+ark-std = { version = "0.5.0", features = ["getrandom"] }
+async-trait = "0.1"
+bincode = { version = "1.3.3", default-features = true }
+futures = "0.3.31"
+hex = "0.4"
+libc = "0.2"
+rustls = "0.23"
+serde = { version = "1.0", features = ["derive", "default"] }
+thiserror = "2"
+tokio = { version = "1.47.1", features = ["full"] }
+tracing = "0.1.41"
+uuid = { version = "1.17.0", features = ["v4"] }
+x509-parser = "0.18.1"
+
+[dev-dependencies]
+stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
+stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }

@@ -160,7 +160,7 @@ fn read_one(
         args.require_exact(1, "1 argument: field_bytes")?;
         args.cloned(0)?
     };
-    ctx.read_byte_array(&value)
+    Ok(ctx.read_byte_array(&value)?)
 }
 
 fn read_two(

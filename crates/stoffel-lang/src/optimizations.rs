@@ -2682,7 +2682,7 @@ fn inline_call(
     // Preserve the parameter's secrecy and type annotation so a secret argument
     // binding stays secret: dropping these would let codegen lower a secret
     // value into a clear register (or compile a secret op as a clear op).
-    for (param, arg) in info.params.iter().zip(args) {
+    for (param, arg) in info.params.iter().zip(args.into_iter()) {
         prelude.push(AstNode::VariableDeclaration {
             name: map.get(&param.name).cloned().unwrap(),
             type_annotation: param.type_annotation.clone(),

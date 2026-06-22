@@ -62,9 +62,9 @@ RUN --mount=type=ssh \
         export CARGO_PROFILE_RELEASE_DEBUG=1; \
     fi; \
     if [ "$ENABLE_NAT" = "true" ]; then \
-        cargo build --release --package stoffel-vm --bin stoffel-run --features nat; \
+        cargo build --release --package stoffel-vm-runner --bin stoffel-run --features nat; \
     else \
-        cargo build --release --package stoffel-vm --bin stoffel-run; \
+        cargo build --release --package stoffel-vm-runner --bin stoffel-run; \
     fi; \
     if [ "$PROFILE_BUILD" != "true" ]; then \
         strip target/release/stoffel-run; \

@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use stoffel_vm::net::{
+use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
+use stoffel_vm_runner::{
     LocalClientInput, LocalCoordinatorRunOutput, LocalCoordinatorRunner, LocalPartyOutput,
-    MpcBackendKind, MpcCurveConfig,
 };
 use stoffel_vm_types::compiled_binary::{ClientIoManifest, ClientIoSchema, CompiledBinary};
 use stoffel_vm_types::core_types::{ShareType, Value};

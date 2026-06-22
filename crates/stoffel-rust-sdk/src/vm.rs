@@ -221,7 +221,7 @@ pub(crate) async fn execute_local_capturing_with_options(
     let local_client_inputs = flattened_client_inputs
         .iter()
         .map(|(client_slot, values)| {
-            Ok(stoffel_vm::net::LocalClientInput::raw(
+            Ok(stoffel_vm_runner::LocalClientInput::raw(
                 *client_slot,
                 values
                     .iter()
@@ -237,7 +237,7 @@ pub(crate) async fn execute_local_capturing_with_options(
             .or_else(|| runtime.local_runner_binary_path()),
     )?;
 
-    let mut runner = stoffel_vm::net::LocalCoordinatorRunner::builder(
+    let mut runner = stoffel_vm_runner::LocalCoordinatorRunner::builder(
         runner_path,
         runtime.program().binary().clone(),
     )
@@ -309,7 +309,7 @@ pub(crate) async fn execute_local_capturing_with_options(
 
 /// The first party's printed program output, with `Program returned:` markers
 /// removed. Empty when no party produced output.
-fn local_program_output(output: &stoffel_vm::net::LocalCoordinatorRunOutput) -> String {
+fn local_program_output(output: &stoffel_vm_runner::LocalCoordinatorRunOutput) -> String {
     let Some(first_party) = output.party_outputs.first() else {
         return String::new();
     };

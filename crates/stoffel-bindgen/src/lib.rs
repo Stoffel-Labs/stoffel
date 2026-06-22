@@ -650,7 +650,7 @@ fn emit_payload_convenience(
         }
     }
 
-    if len > 0 && len.is_multiple_of(8) && rust_types.iter().all(|rust_type| *rust_type == "bool") {
+    if len > 0 && len % 8 == 0 && rust_types.iter().all(|rust_type| *rust_type == "bool") {
         let byte_len = len / 8;
         writeln!(
             source,
@@ -719,16 +719,13 @@ fn emit_payload_convenience(
         writeln!(source, "        }}").expect("writing to String cannot fail");
         writeln!(source, "        let mut bytes = [0_u8; {byte_len}];")
             .expect("writing to String cannot fail");
-        writeln!(
-            source,
-            "        for (index, byte) in bytes.iter_mut().enumerate() {{"
-        )
-        .expect("writing to String cannot fail");
+        writeln!(source, "        for index in 0..{byte_len} {{")
+            .expect("writing to String cannot fail");
         writeln!(source, "            let start = index * 2;")
             .expect("writing to String cannot fail");
         writeln!(
             source,
-            "            *byte = u8::from_str_radix(&hex[start..start + 2], 16).map_err(|error| {crate_path}::Error::InvalidInput(format!(\"invalid hex byte {{index}}: {{error}}\")))?;"
+            "            bytes[index] = u8::from_str_radix(&hex[start..start + 2], 16).map_err(|error| {crate_path}::Error::InvalidInput(format!(\"invalid hex byte {{index}}: {{error}}\")))?;"
         )
         .expect("writing to String cannot fail");
         writeln!(source, "        }}").expect("writing to String cannot fail");
@@ -747,7 +744,7 @@ fn emit_payload_convenience(
 
     writeln!(source, "}}").expect("writing to String cannot fail");
 
-    if len > 0 && len.is_multiple_of(8) && rust_types.iter().all(|rust_type| *rust_type == "bool") {
+    if len > 0 && len % 8 == 0 && rust_types.iter().all(|rust_type| *rust_type == "bool") {
         let byte_len = len / 8;
         writeln!(source, "impl From<[u8; {byte_len}]> for {struct_name} {{")
             .expect("writing to String cannot fail");

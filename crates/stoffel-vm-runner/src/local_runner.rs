@@ -8,15 +8,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::{BigInteger, PrimeField};
-use stoffel_mpc_coordinator::off_chain::{
+use stoffel_mpc_coordinator_off_chain::tests::fake_coord::{
+    HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
+};
+use stoffel_mpc_coordinator_off_chain::{
     node_rpc::NodeRPCClient as OffChainNodeRPCClient, OffChainCoordinatorClient,
     OffChainCoordinatorServer,
 };
-use stoffel_mpc_coordinator::self_signed_certs;
-use stoffel_mpc_coordinator::tests::fake_coord::off_chain::{
-    HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
-};
-use stoffel_mpc_coordinator::Coordinator;
+use stoffel_mpc_coordinator_shared::self_signed_certs;
+use stoffel_mpc_coordinator_shared::Coordinator;
 use stoffel_vm_types::compiled_binary::{utils::save_to_file, CompiledBinary};
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -24,8 +24,8 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-use crate::net::program_id_from_bytes;
-use crate::net::{MpcBackendKind, MpcCurveConfig};
+use stoffel_vm::net::program_id_from_bytes;
+use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_AUTH_TOKEN: &str = "stoffel-local-coordinator-runner";
@@ -37,7 +37,7 @@ pub enum LocalCoordinatorRunnerError {
     #[error("local coordinator runner IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("local coordinator error: {0}")]
-    Coordinator(#[from] stoffel_mpc_coordinator::CoordinatorError),
+    Coordinator(#[from] stoffel_mpc_coordinator_shared::CoordinatorError),
     #[error("local coordinator runner timed out after {0:?}")]
     Timeout(Duration),
     #[error("local party {name} timed out after {timeout:?}: {output}")]
@@ -1160,7 +1160,7 @@ async fn send_avss_masked_input_when_ready(
     }
 }
 
-fn coordinator_wrong_round(error: &stoffel_mpc_coordinator::CoordinatorError) -> bool {
+fn coordinator_wrong_round(error: &stoffel_mpc_coordinator_shared::CoordinatorError) -> bool {
     let message = error.to_string();
     message.contains("WrongRound")
         || message.contains("Need round")
@@ -1197,7 +1197,7 @@ fn parse_input_as_field(value: &str) -> LocalCoordinatorRunnerResult<Fr> {
             "invalid integer client input '{value}': {error}"
         ))
     })?;
-    Ok(crate::net::field_from_i64::<Fr>(value))
+    Ok(stoffel_vm::net::field_from_i64::<Fr>(value))
 }
 
 enum PartyRole {

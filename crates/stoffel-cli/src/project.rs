@@ -732,10 +732,10 @@ fn unknown_config_field(error: &str) -> Option<&str> {
 }
 
 fn validate_package_config(document: &toml::Value, package: &PackageConfig) -> Result<()> {
-    if document
+    if !document
         .get("package")
         .and_then(toml::Value::as_table)
-        .is_none()
+        .is_some()
     {
         anyhow::bail!(
             "missing [package] table in Stoffel.toml; add [package] with name and version fields"

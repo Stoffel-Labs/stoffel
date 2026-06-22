@@ -20,11 +20,11 @@ A compiler for the Stoffel programming language, with support for generating byt
 
 ```bash
 # Clone the repository
-git clone https://github.com/Stoffel-Labs/stoffel.git
-cd stoffel
+git clone https://github.com/yourusername/Stoffel-Lang.git
+cd Stoffel-Lang
 
 # Build the project
-cargo build --release -p stoffellang
+cargo build --release
 
 # The compiler binary will be available at target/release/stoffellang
 ```
@@ -38,7 +38,7 @@ cargo build --release -p stoffellang
 ./stoffellang path/to/source.stfl
 
 # Enable optimizations
-./stoffellang --optimize path/to/source.stfl
+./stoffellang -o path/to/source.stfl
 
 # Set optimization level (0-3)
 ./stoffellang -O2 path/to/source.stfl

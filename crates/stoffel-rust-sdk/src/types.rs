@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 
 pub type PartyId = usize;
 pub type ClientId = stoffelnet::network_utils::ClientId;
-pub type Round = stoffel_mpc_coordinator::Round;
+pub type Round = stoffel_mpc_coordinator_shared::Round;
 pub type MaskIndex = u64;
 
 /// SDK-level scalar type expected by a typed client input or output.

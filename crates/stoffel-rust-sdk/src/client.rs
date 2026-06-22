@@ -15,10 +15,10 @@ use std::time::Duration;
 use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::{PrimeField, Zero};
 use serde::{Deserialize, Serialize};
-use stoffel_mpc_coordinator::off_chain::{
+use stoffel_mpc_coordinator_off_chain::{
     node_rpc::NodeRPCClient as OffChainNodeRPCClient, OffChainCoordinatorClient,
 };
-use stoffel_mpc_coordinator::Coordinator as _;
+use stoffel_mpc_coordinator_shared::Coordinator as _;
 use stoffel_vm_types::core_types::ShareType;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -1152,7 +1152,7 @@ async fn run_offchain_with_share<S>(
     inputs: &[Value],
 ) -> Result<Vec<Value>>
 where
-    S: stoffel_mpc_coordinator::ShareBound<Fr, ValueType = Fr>,
+    S: stoffel_mpc_coordinator_shared::ShareBound<Fr, ValueType = Fr>,
 {
     tokio::time::timeout(config.timeout, async {
         let coord = OffChainCoordinatorClient::<Fr, S>::start_rpc_client(
@@ -1195,7 +1195,7 @@ where
         {
             let reserved_index = config.input_start_index + ordinal as u64;
             let mask = masks.get(ordinal).ok_or_else(|| {
-                Error::Coordinator(stoffel_mpc_coordinator::CoordinatorError::JSONError(
+                Error::Coordinator(stoffel_mpc_coordinator_shared::CoordinatorError::JSONError(
                     format!("missing assigned mask for input ordinal {ordinal}"),
                 ))
             })?;

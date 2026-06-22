@@ -169,7 +169,7 @@ pub fn analyze_liveness_cfg_with_liveins(
     }
 
     // Bitset over `words` u64 lanes, one bit per dense VR index.
-    let words = num_vrs.div_ceil(64);
+    let words = (num_vrs + 63) / 64;
     #[inline]
     fn bit_set(bits: &mut [u64], i: u32) {
         bits[(i >> 6) as usize] |= 1u64 << (i & 63);
@@ -307,7 +307,9 @@ pub fn analyze_liveness_cfg_with_liveins(
         changed = false;
         for bi in (0..blocks.len()).rev() {
             // out[B] = union of in[S] over successors
-            new_out.fill(0);
+            for w in &mut new_out {
+                *w = 0;
+            }
             for &s in &blocks[bi].succs {
                 let src = &live_in_b[s];
                 for w in 0..words {
@@ -824,11 +826,10 @@ pub fn linear_scan_partition(
         // No register available within budget: reuse a spillable active's register.
         let mut victim: Option<usize> = None;
         for (idx, a) in active.iter().enumerate() {
-            if classify(a.1) == Some(is_secret)
-                && !unspillable.contains(&a.2)
-                && victim.is_none_or(|best: usize| a.0 > active[best].0)
-            {
-                victim = Some(idx);
+            if classify(a.1) == Some(is_secret) && !unspillable.contains(&a.2) {
+                if victim.map_or(true, |best: usize| a.0 > active[best].0) {
+                    victim = Some(idx);
+                }
             }
         }
 

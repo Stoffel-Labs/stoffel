@@ -591,7 +591,8 @@ impl VMState {
                 };
 
                 let mut local_products: Vec<(usize, ShareType, ShareData, i64)> = Vec::new();
-                for (index, (left, right)) in lefts.into_iter().zip(rights).enumerate() {
+                for (index, (left, right)) in lefts.into_iter().zip(rights.into_iter()).enumerate()
+                {
                     match (left, right) {
                         (ShareOrScalar::Share(lt, ld), ShareOrScalar::Share(rt, rd)) => {
                             require_type(lt)?;

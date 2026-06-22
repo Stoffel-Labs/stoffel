@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-pub use stoffel_mpc_coordinator::CoordinatorError;
+pub use stoffel_mpc_coordinator_shared::CoordinatorError;
 pub use stoffelnet::network_utils::{ConsensusError, NetworkError};
 
 /// SDK result type.

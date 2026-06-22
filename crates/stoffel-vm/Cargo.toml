@@ -9,6 +9,7 @@ repository = "https://github.com/Stoffel-Labs/StoffelVM"
 homepage = "https://stoffelmpc.com"
 keywords = ["mpc", "vm", "runtime", "bytecode", "cryptography"]
 categories = ["compilers", "cryptography", "virtualization"]
+publish = true
 
 # Build as both a Rust library and a C-compatible dynamic library
 [lib]
@@ -16,10 +17,9 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 libc = "0.2"
-stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0", git = "https://github.com/Stoffel-Labs/mpc-protocols.git", branch = "main" }
+stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
 stoffelnet = "0.1.0"
-stoffel-vm-types = "0.1.0"
-stoffel-mpc-coordinator = { version = "0.1.0", git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev", default-features = false, features = ["off-chain", "on-chain"] }
+stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
 alloy = "1.7.3"
 alloy-primitives = "1.5.7"
 x509-parser = "0.18.1"

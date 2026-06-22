@@ -1,5 +1,3 @@
-use alloy::signers::local::PrivateKeySigner;
-use alloy_primitives::Address;
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{BigInteger, PrimeField};
 use serde::{Deserialize, Serialize};
@@ -13,13 +11,11 @@ use std::process::exit;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use stoffel_mpc_coordinator::off_chain::node_rpc::{
+use stoffel_mpc_coordinator_off_chain::node_rpc::{
     NodeRPCClient as OffChainNodeRPCClient, NodeRPCServer as OffChainNodeRPCServer,
 };
-use stoffel_mpc_coordinator::off_chain::OffChainCoordinatorClient;
-use stoffel_mpc_coordinator::on_chain;
-use stoffel_mpc_coordinator::on_chain::node_rpc::NodeRPCClient as OnChainNodeRPCClient;
-use stoffel_mpc_coordinator::{Coordinator, NodeRPCError, Round};
+use stoffel_mpc_coordinator_off_chain::OffChainCoordinatorClient;
+use stoffel_mpc_coordinator_shared::{Coordinator, NodeRPCError, Round};
 use stoffel_vm::core_vm::VirtualMachine;
 use stoffel_vm::net::curve::{field_from_i64, field_to_i64, SupportedMpcField};
 use stoffel_vm::net::hb_engine::HoneyBadgerMpcEngine;
@@ -194,7 +190,6 @@ fn plan_preprocessing(
 type HbOffChainCoordinator<F> = OffChainCoordinatorClient<F, HbCoordinatorShare<F>>;
 type HbOffChainNodeRpcClient<F> = OffChainNodeRPCClient<F, HbCoordinatorShare<F>>;
 type HbOffChainNodeRpcServer<F> = OffChainNodeRPCServer<F, HbCoordinatorShare<F>>;
-type HbOnChainNodeRpcClient<F> = OnChainNodeRPCClient<F, HbCoordinatorShare<F>>;
 type AvssCoordinatorShare<F, G> = FeldmanShamirShare<F, G>;
 type AvssOffChainCoordinator<F, G> = OffChainCoordinatorClient<F, AvssCoordinatorShare<F, G>>;
 type AvssOffChainNodeRpcClient<F, G> = OffChainNodeRPCClient<F, AvssCoordinatorShare<F, G>>;
@@ -2109,93 +2104,12 @@ async fn run_hb_coordinator_client_for_field<F>(
         exit(2);
     });
 
-    if let Some(contract) = contract_addr {
-        // On-chain client mode
-        let eth_node = eth_node_addr
-            .as_deref()
-            .expect("--eth-node required in on-chain client mode");
-        let wallet_sk = wallet_sk_str
-            .as_deref()
-            .expect("--wallet-sk required in on-chain client mode");
-        let signer = PrivateKeySigner::from_str(wallet_sk).expect("Invalid --wallet-sk");
-        let client_addr = signer.address();
-        let eth = on_chain::ws_connect(eth_node, wallet_sk).await;
-        let contract_addr = Address::from_str(&contract).expect("Invalid --on-chain-coord address");
-        let mut coord = on_chain::setup_coord::<_, F, HbCoordinatorShare<F>>(
-            eth,
-            contract_addr,
-            server_addrs.len() as u64,
-            t as u64,
-            output_len as u64,
-            Some(key_der.clone()),
-        )
-        .await;
-
-        coord.wait_for_round(Round::Preprocessing).await.unwrap();
-        coord
-            .wait_for_round(Round::InputMaskReservation)
-            .await
-            .unwrap();
-        for offset in 0..input_values.len() {
-            coord
-                .reserve_mask_index(reserved_index + offset as u64)
-                .await
-                .unwrap();
-        }
-
-        let base_nonce = coord.base_nonce().await;
-
-        let rpc_addrs: Vec<(String, u16)> = server_addrs
-            .iter()
-            .map(|a| (a.ip().to_string(), a.port()))
-            .collect();
-        let node_rpc_client = HbOnChainNodeRpcClient::<F>::start_rpc_client(
-            rpc_addrs.len(),
-            t,
-            rpc_addrs,
-            cert_der,
-            key_der,
-        )
-        .await;
-        let mut masks = Vec::with_capacity(input_values.len());
-        for offset in 0..input_values.len() {
-            let index = reserved_index + offset as u64;
-            let sig = on_chain::generate_client_sig(base_nonce, index, signer.clone())
-                .await
-                .unwrap();
-            masks.push(
-                node_rpc_client
-                    .receive_mask(sig.as_bytes().to_vec(), client_addr)
-                    .await
-                    .unwrap(),
-            );
-        }
-
-        coord.wait_for_round(Round::InputCollection).await.unwrap();
-        for (offset, (input_value, mask)) in input_values.iter().zip(masks).enumerate() {
-            coord
-                .send_masked_input(mask + *input_value, reserved_index + offset as u64)
-                .await
-                .unwrap();
-        }
-        if output_len == 0 {
-            eprintln!(
-                "[client slot {reserved_index}] input submission complete; no outputs requested"
-            );
-            return;
-        }
-
-        coord.wait_for_round(Round::MPCExecution).await.unwrap();
-        coord
-            .wait_for_round(Round::OutputDistribution)
-            .await
-            .unwrap();
-        let outputs = coord.obtain_outputs().await.unwrap();
-        println!(
-            "outputs: {}",
-            format_coordinator_outputs(&outputs, output_format)
+    if contract_addr.is_some() {
+        let _ = (eth_node_addr, wallet_sk_str);
+        eprintln!(
+            "Error: on-chain coordinator mode is temporarily unavailable in the crates.io-ready build"
         );
-        return;
+        exit(2);
     }
 
     // Off-chain client mode
@@ -3792,7 +3706,7 @@ async fn main() {
     fail_removed_flag(
         &raw_args,
         "--node-ids",
-        "Use `--expected-clients <client-addrs>` in on-chain coordinator mode instead.",
+        "On-chain coordinator mode is temporarily unavailable in the crates.io-ready build.",
     );
     fail_removed_flag(
         &raw_args,
@@ -4019,6 +3933,13 @@ async fn main() {
         &key_der,
         local_store_path.is_some() || preproc_store_path.is_some(),
     );
+    if contract_addr.is_some() {
+        let _ = (eth_node_addr.as_ref(), wallet_sk_str.as_ref());
+        eprintln!(
+            "Error: on-chain coordinator mode is temporarily unavailable in the crates.io-ready build"
+        );
+        exit(2);
+    }
 
     // Bootnode-only mode (no program execution)
     if as_bootnode && !as_leader {
@@ -4100,13 +4021,13 @@ async fn main() {
                     coordinator_output_format,
                     server_addrs,
                     coord_addr,
-                    contract_addr,
+                    None,
                     cert_der.expect("--cert required in client mode"),
                     key_der.expect("--key required in client mode"),
                     threshold,
                     coordinator_client_index,
-                    eth_node_addr,
-                    wallet_sk_str,
+                    None,
+                    None,
                 )
                 .await;
                 return;
@@ -4716,63 +4637,10 @@ async fn main() {
     let mut node_rpc_opt: Option<HbOffChainNodeRpcServer<ark_bls12_381::Fr>> = None;
     let mut input_ids: Vec<Vec<u8>> = Vec::new();
     let mut output_ids: Vec<Vec<u8>> = Vec::new();
-    let mut on_chain_input_ids: Vec<Address> = Vec::new();
-    let mut on_chain_output_clients: Vec<(Vec<u8>, Address)> = Vec::new();
     let mut hb_bls12381_coord_engine: Option<
         Arc<HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>>,
     > = None;
 
-    let mut on_chain_coord_opt = if matches!(backend_kind, MpcBackendKind::HoneyBadger) {
-        if let Some(ref contract) = contract_addr {
-            let eth_node = eth_node_addr
-                .as_deref()
-                .expect("--eth-node required in on-chain coordinator mode");
-            let wallet_sk = wallet_sk_str
-                .as_deref()
-                .expect("--wallet-sk required in on-chain coordinator mode");
-            let eth = on_chain::ws_connect(eth_node, wallet_sk).await;
-            let contract = Address::from_str(contract).expect("Invalid --on-chain-coord address");
-            on_chain_input_ids = expected_clients
-                .iter()
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| Address::from_str(s.trim()).expect("Invalid on-chain client address"))
-                .collect();
-            Some(
-                on_chain::setup_coord::<
-                    _,
-                    ark_bls12_381::Fr,
-                    HbCoordinatorShare<ark_bls12_381::Fr>,
-                >(
-                    eth,
-                    contract,
-                    session_n_parties.unwrap_or_else(|| n_parties.unwrap_or(5)) as u64,
-                    session_threshold.unwrap_or(1) as u64,
-                    1,
-                    None,
-                )
-                .await,
-            )
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let mut on_chain_node_rpc_opt =
-        if let (Some(rpc), Some(coord)) = (rpc_addr.as_ref(), on_chain_coord_opt.as_ref()) {
-            Some(
-                on_chain::node_rpc::NodeRPCServer::start(
-                    &rpc.0,
-                    rpc.1,
-                    coord.coord(),
-                    cert_der.clone().expect("--cert required"),
-                    key_der.clone().expect("--key required"),
-                )
-                .await,
-            )
-        } else {
-            None
-        };
     if matches!(backend_kind, MpcBackendKind::HoneyBadger) {
         if let Some(ref ca) = coord_addr {
             let coord = HbOffChainCoordinator::<ark_bls12_381::Fr>::start_rpc_client(
@@ -4860,13 +4728,6 @@ async fn main() {
                         coord.start_preprocessing().await.unwrap();
                     }
                 }
-                if let Some(ref mut coord) = on_chain_coord_opt {
-                    if as_leader {
-                        coord.reset_coord().await.unwrap();
-                        coord.start_preprocessing().await.unwrap();
-                    }
-                }
-
                 // Phase 2: Create MPC engine + preprocessing + coordinator input phases
                 macro_rules! setup_hb {
                     ($F:ty, $G:ty) => {{
@@ -4902,9 +4763,7 @@ async fn main() {
                 }
 
                 // Bls12_381 path with coordinator support
-                if (coord_opt.is_some() || on_chain_coord_opt.is_some())
-                    && matches!(curve_config, MpcCurveConfig::Bls12_381)
-                {
+                if coord_opt.is_some() && matches!(curve_config, MpcCurveConfig::Bls12_381) {
                     let engine = match setup_hb_party_for_curve::<
                         ark_bls12_381::Fr,
                         ark_bls12_381::G1Projective,
@@ -5062,120 +4921,6 @@ async fn main() {
                             );
                         }
                     }
-
-                    if let Some(ref mut coord) = on_chain_coord_opt {
-                        let node_rpc = on_chain_node_rpc_opt
-                            .as_mut()
-                            .expect("--rpc-bind required with on-chain coordinator");
-
-                        if !on_chain_input_ids.is_empty() {
-                            let total_input_count = if client_input_total > 0 {
-                                client_input_total
-                            } else {
-                                on_chain_input_ids.len().saturating_mul(client_input_count)
-                            };
-                            let precomputed_mask_shares = Some(
-                                engine
-                                    .node_handle()
-                                    .lock()
-                                    .await
-                                    .preprocessing_material
-                                    .lock()
-                                    .await
-                                    .take_random_shares(total_input_count)
-                                    .unwrap_or_else(|e| {
-                                        eprintln!("take_random_shares: {}", e);
-                                        exit(13);
-                                    }),
-                            );
-
-                            if let Some(ref mask_shares) = precomputed_mask_shares {
-                                for (i, share) in mask_shares.iter().cloned().enumerate() {
-                                    node_rpc
-                                        .add_mask_share(i as u64, share)
-                                        .await
-                                        .unwrap_or_else(|e| {
-                                            eprintln!("add_mask_share: {:?}", e);
-                                            exit(13);
-                                        });
-                                }
-                            }
-
-                            if as_leader {
-                                coord.reserve_input_masks().await.unwrap();
-                            }
-                            coord
-                                .wait_for_round(Round::InputMaskReservation)
-                                .await
-                                .unwrap();
-
-                            let client_to_indices = normalize_client_to_indices(
-                                coord
-                                    .wait_for_indices(total_input_count as u64)
-                                    .await
-                                    .unwrap(),
-                            );
-
-                            let mask_shares = if let Some(mask_shares) = precomputed_mask_shares {
-                                mask_shares
-                            } else {
-                                let mask_shares = load_reserved_mask_shares(
-                                    &engine,
-                                    total_input_count,
-                                    client_to_indices.values().flatten().copied(),
-                                )
-                                .await
-                                .unwrap_or_else(|e| {
-                                    eprintln!("load_reserved_mask_shares: {}", e);
-                                    exit(13);
-                                });
-
-                                for idx in client_to_indices.values().flatten().copied() {
-                                    node_rpc
-                                        .add_mask_share(idx, mask_shares[idx as usize].clone())
-                                        .await
-                                        .unwrap_or_else(|e| {
-                                            eprintln!("add_mask_share: {:?}", e);
-                                            exit(13);
-                                        });
-                                }
-
-                                mask_shares
-                            };
-
-                            for (cid, indices) in &client_to_indices {
-                                for idx in indices {
-                                    node_rpc
-                                        .add_reserved_index(*cid, *idx)
-                                        .await
-                                        .unwrap_or_else(|e| {
-                                            eprintln!("add_reserved_index: {:?}", e);
-                                            exit(13);
-                                        });
-                                }
-                            }
-
-                            on_chain_output_clients = node_rpc.ids_and_addrs().await;
-
-                            if as_leader {
-                                coord.collect_inputs().await.unwrap();
-                            }
-                            coord.wait_for_round(Round::InputCollection).await.unwrap();
-
-                            let client_inputs = coord
-                                .wait_for_inputs(total_input_count as u64, mask_shares)
-                                .await
-                                .unwrap();
-                            store_reserved_client_inputs(
-                                &mut vm,
-                                &client_to_indices,
-                                client_inputs,
-                                client_input_count,
-                                &[],
-                                &client_input_types,
-                            );
-                        }
-                    }
                 } else {
                     // No coordinator or non-Bls12_381 curves
                     match curve_config {
@@ -5313,12 +5058,6 @@ async fn main() {
         }
         coord.wait_for_round(Round::MPCExecution).await.unwrap();
     }
-    if let Some(ref mut coord) = on_chain_coord_opt {
-        if as_leader {
-            coord.start_mpc().await.unwrap();
-        }
-        coord.wait_for_round(Round::MPCExecution).await.unwrap();
-    }
 
     eprintln!("Starting VM execution of '{}'...", agreed_entry);
     if !client_roster.is_empty() {
@@ -5426,53 +5165,6 @@ async fn main() {
                     print_vm_result(&mut vm, result.clone());
                 }
 
-                if let Some(ref mut coord) = on_chain_coord_opt {
-                    handled_by_coordinator = true;
-                    let output_share = if on_chain_output_clients.is_empty() {
-                        None
-                    } else {
-                        coordinator_output_share_bytes(&mut vm, &result)
-                    };
-
-                    if let Some(output_share) = output_share {
-                        if as_leader {
-                            coord.send_output().await.unwrap();
-                        }
-                        coord
-                            .wait_for_round(Round::OutputDistribution)
-                            .await
-                            .unwrap();
-
-                        for (key, client_addr) in on_chain_output_clients.iter() {
-                            let share: HbCoordinatorShare<ark_bls12_381::Fr> =
-                                ark_serialize::CanonicalDeserialize::deserialize_compressed(
-                                    output_share.as_slice(),
-                                )
-                                .expect("deserialize output share");
-                            if let Err(e) = coord
-                                .send_output_shares(*client_addr, key.clone(), vec![share])
-                                .await
-                            {
-                                eprintln!(
-                                    "Warning: failed to submit output shares for client {:?}: {}",
-                                    client_addr, e
-                                );
-                            }
-                        }
-
-                        if as_leader {
-                            if let Err(e) = coord.finalize().await {
-                                eprintln!(
-                                    "Warning: failed to finalize on-chain coordinator round: {}",
-                                    e
-                                );
-                            }
-                        }
-                    } else {
-                        print_vm_result(&mut vm, result.clone());
-                    }
-                }
-
                 if !handled_by_coordinator {
                     print_vm_result(&mut vm, result);
                 }
@@ -5523,17 +5215,17 @@ Flags:
   --off-chain-coord <addr:port>
                           Off-chain coordinator address
   --on-chain-coord <address>
-                          On-chain coordinator contract address
-  --eth-node <url>        Ethereum WebSocket RPC endpoint for on-chain coordinator mode
-  --wallet-sk <hex>       Ethereum private key for on-chain coordinator transactions
+                          Temporarily unavailable in the crates.io-ready build
+  --eth-node <url>        Reserved for future on-chain coordinator support
+  --wallet-sk <hex>       Reserved for future on-chain coordinator support
   --rpc-bind <addr:port>  Node RPC server bind address (for mask distribution)
   --cert <path>           Path to DER-encoded X.509 certificate
   --key <path>            Path to DER-encoded private key
   --client-index <u64>    Reserved coordinator input index (coordinator client mode)
   --preproc-store <path>  Persistent HoneyBadger preprocessing store directory
   --local-store <path>    Persistent VM local storage database
-  --expected-clients <cert-paths-or-addrs>
-                          Comma-separated client cert paths for off-chain or addresses for on-chain mode
+  --expected-clients <cert-paths>
+                          Comma-separated client cert paths for off-chain coordinator mode
   -h, --help              Show this help
 
 Required environment:

@@ -3746,7 +3746,7 @@ def main() -> int64:
 "#;
     let program = compile(source, "test.stfl", &default_options())
         .expect("break/continue should compile inside loops");
-    assert!(!program.main_chunk.instructions.is_empty());
+    assert!(program.main_chunk.instructions.len() > 0);
 }
 
 #[test]

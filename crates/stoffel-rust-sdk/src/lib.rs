@@ -81,11 +81,8 @@ pub use config::{
 };
 pub use consensus::{ConsensusGate, NodePublicKey, VerifiedOrdering};
 pub use coordinator::{
-    BlsOnChainAvssCoordinator, Coordinator, CoordinatorEvent, CoordinatorEventStream,
-    HoneyBadgerOnChainCoordinator, OffChainCoordinator, OffChainCoordinatorClient,
-    OffChainCoordinatorServer, OnChainClientIdentity, OnChainCoordinator, OnChainCoordinatorConfig,
-    OnChainCoordinatorConfigBuilder, OnChainCoordinatorConfigSummary, OnChainCoordinatorHandle,
-    OnChainCoordinatorSummary, ShareBound,
+    Coordinator, OffChainCoordinator, OffChainCoordinatorClient, OffChainCoordinatorServer,
+    ShareBound,
 };
 pub use error::{ConsensusError, CoordinatorError, Error, ErrorCategory, NetworkError, Result};
 pub use input_file::{load_client_inputs_file, load_named_inputs_file};

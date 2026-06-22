@@ -3,8 +3,7 @@ name = "stoffel-bindgen"
 version = "0.1.0"
 edition = "2021"
 description = "Build-time Rust binding generation for Stoffel programs"
-license = "Apache-2.0"
-repository = "https://github.com/Stoffel-Labs/StoffelVM"
+license = "MIT"
 publish = false
 
 [dependencies]

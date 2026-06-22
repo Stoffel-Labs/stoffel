@@ -1,6 +1,6 @@
-# stoffel
-[![GitHub License](https://img.shields.io/github/license/Stoffel-Labs/stoffel)](LICENSE)
-[![Reddit](https://img.shields.io/reddit/subreddit-subscribers/StoffelMPC?style=social&label=r%2FStoffelMPC)](https://www.reddit.com/r/StoffelMPC/)
+# StoffelVM
+![Discord](https://img.shields.io/discord/1300834528042160150?label=discord)
+[![GitHub License](https://img.shields.io/github/license/Stoffel-Labs/StoffelVM)](LICENSE)
 
 This repository contains the core crates of the Stoffel Virtual Machine, a register-based VM built for both local execution and networked multiparty computation (MPC).
 
@@ -17,7 +17,8 @@ The workspace currently includes:
 - `crates/stoffel-cli`: the Cargo-like `stoffel` project CLI
 - `crates/stoffel-lang`: the Stoffel-Lang compiler
 - `crates/stoffel-rust-sdk`: the Rust SDK used by the CLI and applications
-- `crates/stoffel-vm`: the runtime, networking layer, MPC integrations, CLI binaries, and C FFI
+- `crates/stoffel-vm`: the runtime, networking layer, MPC integrations, and C FFI
+- `crates/stoffel-vm-runner`: the `stoffel-run` binary and local runner
 - `crates/stoffel-vm-types`: shared VM types, instruction definitions, and the compiled bytecode format
 - `include/`: the public C header and FFI notes
 
@@ -165,7 +166,7 @@ Now that you're familiar with the basics of Stoffel VM, good places to explore n
 ## Learn More
 
 To learn more about what you can build with Stoffel, visit 
-[stoffelmpc.com](https://stoffelmpc.com?utm_source=github&utm_medium=readme&utm_campaign=stoffel-repo&utm_term=mpc)
+[stoffelmpc.com](https://stoffelmpc.com?utm_source=github&utm_medium=readme&utm_campaign=stoffelvm-repo&utm_term=mpc)
 
 ## Compiled Bytecode
 
@@ -199,7 +200,7 @@ cargo test -- --ignored
 Build the runtime and CLI in release mode:
 
 ```bash
-cargo build --release -p stoffel-vm
+cargo build --release -p stoffel-vm -p stoffel-vm-runner
 ```
 
 HoneyBadger and AVSS backend code is built by default. Distributed party runs select the backend
@@ -243,8 +244,8 @@ provided. Use `--output` when compiling a single file.
 Run local MPC development mode when `stoffel-run` is available:
 
 ```bash
-cargo build -p stoffel-vm --bin stoffel-run
-stoffel dev --runner /path/to/stoffel/target/debug/stoffel-run --parties 5 --threshold 1 --input a=40 --input b=2
+cargo build -p stoffel-vm-runner --bin stoffel-run
+stoffel dev --runner /path/to/StoffelVM/target/debug/stoffel-run --parties 5 --threshold 1 --input a=40 --input b=2
 ```
 
 `stoffel dev` runs once, watches `Stoffel.toml` and the configured source tree,
@@ -303,13 +304,13 @@ A CLI is included to run a compiled Stoffel bytecode file locally or as part of 
 Build the CLI:
 
 ```bash
-cargo build --release -p stoffel-vm
+cargo build --release -p stoffel-vm-runner
 ```
 
 Show the available flags:
 
 ```bash
-cargo run -p stoffel-vm --bin stoffel-run -- --help
+cargo run -p stoffel-vm-runner --bin stoffel-run -- --help
 ```
 
 Run a compiled program locally (default entry function is `main`):

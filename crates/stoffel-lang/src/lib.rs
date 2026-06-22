@@ -3,16 +3,6 @@
 //! This library provides the core compilation functionality for the Stoffel programming language.
 //! It can be used as a standalone compiler or integrated into other tools.
 
-#![allow(
-    clippy::collapsible_match,
-    clippy::if_same_then_else,
-    clippy::match_like_matches_macro,
-    clippy::needless_range_loop,
-    clippy::nonminimal_bool,
-    clippy::result_large_err,
-    clippy::too_many_arguments
-)]
-
 pub mod ast;
 pub mod binary_converter;
 pub mod builtin_registry;

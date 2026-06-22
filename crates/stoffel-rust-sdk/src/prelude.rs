@@ -17,11 +17,8 @@ pub use crate::config::{
 };
 pub use crate::consensus::{ConsensusGate, NodePublicKey, VerifiedOrdering};
 pub use crate::coordinator::{
-    BlsOnChainAvssCoordinator, Coordinator, CoordinatorEvent, CoordinatorEventStream,
-    HoneyBadgerOnChainCoordinator, OffChainCoordinator, OffChainCoordinatorClient,
-    OffChainCoordinatorServer, OnChainClientIdentity, OnChainCoordinator, OnChainCoordinatorConfig,
-    OnChainCoordinatorConfigBuilder, OnChainCoordinatorConfigSummary, OnChainCoordinatorHandle,
-    OnChainCoordinatorSummary, ShareBound,
+    Coordinator, OffChainCoordinator, OffChainCoordinatorClient, OffChainCoordinatorServer,
+    ShareBound,
 };
 pub use crate::error::{
     ConsensusError, CoordinatorError, Error, ErrorCategory, NetworkError, Result,
