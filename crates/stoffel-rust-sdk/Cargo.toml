@@ -47,6 +47,10 @@ stoffel-vm-runner = { version = "0.1.0", path = "../stoffel-vm-runner" }
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
 stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
 
+[[example]]
+name = "onchain"
+required-features = ["on-chain"]
+
 [dev-dependencies]
 aes = "0.8"
 stoffel-bindgen = { version = "0.1.0", path = "../stoffel-bindgen" }
