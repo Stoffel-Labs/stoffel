@@ -8,6 +8,7 @@ repository = "https://github.com/Stoffel-Labs/StoffelVM"
 readme = "README.md"
 keywords = ["mpc", "sdk", "compiler", "vm", "cryptography"]
 categories = ["api-bindings", "compilers", "cryptography"]
+publish = true
 
 [lib]
 name = "stoffel"
@@ -37,7 +38,7 @@ stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
 stoffel-mpc-coordinator-shared = "0.1.0"
 stoffel-mpc-coordinator-off-chain = "0.1.0"
 stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
-stoffel-vm-runner = { version = "0.1.0", path = "../stoffel-vm-runner" }
+stoffel-vm-runner = "0.1.0"
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
 stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
 

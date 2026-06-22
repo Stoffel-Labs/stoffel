@@ -8,6 +8,7 @@ repository = "https://github.com/Stoffel-Labs/StoffelVM"
 homepage = "https://stoffelmpc.com"
 keywords = ["mpc", "vm", "runner", "cryptography"]
 categories = ["command-line-utilities", "cryptography"]
+publish = true
 
 [[bin]]
 name = "stoffel-run"

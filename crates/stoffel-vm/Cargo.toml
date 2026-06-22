@@ -9,6 +9,7 @@ repository = "https://github.com/Stoffel-Labs/StoffelVM"
 homepage = "https://stoffelmpc.com"
 keywords = ["mpc", "vm", "bytecode", "cryptography"]
 categories = ["cryptography", "compilers"]
+publish = true
 
 # Build as both a Rust library and a C-compatible dynamic library
 [lib]
