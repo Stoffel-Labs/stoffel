@@ -1,0 +1,76 @@
+# Newton's method as polynomial root finding in fix64: the positive
+# root of p(x) = x^2 - a is sqrt(a). Each step evaluates p and p'
+# with Horner's rule and moves x by -p(x)/p'(x).
+
+def poly_eval(p: list[fix64], x: fix64) -> fix64:
+  var acc: fix64 = 0.0
+  var i: int64 = p.len() - 1
+  while i >= 0:
+    acc = acc * x + p[i]
+    i -= 1
+  return acc
+
+def differentiate(p: list[fix64]) -> list[fix64]:
+  var out: list[fix64] = []
+  var factor: fix64 = 1.0
+  var i: int64 = 1
+  while i < p.len():
+    out.append(p[i] * factor)
+    factor = factor + 1.0
+    i += 1
+  return out
+
+def newton_root(p: list[fix64], start: fix64, steps: int64) -> fix64:
+  var dp: list[fix64] = differentiate(p)
+  var x: fix64 = start
+  var i: int64 = 0
+  while i < steps:
+    var fx: fix64 = poly_eval(p, x)
+    var dfx: fix64 = poly_eval(dp, x)
+    x = x - fx / dfx
+    i += 1
+  return x
+
+def fabs(x: fix64) -> fix64:
+  if x < 0.0:
+    return -x
+  return x
+
+def newton_sqrt(a: fix64) -> fix64:
+  # Root of x^2 - a, seeded at a safe positive start.
+  var p: list[fix64] = [-a, 0.0, 1.0]
+  var seed: fix64 = a
+  if seed < 1.0:
+    seed = 1.0
+  return newton_root(p, seed, 12)
+
+def main() -> int64:
+  var tol: fix64 = 0.001
+
+  # Exact binary-fraction roots come out (nearly) exactly.
+  assert fabs(newton_sqrt(2.25) - 1.5) < tol, "sqrt(2.25)"
+  assert fabs(newton_sqrt(0.25) - 0.5) < tol, "sqrt(0.25)"
+  assert fabs(newton_sqrt(16.0) - 4.0) < tol, "sqrt(16)"
+
+  # Irrational roots within fixed-point tolerance.
+  var root2: fix64 = newton_sqrt(2.0)
+  assert fabs(root2 - 1.4142136) < tol, "sqrt(2)"
+  var root10: fix64 = newton_sqrt(10.0)
+  assert fabs(root10 - 3.1622777) < tol, "sqrt(10)"
+
+  # The defining property |root^2 - a| stays small.
+  var targets: list[fix64] = [2.0, 3.0, 5.0, 10.0, 42.25]
+  var i: int64 = 0
+  while i < targets.len():
+    var a: fix64 = targets[i]
+    var r: fix64 = newton_sqrt(a)
+    assert fabs(r * r - a) < 0.01, "root squares back to the radicand"
+    i += 1
+
+  # Newton on a cubic: x^3 - 8 has the real root 2.
+  var cubic: list[fix64] = [-8.0, 0.0, 0.0, 1.0]
+  var cubic_root: fix64 = newton_root(cubic, 3.0, 16)
+  assert fabs(cubic_root - 2.0) < tol, "cube root of 8"
+
+  print("newton: square and cube roots found via polynomial iteration")
+  return 0

@@ -1,0 +1,8 @@
+# Base module - no dependencies
+# This is the bottom of the chain
+
+def base_value() -> int64:
+  return 100
+
+def double(x: int64) -> int64:
+  return x * 2

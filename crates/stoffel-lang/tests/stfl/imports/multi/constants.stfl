@@ -1,0 +1,6 @@
+# Constants module
+def get_pi_approx() -> int64:
+  return 314
+
+def get_e_approx() -> int64:
+  return 271

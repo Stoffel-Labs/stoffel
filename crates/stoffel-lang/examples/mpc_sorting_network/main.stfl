@@ -1,0 +1,120 @@
+# Data-oblivious sort of secret values with a fixed sorting network, plus median.
+#
+# Compare-and-swap orders a pair: lt = [x<y]; arr[i]=select(lt,x,y) (min),
+# arr[j]=select(lt,y,x) (max) -- one comparison + two selects. A 9-comparator
+# network sorts 5 elements; the comparator sequence is independent of the
+# values, so the access pattern leaks nothing. The median is the middle
+# element of the sorted list. kappa is small for speed (production uses ~40).
+
+def random_bit() -> Share:
+  while True:
+    var r = Share.random_field()
+    var r_squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(r_squared):
+      continue
+    var r_prime_inv = Field.inverse(Field.sqrt(r_squared))
+    var two_inv = Field.inverse(Field.from_int(2))
+    var c = Share.mul_field(r, r_prime_inv)
+    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
+    return Share.retag(a, 1)
+
+def pow2(i: int64) -> int64:
+  var p = 1
+  var k = 0
+  while k < i:
+    p = p * 2
+    k = k + 1
+  return p
+
+def combine_bits(bits: list[Share], n: int64) -> Share:
+  var acc = Share.mul_scalar(bits[0], 1)
+  var i = 1
+  while i < n:
+    acc = Share.add(acc, Share.mul_scalar(bits[i], pow2(i)))
+    i = i + 1
+  return Share.retag(acc, 64)
+
+# Secret-shared [a < b] for a, b in [0, 2^l): masked reveal + carry chain.
+def less_than(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  var z = Share.add_scalar(Share.sub(Share.retag(a, 64), Share.retag(b, 64)), pow2(l))
+  var rbits: list[Share] = []
+  var i = 0
+  while i < (l + 1):
+    rbits.append(random_bit())
+    i = i + 1
+  var r_low = combine_bits(rbits, l + 1)
+  var r_high = Share.retag(Share.random_int(kappa), 64)
+  var r = Share.add(r_low, Share.mul_scalar(r_high, pow2(l + 1)))
+  var c = Share.open(Share.retag(Share.add(Share.retag(z, 64), r), 64))
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < l:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    if ci == 0:
+      borrow = Share.retag(Share.sub(Share.add(ri, borrow), rb), 1)
+    else:
+      borrow = Share.retag(rb, 1)
+    i = i + 1
+  var cl = (c shr l) and 1
+  var rl = rbits[l]
+  var rlb = Share.mul(rl, borrow)
+  var zl = Share.sub(Share.add(rl, borrow), Share.mul_scalar(rlb, 2))
+  if cl == 1:
+    zl = Share.sub(Share.from_clear_int(1, 1), zl)
+  return Share.sub(Share.from_clear_int(1, 1), Share.retag(zl, 1))
+
+# Oblivious select: returns a if cond==1 else b.  b + cond*(a-b), one multiply.
+def select(cond: Share, a: Share, b: Share) -> Share:
+  # cond in {0,1}; a, b arbitrary integer shares. Retag to a common width so
+  # Share.mul accepts the (1-bit cond) x (wide diff) product.
+  var aa = Share.retag(a, 64)
+  var bb = Share.retag(b, 64)
+  var c = Share.retag(cond, 64)
+  return Share.add(bb, Share.mul(c, Share.sub(aa, bb)))
+
+# compare-and-swap: order arr[i], arr[j] ascending. One comparison + two selects.
+def cas(arr: list[Share], i: int64, j: int64, l: int64, kappa: int64) -> int64:
+  var x = arr[i]
+  var y = arr[j]
+  var lt = less_than(x, y, l, kappa)   # x < y
+  arr[i] = select(lt, x, y)            # min
+  arr[j] = select(lt, y, x)            # max
+  return 0
+
+# Data-oblivious sort of 5 elements with a fixed 9-comparator sorting network.
+# The comparator sequence is independent of the values, so the access pattern
+# leaks nothing.
+def sort5(arr: list[Share], l: int64, kappa: int64) -> int64:
+  var pairs = [0, 1, 3, 4, 2, 4, 2, 3, 1, 4, 0, 3, 0, 2, 1, 3, 1, 2]
+  var k = 0
+  while k < len(pairs):
+    var dummy = cas(arr, pairs[k], pairs[k + 1], l, kappa)
+    k = k + 2
+  return 0
+
+def main() -> int64:
+  var l = 8
+  var kappa = 8
+  var raw = [50, 20, 40, 10, 30]
+  var arr: list[Share] = []
+  var i = 0
+  while i < len(raw):
+    arr.append(Share.from_clear_int(raw[i], l))
+    i = i + 1
+  var dummy = sort5(arr, l, kappa)
+  # reveal sorted list, verify ascending, and the median
+  var prev = 0
+  var ok = 1
+  i = 0
+  while i < len(arr):
+    var v = Share.open(Share.retag(arr[i], 64))
+    if v < prev:
+      ok = 0
+    prev = v
+    i = i + 1
+  var median = Share.open(Share.retag(arr[2], 64))
+  assert ok == 1, "list must be sorted ascending"
+  assert median == 30, "median must be 30"
+  return median

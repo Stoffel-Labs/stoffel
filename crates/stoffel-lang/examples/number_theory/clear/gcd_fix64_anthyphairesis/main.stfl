@@ -1,0 +1,55 @@
+# Euclid's original algorithm — anthyphairesis, repeated mutual
+# subtraction of magnitudes — run directly on fix64 quantities.
+# For commensurate magnitudes (exact binary fractions here) it finds
+# the greatest common measure, the largest quantity that tiles both.
+
+def greatest_common_measure(a: fix64, b: fix64) -> fix64:
+  var x: fix64 = a
+  var y: fix64 = b
+  while x != y:
+    if x > y:
+      x = x - y
+    else:
+      y = y - x
+  return x
+
+def is_multiple_of(value: fix64, unit: fix64) -> bool:
+  # Subtract the unit until we hit zero (or overshoot).
+  var v: fix64 = value
+  while v > 0.0:
+    v = v - unit
+  return v == 0.0
+
+def main() -> int64:
+  # 2.25 and 1.5 are both multiples of 0.75.
+  var m1: fix64 = greatest_common_measure(2.25, 1.5)
+  assert m1 == 0.75, "common measure of 2.25 and 1.5"
+
+  # 5.0 and 3.5 share the measure 0.5.
+  var m2: fix64 = greatest_common_measure(5.0, 3.5)
+  assert m2 == 0.5, "common measure of 5.0 and 3.5"
+
+  # 1.75 and 1.0 share only the measure 0.25.
+  var m3: fix64 = greatest_common_measure(1.75, 1.0)
+  assert m3 == 0.25, "common measure of 1.75 and 1.0"
+
+  # Order does not matter.
+  assert greatest_common_measure(1.5, 2.25) == m1, "anthyphairesis is symmetric"
+
+  # Equal magnitudes measure themselves.
+  assert greatest_common_measure(3.25, 3.25) == 3.25, "a measures itself"
+
+  # The result really measures both inputs: whole-number tilings.
+  assert is_multiple_of(2.25, m1), "0.75 tiles 2.25 three times"
+  assert is_multiple_of(1.5, m1), "0.75 tiles 1.5 twice"
+  assert is_multiple_of(5.0, m2), "0.5 tiles 5.0 ten times"
+  assert is_multiple_of(3.5, m2), "0.5 tiles 3.5 seven times"
+
+  # And it is the *greatest* such measure: doubling it fails to tile.
+  assert not is_multiple_of(2.25, m1 * 2.0), "1.5 does not tile 2.25"
+
+  # Integer-valued magnitudes reduce to the ordinary gcd: 12 and 8 give 4.
+  assert greatest_common_measure(12.0, 8.0) == 4.0, "integers fall out as gcd"
+
+  print("anthyphairesis: greatest common measures found by pure subtraction")
+  return 0

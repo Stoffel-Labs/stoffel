@@ -1,0 +1,4 @@
+import "../provider/main.stfl" as provider
+
+def main() -> int64:
+  return provider.provided_value()

@@ -4,13 +4,31 @@
 # generate a jointly-random secret, then extracts the public key from
 # commitment[0]. All parties should output the same public key.
 #
+# This stack is also the local-store persistence testbed: each party mounts a
+# named /app/data volume and passes STOFFEL_LOCAL_STORE to stoffel-run. The
+# API/coordinator compose path is separate and currently uses the
+# HoneyBadger/BLS12-381 coordinator flow.
+#
 # Usage:
 #   STOFFEL_AUTH_TOKEN=<token> docker-compose -f docker-compose.avss.yml up
+#
+# To run a different compiled Stoffel program:
+#   STOFFEL_AUTH_TOKEN=<token> STOFFEL_PROGRAM=/app/programs/threshold_bls_bls12381.stflb docker-compose -f docker-compose.avss.yml up
+#
+# Threshold ECDSA fixtures:
+#   STOFFEL_AUTH_TOKEN=<token> STOFFEL_PROGRAM=/app/programs/threshold_ecdsa_secp256k1.stflb STOFFEL_MPC_CURVE=secp256k1 docker-compose -f docker-compose.avss.yml up
+#   STOFFEL_AUTH_TOKEN=<token> STOFFEL_PROGRAM=/app/programs/threshold_ecdsa_p256.stflb STOFFEL_MPC_CURVE=p-256 docker-compose -f docker-compose.avss.yml up
+#
+# AVSS certificate fixture path:
+#   1. Run /app/programs/avss_certificate_keygen.stflb with STOFFEL_MPC_CURVE=secp256k1 or p-256.
+#      It loads an existing CA key share and only generates on first use.
+#   2. Run /app/programs/avss_certificate_sign.stflb with STOFFEL_WAIT_FOR_CLIENTS=1.
+#      The AVSS output client submits the real TBS digest and reconstructs r(32) || s(32).
 #
 # To use a different elliptic curve (default: bls12-381):
 #   STOFFEL_AUTH_TOKEN=<token> STOFFEL_MPC_CURVE=bn254 docker-compose -f docker-compose.avss.yml up
 #
-# Supported curves: bls12-381, bn254, curve25519, ed25519
+# Supported curves: bls12-381, bn254, curve25519, ed25519, secp256k1, p-256 (alias: secp256r1)
 #
 # To view logs from a specific party:
 #   docker-compose -f docker-compose.avss.yml logs -f party0
@@ -30,12 +48,15 @@ services:
       - STOFFEL_BIND_ADDR=172.29.0.10:9000
       - STOFFEL_N_PARTIES=5
       - STOFFEL_THRESHOLD=1
-      - STOFFEL_PROGRAM=/app/programs/avss_keygen.stflb
+      - STOFFEL_PROGRAM=${STOFFEL_PROGRAM:-/app/programs/avss_keygen.stflb}
       - STOFFEL_ENTRY=main
       - STOFFEL_MPC_BACKEND=avss
       - STOFFEL_MPC_CURVE=${STOFFEL_MPC_CURVE:-}
+      - STOFFEL_LOCAL_STORE=/app/data/local.redb
       - RUST_LOG=info
       - RUST_BACKTRACE=1
+    volumes:
+      - stoffel-avss-party0-local:/app/data
     networks:
       stoffel-avss-net:
         ipv4_address: 172.29.0.10
@@ -64,12 +85,15 @@ services:
       - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
       - STOFFEL_N_PARTIES=5
       - STOFFEL_THRESHOLD=1
-      - STOFFEL_PROGRAM=/app/programs/avss_keygen.stflb
+      - STOFFEL_PROGRAM=${STOFFEL_PROGRAM:-/app/programs/avss_keygen.stflb}
       - STOFFEL_ENTRY=main
       - STOFFEL_MPC_BACKEND=avss
       - STOFFEL_MPC_CURVE=${STOFFEL_MPC_CURVE:-}
+      - STOFFEL_LOCAL_STORE=/app/data/local.redb
       - RUST_LOG=info
       - RUST_BACKTRACE=1
+    volumes:
+      - stoffel-avss-party1-local:/app/data
     networks:
       stoffel-avss-net:
         ipv4_address: 172.29.0.11
@@ -95,12 +119,15 @@ services:
       - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
       - STOFFEL_N_PARTIES=5
       - STOFFEL_THRESHOLD=1
-      - STOFFEL_PROGRAM=/app/programs/avss_keygen.stflb
+      - STOFFEL_PROGRAM=${STOFFEL_PROGRAM:-/app/programs/avss_keygen.stflb}
       - STOFFEL_ENTRY=main
       - STOFFEL_MPC_BACKEND=avss
       - STOFFEL_MPC_CURVE=${STOFFEL_MPC_CURVE:-}
+      - STOFFEL_LOCAL_STORE=/app/data/local.redb
       - RUST_LOG=info
       - RUST_BACKTRACE=1
+    volumes:
+      - stoffel-avss-party2-local:/app/data
     networks:
       stoffel-avss-net:
         ipv4_address: 172.29.0.12
@@ -126,12 +153,15 @@ services:
       - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
       - STOFFEL_N_PARTIES=5
       - STOFFEL_THRESHOLD=1
-      - STOFFEL_PROGRAM=/app/programs/avss_keygen.stflb
+      - STOFFEL_PROGRAM=${STOFFEL_PROGRAM:-/app/programs/avss_keygen.stflb}
       - STOFFEL_ENTRY=main
       - STOFFEL_MPC_BACKEND=avss
       - STOFFEL_MPC_CURVE=${STOFFEL_MPC_CURVE:-}
+      - STOFFEL_LOCAL_STORE=/app/data/local.redb
       - RUST_LOG=info
       - RUST_BACKTRACE=1
+    volumes:
+      - stoffel-avss-party3-local:/app/data
     networks:
       stoffel-avss-net:
         ipv4_address: 172.29.0.13
@@ -157,12 +187,15 @@ services:
       - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
       - STOFFEL_N_PARTIES=5
       - STOFFEL_THRESHOLD=1
-      - STOFFEL_PROGRAM=/app/programs/avss_keygen.stflb
+      - STOFFEL_PROGRAM=${STOFFEL_PROGRAM:-/app/programs/avss_keygen.stflb}
       - STOFFEL_ENTRY=main
       - STOFFEL_MPC_BACKEND=avss
       - STOFFEL_MPC_CURVE=${STOFFEL_MPC_CURVE:-}
+      - STOFFEL_LOCAL_STORE=/app/data/local.redb
       - RUST_LOG=info
       - RUST_BACKTRACE=1
+    volumes:
+      - stoffel-avss-party4-local:/app/data
     networks:
       stoffel-avss-net:
         ipv4_address: 172.29.0.14
@@ -180,3 +213,10 @@ networks:
       config:
         - subnet: 172.29.0.0/16
           gateway: 172.29.0.1
+
+volumes:
+  stoffel-avss-party0-local:
+  stoffel-avss-party1-local:
+  stoffel-avss-party2-local:
+  stoffel-avss-party3-local:
+  stoffel-avss-party4-local:

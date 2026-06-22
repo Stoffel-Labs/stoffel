@@ -1,0 +1,6 @@
+# Helper functions module
+def square(x: int64) -> int64:
+  return x * x
+
+def cube(x: int64) -> int64:
+  return x * x * x

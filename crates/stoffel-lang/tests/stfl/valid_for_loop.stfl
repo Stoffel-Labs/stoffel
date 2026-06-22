@@ -1,0 +1,17 @@
+# Example program that should parse correctly
+
+def main() -> None:
+  var total = 0
+
+  # Iterate over a simple integer range
+  for i in 0..4:
+    if i < 2:
+      var doubled = i + i
+      discard doubled
+    else:
+      var tmp = i * 2
+      discard tmp
+
+  # Simple while loop to exercise loops and assignments
+  while total < 10:
+    total = total + 1

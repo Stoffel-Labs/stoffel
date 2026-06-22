@@ -1,0 +1,13 @@
+[package]
+name = "mpc-oprf"
+version = "0.1.0"
+
+[mpc]
+backend = "honeybadger"
+parties = 5
+threshold = 1
+curve = "bls12_381"
+
+[build]
+source = "main.stfl"
+target_dir = "target"

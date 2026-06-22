@@ -1,0 +1,103 @@
+# run-args: --client-input 0=42 --expected-output-clients 1
+# Bit-decomposition (Damgard, Fitzi, Kiltz, Nielsen, Toft).
+#
+# Given a secret [a] known to lie in [0, 2^l), produce shares of its bits
+# [a_0], ..., [a_{l-1}] without revealing a. Bit-decomposition is the workhorse
+# the same paper builds equality, comparison and exponentiation on top of.
+#
+# Method (statistically-hiding mask + public subtraction):
+#   1. Draw m = l + kappa shared random bits and form [r] = sum 2^i [r_i].
+#   2. Reveal c = a + r. With r ~ uniform over m bits and kappa "slack" bits,
+#      c statistically hides a (leakage ~ 2^-kappa). No mod-p wrap for small l.
+#   3. a = c - r. Since c is public, run a borrow-chain subtractor over the
+#      public bits of c and the shared bits of [r]; the low l result bits are a.
+#
+# kappa is small here so the example runs quickly; a real deployment uses
+# kappa ~ 40 for ~2^-40 statistical security.
+
+def random_bit() -> Share:
+  while True:
+    var r = Share.random_field()
+    var r_squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(r_squared):
+      continue
+    var r_prime_inv = Field.inverse(Field.sqrt(r_squared))
+    var two_inv = Field.inverse(Field.from_int(2))
+    var c = Share.mul_field(r, r_prime_inv)
+    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
+    return Share.retag(a, 1)
+
+def pow2(i: int64) -> int64:
+  var p = 1
+  var k = 0
+  while k < i:
+    p = p * 2
+    k = k + 1
+  return p
+
+# [sum 2^i bits[i]] as a single 64-bit-tagged share.
+def combine_bits(bits: list[Share], n: int64) -> Share:
+  var acc = Share.mul_scalar(bits[0], 1)
+  var i = 1
+  while i < n:
+    acc = Share.add(acc, Share.mul_scalar(bits[i], pow2(i)))
+    i = i + 1
+  return Share.retag(acc, 64)
+
+# Shares of the bits of a in [0, 2^l). Returns n = l + kappa + 1 bit-shares
+# (the low l are a's bits; higher bits are 0).
+def bit_decompose(a: Share, l: int64, kappa: int64) -> list[Share]:
+  var m = l + kappa
+  var n = m + 1
+  var rbits: list[Share] = []
+  var i = 0
+  while i < m:
+    rbits.append(random_bit())
+    i = i + 1
+  while i < n:
+    rbits.append(Share.from_clear_int(0, 1))   # pad the top bit with a public 0
+    i = i + 1
+
+  # Reveal c = a + r (statistically hides a).
+  var r = combine_bits(rbits, n)
+  var c = Share.open(Share.retag(Share.add(Share.retag(a, 64), r), 64))
+
+  # a = c - r: full subtractor with public minuend bits c_i and shared r_i.
+  # Per bit we need a single multiply (r_i AND borrow), reused for both the
+  # difference bit and the next borrow.
+  var abits: list[Share] = []
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < n:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    var xorrb = Share.sub(Share.add(ri, borrow), Share.mul_scalar(rb, 2))  # r_i XOR borrow
+    var ai = borrow
+    var nb = borrow
+    if ci == 0:
+      ai = xorrb                                        # 0 XOR (r_i XOR b)
+      nb = Share.sub(Share.add(ri, borrow), rb)         # borrow' = r_i OR b
+    else:
+      ai = Share.sub(Share.from_clear_int(1, 1), xorrb) # 1 XOR (r_i XOR b)
+      nb = rb                                            # borrow' = r_i AND b
+    abits.append(Share.retag(ai, 1))
+    borrow = Share.retag(nb, 1)
+    i = i + 1
+  return abits
+
+def main() -> int64:
+  var l = 8
+  var kappa = 8
+  var expected = 42
+  var a: secret int64 = ClientStore.take_share(0, 0)
+  var bits = bit_decompose(a, l, kappa)
+  if Mpc.has_capability("client-output"):
+    bits[0].send_to_client(0)   # return the LSB (parity) to the client
+  var recon = 0
+  var i = 0
+  while i < l:
+    recon = recon + Share.open(Share.retag(bits[i], 64)) * pow2(i)
+    i = i + 1
+  assert recon == expected, "bit-decomposition must reconstruct the input"
+  return recon

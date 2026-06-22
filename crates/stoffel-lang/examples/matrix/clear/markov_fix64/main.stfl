@@ -1,0 +1,50 @@
+# A two-state weather Markov chain in fix64. Power iteration drives
+# any starting distribution to the analytic steady state (2/3, 1/3),
+# row-stochasticity is preserved along the way, and the limit is a
+# fixed point of the transition matrix.
+
+def step(dist: list[fix64], p: list[list[fix64]]) -> list[fix64]:
+  # Row vector times matrix: next_j = sum_i dist_i * p[i][j].
+  return [
+    dist[0] * p[0][0] + dist[1] * p[1][0],
+    dist[0] * p[0][1] + dist[1] * p[1][1]
+  ]
+
+def fabs(x: fix64) -> fix64:
+  if x < 0.0:
+    return -x
+  return x
+
+def main() -> int64:
+  # P[sunny][sunny] = 0.75, P[rainy][sunny] = 0.5.
+  var p: list[list[fix64]] = [[0.75, 0.25], [0.5, 0.5]]
+  var tol: fix64 = 0.002
+
+  # Start from certainty of rain.
+  var dist: list[fix64] = [0.0, 1.0]
+  var i: int64 = 0
+  while i < 30:
+    dist = step(dist, p)
+    # Probability mass is conserved at every step.
+    assert fabs(dist[0] + dist[1] - 1.0) < tol, "distribution stays normalised"
+    i += 1
+
+  # Analytic steady state of this chain is (2/3, 1/3).
+  assert fabs(dist[0] - 0.6666667) < tol, "sunny steady-state probability"
+  assert fabs(dist[1] - 0.3333333) < tol, "rainy steady-state probability"
+
+  # The limit is a fixed point: stepping once more does not move it.
+  var again: list[fix64] = step(dist, p)
+  assert fabs(again[0] - dist[0]) < tol, "fixed point in component 0"
+  assert fabs(again[1] - dist[1]) < tol, "fixed point in component 1"
+
+  # A different start converges to the same place (ergodicity).
+  var other: list[fix64] = [1.0, 0.0]
+  i = 0
+  while i < 30:
+    other = step(other, p)
+    i += 1
+  assert fabs(other[0] - dist[0]) < tol, "start-independent limit"
+
+  print("markov: power iteration reaches the (2/3, 1/3) steady state")
+  return 0

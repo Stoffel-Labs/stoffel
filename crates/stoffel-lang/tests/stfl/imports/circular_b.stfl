@@ -1,0 +1,5 @@
+# This file imports circular_a, completing the cycle
+import circular_a
+
+def func_b() -> int64:
+  return 2

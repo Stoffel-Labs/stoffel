@@ -1,0 +1,8 @@
+# A non-None function where some path falls off the end:
+# desired compile-time error (return-path analysis).
+def maybe(x: int64) -> int64:
+  if x > 0:
+    return 1
+
+def main() -> int64:
+  return maybe(1)

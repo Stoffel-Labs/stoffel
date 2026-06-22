@@ -1,0 +1,4 @@
+# Tuple unpacking is unsupported; desired: targeted diagnostic.
+def main() -> int64:
+  var a, b = 1, 2
+  return a + b

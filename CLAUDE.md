@@ -160,6 +160,10 @@ pub enum Value {
 | `get_upvalue` | Get captured variable |
 | `set_upvalue` | Set captured variable |
 | `type` | Get value type as string |
+| `to_string` | Convert any value to its string form |
+| `slice` | Pythonic slice of arrays/strings (negative bounds ok) |
+| `contains` | Membership test (backs the `in` operator) |
+| `assert` | Abort execution when a condition is false |
 
 ## Key Files
 

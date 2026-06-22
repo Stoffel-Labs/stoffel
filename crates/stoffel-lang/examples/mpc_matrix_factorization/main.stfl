@@ -1,0 +1,54 @@
+# run-args: --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=1 --client-input 0=20 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --client-input 1=1 --expected-output-clients 2
+# Private matrix-factorization recommendation with a realistic latent dimension.
+#
+# A recommender factorizes the ratings matrix into k-dimensional latent user and
+# item factor vectors (here k = 16). Client 0 holds a user's factors plus an
+# observed rating; client 1 holds an item's factors. Neither client sees the
+# other's factors. The predicted rating is the dot product <u, v>; we then run
+# one matrix-factorization SGD update of the user factors:
+#
+#   pred = <u, v>
+#   err  = pred - observed
+#   u_j  = u_j - err * v_j        (lr = 1)
+#
+# Both dot product and gradient use a single batched multiply (Share.batch_mul)
+# so the whole step costs two multiplication rounds regardless of k.
+
+def main() -> int64:
+  var k = 16
+
+  var u: list[Share] = []
+  var i = 0
+  while i < k:
+    u.append(ClientStore.take_share(0, i))
+    i = i + 1
+  var observed: secret int64 = ClientStore.take_share(0, 16)
+  var v: list[Share] = []
+  i = 0
+  while i < k:
+    v.append(ClientStore.take_share(1, i))
+    i = i + 1
+
+  # predicted rating = <u, v>. The literal-bound `for` loop lets the compiler
+  # provision exactly k beaver triples for the k secret multiplications.
+  var pred = Share.from_clear_int(0, 64)
+  for di in 0..16:
+    pred = Share.add(pred, Share.mul(Share.retag(u[di], 64), Share.retag(v[di], 64)))
+
+  var err = Share.sub(pred, Share.retag(observed, 64))
+
+  # gradient step on the user factors: u_j <- u_j - err * v_j
+  var u_new: list[Share] = []
+  for gi in 0..16:
+    var g = Share.mul(Share.retag(err, 64), Share.retag(v[gi], 64))
+    u_new.append(Share.sub(Share.retag(u[gi], 64), g))
+
+  if Mpc.has_capability("client-output"):
+    pred.send_to_client(0)
+    pred.send_to_client(1)
+
+  var rp = Share.open(Share.retag(pred, 64))
+  var ru0 = Share.open(Share.retag(u_new[0], 64))
+  assert rp == 16, "<u, v> of two length-16 all-ones factor vectors = 16"
+  assert ru0 == 5, "u0: 1 - (16 - 20)*1 = 5"
+  return rp

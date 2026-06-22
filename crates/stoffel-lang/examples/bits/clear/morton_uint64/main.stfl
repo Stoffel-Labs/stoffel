@@ -1,0 +1,66 @@
+# Morton (Z-order) codes: interleave the bits of two 32-bit coordinates
+# into one uint64 with logarithmic mask-spread steps, validated against
+# a bit-at-a-time reference, then inverted to recover the coordinates.
+
+def spread_bits(v: uint64) -> uint64:
+  # Move the low 32 bits to the even positions.
+  var x: uint64 = v and 0x00000000FFFFFFFFu64
+  x = (x or (x shl 16u64)) and 0x0000FFFF0000FFFFu64
+  x = (x or (x shl 8u64)) and 0x00FF00FF00FF00FFu64
+  x = (x or (x shl 4u64)) and 0x0F0F0F0F0F0F0F0Fu64
+  x = (x or (x shl 2u64)) and 0x3333333333333333u64
+  x = (x or (x shl 1u64)) and 0x5555555555555555u64
+  return x
+
+def compact_bits(v: uint64) -> uint64:
+  # Inverse of spread_bits: gather the even positions back together.
+  var x: uint64 = v and 0x5555555555555555u64
+  x = (x or (x shr 1u64)) and 0x3333333333333333u64
+  x = (x or (x shr 2u64)) and 0x0F0F0F0F0F0F0F0Fu64
+  x = (x or (x shr 4u64)) and 0x00FF00FF00FF00FFu64
+  x = (x or (x shr 8u64)) and 0x0000FFFF0000FFFFu64
+  x = (x or (x shr 16u64)) and 0x00000000FFFFFFFFu64
+  return x
+
+def morton_encode(x: uint64, y: uint64) -> uint64:
+  return spread_bits(x) or (spread_bits(y) shl 1u64)
+
+def morton_encode_reference(x: uint64, y: uint64) -> uint64:
+  # Interleave one bit at a time.
+  var code: uint64 = 0u64
+  var i: uint64 = 0u64
+  while i < 32u64:
+    code = code or (((x shr i) and 1u64) shl (2u64 * i))
+    code = code or (((y shr i) and 1u64) shl (2u64 * i + 1u64))
+    i += 1u64
+  return code
+
+def main() -> int64:
+  # Hand-checked small codes.
+  assert morton_encode(1u64, 0u64) == 1u64, "x bit lands on even position"
+  assert morton_encode(0u64, 1u64) == 2u64, "y bit lands on odd position"
+  assert morton_encode(3u64, 5u64) == 39u64, "interleave of 0b011 and 0b101"
+  assert morton_encode(7u64, 7u64) == 63u64, "both lanes full"
+
+  # The SWAR spread agrees with the reference everywhere we look,
+  # and compacting recovers both coordinates.
+  var xs: list[uint64] = [0u64, 1u64, 3u64, 5u64, 255u64, 12345u64, 4294967295u64]
+  var ys: list[uint64] = [0u64, 2u64, 5u64, 3u64, 65535u64, 54321u64, 4294967295u64]
+  var i: int64 = 0
+  while i < xs.len():
+    var x: uint64 = xs[i]
+    var y: uint64 = ys[i]
+    var code: uint64 = morton_encode(x, y)
+    assert code == morton_encode_reference(x, y), "SWAR spread vs reference"
+    assert compact_bits(code) == x, "x recovered from even bits"
+    assert compact_bits(code shr 1u64) == y, "y recovered from odd bits"
+    i += 1
+
+  # Z-order locality: within an aligned 2x2 block the codes are consecutive.
+  var base: uint64 = morton_encode(10u64, 6u64)
+  assert morton_encode(11u64, 6u64) == base + 1u64, "east neighbour"
+  assert morton_encode(10u64, 7u64) == base + 2u64, "south neighbour"
+  assert morton_encode(11u64, 7u64) == base + 3u64, "diagonal neighbour"
+
+  print("morton: encode/decode round trips and Z-order locality verified")
+  return 0

@@ -1,0 +1,37 @@
+# Local nested generic list dispatch.
+#
+# This intentionally uses list[list[T]] with T bound both to int64 and to
+# list[int64]. The VM only sees regular CALL and list bytecode; the compiler's
+# semantic pass is responsible for proving the generic shapes before emission.
+
+def first_row[T](rows: list[list[T]]) -> list[T]:
+  return rows[0]
+
+def first_cell[T](rows: list[list[T]]) -> T:
+  return rows[0][0]
+
+def choose_nested[T](left: list[list[T]], right: list[T]) -> list[T]:
+  return right
+
+def at[T](items: list[T], index: int64) -> T:
+  return items[index]
+
+def main() -> int64:
+  var n: int64 = 1
+
+  var rows: list[list[int64]] = [[1, 2], [3, 4]]
+  var row: list[int64] = first_row(rows)
+  var cell: int64 = first_cell(rows)
+  var row_value: int64 = at(row, n)
+
+  var cubes: list[list[list[int64]]] = [[[10, 20]], [[30, 40]]]
+  var layer: list[list[int64]] = first_row(cubes)
+
+  var generated: list[list[int64]] = []
+  generated.append([5, 6])
+
+  var selected: list[list[int64]] = choose_nested(cubes, generated)
+  var selected_row: list[int64] = at(selected, 0)
+  var selected_value: int64 = at(selected_row, n)
+
+  return cell + row[n] + row_value + layer[0][n] + selected[0][0] + selected_value + selected.len()

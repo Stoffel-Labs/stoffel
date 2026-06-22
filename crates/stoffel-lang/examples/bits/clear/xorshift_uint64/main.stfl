@@ -1,0 +1,80 @@
+# Marsaglia's xorshift64 PRNG from shl/shr/xor steps. Every step
+# x ^= x << k is a linear bijection on 64-bit words, so the generator
+# is exactly invertible: the inverse cascade below walks the stream
+# backwards to recover the seed.
+
+def xorshift64(state: uint64) -> uint64:
+  var x: uint64 = state
+  x = x xor (x shl 13u64)
+  x = x xor (x shr 7u64)
+  x = x xor (x shl 17u64)
+  return x
+
+def invert_xor_shl(y: uint64, k: uint64) -> uint64:
+  # Invert x ^= x << k. Re-folding at doubling offsets accumulates
+  # y ^ (y<<k) ^ (y<<2k) ^ (y<<3k) ^ ..., the closed-form inverse.
+  var x: uint64 = y
+  var shift: uint64 = k
+  while shift < 64u64:
+    x = x xor (x shl shift)
+    shift = shift * 2u64
+  return x
+
+def invert_xor_shr(y: uint64, k: uint64) -> uint64:
+  var x: uint64 = y
+  var shift: uint64 = k
+  while shift < 64u64:
+    x = x xor (x shr shift)
+    shift = shift * 2u64
+  return x
+
+def xorshift64_inverse(state: uint64) -> uint64:
+  var x: uint64 = invert_xor_shl(state, 17u64)
+  x = invert_xor_shr(x, 7u64)
+  x = invert_xor_shl(x, 13u64)
+  return x
+
+def popcount(v: uint64) -> uint64:
+  var count: uint64 = 0u64
+  var x: uint64 = v
+  while x != 0u64:
+    x = x and (x - 1u64)
+    count += 1u64
+  return count
+
+def main() -> int64:
+  # Zero is the lone fixed point; any nonzero seed avoids it forever.
+  assert xorshift64(0u64) == 0u64, "zero is fixed"
+
+  var seed: uint64 = 88172645463325252u64
+  var x: uint64 = seed
+  var i: int64 = 0
+  while i < 200:
+    x = xorshift64(x)
+    assert x != 0u64, "nonzero orbit never hits zero"
+    assert x != seed, "the period is 2^64 - 1, far beyond 200 steps"
+    i += 1
+
+  # Walk the same 200 steps backwards and recover the seed exactly.
+  i = 0
+  while i < 200:
+    x = xorshift64_inverse(x)
+    i += 1
+  assert x == seed, "inverse cascade recovers the seed"
+
+  # Avalanche sanity: across 64 steps the average flipped-bit count per
+  # step should be near 32 (between 20 and 44 is comfortably random-ish).
+  var prev: uint64 = seed
+  var flipped_total: uint64 = 0u64
+  i = 0
+  while i < 64:
+    var next: uint64 = xorshift64(prev)
+    flipped_total += popcount(prev xor next)
+    prev = next
+    i += 1
+  var average_flips: uint64 = flipped_total / 64u64
+  assert average_flips > 20u64, "bit mixing lower bound"
+  assert average_flips < 44u64, "bit mixing upper bound"
+
+  print("xorshift: 200-step round trip inverted exactly, mixing sane")
+  return 0

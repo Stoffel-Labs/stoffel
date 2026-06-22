@@ -1,0 +1,23 @@
+# Local risk queue example.
+#
+# Uses list methods while modeling a small ranked queue of review scores.
+
+def main() -> int64:
+  var review_scores: list[int64] = []
+  review_scores.append(72)
+  review_scores.append(41)
+  review_scores.append(93)
+  review_scores.append(65)
+
+  review_scores[1] = review_scores[1] + 10
+
+  var total: int64 = 0
+  var high_priority: int64 = 0
+
+  for score in review_scores:
+    total += score
+    if score >= 70:
+      high_priority += 1
+
+  var alias_count_check: int64 = review_scores.len() + review_scores.len()
+  return total + (high_priority * 100) + alias_count_check

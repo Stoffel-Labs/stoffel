@@ -1,0 +1,65 @@
+# Iterative extended Euclidean algorithm in int64, maintaining the
+# Bezout coefficient rows alongside the remainders. For every tested
+# pair the certificate a*x + b*y == gcd(a, b) is checked directly.
+
+def xgcd(a: int64, b: int64) -> list[int64]:
+  # Returns [g, x, y] with a*x + b*y == g.
+  var old_r: int64 = a
+  var r: int64 = b
+  var old_s: int64 = 1
+  var s: int64 = 0
+  var old_t: int64 = 0
+  var t: int64 = 1
+  while r != 0:
+    var q: int64 = old_r / r
+    var tmp: int64 = old_r - q * r
+    old_r = r
+    r = tmp
+    tmp = old_s - q * s
+    old_s = s
+    s = tmp
+    tmp = old_t - q * t
+    old_t = t
+    t = tmp
+  return [old_r, old_s, old_t]
+
+def abs64(n: int64) -> int64:
+  if n < 0:
+    return -n
+  return n
+
+def main() -> int64:
+  # The classic worked example: gcd(240, 46) = 2 = 240*(-9) + 46*47.
+  var res: list[int64] = xgcd(240, 46)
+  assert res[0] == 2, "gcd(240, 46)"
+  assert 240 * res[1] + 46 * res[2] == 2, "Bezout certificate for (240, 46)"
+  assert res[1] == -9 and res[2] == 47, "canonical coefficients"
+
+  # Certificate holds across a grid, including signed inputs.
+  var pairs_a: list[int64] = [240, 48, 17, 0, 7, -240, 99, 1071]
+  var pairs_b: list[int64] = [46, 18, 13, 5, 7, 46, -78, 462]
+  var i: int64 = 0
+  while i < pairs_a.len():
+    var a: int64 = pairs_a[i]
+    var b: int64 = pairs_b[i]
+    var r2: list[int64] = xgcd(a, b)
+    var g: int64 = r2[0]
+    # The identity is exact whatever the signs.
+    assert a * r2[1] + b * r2[2] == g, "a*x + b*y == g"
+    # g divides both inputs (sign-insensitively).
+    if g != 0:
+      assert a % g == 0, "g divides a"
+      assert b % g == 0, "g divides b"
+    assert abs64(g) == abs64(xgcd(b, a)[0]), "gcd magnitude is symmetric"
+    i += 1
+
+  # Coprime pair: the Bezout x is the modular inverse of a mod b.
+  var inv_res: list[int64] = xgcd(17, 13)
+  assert inv_res[0] == 1, "17 and 13 are coprime"
+  # Floored 'mod' normalises the (possibly negative) Bezout coefficient
+  # into the residue range [0, 13); '%' alone could leave it negative.
+  var inv: int64 = inv_res[1] mod 13
+  assert (17 * inv) % 13 == 1, "Bezout x inverts 17 modulo 13"
+
+  print("xgcd iterative: Bezout certificates verified on 8 pairs")
+  return 0

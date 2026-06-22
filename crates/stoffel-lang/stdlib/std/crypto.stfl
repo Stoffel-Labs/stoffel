@@ -1,0 +1,13 @@
+builtin object Bytes:
+  def concat(left: bytes, right: bytes) -> bytes {.builtin.}:
+  def from_string(value: string) -> bytes {.builtin.}:
+
+builtin object Crypto:
+  def sha256(message: bytes) -> bytes {.builtin.}:
+  def sha512(message: bytes) -> bytes {.builtin.}:
+  def hash_to_field(message: bytes, curve_name: string) -> bytes {.builtin.}:
+  def field_inv(field_bytes: bytes, curve_name: string) -> bytes {.builtin.}:
+  def point_x_to_field(point_bytes: bytes, curve_name: string) -> bytes {.builtin.}:
+  def field_to_scalar_bytes(field_bytes: bytes, curve_name: string) -> bytes {.builtin.}:
+  def point_to_sec1(point_bytes: bytes, curve_name: string) -> bytes {.builtin.}:
+  def hash_to_g1(message: bytes) -> bytes {.builtin.}:

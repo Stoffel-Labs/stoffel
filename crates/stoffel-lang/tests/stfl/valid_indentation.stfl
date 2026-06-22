@@ -1,0 +1,22 @@
+# Basic indentation
+var x = 10
+if x > 5:
+  var y = 20 # Indented block
+  # Another comment inside
+  y = y + 1
+var z = 30 # Dedented back to original level
+
+# Nested indentation
+if x < 100:
+  var a = 1
+  if a == 1:
+    var b = 2 # Double indent
+    b = b * x
+  var c = 3 # Back to single indent level
+var d = 4 # Back to top level
+
+# Empty block (requires parser support, e.g., 'pass' keyword or allowing empty blocks)
+# if x == 0:
+#   pass # Placeholder for an empty block
+
+# No explicit main; indentation-only validation

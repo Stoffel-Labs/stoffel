@@ -1,0 +1,48 @@
+type PartyCount = int64
+type ShareBytes = bytes
+
+object MpcJob:
+  id: string
+  parties: PartyCount
+  threshold: int64
+  curve: string
+
+object ClientContribution:
+  share: secret int64
+  client_id: string
+  commitments: list[ShareBytes]
+
+object AuditedJob(MpcJob):
+  transcript_hash: bytes
+  approved: bool
+
+def main() -> int64:
+  var job = MpcJob(
+    id: "nightly-risk-score",
+    parties: 5,
+    threshold: 1,
+    curve: "bls12-381",
+  )
+
+  var commitments: list[ShareBytes] = []
+  commitments.append(Bytes.from_string("commitment-a"))
+  commitments.append(Bytes.from_string("commitment-b"))
+  var review_grid: list[list[int64]] = [[5, 5], [3, 2]]
+  var keyed_scores: dict[string, list[int64]] = {"latency": [1, 2], "privacy": [3, 4]}
+
+  var approved: bool = True
+  var audit = AuditedJob(
+    transcript_hash: Crypto.sha256(Bytes.from_string("nightly-risk-score:v1")),
+    approved: approved,
+  )
+
+  var quorum_score: int64 = job.parties - job.threshold
+  quorum_score += commitments.len()
+  quorum_score += review_grid[0][1]
+  quorum_score += keyed_scores["privacy"][0]
+
+  if approved:
+    quorum_score += 10
+
+  print("mpc job schemas loaded")
+  return quorum_score

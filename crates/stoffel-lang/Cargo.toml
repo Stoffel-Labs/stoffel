@@ -1,0 +1,47 @@
+[package]
+name = "stoffellang"
+description = "The compiler for Stoffel Lang, ideally a simple compiler with optimizations for Stoffel VM."
+authors = ["Gabriel Arrouye"]
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "stoffellang"
+
+[dependencies]
+stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
+colored = "3.0.0"
+edit-distance = "2.1.0"
+clap = { version = "4.5.4", features = ["derive"] }
+
+# Test configurations for tests in the rust subdirectory
+[[test]]
+name = "compiler_phase_tests"
+path = "tests/rust/compiler_phase_tests.rs"
+
+[[test]]
+name = "import_integration_tests"
+path = "tests/rust/import_integration_tests.rs"
+
+[[test]]
+name = "object_integration_tests"
+path = "tests/rust/object_integration_tests.rs"
+
+[[test]]
+name = "object_syntax_tests"
+path = "tests/rust/object_syntax_tests.rs"
+
+[[test]]
+name = "suggestion_integration_tests"
+path = "tests/rust/suggestion_integration_tests.rs"
+
+[[test]]
+name = "user_defined_object_tests"
+path = "tests/rust/user_defined_object_tests.rs"
+
+[[test]]
+name = "fixture_and_example_tests"
+path = "tests/rust/fixture_and_example_tests.rs"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,2 @@
+def provided_value() -> int64:
+  return 752

@@ -1,0 +1,6 @@
+builtin opaque RbcResult
+
+builtin object Rbc:
+  def broadcast(message: string) -> int64 {.builtin.}:
+  def receive(from_party: int64, timeout_ms: int64) -> string {.builtin.}:
+  def receive_any(timeout_ms: int64) -> RbcResult {.builtin.}:

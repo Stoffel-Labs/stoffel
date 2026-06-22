@@ -1,0 +1,18 @@
+# Threshold BLS signature over BLS12-381.
+#
+# Result layout: sig_g1(48) || pk_g2(96) || H(message)_g1(48).
+
+def main() -> bytes:
+  var client_count = ClientStore.get_number_clients()
+  var secret_key: secret int64 = Share.random()
+  var public_key = secret_key.open_exp("bls12-381-g2")
+
+  var message = Bytes.from_string("test message for bls")
+  if client_count > 0:
+    var message_share = ClientStore.take_share(0, 0)
+    message = message_share.open_field()
+  var hashed_message = Crypto.hash_to_g1(message)
+  var signature = secret_key.open_exp_custom(hashed_message)
+
+  var signature_and_key = Bytes.concat(signature, public_key)
+  return Bytes.concat(signature_and_key, hashed_message)

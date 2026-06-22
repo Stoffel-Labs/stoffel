@@ -1,0 +1,22 @@
+type Score = int64
+def base_score(amount: int64, tenure_months: int64) -> int64:
+  var score: int64 = 100
+
+  if amount > 10000:
+    score -= 45
+  elif amount > 5000:
+    score -= 20
+  else:
+    score += 10
+
+  if tenure_months >= 24 and not (amount > 15000):
+    score += 30
+
+  return score
+
+def tag_bonus(verified: int64, repeat_customer: int64, manual_review: int64) -> int64:
+  var bonus: int64 = 0
+  bonus += verified
+  bonus += repeat_customer
+  bonus -= manual_review
+  return bonus

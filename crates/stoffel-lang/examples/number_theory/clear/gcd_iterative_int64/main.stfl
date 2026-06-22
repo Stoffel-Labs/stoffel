@@ -1,0 +1,56 @@
+# The classic remainder-based Euclidean algorithm as an int64 loop,
+# normalised for negative inputs and validated against gcd identities.
+
+def abs64(n: int64) -> int64:
+  if n < 0:
+    return -n
+  return n
+
+def gcd(a: int64, b: int64) -> int64:
+  var x: int64 = abs64(a)
+  var y: int64 = abs64(b)
+  while y != 0:
+    var t: int64 = x % y
+    x = y
+    y = t
+  return x
+
+def main() -> int64:
+  # Textbook pairs.
+  assert gcd(48, 18) == 6, "gcd(48, 18)"
+  assert gcd(252, 105) == 21, "gcd(252, 105)"
+  assert gcd(17, 13) == 1, "coprime primes"
+  assert gcd(0, 5) == 5, "gcd with zero"
+  assert gcd(7, 7) == 7, "gcd of equal values"
+  assert gcd(1071, 462) == 21, "Euclid's own example"
+
+  # Sign normalisation: gcd ignores signs entirely.
+  assert gcd(-48, 18) == 6, "negative first argument"
+  assert gcd(48, -18) == 6, "negative second argument"
+  assert gcd(-48, -18) == 6, "both negative"
+
+  # Identities checked across a grid of pairs.
+  var values: list[int64] = [1, 2, 6, 15, 35, 49, 120, 121]
+  var i: int64 = 0
+  while i < values.len():
+    var a: int64 = values[i]
+    var j: int64 = 0
+    while j < values.len():
+      var b: int64 = values[j]
+      var g: int64 = gcd(a, b)
+      # Commutativity.
+      assert g == gcd(b, a), "gcd is symmetric"
+      # The gcd divides both arguments.
+      assert a % g == 0, "g divides a"
+      assert b % g == 0, "g divides b"
+      # Scaling law: gcd(ka, kb) == k * gcd(a, b).
+      assert gcd(3 * a, 3 * b) == 3 * g, "gcd scaling"
+      j += 1
+    i += 1
+
+  # Large 64-bit values.
+  assert gcd(7766279631452241920, 1000000007) == 1, "large coprime pair"
+  assert gcd(6148914691236517205, 4611686018427387904) == 1, "alternating bits vs power of two"
+
+  print("euclid iterative: identities hold on an 8x8 grid plus edge cases")
+  return 0

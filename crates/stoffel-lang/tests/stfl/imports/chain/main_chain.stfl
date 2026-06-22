@@ -1,0 +1,8 @@
+# Main module - imports middle (which imports base)
+# Chain: main_chain -> middle -> base
+import middle
+
+def main() -> int64:
+  var result = middle_compute()
+  var tripled = triple(result)
+  return tripled

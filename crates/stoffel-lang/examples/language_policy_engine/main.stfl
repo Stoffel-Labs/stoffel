@@ -1,0 +1,59 @@
+import math_rules as rules
+
+def seasonal_adjustment(days: int64) -> int64:
+  var adjustment: int64 = 0
+  for day in 1..days:
+    if day % 7 == 0:
+      adjustment += 2
+    else:
+      adjustment += 1
+  return adjustment
+
+def main() -> int64:
+  var amount: int64 = 7200
+  var tenure_months: int64 = 30
+  var tags: dict[string, int64] = {"verified": 8, "repeat_customer": 12, "manual_review": 0}
+  var audit_events: list[int64] = [3, 5, 8]
+
+  var score: int64 = base_score(amount, tenure_months)
+  score += tag_bonus(tags["verified"], tags["repeat_customer"], tags["manual_review"])
+  score += seasonal_adjustment(14)
+
+  score += 6
+
+  for event_score in audit_events:
+    score += event_score
+
+  var index: int64 = 0
+  while index < audit_events.len():
+    score += audit_events[index]
+    index += 1
+
+  var amount_i32: int32 = 7200i32
+  var tenure_u16: uint16 = 30u16
+  var risk_bucket_u8: uint8 = 3u8
+  var settlement_cap_u64: uint64 = 50000u64
+  var signed_delta: int64 = -12
+  var unused_i8: int8 = 12i8
+  var unused_i16: int16 = 320i16
+  var unused_u32: uint32 = 9000u32
+  var fee_rate: float64 = 0.125
+  var enabled: bool = True
+  var nothing = None
+
+  if amount_i32 > 0i32 and tenure_u16 > 0u16 and risk_bucket_u8 < 10u8 and settlement_cap_u64 > 0u64:
+    score += 4
+
+  if enabled and not (score < 0):
+    score *= 2
+    score /= 2
+    score %= 1000
+
+  score = score + signed_delta
+  discard unused_i8
+  discard unused_i16
+  discard unused_u32
+  discard fee_rate
+  discard nothing
+
+  return score

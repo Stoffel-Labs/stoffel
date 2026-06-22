@@ -1,0 +1,11 @@
+[package]
+name = "stoffel-bindgen"
+version = "0.1.0"
+edition = "2021"
+description = "Build-time Rust binding generation for Stoffel programs"
+license = "MIT"
+publish = false
+
+[dependencies]
+stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
+thiserror = "2"

@@ -1,0 +1,34 @@
+# Lightweight invoice reference validator.
+#
+# Scores a local reference string by checking length, separators, digits, and
+# expected workflow words. This is intentionally local-only: client input/output
+# is demonstrated by the MPC service examples.
+
+def main() -> int64:
+  var reference = "invoice-2048-paid"
+  var characters: list[string] = ["i", "n", "v", "o", "i", "c", "e", "-", "2", "0", "4", "8", "-", "p", "a", "i", "d"]
+  var length: int64 = 0
+  var digit_count: int64 = 0
+  var separator_count: int64 = 0
+  var vowel_count: int64 = 0
+
+  for ch in characters:
+    length += 1
+
+    if ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9":
+      digit_count += 1
+    elif ch == "-":
+      separator_count += 1
+    elif ch == "a" or ch == "e" or ch == "i" or ch == "o" or ch == "u":
+      vowel_count += 1
+
+  var score: int64 = length
+  score += digit_count * 10
+  score += separator_count * 5
+  score += vowel_count
+
+  if length >= 12 and digit_count == 4 and separator_count == 2:
+    score += 100
+
+  discard reference
+  return score

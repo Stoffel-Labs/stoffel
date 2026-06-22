@@ -1,0 +1,8 @@
+# Mixing integer widths in arithmetic (int32 + int64).
+# Desired: clear compile-time error (no implicit narrowing/widening).
+# Currently suspected to compile unchecked and fail (or misbehave) at runtime.
+def main() -> int64:
+  var a: int32 = 5i32
+  var b: int64 = 10i64
+  var c = a + b
+  return 1

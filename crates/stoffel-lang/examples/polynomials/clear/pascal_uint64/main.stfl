@@ -1,0 +1,63 @@
+# Coefficients of (1 + x)^n from Pascal's triangle in uint64, checked
+# against the binomial theorem: evaluating at x = 1 gives 2^n and at
+# x = 2 gives 3^n, with powers computed independently.
+
+def pascal_row(n: int64) -> list[uint64]:
+  var row: list[uint64] = [1u64]
+  var r: int64 = 0
+  while r < n:
+    var next: list[uint64] = [1u64]
+    var i: int64 = 1
+    while i < row.len():
+      next.append(row[i - 1] + row[i])
+      i += 1
+    next.append(1u64)
+    row = next
+    r += 1
+  return row
+
+def poly_eval(p: list[uint64], x: uint64) -> uint64:
+  var acc: uint64 = 0u64
+  var i: int64 = p.len() - 1
+  while i >= 0:
+    acc = acc * x + p[i]
+    i -= 1
+  return acc
+
+def power(base: uint64, exp: int64) -> uint64:
+  var acc: uint64 = 1u64
+  var i: int64 = 0
+  while i < exp:
+    acc *= base
+    i += 1
+  return acc
+
+def main() -> int64:
+  # Row 4 is the familiar 1 4 6 4 1.
+  var row4: list[uint64] = pascal_row(4)
+  assert row4.len() == 5, "row 4 has five entries"
+  assert row4[0] == 1u64 and row4[1] == 4u64 and row4[2] == 6u64, "row 4 left half"
+  assert row4[3] == 4u64 and row4[4] == 1u64, "row 4 right half"
+
+  # Binomial theorem checks for n = 0..10.
+  var n: int64 = 0
+  while n <= 10:
+    var coeffs: list[uint64] = pascal_row(n)
+
+    # Symmetry: C(n, k) == C(n, n-k).
+    var k: int64 = 0
+    while k < coeffs.len():
+      assert coeffs[k] == coeffs[coeffs.len() - 1 - k], "binomial symmetry"
+      k += 1
+
+    # (1+1)^n = 2^n and (1+2)^n = 3^n.
+    assert poly_eval(coeffs, 1u64) == power(2u64, n), "row sum is 2^n"
+    assert poly_eval(coeffs, 2u64) == power(3u64, n), "weighted sum is 3^n"
+    n += 1
+
+  # A big-number spot check: C(60, 30) fits in uint64.
+  var row60: list[uint64] = pascal_row(60)
+  assert row60[30] == 118264581564861424u64, "central binomial C(60,30)"
+
+  print("pascal: rows 0..10 satisfy the binomial theorem, C(60,30) exact")
+  return 0

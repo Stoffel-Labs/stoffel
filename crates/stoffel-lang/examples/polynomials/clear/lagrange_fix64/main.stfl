@@ -1,0 +1,60 @@
+# Lagrange interpolation in fix64: rebuild a quadratic from three
+# samples. The interpolant must reproduce the nodes exactly and agree
+# with the generating polynomial between and beyond them.
+
+def lagrange_eval(xs: list[fix64], ys: list[fix64], t: fix64) -> fix64:
+  # sum_i y_i * prod_{j != i} (t - x_j) / (x_i - x_j)
+  var total: fix64 = 0.0
+  var i: int64 = 0
+  while i < xs.len():
+    var basis: fix64 = 1.0
+    var j: int64 = 0
+    while j < xs.len():
+      if j != i:
+        basis = basis * (t - xs[j]) / (xs[i] - xs[j])
+      j += 1
+    total = total + ys[i] * basis
+    i += 1
+  return total
+
+def f(x: fix64) -> fix64:
+  # The generating quadratic: x^2 + 0.5x + 1.
+  return x * x + 0.5 * x + 1.0
+
+def fabs(x: fix64) -> fix64:
+  if x < 0.0:
+    return -x
+  return x
+
+def main() -> int64:
+  var tol: fix64 = 0.01
+
+  # Sample the quadratic at x = 0, 1, 2.
+  var xs: list[fix64] = [0.0, 1.0, 2.0]
+  var ys: list[fix64] = [f(0.0), f(1.0), f(2.0)]
+  assert fabs(ys[0] - 1.0) < tol, "f(0)"
+  assert fabs(ys[1] - 2.5) < tol, "f(1)"
+  assert fabs(ys[2] - 6.0) < tol, "f(2)"
+
+  # The interpolant reproduces every node.
+  var i: int64 = 0
+  while i < xs.len():
+    assert fabs(lagrange_eval(xs, ys, xs[i]) - ys[i]) < tol, "interpolant hits the node"
+    i += 1
+
+  # Three points determine the quadratic everywhere, not just at nodes.
+  var probes: list[fix64] = [0.5, 1.5, 3.0, -1.0, 4.5]
+  i = 0
+  while i < probes.len():
+    var t: fix64 = probes[i]
+    assert fabs(lagrange_eval(xs, ys, t) - f(t)) < tol, "interpolant matches generator"
+    i += 1
+
+  # Interpolating a straight line through two points stays linear.
+  var line_x: list[fix64] = [1.0, 3.0]
+  var line_y: list[fix64] = [2.0, 6.0]
+  assert fabs(lagrange_eval(line_x, line_y, 2.0) - 4.0) < tol, "midpoint of the line"
+  assert fabs(lagrange_eval(line_x, line_y, 0.0) - 0.0) < tol, "extrapolated intercept"
+
+  print("lagrange: quadratic reconstructed from 3 samples, 5 probes match")
+  return 0

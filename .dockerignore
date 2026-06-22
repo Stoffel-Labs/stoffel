@@ -1,5 +1,6 @@
 # Build artifacts
 target/
+**/target/
 *.pdb
 
 # IDE/Editor directories
@@ -20,12 +21,17 @@ target/
 # Test artifacts
 *.log
 *.tmp
+profiles/
+*.heaptrack.gz
+perf.data*
+callgrind.out.*
 
 # Local development files
 .env
 .env.*
 !.env.example
 .docker-cache/
+.cargo/config.toml
 
 # OS files
 .DS_Store

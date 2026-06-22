@@ -1,0 +1,19 @@
+# Client-aware MPC arithmetic.
+#
+# With connected clients, client 0 supplies the left operand and receives the
+# product through coordinator output distribution. Without clients, it falls
+# back to deterministic demo inputs so Docker smoke tests can still run the
+# same source.
+
+def main() -> Share:
+  var client_count = ClientStore.get_number_clients()
+  var right = Share.from_clear(21)
+  var product = right
+
+  if client_count > 0:
+    var client_left = ClientStore.take_share(0, 0)
+    product = client_left.mul(right)
+  else:
+    product = Share.from_clear(37).mul(right)
+
+  return product

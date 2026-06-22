@@ -1,0 +1,7 @@
+builtin opaque AvssShare
+
+builtin object Avss:
+  def get_commitment(share: AvssShare, index: int64) -> bytes {.builtin.}:
+  def get_key_name(share: AvssShare) -> string {.builtin.}:
+  def commitment_count(share: AvssShare) -> int64 {.builtin.}:
+  def is_avss_share[T](value: T) -> bool {.builtin.}:

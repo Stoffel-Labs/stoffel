@@ -1,0 +1,81 @@
+# Polynomial addition and multiplication over uint64 coefficient
+# lists. The product is a convolution of coefficients; the evaluation
+# homomorphism (p*q)(x) == p(x)*q(x) is checked at sample points.
+
+def poly_add(p: list[uint64], q: list[uint64]) -> list[uint64]:
+  var out: list[uint64] = []
+  var n: int64 = p.len()
+  if q.len() > n:
+    n = q.len()
+  var i: int64 = 0
+  while i < n:
+    var c: uint64 = 0u64
+    if i < p.len():
+      c += p[i]
+    if i < q.len():
+      c += q[i]
+    out.append(c)
+    i += 1
+  return out
+
+def poly_mul(p: list[uint64], q: list[uint64]) -> list[uint64]:
+  var out: list[uint64] = []
+  var size: int64 = p.len() + q.len() - 1
+  var i: int64 = 0
+  while i < size:
+    out.append(0u64)
+    i += 1
+  i = 0
+  while i < p.len():
+    var j: int64 = 0
+    while j < q.len():
+      out[i + j] = out[i + j] + p[i] * q[j]
+      j += 1
+    i += 1
+  return out
+
+def poly_eval(p: list[uint64], x: uint64) -> uint64:
+  var acc: uint64 = 0u64
+  var i: int64 = p.len() - 1
+  while i >= 0:
+    acc = acc * x + p[i]
+    i -= 1
+  return acc
+
+def main() -> int64:
+  # p(x) = 1 + 2x + 3x^2, q(x) = 4 + 5x
+  var p: list[uint64] = [1u64, 2u64, 3u64]
+  var q: list[uint64] = [4u64, 5u64]
+
+  # Hand-checked convolution: (1+2x+3x^2)(4+5x) = 4 + 13x + 22x^2 + 15x^3.
+  var product: list[uint64] = poly_mul(p, q)
+  assert product.len() == 4, "degree adds under multiplication"
+  assert product[0] == 4u64, "constant coefficient"
+  assert product[1] == 13u64, "x coefficient"
+  assert product[2] == 22u64, "x^2 coefficient"
+  assert product[3] == 15u64, "x^3 coefficient"
+
+  # Sum: (1+2x+3x^2) + (4+5x) = 5 + 7x + 3x^2.
+  var total: list[uint64] = poly_add(p, q)
+  assert total[0] == 5u64, "sum constant"
+  assert total[1] == 7u64, "sum x coefficient"
+  assert total[2] == 3u64, "sum keeps the longer tail"
+
+  # Evaluation is a ring homomorphism: check at several points.
+  var points: list[uint64] = [0u64, 1u64, 2u64, 3u64, 10u64, 100u64]
+  var i: int64 = 0
+  while i < points.len():
+    var x: uint64 = points[i]
+    assert poly_eval(product, x) == poly_eval(p, x) * poly_eval(q, x), "(p*q)(x) == p(x)q(x)"
+    assert poly_eval(total, x) == poly_eval(p, x) + poly_eval(q, x), "(p+q)(x) == p(x)+q(x)"
+    i += 1
+
+  # Multiplication is commutative.
+  var reversed_product: list[uint64] = poly_mul(q, p)
+  i = 0
+  while i < product.len():
+    assert product[i] == reversed_product[i], "p*q == q*p"
+    i += 1
+
+  print("poly ring: convolution product and evaluation homomorphism verified")
+  return 0

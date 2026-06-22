@@ -1,0 +1,48 @@
+def main() -> int64:
+  var client_count = ClientStore.get_number_clients()
+  var base = Share.from_clear_int(125, 64)
+  var adjustment = Share.from_clear(17)
+  var fixed_weight = Share.from_clear_fixed(1.25, 64, 16)
+  var random_mask: secret int64 = Share.random()
+
+  var score = base.add(adjustment)
+  score = score.sub(Share.from_clear_int(5, 64))
+  score = score.add_scalar(9)
+  score = score.mul_scalar(2)
+  score = score.add(Share.from_clear_int(-3, 64).neg())
+
+  if Mpc.has_capability("multiplication"):
+    score = score.mul(Share.from_clear_int(1, 64))
+
+  discard fixed_weight
+  discard random_mask
+
+  var batch: list[Share] = [base, adjustment, score]
+  discard Share.batch_open(batch)
+  discard Share.from_clear_fixed(2.5, 64, 16).open_fixed()
+  discard score.get_type()
+  discard score.get_party_id()
+
+  if score.has_commitments():
+    discard score.get_commitment(0)
+
+  discard score.commitment_count()
+
+  if client_count > 0 and Mpc.has_capability("client-output"):
+    score.send_to_client(0)
+    if client_count > 1:
+      var output_shares: list[Share] = [score]
+      MpcOutput.send_to_client(1, output_shares)
+
+  if Mpc.has_capability("field-arithmetic"):
+    var field_element = Mpc.rand()
+    var field_score = score.mul_field(field_element)
+    discard field_score.open_field()
+
+  if Mpc.has_capability("open-in-exponent"):
+    discard score.open_exp("bls12-381-g1")
+    var custom_generator = Crypto.hash_to_g1(Bytes.from_string("toolkit-generator"))
+    discard score.open_exp_custom(custom_generator)
+
+  discard Mpc.rand_int(64)
+  return score.open()

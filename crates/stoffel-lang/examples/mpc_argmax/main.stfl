@@ -1,0 +1,115 @@
+# argmax / argmin over a list of secret values, returning the secret-shared
+# winning INDEX. Tournament tracking the running best value and its index:
+#   gt = [v[i] > best];  best = select(gt, v[i], best);  idx = select(gt, i, idx)
+# The index i is public (the loop counter); the result index stays secret.
+# Built on secure comparison + oblivious select. kappa is small for speed
+# (production uses ~40).
+
+def random_bit() -> Share:
+  while True:
+    var r = Share.random_field()
+    var r_squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(r_squared):
+      continue
+    var r_prime_inv = Field.inverse(Field.sqrt(r_squared))
+    var two_inv = Field.inverse(Field.from_int(2))
+    var c = Share.mul_field(r, r_prime_inv)
+    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
+    return Share.retag(a, 1)
+
+def pow2(i: int64) -> int64:
+  var p = 1
+  var k = 0
+  while k < i:
+    p = p * 2
+    k = k + 1
+  return p
+
+def combine_bits(bits: list[Share], n: int64) -> Share:
+  var acc = Share.mul_scalar(bits[0], 1)
+  var i = 1
+  while i < n:
+    acc = Share.add(acc, Share.mul_scalar(bits[i], pow2(i)))
+    i = i + 1
+  return Share.retag(acc, 64)
+
+# Secret-shared [a < b] for a, b in [0, 2^l): masked reveal + carry chain.
+def less_than(a: Share, b: Share, l: int64, kappa: int64) -> Share:
+  var z = Share.add_scalar(Share.sub(Share.retag(a, 64), Share.retag(b, 64)), pow2(l))
+  var rbits: list[Share] = []
+  var i = 0
+  while i < (l + 1):
+    rbits.append(random_bit())
+    i = i + 1
+  var r_low = combine_bits(rbits, l + 1)
+  var r_high = Share.retag(Share.random_int(kappa), 64)
+  var r = Share.add(r_low, Share.mul_scalar(r_high, pow2(l + 1)))
+  var c = Share.open(Share.retag(Share.add(Share.retag(z, 64), r), 64))
+  var borrow = Share.from_clear_int(0, 1)
+  i = 0
+  while i < l:
+    var ci = (c shr i) and 1
+    var ri = rbits[i]
+    var rb = Share.mul(ri, borrow)
+    if ci == 0:
+      borrow = Share.retag(Share.sub(Share.add(ri, borrow), rb), 1)
+    else:
+      borrow = Share.retag(rb, 1)
+    i = i + 1
+  var cl = (c shr l) and 1
+  var rl = rbits[l]
+  var rlb = Share.mul(rl, borrow)
+  var zl = Share.sub(Share.add(rl, borrow), Share.mul_scalar(rlb, 2))
+  if cl == 1:
+    zl = Share.sub(Share.from_clear_int(1, 1), zl)
+  return Share.sub(Share.from_clear_int(1, 1), Share.retag(zl, 1))
+
+# Oblivious select: returns a if cond==1 else b.  b + cond*(a-b), one multiply.
+def select(cond: Share, a: Share, b: Share) -> Share:
+  # cond in {0,1}; a, b arbitrary integer shares. Retag to a common width so
+  # Share.mul accepts the (1-bit cond) x (wide diff) product.
+  var aa = Share.retag(a, 64)
+  var bb = Share.retag(b, 64)
+  var c = Share.retag(cond, 64)
+  return Share.add(bb, Share.mul(c, Share.sub(aa, bb)))
+
+# argmax over a list of secret values: tournament tracking the running max value
+# and its index. Each step: gt = [v[i] > best], best = select(gt, v[i], best),
+# idx = select(gt, i, idx). Index i is public (the loop counter); the result is
+# the secret-shared winning index (and value).
+def argmax(values: list[Share], n: int64, l: int64, kappa: int64) -> Share:
+  var best = values[0]
+  var idx = Share.from_clear_int(0, l)
+  var i = 1
+  while i < n:
+    var gt = less_than(best, values[i], l, kappa)   # values[i] > best
+    best = select(gt, values[i], best)
+    idx = select(gt, Share.from_clear_int(i, l), idx)
+    i = i + 1
+  return idx
+
+def argmin(values: list[Share], n: int64, l: int64, kappa: int64) -> Share:
+  var best = values[0]
+  var idx = Share.from_clear_int(0, l)
+  var i = 1
+  while i < n:
+    var lt = less_than(values[i], best, l, kappa)   # values[i] < best
+    best = select(lt, values[i], best)
+    idx = select(lt, Share.from_clear_int(i, l), idx)
+    i = i + 1
+  return idx
+
+def main() -> int64:
+  var l = 8
+  var kappa = 8
+  var raw = [30, 70, 10, 90, 50]
+  var values: list[Share] = []
+  var i = 0
+  while i < len(raw):
+    values.append(Share.from_clear_int(raw[i], l))
+    i = i + 1
+  var amax = Share.open(Share.retag(argmax(values, len(raw), l, kappa), 64))   # 3 (90)
+  var amin = Share.open(Share.retag(argmin(values, len(raw), l, kappa), 64))   # 2 (10)
+  assert amax == 3, "argmax index must be 3"
+  assert amin == 2, "argmin index must be 2"
+  return amax

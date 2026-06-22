@@ -52,17 +52,20 @@ use std::ffi::{c_char, CStr, CString};
 use std::io::Cursor;
 use std::marker::PhantomPinned;
 use std::os::raw::{c_int, c_void};
-use std::sync::{Arc, Mutex};
+use std::ptr::NonNull;
+use std::sync::Arc;
 
 use crate::core_vm::VirtualMachine;
 use crate::foreign_functions::ForeignFunctionContext;
-#[cfg(feature = "honeybadger")]
-use crate::net::hb_engine::HoneyBadgerMpcEngine;
-#[cfg(feature = "honeybadger")]
+use crate::net::hb_engine::{
+    HoneyBadgerEngineConfig, HoneyBadgerMpcEngine, HoneyBadgerPreprocessingConfig,
+};
 use crate::net::mpc_engine::MpcEngine;
 use stoffel_vm_types::compiled_binary::CompiledBinary;
-use stoffel_vm_types::core_types::{ShareType, Value, F64};
-#[cfg(feature = "honeybadger")]
+use stoffel_vm_types::core_types::{
+    ArrayRef, ForeignObjectRef, ObjectRef, ShareType, Value, DEFAULT_FIXED_POINT_FRACTIONAL_BITS,
+    F64,
+};
 use stoffelnet::transports::quic::QuicNetworkManager;
 
 /// Maximum share buffer size accepted from FFI callers (1 MB).
@@ -165,8 +168,6 @@ pub type CForeignFunction =
 // ============================================================================
 // HoneyBadgerMpcEngine FFI Types
 // ============================================================================
-
-#[cfg(feature = "honeybadger")]
 /// Opaque pointer type for HoneyBadgerMpcEngine
 ///
 /// This type is used to pass engine handles across the FFI boundary.
@@ -176,8 +177,6 @@ pub struct HBEngineOpaque {
     _data: (),
     _marker: core::marker::PhantomData<(*mut u8, PhantomPinned)>,
 }
-
-#[cfg(feature = "honeybadger")]
 /// Opaque pointer type for QuicNetworkManager
 ///
 /// This type is used to pass network handles across the FFI boundary.
@@ -186,8 +185,6 @@ pub struct HBNetworkOpaque {
     _data: (),
     _marker: core::marker::PhantomData<(*mut u8, PhantomPinned)>,
 }
-
-#[cfg(feature = "honeybadger")]
 /// Error codes for HoneyBadgerMpcEngine FFI operations
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,34 +232,69 @@ pub struct CShareType {
     pub width: i64,
 }
 
-impl From<CShareType> for ShareType {
-    fn from(c: CShareType) -> Self {
+impl TryFrom<CShareType> for ShareType {
+    type Error = String;
+
+    fn try_from(c: CShareType) -> Result<Self, Self::Error> {
         match c.kind {
             // kind 0 = SecretInt with bit_length
-            0 => ShareType::secret_int(c.width as usize),
+            0 => {
+                let bit_length = positive_ffi_width(c.width, "secret integer bit length")?;
+                ShareType::try_secret_int(bit_length).map_err(String::from)
+            }
             // kind 1 = Boolean (1-bit SecretInt)
-            1 => ShareType::boolean(),
+            1 => Ok(ShareType::boolean()),
             // kind 2 = SecretFixedPoint (width encodes total_bits, fractional_bits assumed default)
-            2 => ShareType::default_secret_fixed_point(),
-            // Default to 64-bit secret int
-            _ => ShareType::default_secret_int(),
+            2 => {
+                let total_bits = positive_ffi_width(c.width, "fixed-point total bits")?;
+                if total_bits <= 1 {
+                    return Err("fixed-point total bits must be greater than one".to_string());
+                }
+                let fractional_bits = DEFAULT_FIXED_POINT_FRACTIONAL_BITS.min(total_bits - 1);
+                ShareType::try_secret_fixed_point_from_bits(total_bits, fractional_bits)
+                    .map_err(String::from)
+            }
+            // kind 3 = SecretUInt with bit_length
+            3 => {
+                let bit_length = positive_ffi_width(c.width, "secret unsigned integer bit length")?;
+                ShareType::try_secret_uint(bit_length).map_err(String::from)
+            }
+            _ => Err(format!("unknown share type kind {}", c.kind)),
         }
     }
 }
 
-impl From<ShareType> for CShareType {
-    fn from(st: ShareType) -> Self {
+impl TryFrom<ShareType> for CShareType {
+    type Error = String;
+
+    fn try_from(st: ShareType) -> Result<Self, Self::Error> {
         match st {
-            ShareType::SecretInt { bit_length } => CShareType {
-                kind: 0,
-                width: bit_length as i64,
-            },
-            ShareType::SecretFixedPoint { precision } => CShareType {
+            ShareType::SecretInt { bit_length } => Ok(CShareType {
+                kind: if bit_length == 1 { 1 } else { 0 },
+                width: i64::try_from(bit_length)
+                    .map_err(|_| "secret integer bit length exceeds C ABI range".to_string())?,
+            }),
+            ShareType::SecretUInt { bit_length } => Ok(CShareType {
+                kind: 3,
+                width: i64::try_from(bit_length).map_err(|_| {
+                    "secret unsigned integer bit length exceeds C ABI range".to_string()
+                })?,
+            }),
+            ShareType::SecretFixedPoint { precision } => Ok(CShareType {
                 kind: 2,
-                width: precision.k() as i64,
-            },
+                width: i64::try_from(precision.k())
+                    .map_err(|_| "fixed-point total bits exceeds C ABI range".to_string())?,
+            }),
         }
     }
+}
+
+fn positive_ffi_width(width: i64, name: &str) -> Result<usize, String> {
+    let value = usize::try_from(width).map_err(|_| format!("{name} must be non-negative"))?;
+    if value == 0 {
+        return Err(format!("{name} must be positive"));
+    }
+    Ok(value)
 }
 
 /// Creates a new VM instance
@@ -288,9 +320,11 @@ pub extern "C" fn stoffel_create_vm() -> VMHandle {
 ///
 /// # Safety
 ///
-/// The handle must not be used after this function is called.
+/// `handle` must be null or a live handle returned by `stoffel_create_vm`.
+/// It must not be used after this function is called, and it must not be freed
+/// more than once.
 #[no_mangle]
-pub extern "C" fn stoffel_destroy_vm(handle: VMHandle) {
+pub unsafe extern "C" fn stoffel_destroy_vm(handle: VMHandle) {
     if !handle.is_null() {
         unsafe {
             let _ = Box::from_raw(handle as *mut VirtualMachine);
@@ -312,10 +346,11 @@ pub extern "C" fn stoffel_destroy_vm(handle: VMHandle) {
 ///
 /// # Safety
 ///
+/// `handle` must be a live VM handle returned by `stoffel_create_vm`.
 /// The function_name must be a valid null-terminated C string.
 /// The result pointer must be valid and point to enough memory to store a StoffelValue.
 #[no_mangle]
-pub extern "C" fn stoffel_execute(
+pub unsafe extern "C" fn stoffel_execute(
     handle: VMHandle,
     function_name: *const c_char,
     result: *mut StoffelValue,
@@ -361,11 +396,12 @@ pub extern "C" fn stoffel_execute(
 ///
 /// # Safety
 ///
+/// `handle` must be a live VM handle returned by `stoffel_create_vm`.
 /// The function_name must be a valid null-terminated C string.
 /// The args pointer must be valid and point to at least arg_count StoffelValue structs.
 /// The result pointer must be valid and point to enough memory to store a StoffelValue.
 #[no_mangle]
-pub extern "C" fn stoffel_execute_with_args(
+pub unsafe extern "C" fn stoffel_execute_with_args(
     handle: VMHandle,
     function_name: *const c_char,
     args: *const StoffelValue,
@@ -388,14 +424,19 @@ pub extern "C" fn stoffel_execute_with_args(
     };
 
     // Guard against unreasonable arg counts from C callers
-    if arg_count < 0 || arg_count > 1024 {
+    let arg_count = match usize::try_from(arg_count) {
+        Ok(count) if count <= 1024 => count,
+        _ => return -1,
+    };
+
+    if arg_count > 0 && args.is_null() {
         return -1;
     }
 
     // Convert C args to Rust Values
-    let mut rust_args = Vec::with_capacity(arg_count as usize);
+    let mut rust_args = Vec::with_capacity(arg_count);
     for i in 0..arg_count {
-        let arg = unsafe { &*args.offset(i as isize) };
+        let arg = unsafe { &*args.add(i) };
         match stoffel_value_to_value(arg) {
             Ok(value) => rust_args.push(value),
             Err(_) => return -3,
@@ -425,7 +466,7 @@ impl CForeignFunctionWrapper {
     fn call(&self, ctx: ForeignFunctionContext) -> Result<Value, String> {
         // Convert Rust args to C args
         let c_args: Vec<StoffelValue> = ctx
-            .args
+            .args()
             .iter()
             .map(value_to_stoffel_value)
             .collect::<Result<Vec<_>, _>>()?;
@@ -436,7 +477,9 @@ impl CForeignFunctionWrapper {
         };
 
         // Call the C function
-        let status = (self.func)(c_args.as_ptr(), c_args.len() as c_int, &mut result);
+        let arg_count = c_int::try_from(c_args.len())
+            .map_err(|_| "Too many C callback arguments".to_string())?;
+        let status = (self.func)(c_args.as_ptr(), arg_count, &mut result);
 
         if status != 0 {
             return Err(format!("Foreign function returned error code: {}", status));
@@ -461,10 +504,11 @@ impl CForeignFunctionWrapper {
 ///
 /// # Safety
 ///
+/// `handle` must be a live VM handle returned by `stoffel_create_vm`.
 /// The name must be a valid null-terminated C string.
 /// The func pointer must be valid and point to a function with the correct signature.
 #[no_mangle]
-pub extern "C" fn stoffel_register_foreign_function(
+pub unsafe extern "C" fn stoffel_register_foreign_function(
     handle: VMHandle,
     name: *const c_char,
     func: CForeignFunction,
@@ -482,9 +526,10 @@ pub extern "C" fn stoffel_register_foreign_function(
 
     let wrapper = CForeignFunctionWrapper { func };
 
-    vm.register_foreign_function(name, move |ctx| wrapper.call(ctx));
-
-    0
+    match vm.try_register_foreign_function(name, move |ctx| wrapper.call(ctx)) {
+        Ok(()) => 0,
+        Err(_) => -3,
+    }
 }
 
 /// Thread-safe wrapper for C pointers
@@ -499,12 +544,12 @@ pub extern "C" fn stoffel_register_foreign_function(
 /// and that any operations on the pointer are thread-safe.
 #[allow(dead_code)]
 struct CForeignObject {
-    /// The raw pointer, wrapped in Arc<Mutex<>> for thread safety
-    ptr: Arc<Mutex<*mut c_void>>,
+    ptr: NonNull<c_void>,
 }
 
-// Implement Send and Sync for CForeignObject
-// This is safe because we're using Arc<Mutex<>> for synchronization
+// SAFETY: FFI callers opt into sharing this opaque pointer across VM threads.
+// The VM never dereferences it directly; synchronization and validity are the
+// responsibility of the foreign object implementation.
 unsafe impl Send for CForeignObject {}
 unsafe impl Sync for CForeignObject {}
 
@@ -514,10 +559,8 @@ impl CForeignObject {
     /// # Safety
     ///
     /// The pointer must be valid and must remain valid for the lifetime of the wrapper.
-    fn new(ptr: *mut c_void) -> Self {
-        CForeignObject {
-            ptr: Arc::new(Mutex::new(ptr)),
-        }
+    fn new(ptr: *mut c_void) -> Option<Self> {
+        NonNull::new(ptr).map(|ptr| CForeignObject { ptr })
     }
 
     /// Gets the raw pointer
@@ -527,7 +570,7 @@ impl CForeignObject {
     /// The caller must ensure that any operations on the pointer are thread-safe.
     #[allow(dead_code)]
     fn get_ptr(&self) -> *mut c_void {
-        *self.ptr.lock().unwrap()
+        self.ptr.as_ptr()
     }
 }
 
@@ -545,6 +588,7 @@ impl CForeignObject {
 ///
 /// # Safety
 ///
+/// `handle` must be a live VM handle returned by `stoffel_create_vm`.
 /// The object pointer must be valid and must remain valid for the lifetime of the VM.
 /// The result pointer must be valid and point to enough memory to store a StoffelValue.
 ///
@@ -554,7 +598,7 @@ impl CForeignObject {
 /// Send and Sync. The actual safety of the pointer is the responsibility of the
 /// C code that manages it.
 #[no_mangle]
-pub extern "C" fn stoffel_register_foreign_object(
+pub unsafe extern "C" fn stoffel_register_foreign_object(
     handle: VMHandle,
     object: *mut c_void,
     result: *mut StoffelValue,
@@ -566,10 +610,16 @@ pub extern "C" fn stoffel_register_foreign_object(
     let vm = unsafe { &mut *(handle as *mut VirtualMachine) };
 
     // Create a thread-safe wrapper around the raw pointer
-    let foreign_object = CForeignObject::new(object);
+    let foreign_object = match CForeignObject::new(object) {
+        Some(object) => object,
+        None => return -1,
+    };
 
     // Register the wrapped object with the VM
-    let value = vm.register_foreign_object(foreign_object);
+    let value = match vm.try_register_foreign_object_value(foreign_object) {
+        Ok(value) => value,
+        Err(_) => return -2,
+    };
 
     // Convert the result to a StoffelValue
     let converted = match value_to_stoffel_value(&value) {
@@ -597,10 +647,11 @@ pub extern "C" fn stoffel_register_foreign_object(
 ///
 /// # Safety
 ///
+/// `handle` must be a live VM handle returned by `stoffel_create_vm`.
 /// The str pointer must be a valid null-terminated C string.
 /// The result pointer must be valid and point to enough memory to store a StoffelValue.
 #[no_mangle]
-pub extern "C" fn stoffel_create_string(
+pub unsafe extern "C" fn stoffel_create_string(
     handle: VMHandle,
     str: *const c_char,
     result: *mut StoffelValue,
@@ -710,24 +761,29 @@ fn value_to_stoffel_value(value: &Value) -> Result<StoffelValue, String> {
                 data: StoffelValueData { string_val: ptr },
             })
         }
-        Value::Object(id) => Ok(StoffelValue {
+        Value::Object(object_ref) => Ok(StoffelValue {
             value_type: StoffelValueType::Object,
-            data: StoffelValueData { object_id: *id },
+            data: StoffelValueData {
+                object_id: object_ref.id(),
+            },
         }),
-        Value::Array(id) => Ok(StoffelValue {
+        Value::Array(array_ref) => Ok(StoffelValue {
             value_type: StoffelValueType::Array,
-            data: StoffelValueData { array_id: *id },
+            data: StoffelValueData {
+                array_id: array_ref.id(),
+            },
         }),
-        Value::Foreign(id) => Ok(StoffelValue {
+        Value::Foreign(foreign_ref) => Ok(StoffelValue {
             value_type: StoffelValueType::Foreign,
-            data: StoffelValueData { foreign_id: *id },
+            data: StoffelValueData {
+                foreign_id: foreign_ref.id(),
+            },
         }),
         Value::Closure(_) => Ok(StoffelValue {
             value_type: StoffelValueType::Closure,
             data: StoffelValueData { closure_id: 0 }, // Simplified
         }),
         Value::Share(_, _) => Err("Cannot convert secret share value to C ABI".to_string()),
-        Value::PendingReveal(_) => Err("Cannot convert pending reveal marker to C ABI".to_string()),
     }
 }
 
@@ -756,9 +812,13 @@ fn stoffel_value_to_value(value: &StoffelValue) -> Result<Value, String> {
                 Err(_) => Err("Invalid UTF-8 in string".to_string()),
             }
         },
-        StoffelValueType::Object => unsafe { Ok(Value::Object(value.data.object_id)) },
-        StoffelValueType::Array => unsafe { Ok(Value::Array(value.data.array_id)) },
-        StoffelValueType::Foreign => unsafe { Ok(Value::Foreign(value.data.foreign_id)) },
+        StoffelValueType::Object => unsafe {
+            Ok(Value::from(ObjectRef::new(value.data.object_id)))
+        },
+        StoffelValueType::Array => unsafe { Ok(Value::from(ArrayRef::new(value.data.array_id))) },
+        StoffelValueType::Foreign => unsafe {
+            Ok(Value::from(ForeignObjectRef::new(value.data.foreign_id)))
+        },
         StoffelValueType::Closure => Err("Closure conversion not implemented".to_string()),
     }
 }
@@ -774,7 +834,7 @@ fn stoffel_value_to_value(value: &StoffelValue) -> Result<Value, String> {
 /// The str pointer must have been created by stoffel_create_string or similar functions.
 /// After this function is called, the pointer must not be used.
 #[no_mangle]
-pub extern "C" fn stoffel_free_string(str: *mut c_char) {
+pub unsafe extern "C" fn stoffel_free_string(str: *mut c_char) {
     if !str.is_null() {
         unsafe {
             let _ = CString::from_raw(str);
@@ -799,9 +859,10 @@ pub extern "C" fn stoffel_free_string(str: *mut c_char) {
 ///
 /// # Safety
 ///
+/// `handle` must be a live VM handle returned by `stoffel_create_vm`.
 /// The bytecode pointer must be valid and point to at least `bytecode_len` bytes.
 #[no_mangle]
-pub extern "C" fn stoffel_load_bytecode(
+pub unsafe extern "C" fn stoffel_load_bytecode(
     handle: VMHandle,
     bytecode: *const u8,
     bytecode_len: usize,
@@ -823,10 +884,15 @@ pub extern "C" fn stoffel_load_bytecode(
     };
 
     // Convert to VM functions and register them
-    let vm_functions = compiled_binary.to_vm_functions();
+    let vm_functions = match compiled_binary.try_to_vm_functions() {
+        Ok(functions) => functions,
+        Err(_) => return -3,
+    };
 
     for function in vm_functions {
-        vm.register_function(function);
+        if vm.try_register_function(function).is_err() {
+            return -3;
+        }
     }
 
     0
@@ -835,8 +901,6 @@ pub extern "C" fn stoffel_load_bytecode(
 // ============================================================================
 // HoneyBadgerMpcEngine FFI Functions
 // ============================================================================
-
-#[cfg(feature = "honeybadger")]
 /// Creates a new HoneyBadgerMpcEngine
 ///
 /// # Arguments
@@ -855,9 +919,10 @@ pub extern "C" fn stoffel_load_bytecode(
 ///
 /// # Safety
 ///
-/// The network_ptr must be a valid pointer to an HBNetworkOpaque created by this FFI.
+/// `network_ptr` must be a valid, live pointer to an `HBNetworkOpaque`
+/// allocated by this FFI layer.
 #[no_mangle]
-pub extern "C" fn hb_engine_new(
+pub unsafe extern "C" fn hb_engine_new(
     instance_id: u64,
     party_id: usize,
     n: usize,
@@ -876,15 +941,17 @@ pub extern "C" fn hb_engine_new(
         Arc::clone(boxed)
     };
 
-    match HoneyBadgerMpcEngine::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>::new(
-        instance_id,
-        party_id,
-        n,
-        t,
-        n_triples,
-        n_random,
-        net,
-        Vec::new(),
+    let session = match crate::net::MpcSessionConfig::try_new(instance_id, party_id, n, t, net) {
+        Ok(session) => session,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let config = HoneyBadgerEngineConfig::new(
+        session,
+        HoneyBadgerPreprocessingConfig::new(n_triples, n_random),
+    );
+
+    match HoneyBadgerMpcEngine::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>::from_config(
+        config,
     ) {
         Ok(engine) => {
             // engine is Arc<HoneyBadgerMpcEngine>, box it for stable FFI pointer
@@ -893,23 +960,20 @@ pub extern "C" fn hb_engine_new(
         Err(_) => std::ptr::null_mut(),
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Frees a HoneyBadgerMpcEngine instance
 ///
 /// # Safety
 ///
-/// The pointer must have been created by hb_engine_new and not already freed.
+/// `engine_ptr` must be null or a live pointer created by `hb_engine_new`.
+/// It must not be used after this call, and it must not be freed more than once.
 #[no_mangle]
-pub extern "C" fn hb_engine_free(engine_ptr: *mut HBEngineOpaque) {
+pub unsafe extern "C" fn hb_engine_free(engine_ptr: *mut HBEngineOpaque) {
     if !engine_ptr.is_null() {
         unsafe {
             let _ = Box::from_raw(engine_ptr as *mut Arc<HoneyBadgerMpcEngine>);
         }
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Runs preprocessing (generates Beaver triples and random shares)
 ///
 /// This is a blocking call that runs the async preprocessing protocol.
@@ -919,8 +983,14 @@ pub extern "C" fn hb_engine_free(engine_ptr: *mut HBEngineOpaque) {
 ///
 /// * HBEngineSuccess on success
 /// * Error code on failure
+///
+/// # Safety
+///
+/// `engine_ptr` must be null or a live pointer created by `hb_engine_new`.
 #[no_mangle]
-pub extern "C" fn hb_engine_start_async(engine_ptr: *mut HBEngineOpaque) -> HBEngineErrorCode {
+pub unsafe extern "C" fn hb_engine_start_async(
+    engine_ptr: *mut HBEngineOpaque,
+) -> HBEngineErrorCode {
     if engine_ptr.is_null() {
         return HBEngineErrorCode::HBEngineNullPointer;
     }
@@ -938,15 +1008,17 @@ pub extern "C" fn hb_engine_start_async(engine_ptr: *mut HBEngineOpaque) -> HBEn
         Err(_) => HBEngineErrorCode::HBEnginePreprocessingFailed,
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Checks if the engine is ready (preprocessing complete)
 ///
 /// # Returns
 ///
 /// 1 if ready, 0 if not ready or null pointer
+///
+/// # Safety
+///
+/// `engine_ptr` must be null or a live pointer created by `hb_engine_new`.
 #[no_mangle]
-pub extern "C" fn hb_engine_is_ready(engine_ptr: *mut HBEngineOpaque) -> c_int {
+pub unsafe extern "C" fn hb_engine_is_ready(engine_ptr: *mut HBEngineOpaque) -> c_int {
     if engine_ptr.is_null() {
         return 0;
     }
@@ -958,8 +1030,6 @@ pub extern "C" fn hb_engine_is_ready(engine_ptr: *mut HBEngineOpaque) -> c_int {
         0
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Performs secure multiplication of two shares
 ///
 /// # Arguments
@@ -976,8 +1046,15 @@ pub extern "C" fn hb_engine_is_ready(engine_ptr: *mut HBEngineOpaque) -> c_int {
 /// # Returns
 ///
 /// * HBEngineSuccess on success, error code on failure
+///
+/// # Safety
+///
+/// `engine_ptr` must be a live pointer created by `hb_engine_new`.
+/// `left_ptr` and `right_ptr` must point to `left_len` and `right_len` bytes
+/// respectively. `result_ptr` and `result_len_ptr` must be valid output
+/// pointers; successful results must be released with `hb_free_bytes`.
 #[no_mangle]
-pub extern "C" fn hb_engine_multiply_share_async(
+pub unsafe extern "C" fn hb_engine_multiply_share_async(
     engine_ptr: *mut HBEngineOpaque,
     share_type: CShareType,
     left_ptr: *const u8,
@@ -1002,7 +1079,10 @@ pub extern "C" fn hb_engine_multiply_share_async(
     let engine = unsafe { &*(engine_ptr as *const Arc<HoneyBadgerMpcEngine>) };
     let left = unsafe { std::slice::from_raw_parts(left_ptr, left_len) };
     let right = unsafe { std::slice::from_raw_parts(right_ptr, right_len) };
-    let ty: ShareType = share_type.into();
+    let ty = match ShareType::try_from(share_type) {
+        Ok(ty) => ty,
+        Err(_) => return HBEngineErrorCode::HBEngineInvalidShareType,
+    };
 
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -1019,8 +1099,6 @@ pub extern "C" fn hb_engine_multiply_share_async(
         Err(_) => HBEngineErrorCode::HBEngineMultiplyFailed,
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Opens (reconstructs) a shared value
 ///
 /// # Arguments
@@ -1034,8 +1112,14 @@ pub extern "C" fn hb_engine_multiply_share_async(
 /// # Returns
 ///
 /// * HBEngineSuccess on success, error code on failure
+///
+/// # Safety
+///
+/// `engine_ptr` must be a live pointer created by `hb_engine_new`.
+/// `share_ptr` must point to `share_len` bytes, and `result_ptr` must be a
+/// valid output pointer.
 #[no_mangle]
-pub extern "C" fn hb_engine_open_share(
+pub unsafe extern "C" fn hb_engine_open_share(
     engine_ptr: *mut HBEngineOpaque,
     share_type: CShareType,
     share_ptr: *const u8,
@@ -1051,11 +1135,15 @@ pub extern "C" fn hb_engine_open_share(
     }
     let engine = unsafe { &*(engine_ptr as *const Arc<HoneyBadgerMpcEngine>) };
     let share_bytes = unsafe { std::slice::from_raw_parts(share_ptr, share_len) };
-    let ty: ShareType = share_type.into();
+    let ty = match ShareType::try_from(share_type) {
+        Ok(ty) => ty,
+        Err(_) => return HBEngineErrorCode::HBEngineInvalidShareType,
+    };
 
     // open_share is sync in the current implementation (uses global registry)
     match engine.open_share(ty, share_bytes) {
         Ok(value) => {
+            let value = crate::net::curve::clear_share_value_to_vm_value(ty, value);
             let converted = match value_to_stoffel_value(&value) {
                 Ok(converted) => converted,
                 Err(_) => return HBEngineErrorCode::HBEngineOpenShareFailed,
@@ -1068,8 +1156,6 @@ pub extern "C" fn hb_engine_open_share(
         Err(_) => HBEngineErrorCode::HBEngineOpenShareFailed,
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Initialize input shares from a client
 ///
 /// # Arguments
@@ -1087,8 +1173,13 @@ pub extern "C" fn hb_engine_open_share(
 ///
 /// The shares_data must be serialized using ark_serialize compressed format.
 /// Format: [num_shares: u32][share1_bytes][share2_bytes]...
+///
+/// # Safety
+///
+/// `engine_ptr` must be a live pointer created by `hb_engine_new`.
+/// `shares_data` must point to `shares_len` bytes.
 #[no_mangle]
-pub extern "C" fn hb_engine_init_client_input(
+pub unsafe extern "C" fn hb_engine_init_client_input(
     engine_ptr: *mut HBEngineOpaque,
     client_id: u64,
     shares_data: *const u8,
@@ -1110,12 +1201,15 @@ pub extern "C" fn hb_engine_init_client_input(
     if shares_len < 4 {
         return HBEngineErrorCode::HBEngineSerializationError;
     }
-    let num_shares = u32::from_le_bytes([
+    let num_shares = match usize::try_from(u32::from_le_bytes([
         shares_bytes[0],
         shares_bytes[1],
         shares_bytes[2],
         shares_bytes[3],
-    ]) as usize;
+    ])) {
+        Ok(num_shares) => num_shares,
+        Err(_) => return HBEngineErrorCode::HBEngineSerializationError,
+    };
     let mut cursor = &shares_bytes[4..];
     let mut shares: Vec<RobustShare<Fr>> = Vec::with_capacity(num_shares);
 
@@ -1131,13 +1225,16 @@ pub extern "C" fn hb_engine_init_client_input(
         Err(_) => return HBEngineErrorCode::HBEngineRuntimeError,
     };
 
-    match rt.block_on(engine.init_client_input(client_id as usize, shares)) {
+    let client_id = match usize::try_from(client_id) {
+        Ok(client_id) => client_id,
+        Err(_) => return HBEngineErrorCode::HBEngineInvalidConfig,
+    };
+
+    match rt.block_on(engine.init_client_input(client_id, shares)) {
         Ok(()) => HBEngineErrorCode::HBEngineSuccess,
         Err(_) => HBEngineErrorCode::HBEngineClientInputFailed,
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Get shares for a specific client
 ///
 /// # Arguments
@@ -1155,8 +1252,14 @@ pub extern "C" fn hb_engine_init_client_input(
 ///
 /// Caller must free the result bytes with hb_free_bytes.
 /// Format: [num_shares: u32][share1_bytes][share2_bytes]...
+///
+/// # Safety
+///
+/// `engine_ptr` must be a live pointer created by `hb_engine_new`.
+/// `result_ptr` and `result_len_ptr` must be valid output pointers; successful
+/// results must be released with `hb_free_bytes`.
 #[no_mangle]
-pub extern "C" fn hb_engine_get_client_shares(
+pub unsafe extern "C" fn hb_engine_get_client_shares(
     engine_ptr: *mut HBEngineOpaque,
     client_id: u64,
     result_ptr: *mut *mut u8,
@@ -1175,12 +1278,21 @@ pub extern "C" fn hb_engine_get_client_shares(
         Err(_) => return HBEngineErrorCode::HBEngineRuntimeError,
     };
 
-    match rt.block_on(engine.get_client_shares(client_id as usize)) {
+    let client_id = match usize::try_from(client_id) {
+        Ok(client_id) => client_id,
+        Err(_) => return HBEngineErrorCode::HBEngineInvalidConfig,
+    };
+
+    match rt.block_on(engine.get_client_shares(client_id)) {
         Ok(shares) => {
             // Serialize shares using ark_serialize
             // Format: [num_shares: u32][share1_bytes][share2_bytes]...
             let mut bytes = Vec::new();
-            bytes.extend_from_slice(&(shares.len() as u32).to_le_bytes());
+            let share_count = match u32::try_from(shares.len()) {
+                Ok(count) => count,
+                Err(_) => return HBEngineErrorCode::HBEngineSerializationError,
+            };
+            bytes.extend_from_slice(&share_count.to_le_bytes());
             for share in &shares {
                 if share.serialize_compressed(&mut bytes).is_err() {
                     return HBEngineErrorCode::HBEngineSerializationError;
@@ -1194,46 +1306,56 @@ pub extern "C" fn hb_engine_get_client_shares(
         Err(_) => HBEngineErrorCode::HBEngineGetClientSharesFailed,
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Get the party ID of the engine
+///
+/// # Safety
+///
+/// `engine_ptr` must be null or a live pointer created by `hb_engine_new`.
 #[no_mangle]
-pub extern "C" fn hb_engine_party_id(engine_ptr: *mut HBEngineOpaque) -> usize {
+pub unsafe extern "C" fn hb_engine_party_id(engine_ptr: *mut HBEngineOpaque) -> usize {
     if engine_ptr.is_null() {
         return 0;
     }
     let engine = unsafe { &*(engine_ptr as *const Arc<HoneyBadgerMpcEngine>) };
-    engine.party_id()
+    engine.party().id()
 }
-
-#[cfg(feature = "honeybadger")]
 /// Get the instance ID of the engine
+///
+/// # Safety
+///
+/// `engine_ptr` must be null or a live pointer created by `hb_engine_new`.
 #[no_mangle]
-pub extern "C" fn hb_engine_instance_id(engine_ptr: *mut HBEngineOpaque) -> u64 {
+pub unsafe extern "C" fn hb_engine_instance_id(engine_ptr: *mut HBEngineOpaque) -> u64 {
     if engine_ptr.is_null() {
         return 0;
     }
     let engine = unsafe { &*(engine_ptr as *const Arc<HoneyBadgerMpcEngine>) };
-    engine.instance_id()
+    engine.instance().id()
 }
-
-#[cfg(feature = "honeybadger")]
 /// Get the protocol name (returns static string, do not free)
+///
+/// # Safety
+///
+/// `engine_ptr` must be null or a live pointer created by `hb_engine_new`.
 #[no_mangle]
-pub extern "C" fn hb_engine_protocol_name(engine_ptr: *mut HBEngineOpaque) -> *const c_char {
+pub unsafe extern "C" fn hb_engine_protocol_name(engine_ptr: *mut HBEngineOpaque) -> *const c_char {
     static PROTOCOL_NAME: &[u8] = b"honeybadger-mpc\0";
     if engine_ptr.is_null() {
         return std::ptr::null();
     }
     PROTOCOL_NAME.as_ptr() as *const c_char
 }
-
-#[cfg(feature = "honeybadger")]
 /// Get the network handle from the engine
 ///
 /// Returns a cloned network pointer. Caller must free with hb_network_free.
+///
+/// # Safety
+///
+/// `engine_ptr` must be null or a live pointer created by `hb_engine_new`.
 #[no_mangle]
-pub extern "C" fn hb_engine_get_network(engine_ptr: *mut HBEngineOpaque) -> *mut HBNetworkOpaque {
+pub unsafe extern "C" fn hb_engine_get_network(
+    engine_ptr: *mut HBEngineOpaque,
+) -> *mut HBNetworkOpaque {
     if engine_ptr.is_null() {
         return std::ptr::null_mut();
     }
@@ -1244,24 +1366,51 @@ pub extern "C" fn hb_engine_get_network(engine_ptr: *mut HBEngineOpaque) -> *mut
     // Box the Arc for stable FFI pointer
     Box::into_raw(Box::new(net)) as *mut HBNetworkOpaque
 }
-
-#[cfg(feature = "honeybadger")]
 /// Free a network handle obtained from hb_engine_get_network
+///
+/// # Safety
+///
+/// `network_ptr` must be null or a live pointer returned by
+/// `hb_engine_get_network`. It must not be used after this call, and it must not
+/// be freed more than once.
 #[no_mangle]
-pub extern "C" fn hb_network_free(network_ptr: *mut HBNetworkOpaque) {
+pub unsafe extern "C" fn hb_network_free(network_ptr: *mut HBNetworkOpaque) {
     if !network_ptr.is_null() {
         unsafe {
             let _ = Box::from_raw(network_ptr as *mut Arc<QuicNetworkManager>);
         }
     }
 }
-
-#[cfg(feature = "honeybadger")]
 /// Free bytes allocated by engine functions (e.g., multiply_share_async result)
+///
+/// # Safety
+///
+/// `ptr` must be null or a pointer returned by an FFI function in this module
+/// with exactly the same `len`.
 #[no_mangle]
-pub extern "C" fn hb_free_bytes(ptr: *mut u8, len: usize) {
+pub unsafe extern "C" fn hb_free_bytes(ptr: *mut u8, len: usize) {
     unsafe {
         free_ffi_result_bytes(ptr, len);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn c_foreign_object_rejects_null_pointer() {
+        assert!(CForeignObject::new(std::ptr::null_mut()).is_none());
+    }
+
+    #[test]
+    fn c_foreign_object_preserves_opaque_pointer() {
+        let mut value = 42u8;
+        let ptr = (&mut value as *mut u8).cast::<c_void>();
+
+        let object = CForeignObject::new(ptr).expect("non-null pointer is accepted");
+
+        assert_eq!(object.get_ptr(), ptr);
     }
 }
 
@@ -1269,14 +1418,14 @@ pub extern "C" fn hb_free_bytes(ptr: *mut u8, len: usize) {
 // HoneyBadgerMpcEngine FFI - Unit Tests
 // ============================================================================
 
-#[cfg(all(test, feature = "honeybadger"))]
+#[cfg(test)]
 mod hb_engine_tests {
     use super::*;
 
     #[test]
     fn test_share_type_conversion_int() {
         let c_int = CShareType { kind: 0, width: 64 };
-        let st: ShareType = c_int.into();
+        let st = ShareType::try_from(c_int).expect("valid secret int share type");
         assert!(matches!(st, ShareType::SecretInt { bit_length: 64 }));
     }
 
@@ -1284,58 +1433,114 @@ mod hb_engine_tests {
     fn test_share_type_conversion_bool() {
         // Both width values should result in boolean (1-bit SecretInt)
         let c_bool_true = CShareType { kind: 1, width: 1 };
-        let st: ShareType = c_bool_true.into();
+        let st = ShareType::try_from(c_bool_true).expect("valid boolean share type");
         assert!(matches!(st, ShareType::SecretInt { bit_length: 1 }));
 
         let c_bool_false = CShareType { kind: 1, width: 0 };
-        let st: ShareType = c_bool_false.into();
+        let st = ShareType::try_from(c_bool_false).expect("valid boolean share type");
         assert!(matches!(st, ShareType::SecretInt { bit_length: 1 }));
     }
 
     #[test]
     fn test_share_type_conversion_float() {
         let c_float = CShareType { kind: 2, width: 42 };
-        let st: ShareType = c_float.into();
+        let st = ShareType::try_from(c_float).expect("valid fixed-point share type");
         assert!(matches!(st, ShareType::SecretFixedPoint { .. }));
     }
 
     #[test]
-    fn test_null_pointer_handling() {
-        assert_eq!(
-            hb_engine_start_async(std::ptr::null_mut()),
-            HBEngineErrorCode::HBEngineNullPointer
-        );
+    fn share_type_conversion_rejects_invalid_int_width() {
+        assert!(ShareType::try_from(CShareType { kind: 0, width: 0 }).is_err());
+        assert!(ShareType::try_from(CShareType { kind: 0, width: -1 }).is_err());
+    }
 
-        assert_eq!(hb_engine_is_ready(std::ptr::null_mut()), 0);
-        assert!(hb_engine_get_network(std::ptr::null_mut()).is_null());
-        assert_eq!(hb_engine_party_id(std::ptr::null_mut()), 0);
-        assert_eq!(hb_engine_instance_id(std::ptr::null_mut()), 0);
-        assert!(hb_engine_protocol_name(std::ptr::null_mut()).is_null());
+    #[test]
+    fn share_type_conversion_rejects_invalid_kind() {
+        assert!(ShareType::try_from(CShareType {
+            kind: 99,
+            width: 64
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn share_type_conversion_to_c_preserves_kind_and_width() {
+        let c_int =
+            CShareType::try_from(ShareType::secret_int(64)).expect("secret int should fit C ABI");
+        assert_eq!(c_int.kind, 0);
+        assert_eq!(c_int.width, 64);
+
+        let c_bool = CShareType::try_from(ShareType::boolean()).expect("bool should fit C ABI");
+        assert_eq!(c_bool.kind, 1);
+        assert_eq!(c_bool.width, 1);
+
+        let c_fixed = CShareType::try_from(ShareType::secret_fixed_point_from_bits(42, 16))
+            .expect("fixed-point should fit C ABI");
+        assert_eq!(c_fixed.kind, 2);
+        assert_eq!(c_fixed.width, 42);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn share_type_conversion_to_c_rejects_unrepresentable_width() {
+        let too_wide = ShareType::SecretInt {
+            bit_length: usize::MAX,
+        };
+
+        assert!(CShareType::try_from(too_wide).is_err());
+    }
+
+    #[test]
+    fn test_null_pointer_handling() {
+        unsafe {
+            assert_eq!(
+                hb_engine_start_async(std::ptr::null_mut()),
+                HBEngineErrorCode::HBEngineNullPointer
+            );
+
+            assert_eq!(hb_engine_is_ready(std::ptr::null_mut()), 0);
+            assert!(hb_engine_get_network(std::ptr::null_mut()).is_null());
+            assert_eq!(hb_engine_party_id(std::ptr::null_mut()), 0);
+            assert_eq!(hb_engine_instance_id(std::ptr::null_mut()), 0);
+            assert!(hb_engine_protocol_name(std::ptr::null_mut()).is_null());
+        }
     }
 
     #[test]
     fn test_hb_engine_new_null_network() {
-        let engine = hb_engine_new(1, 0, 5, 1, 8, 16, std::ptr::null_mut());
+        let engine = unsafe { hb_engine_new(1, 0, 5, 1, 8, 16, std::ptr::null_mut()) };
         assert!(engine.is_null());
+    }
+
+    #[test]
+    fn test_hb_engine_new_invalid_topology_rejected() {
+        let net = Arc::new(QuicNetworkManager::new());
+        let net_ptr = &net as *const Arc<QuicNetworkManager> as *mut HBNetworkOpaque;
+
+        let engine = unsafe { hb_engine_new(1, 5, 5, 1, 8, 16, net_ptr) };
+
+        assert!(engine.is_null(), "party id outside n must be rejected");
     }
 
     #[test]
     fn test_hb_engine_free_null() {
         // Should not crash
-        hb_engine_free(std::ptr::null_mut());
+        unsafe { hb_engine_free(std::ptr::null_mut()) };
     }
 
     #[test]
     fn test_hb_network_free_null() {
         // Should not crash
-        hb_network_free(std::ptr::null_mut());
+        unsafe { hb_network_free(std::ptr::null_mut()) };
     }
 
     #[test]
     fn test_hb_free_bytes_null() {
         // Should not crash
-        hb_free_bytes(std::ptr::null_mut(), 0);
-        hb_free_bytes(std::ptr::null_mut(), 10);
+        unsafe {
+            hb_free_bytes(std::ptr::null_mut(), 0);
+            hb_free_bytes(std::ptr::null_mut(), 10);
+        }
     }
 }
 
@@ -1345,11 +1550,9 @@ mod hb_engine_tests {
 // FFI export names keep the `adkg_` prefix for ABI compatibility with existing
 // C/SDK consumers. Internal Rust types use the `Avss` prefix.
 // ============================================================================
-
-#[cfg(feature = "avss")]
 mod avss_ffi {
     use super::*;
-    use crate::net::avss_engine::{AvssMpcEngine, AvssOperations};
+    use crate::net::avss_engine::{AvssEngineConfig, AvssMpcEngine, AvssOperations};
     use crate::net::mpc_engine::MpcEngine;
     use ark_serialize::CanonicalDeserialize;
     use ark_std::rand::SeedableRng;
@@ -1402,6 +1605,8 @@ mod avss_ffi {
         Bn254 = 1,
         Curve25519 = 2,
         Ed25519 = 3,
+        Secp256k1 = 4,
+        P256 = 5,
     }
 
     impl CAvssCurveConfig {
@@ -1411,6 +1616,8 @@ mod avss_ffi {
                 1 => Some(CAvssCurveConfig::Bn254),
                 2 => Some(CAvssCurveConfig::Curve25519),
                 3 => Some(CAvssCurveConfig::Ed25519),
+                4 => Some(CAvssCurveConfig::Secp256k1),
+                5 => Some(CAvssCurveConfig::P256),
                 _ => None,
             }
         }
@@ -1488,16 +1695,13 @@ mod avss_ffi {
             ));
         }
 
-        let engine = block_on_avss(AvssMpcEngine::<F, G>::new(
-            instance_id,
-            party_id,
-            n,
-            t,
-            net,
+        let session = crate::net::MpcSessionConfig::try_new(instance_id, party_id, n, t, net)
+            .map_err(|error| error.to_string())?;
+        let engine = block_on_avss(AvssMpcEngine::<F, G>::from_config(AvssEngineConfig::new(
+            session,
             sk_i,
             Arc::new(pk_map),
-            vec![],
-        ))?;
+        )))?;
 
         let engine_arc: Arc<AvssMpcEngine<F, G>> = engine;
         Ok(AvssFfiWrapper {
@@ -1586,6 +1790,46 @@ mod avss_ffi {
         )
     }
 
+    fn create_secp256k1_engine(
+        instance_id: u64,
+        party_id: usize,
+        n: usize,
+        t: usize,
+        net: Arc<QuicNetworkManager>,
+        sk_bytes: &[u8],
+        pk_bytes: &[u8],
+    ) -> Result<AvssFfiWrapper, String> {
+        create_engine_inner::<ark_secp256k1::Fr, ark_secp256k1::Projective>(
+            instance_id,
+            party_id,
+            n,
+            t,
+            net,
+            sk_bytes,
+            pk_bytes,
+        )
+    }
+
+    fn create_p256_engine(
+        instance_id: u64,
+        party_id: usize,
+        n: usize,
+        t: usize,
+        net: Arc<QuicNetworkManager>,
+        sk_bytes: &[u8],
+        pk_bytes: &[u8],
+    ) -> Result<AvssFfiWrapper, String> {
+        create_engine_inner::<ark_secp256r1::Fr, ark_secp256r1::Projective>(
+            instance_id,
+            party_id,
+            n,
+            t,
+            net,
+            sk_bytes,
+            pk_bytes,
+        )
+    }
+
     /// Creates a new AVSS engine
     ///
     /// # Arguments
@@ -1594,7 +1838,7 @@ mod avss_ffi {
     /// * `n` - Total number of parties
     /// * `t` - Threshold
     /// * `network_ptr` - Pointer to a QuicNetworkManager (same opaque type as HB)
-    /// * `curve_config` - Curve configuration (0 = BLS12-381, 1 = BN254, 2 = Curve25519, 3 = Ed25519)
+    /// * `curve_config` - Curve configuration (0 = BLS12-381, 1 = BN254, 2 = Curve25519, 3 = Ed25519, 4 = secp256k1, 5 = P-256)
     /// * `sk_bytes` - Secret key bytes (serialized Fr element), or null for random key
     /// * `sk_len` - Length of secret key bytes
     /// * `pk_map_ptr` - Pointer to serialized public key map (required, must not be null)
@@ -1602,8 +1846,14 @@ mod avss_ffi {
     ///
     /// # Returns
     /// Pointer to opaque engine handle, or null on failure
+    ///
+    /// # Safety
+    /// `network_ptr` must be a valid, live pointer to an
+    /// `Arc<QuicNetworkManager>` allocated by this FFI layer. When non-null,
+    /// `sk_bytes` must point to `sk_len` bytes. `pk_map_ptr` must point to
+    /// `pk_map_len` bytes.
     #[no_mangle]
-    pub extern "C" fn adkg_engine_new(
+    pub unsafe extern "C" fn adkg_engine_new(
         instance_id: u64,
         party_id: usize,
         n: usize,
@@ -1654,6 +1904,12 @@ mod avss_ffi {
             CAvssCurveConfig::Ed25519 => {
                 create_ed25519_engine(instance_id, party_id, n, t, net, sk_slice, pk_slice)
             }
+            CAvssCurveConfig::Secp256k1 => {
+                create_secp256k1_engine(instance_id, party_id, n, t, net, sk_slice, pk_slice)
+            }
+            CAvssCurveConfig::P256 => {
+                create_p256_engine(instance_id, party_id, n, t, net, sk_slice, pk_slice)
+            }
         };
 
         match wrapper {
@@ -1672,8 +1928,13 @@ mod avss_ffi {
     }
 
     /// Frees an AVSS engine instance
+    ///
+    /// # Safety
+    /// `engine_ptr` must be null or a live pointer created by `adkg_engine_new`.
+    /// It must not be used after this call, and it must not be freed more than
+    /// once.
     #[no_mangle]
-    pub extern "C" fn adkg_engine_free(engine_ptr: *mut AvssEngineOpaque) {
+    pub unsafe extern "C" fn adkg_engine_free(engine_ptr: *mut AvssEngineOpaque) {
         if !engine_ptr.is_null() {
             unsafe {
                 let _ = Box::from_raw(engine_ptr as *mut AvssFfiWrapper);
@@ -1690,8 +1951,14 @@ mod avss_ffi {
     ///
     /// Returns serialized share bytes via out parameters on success.
     /// Caller must free result bytes with adkg_free_bytes.
+    ///
+    /// # Safety
+    /// `engine_ptr` must be a live pointer created by `adkg_engine_new`.
+    /// `key_name` must be a valid null-terminated C string. `result_ptr` and
+    /// `result_len_ptr` must be valid output pointers; successful results must
+    /// be released with `adkg_free_bytes`.
     #[no_mangle]
-    pub extern "C" fn adkg_engine_generate_share(
+    pub unsafe extern "C" fn adkg_engine_generate_share(
         engine_ptr: *mut AvssEngineOpaque,
         key_name: *const c_char,
         result_ptr: *mut *mut u8,
@@ -1728,8 +1995,14 @@ mod avss_ffi {
     /// Get the public key for a stored share by key name
     ///
     /// Caller must free result bytes with adkg_free_bytes.
+    ///
+    /// # Safety
+    /// `engine_ptr` must be a live pointer created by `adkg_engine_new`.
+    /// `key_name` must be a valid null-terminated C string. `result_ptr` and
+    /// `result_len_ptr` must be valid output pointers; successful results must
+    /// be released with `adkg_free_bytes`.
     #[no_mangle]
-    pub extern "C" fn adkg_engine_get_public_key(
+    pub unsafe extern "C" fn adkg_engine_get_public_key(
         engine_ptr: *mut AvssEngineOpaque,
         key_name: *const c_char,
         result_ptr: *mut *mut u8,
@@ -1765,8 +2038,14 @@ mod avss_ffi {
     /// Get a commitment at a specific index for a stored share by key name
     ///
     /// Caller must free result bytes with adkg_free_bytes.
+    ///
+    /// # Safety
+    /// `engine_ptr` must be a live pointer created by `adkg_engine_new`.
+    /// `key_name` must be a valid null-terminated C string. `result_ptr` and
+    /// `result_len_ptr` must be valid output pointers; successful results must
+    /// be released with `adkg_free_bytes`.
     #[no_mangle]
-    pub extern "C" fn adkg_engine_get_commitment(
+    pub unsafe extern "C" fn adkg_engine_get_commitment(
         engine_ptr: *mut AvssEngineOpaque,
         key_name: *const c_char,
         index: usize,
@@ -1801,8 +2080,11 @@ mod avss_ffi {
     }
 
     /// Check if the engine is ready
+    ///
+    /// # Safety
+    /// `engine_ptr` must be null or a live pointer created by `adkg_engine_new`.
     #[no_mangle]
-    pub extern "C" fn adkg_engine_is_ready(engine_ptr: *mut AvssEngineOpaque) -> c_int {
+    pub unsafe extern "C" fn adkg_engine_is_ready(engine_ptr: *mut AvssEngineOpaque) -> c_int {
         if engine_ptr.is_null() {
             return 0;
         }
@@ -1815,18 +2097,24 @@ mod avss_ffi {
     }
 
     /// Get the party ID
+    ///
+    /// # Safety
+    /// `engine_ptr` must be null or a live pointer created by `adkg_engine_new`.
     #[no_mangle]
-    pub extern "C" fn adkg_engine_party_id(engine_ptr: *mut AvssEngineOpaque) -> usize {
+    pub unsafe extern "C" fn adkg_engine_party_id(engine_ptr: *mut AvssEngineOpaque) -> usize {
         if engine_ptr.is_null() {
             return 0;
         }
         let wrapper = unsafe { get_wrapper(engine_ptr) };
-        wrapper.engine.party_id()
+        wrapper.engine.party().id()
     }
 
     /// Get the protocol name (returns static string, do not free)
+    ///
+    /// # Safety
+    /// `engine_ptr` must be null or a live pointer created by `adkg_engine_new`.
     #[no_mangle]
-    pub extern "C" fn adkg_engine_protocol_name(
+    pub unsafe extern "C" fn adkg_engine_protocol_name(
         engine_ptr: *mut AvssEngineOpaque,
     ) -> *const c_char {
         static PROTOCOL_NAME: &[u8] = b"avss\0";
@@ -1837,8 +2125,12 @@ mod avss_ffi {
     }
 
     /// Free bytes allocated by AVSS engine functions
+    ///
+    /// # Safety
+    /// `ptr` must be null or a pointer returned by an AVSS FFI function with
+    /// exactly the same `len`.
     #[no_mangle]
-    pub extern "C" fn adkg_free_bytes(ptr: *mut u8, len: usize) {
+    pub unsafe extern "C" fn adkg_free_bytes(ptr: *mut u8, len: usize) {
         unsafe {
             free_ffi_result_bytes(ptr, len);
         }
@@ -1855,18 +2147,20 @@ mod avss_ffi {
 
         #[test]
         fn test_adkg_engine_new_null_network() {
-            let engine = adkg_engine_new(
-                1,
-                0,
-                5,
-                1,
-                std::ptr::null_mut(),
-                CAvssCurveConfig::Bls12_381 as u32,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-            );
+            let engine = unsafe {
+                adkg_engine_new(
+                    1,
+                    0,
+                    5,
+                    1,
+                    std::ptr::null_mut(),
+                    CAvssCurveConfig::Bls12_381 as u32,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                )
+            };
             assert!(engine.is_null());
         }
 
@@ -1880,18 +2174,20 @@ mod avss_ffi {
                 .expect("serialize pk map");
             let net_ptr = &net as *const Arc<QuicNetworkManager> as *mut c_void;
 
-            let engine = adkg_engine_new(
-                1,
-                0,
-                n,
-                1,
-                net_ptr,
-                99,
-                std::ptr::null(),
-                0,
-                pk_map_bytes.as_ptr(),
-                pk_map_bytes.len(),
-            );
+            let engine = unsafe {
+                adkg_engine_new(
+                    1,
+                    0,
+                    n,
+                    1,
+                    net_ptr,
+                    99,
+                    std::ptr::null(),
+                    0,
+                    pk_map_bytes.as_ptr(),
+                    pk_map_bytes.len(),
+                )
+            };
             assert!(engine.is_null(), "invalid curve config must be rejected");
         }
 
@@ -1900,18 +2196,20 @@ mod avss_ffi {
             let net = Arc::new(QuicNetworkManager::new());
             let net_ptr = &net as *const Arc<QuicNetworkManager> as *mut c_void;
 
-            let engine = adkg_engine_new(
-                1,
-                0,
-                4,
-                1,
-                net_ptr,
-                CAvssCurveConfig::Bls12_381 as u32,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-            );
+            let engine = unsafe {
+                adkg_engine_new(
+                    1,
+                    0,
+                    4,
+                    1,
+                    net_ptr,
+                    CAvssCurveConfig::Bls12_381 as u32,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                )
+            };
             assert!(
                 engine.is_null(),
                 "constructor must reject null/empty public key map"
@@ -1928,49 +2226,53 @@ mod avss_ffi {
                 .expect("serialize pk map");
             let net_ptr = &net as *const Arc<QuicNetworkManager> as *mut c_void;
 
-            let engine = adkg_engine_new(
-                1,
-                0,
-                n,
-                1,
-                net_ptr,
-                CAvssCurveConfig::Bls12_381 as u32,
-                std::ptr::null(),
-                0,
-                pk_map_bytes.as_ptr(),
-                pk_map_bytes.len(),
-            );
+            let engine = unsafe {
+                adkg_engine_new(
+                    1,
+                    0,
+                    n,
+                    1,
+                    net_ptr,
+                    CAvssCurveConfig::Bls12_381 as u32,
+                    std::ptr::null(),
+                    0,
+                    pk_map_bytes.as_ptr(),
+                    pk_map_bytes.len(),
+                )
+            };
             assert!(
                 !engine.is_null(),
                 "constructor should succeed without an ambient Tokio runtime"
             );
-            adkg_engine_free(engine);
+            unsafe { adkg_engine_free(engine) };
         }
 
         #[test]
         fn test_adkg_engine_free_null() {
-            adkg_engine_free(std::ptr::null_mut());
+            unsafe { adkg_engine_free(std::ptr::null_mut()) };
         }
 
         #[test]
         fn test_adkg_engine_is_ready_null() {
-            assert_eq!(adkg_engine_is_ready(std::ptr::null_mut()), 0);
+            assert_eq!(unsafe { adkg_engine_is_ready(std::ptr::null_mut()) }, 0);
         }
 
         #[test]
         fn test_adkg_engine_party_id_null() {
-            assert_eq!(adkg_engine_party_id(std::ptr::null_mut()), 0);
+            assert_eq!(unsafe { adkg_engine_party_id(std::ptr::null_mut()) }, 0);
         }
 
         #[test]
         fn test_adkg_engine_protocol_name_null() {
-            assert!(adkg_engine_protocol_name(std::ptr::null_mut()).is_null());
+            assert!(unsafe { adkg_engine_protocol_name(std::ptr::null_mut()) }.is_null());
         }
 
         #[test]
         fn test_adkg_free_bytes_null() {
-            adkg_free_bytes(std::ptr::null_mut(), 0);
-            adkg_free_bytes(std::ptr::null_mut(), 10);
+            unsafe {
+                adkg_free_bytes(std::ptr::null_mut(), 0);
+                adkg_free_bytes(std::ptr::null_mut(), 10);
+            }
         }
     }
 }

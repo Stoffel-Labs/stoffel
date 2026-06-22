@@ -11,6 +11,8 @@
 //!
 //! Matrix size: 6 elements (e.g., 2x3 or 3x2 matrix)
 
+#![allow(clippy::needless_range_loop, clippy::while_let_loop)]
+
 use ark_bls12_381::Fr;
 use ark_std::rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -26,10 +28,13 @@ use crate::core_vm::VirtualMachine;
 use crate::net::hb_engine::HoneyBadgerMpcEngine;
 use crate::net::program_id_from_bytes;
 use crate::tests::mpc_multiplication_integration::{
+    assign_topological_client_ids, register_topological_client_connections,
     setup_honeybadger_quic_clients, setup_honeybadger_quic_network, HoneyBadgerQuicConfig,
     RoutedNetwork,
 };
-use crate::tests::test_utils::{acquire_hb_itest_lock, init_crypto_provider, setup_test_tracing};
+use crate::tests::test_utils::{
+    acquire_hb_itest_lock, init_crypto_provider, read_vm_table_number, setup_test_tracing,
+};
 use stoffel_vm_types::compiled_binary::CompiledBinary;
 use stoffel_vm_types::core_types::Value;
 use stoffel_vm_types::functions::VMFunction;
@@ -180,11 +185,11 @@ fn build_federated_average_program_6() -> (Vec<Instruction>, HashMap<String, usi
     instructions.push(Instruction::CALL("get_field".to_string()));
     instructions.push(Instruction::MOV(16, 0)); // reg16 = secret sum
 
-    // MOV(secret -> clear) queues the reveal in the current MPC runtime.
+    // MOV(secret -> clear) may queue the reveal; PUSHARG resolves it before use.
     instructions.push(Instruction::MOV(7, 16));
     instructions.push(Instruction::PUSHARG(9)); // revealed_sums array
     instructions.push(Instruction::PUSHARG(5)); // index
-    instructions.push(Instruction::PUSHARG(7)); // pending reveal marker
+    instructions.push(Instruction::PUSHARG(7)); // resolved revealed value
     instructions.push(Instruction::CALL("set_field".to_string()));
 
     instructions.push(Instruction::ADD(5, 5, 3)); // reg5++
@@ -308,7 +313,7 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     );
 
     for idx in 0..client_count {
-        let client_id = 90 + idx as ClientId;
+        let client_id = idx as ClientId;
         client_ids.push(client_id);
 
         let mut matrix_values: Vec<Fr> = Vec::new();
@@ -457,42 +462,10 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Build client derived_id → logical_client_id mapping.
-    let mut client_derived_to_logical: HashMap<usize, ClientId> = HashMap::new();
-    for client in &clients {
-        let derived = client.network.lock().await.local_derived_id();
-        client_derived_to_logical.insert(derived, client.client_id);
-    }
-
-    // Register client connections and spawn receive handlers with correct logical client IDs.
-    for server in servers.iter() {
-        let all_clients = server
-            .network
-            .as_ref()
-            .expect("network should be set")
-            .get_all_client_connections();
-        for (derived_id, conn) in &all_clients {
-            if let Some(&logical_id) = client_derived_to_logical.get(derived_id) {
-                if let Some(ref routed) = server.routed_network {
-                    routed.register_client(logical_id, conn.clone());
-                }
-                let txx = server.channels.clone();
-                let conn = conn.clone();
-                tokio::spawn(async move {
-                    loop {
-                        match conn.receive().await {
-                            Ok(data) => {
-                                if txx.send((logical_id, data)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                });
-            }
-        }
-    }
+    assign_topological_client_ids(&mut clients)
+        .await
+        .expect("Failed to assign topological client IDs");
+    register_topological_client_connections(&servers);
 
     // Step 5: Run preprocessing
     info!("Step 5: Running preprocessing...");
@@ -559,7 +532,7 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
             .party_id
             .expect("party_id should be set after finalize_network()");
         let mut vm = VirtualMachine::new();
-        let engine = HoneyBadgerMpcEngine::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>::from_existing_node_with_router(
+        let engine = HoneyBadgerMpcEngine::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>::try_from_existing_node_with_router(
             server.open_message_router.clone(),
             instance_id,
             party_id,
@@ -570,8 +543,9 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
                 .clone()
                 .expect("network should be set"),
             server.node.clone(),
-        );
-        vm.state.set_mpc_engine(engine);
+        )
+        .expect("test topology should be valid");
+        vm.set_mpc_engine(engine);
         vms.push(Arc::new(parking_lot::Mutex::new(vm)));
     }
 
@@ -591,11 +565,8 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
                 .collect()
         };
         let vm = vm_arc.lock();
-        let store = vm.state.client_store();
-        store.clear();
-        for (client_id, shares) in shares_for_party {
-            store.store_client_input(client_id, shares);
-        }
+        vm.try_replace_client_inputs(shares_for_party)
+            .expect("populate VM client inputs");
         info!("✓ VM {} client store populated", party_id);
     }
 
@@ -654,8 +625,8 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     // All parties should return arrays with the same averaged values
     for (pid, val) in &results {
         match val {
-            Value::Array(array_id) => {
-                info!("Party {} returned array with id {}", pid, array_id);
+            Value::Array(array_ref) => {
+                info!("Party {} returned array with id {}", pid, array_ref);
             }
             other => {
                 panic!("Party {} returned unexpected value type: {:?}", pid, other);
@@ -666,46 +637,31 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     // Verify element-wise averages from the first party's VM
     {
         let (first_pid, first_val) = &results[0];
-        if let Value::Array(array_id) = first_val {
-            let vm = vms[*first_pid].lock();
-            if let Some(arr) = vm.state.object_store.get_array(*array_id) {
-                info!("Verifying {} averaged matrix elements:", arr.length());
-                for elem_idx in 0..MATRIX_SIZE {
-                    let idx_val = Value::I64(elem_idx as i64);
-                    if let Some(elem_val) = arr.get(&idx_val) {
-                        let computed_avg: f64 = match elem_val {
-                            Value::I64(v) => *v as f64,
-                            Value::Float(v) => v.0,
-                            other => {
-                                panic!("Element {} has unexpected type: {:?}", elem_idx, other)
-                            }
-                        };
+        if let Value::Array(array_ref) = first_val {
+            let mut vm = vms[*first_pid].lock();
+            let len = vm.read_array_len(*array_ref).unwrap();
+            info!("Verifying {} averaged matrix elements:", len);
+            for elem_idx in 0..MATRIX_SIZE {
+                let computed_avg = read_vm_table_number(&mut vm, array_ref.id(), elem_idx).unwrap();
+                let expected = expected_averages[elem_idx];
+                let diff = (computed_avg - expected).abs();
 
-                        let expected = expected_averages[elem_idx];
-                        let diff = (computed_avg - expected).abs();
+                let row = elem_idx / MATRIX_COLS;
+                let col = elem_idx % MATRIX_COLS;
 
-                        let row = elem_idx / MATRIX_COLS;
-                        let col = elem_idx % MATRIX_COLS;
-
-                        assert!(
-                            diff <= 0.01,
-                            "Element [{},{}] mismatch: got {:.4}, expected {:.4} (diff {:.4})",
-                            row,
-                            col,
-                            computed_avg,
-                            expected,
-                            diff
-                        );
-                        info!(
-                            "  ✓ [{},{}] = {:.4} (expected {:.4})",
-                            row, col, computed_avg, expected
-                        );
-                    } else {
-                        panic!("Element {} not found in result array", elem_idx);
-                    }
-                }
-            } else {
-                panic!("Array {} not found in VM object store", array_id);
+                assert!(
+                    diff <= 0.01,
+                    "Element [{},{}] mismatch: got {:.4}, expected {:.4} (diff {:.4})",
+                    row,
+                    col,
+                    computed_avg,
+                    expected,
+                    diff
+                );
+                info!(
+                    "  ✓ [{},{}] = {:.4} (expected {:.4})",
+                    row, col, computed_avg, expected
+                );
             }
         }
     }
@@ -714,46 +670,24 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     info!("Verifying all parties have consistent results...");
     let reference_vals: Vec<f64> = {
         let (first_pid, first_val) = &results[0];
-        let vm = vms[*first_pid].lock();
+        let mut vm = vms[*first_pid].lock();
         let array_id = match first_val {
-            Value::Array(id) => *id,
+            Value::Array(array_ref) => array_ref.id(),
             _ => panic!("Expected array"),
         };
-        let arr = vm
-            .state
-            .object_store
-            .get_array(array_id)
-            .expect("array exists");
         (0..MATRIX_SIZE)
-            .map(|i| {
-                let idx = Value::I64(i as i64);
-                match arr.get(&idx).expect("element exists") {
-                    Value::I64(v) => *v as f64,
-                    Value::Float(v) => v.0,
-                    _ => panic!("unexpected type"),
-                }
-            })
+            .map(|i| read_vm_table_number(&mut vm, array_id, i).unwrap())
             .collect()
     };
 
     for (pid, val) in &results[1..] {
-        let vm = vms[*pid].lock();
+        let mut vm = vms[*pid].lock();
         let array_id = match val {
-            Value::Array(id) => *id,
+            Value::Array(array_ref) => array_ref.id(),
             _ => panic!("Expected array"),
         };
-        let arr = vm
-            .state
-            .object_store
-            .get_array(array_id)
-            .expect("array exists");
         for (i, &ref_val) in reference_vals.iter().enumerate() {
-            let idx = Value::I64(i as i64);
-            let party_val: f64 = match arr.get(&idx).expect("element exists") {
-                Value::I64(v) => *v as f64,
-                Value::Float(v) => v.0,
-                _ => panic!("unexpected type"),
-            };
+            let party_val = read_vm_table_number(&mut vm, array_id, i).unwrap();
             let diff = (party_val - ref_val).abs();
             assert!(
                 diff < 0.0001,

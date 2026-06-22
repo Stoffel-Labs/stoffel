@@ -1,0 +1,34 @@
+# run-args: --client-input 0=42
+# Oblivious PRF (OPRF): F_k(x) = H(x)^k over the BLS12-381 G1 curve.
+#
+# The servers jointly hold the PRF key k as a secret share and never reveal it.
+# Evaluation hashes the input to a curve point and raises it to the shared key
+# via open-in-exponent (Share.open_exp_custom). The 48-byte result is
+# deterministic for a fixed key and pseudorandom without knowledge of k -- the
+# building block for DH-based PSI (mpc_dh_psi) and private keyword search.
+#
+# A production OPRF additionally has the client BLIND its input (send H(x)^r,
+# unblind the H(x)^{rk} response to H(x)^k) so the servers never learn x. That
+# blinding/unblinding is client-side and wraps this server-side evaluation core.
+
+def oprf(input_bytes: bytes, key: Share) -> bytes:
+  var point = Crypto.hash_to_g1(input_bytes)
+  return key.open_exp_custom(point)
+
+def main() -> bytes:
+  # Shared, secret PRF key (never opened).
+  var key: secret int64 = Share.random()
+
+  # Default input; a client may instead supply it as a field share.
+  var x = Bytes.from_string("alice@example.com")
+  if ClientStore.get_number_clients() > 0:
+    var x_share = ClientStore.take_share(0, 0)
+    x = x_share.open_field()
+
+  var fx = oprf(x, key)
+  var fx_again = oprf(x, key)
+  var fy = oprf(Bytes.from_string("bob@example.com"), key)
+
+  assert fx == fx_again, "OPRF must be deterministic for a fixed key and input"
+  assert not (fx == fy), "distinct inputs must give distinct OPRF outputs"
+  return fx

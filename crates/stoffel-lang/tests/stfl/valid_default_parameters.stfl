@@ -1,0 +1,11 @@
+# Default parameter values.
+def greet(base: int64, bonus: int64 = 5) -> int64:
+  return base + bonus
+
+def main() -> int64:
+  var ok = 7100
+  if greet(10) == 15:
+    ok += 1
+  if greet(10, 1) == 11:
+    ok += 1
+  return ok
