@@ -1,0 +1,24 @@
+name: Publish stoffel-vm
+
+on:
+  push:
+    tags:
+      - "stoffel-vm-v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. stoffel-vm-v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    uses: ./.github/workflows/_publish-crate.yml
+    with:
+      crate: stoffel-vm
+      tag: ${{ inputs.tag }}   # empty on tag-push; the reusable workflow falls back to the ref
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
