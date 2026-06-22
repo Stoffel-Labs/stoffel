@@ -14,7 +14,7 @@ categories = ["compilers", "cryptography", "parser-implementations"]
 name = "stoffellang"
 
 [dependencies]
-stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
+stoffel-vm-types = "0.1.0"
 colored = "3.0.0"
 edit-distance = "2.1.0"
 clap = { version = "4.5.4", features = ["derive"] }

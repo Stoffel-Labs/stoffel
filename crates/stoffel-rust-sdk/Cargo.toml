@@ -34,12 +34,12 @@ tracing = { version = "0.1", features = ["attributes"] }
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
-stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
+stoffellang = "0.1.0"
 stoffel-mpc-coordinator-shared = "0.1.0"
 stoffel-mpc-coordinator-off-chain = "0.1.0"
-stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
+stoffel-vm = "0.1.0"
 stoffel-vm-runner = "0.1.0"
-stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
+stoffel-vm-types = "0.1.0"
 stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
 
 [dev-dependencies]

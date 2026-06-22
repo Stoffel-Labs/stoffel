@@ -15,8 +15,8 @@ name = "stoffel-run"
 path = "src/bin/stoffel-run.rs"
 
 [dependencies]
-stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
-stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
+stoffel-vm = "0.1.0"
+stoffel-vm-types = "0.1.0"
 stoffel-mpc-coordinator-shared = "0.1.0"
 stoffel-mpc-coordinator-off-chain = "0.1.0"
 stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
@@ -45,6 +45,6 @@ uuid = { version = "1.17.0", features = ["v4"] }
 x509-parser = "0.18.1"
 
 [dev-dependencies]
-stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
-stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
+stoffel-vm-types = "0.1.0"
+stoffellang = "0.1.0"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }

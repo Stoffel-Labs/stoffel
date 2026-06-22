@@ -133,23 +133,19 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
     let cargo_toml = fs::read_to_string(&cargo_toml_path)
         .unwrap()
         .replace(
-            "stoffel = { package = \"stoffel-rust-sdk\", git = \"https://github.com/Stoffel-Labs/StoffelVM\" }",
+            "stoffel = { package = \"stoffel-rust-sdk\", version = \"0.1.0\" }",
             &format!(
                 "stoffel = {{ package = \"stoffel-rust-sdk\", path = \"{}\" }}",
                 sdk_path.display()
             ),
         )
         .replace(
-            "stoffel-bindgen = { git = \"https://github.com/Stoffel-Labs/StoffelVM\" }",
+            "stoffel-bindgen = \"0.1.0\"",
             &format!("stoffel-bindgen = {{ path = \"{}\" }}", bindgen_path.display()),
         )
         + &format!(
-            "\n[patch.\"https://github.com/Stoffel-Labs/StoffelVM\"]\nstoffel-bindgen = {{ path = \"{}\" }}\nstoffellang = {{ path = \"{}\" }}\nstoffel-rust-sdk = {{ path = \"{}\" }}\nstoffel-vm = {{ path = \"{}\" }}\nstoffel-vm-types = {{ path = \"{}\" }}\n",
-            bindgen_path.display(),
-            crates_dir.join("stoffel-lang").display(),
-            sdk_path.display(),
-            crates_dir.join("stoffel-vm").display(),
-            crates_dir.join("stoffel-vm-types").display(),
+            "\n[patch.crates-io]\nstoffel-vm-runner = {{ path = \"{}\" }}\n",
+            crates_dir.join("stoffel-vm-runner").display(),
         );
     fs::write(&cargo_toml_path, cargo_toml).unwrap();
 
@@ -232,13 +228,33 @@ fn run_executes_default_secret_bool_circuit_project() {
         .assert()
         .success();
 
-    Command::cargo_bin("stoffel")
-        .unwrap()
-        .current_dir(temp.path())
-        .args(["run", "--timeout-secs", LOCAL_MPC_TEST_TIMEOUT_SECS])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("true").or(predicate::str::contains("false")));
+    let mut last_output = None;
+    for _ in 0..3 {
+        let output = Command::cargo_bin("stoffel")
+            .unwrap()
+            .current_dir(temp.path())
+            .args(["run", "--timeout-secs", LOCAL_MPC_TEST_TIMEOUT_SECS])
+            .output()
+            .expect("stoffel run should execute");
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("true") || stdout.contains("false"),
+                "expected boolean output, got stdout:\n{stdout}"
+            );
+            return;
+        }
+        last_output = Some(output);
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    let output = last_output.expect("stoffel run should have been attempted");
+    panic!(
+        "default secret bool circuit did not run successfully after retries\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

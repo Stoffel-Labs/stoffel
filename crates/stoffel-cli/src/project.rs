@@ -508,7 +508,7 @@ fn init_rust_project(path: &Path) -> Result<()> {
     write_new(
         path.join("Cargo.toml"),
         &format!(
-            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n\n[build-dependencies]\nstoffel-bindgen = {{ git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\n",
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", version = \"0.1.0\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n\n[build-dependencies]\nstoffel-bindgen = \"0.1.0\"\n",
             project_name(path)
         ),
     )?;
@@ -957,7 +957,7 @@ fn default_stoffel_program_text() -> &'static str {
 
 fn default_cargo_toml_text(name: &str) -> String {
     format!(
-        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n\n[build-dependencies]\nstoffel-bindgen = {{ git = \"https://github.com/Stoffel-Labs/StoffelVM\" }}\n"
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", version = \"0.1.0\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n\n[build-dependencies]\nstoffel-bindgen = \"0.1.0\"\n"
     )
 }
 
