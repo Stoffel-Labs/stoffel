@@ -1268,9 +1268,9 @@ checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
 
 [[package]]
 name = "arrayvec"
-version = "0.7.6"
+version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
 
 [[package]]
 name = "asn1-rs"
@@ -1502,15 +1502,15 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-io"
-version = "0.1.100"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11301df0b06f22dea7bb1916403fdd88a371031e495c49b8f96931b28189e175"
+checksum = "2dee39a0ee5b4095224a0cfc6bf4cc1baf0f9624b96b367e53b66d974e51d953"
 
 [[package]]
 name = "bitcoin_hashes"
-version = "0.14.100"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c9901a56e133a1fc86eeb1113e2591f45f4682451ca893bff494d2f88918e3f"
+checksum = "4ed83caece3afc59919481b33b472e1432d1abc4641ed9100be142ef5110b406"
 dependencies = [
  "bitcoin-io",
  "hex-conservative",
@@ -1530,9 +1530,9 @@ checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "bitvec"
-version = "1.0.1"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bc2832c24239b0141d5674bb9174f9d68a8b5b3f2753311927c172ca46f7e9c"
+checksum = "ddcec3d12c579d40898fe0a9a358a803c23e9c52ca3c425707f81c9436211837"
 dependencies = [
  "funty",
  "radium",
@@ -1586,9 +1586,9 @@ dependencies = [
 
 [[package]]
 name = "borsh"
-version = "1.6.1"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfd1e3f8955a5d7de9fab72fc8373fade9fb8a703968cb200ae3dc6cf08e185a"
+checksum = "2f3f6da4992df95bbcd9af42a6c7dcb994498fc9048230405f3b36ff7cd3f145"
 dependencies = [
  "borsh-derive",
  "bytes",
@@ -1597,9 +1597,9 @@ dependencies = [
 
 [[package]]
 name = "borsh-derive"
-version = "1.6.1"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfcfdc083699101d5a7965e49925975f2f55060f94f9a05e7187be95d530ca59"
+checksum = "3ae8fb4fb5740e4b2c4884ff95f5f32f5e8479db1e8fd8eb49ddbe09eb09bb7c"
 dependencies = [
  "once_cell",
  "proc-macro-crate",
@@ -1637,9 +1637,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.11.1"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 dependencies = [
  "serde",
 ]
@@ -1661,9 +1661,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.64"
+version = "1.2.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dad887fd958be91b5098c0248def011f4523ab786cd411be668777e55063501f"
+checksum = "e228eec9be7c17ccb640b59b36a5cd805ea2a564a4c5e162c2f659fea30d3b96"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -3565,9 +3565,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.32"
+version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
+checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "lru"
@@ -4193,9 +4193,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.45"
+version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
 dependencies = [
  "proc-macro2",
 ]
@@ -5201,7 +5201,7 @@ dependencies = [
  "jsonrpsee",
  "rustls",
  "stoffel-mpc-coordinator",
- "stoffelmpc-mpc",
+ "stoffelcrypto",
  "tokio",
  "x509-parser 0.18.1",
 ]
@@ -5209,7 +5209,7 @@ dependencies = [
 [[package]]
 name = "stoffel-mpc-coordinator"
 version = "0.1.0"
-source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=dev#cf632ff3575c8a7ef6b2a706a4fe0e4bc37be587"
+source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=dev#e84b62aed415a93b2255374025c309ab31504324"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -5237,7 +5237,8 @@ dependencies = [
  "stoffel-solidity-bindings",
  "stoffel-solidity-bindings-test",
  "stoffel-vm-types",
- "stoffelmpc-mpc",
+ "stoffelcrypto",
+ "stoffelnet",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
@@ -5280,9 +5281,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "stoffelmpc-mpc"
+name = "stoffelcrypto"
 version = "0.1.0"
-source = "git+https://github.com/Stoffel-Labs/mpc-protocols.git?branch=temp%2Freverted-stuff-monorepo-network-dep#87e81ccb64dcd4ac548dbc0b0a3da9412e4e5955"
+source = "git+https://github.com/Stoffel-Labs/mpc-protocols.git?branch=main#669e23f4a31c666852964ab0e2921bb49889a048"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
@@ -5319,7 +5320,7 @@ dependencies = [
 [[package]]
 name = "stoffelmpc-network"
 version = "0.1.0"
-source = "git+https://github.com/Stoffel-Labs/mpc-protocols.git?branch=temp%2Freverted-stuff-monorepo-network-dep#87e81ccb64dcd4ac548dbc0b0a3da9412e4e5955"
+source = "git+https://github.com/Stoffel-Labs/mpc-protocols.git?branch=main#669e23f4a31c666852964ab0e2921bb49889a048"
 dependencies = [
  "ark-ff 0.5.0",
  "ark-serialize 0.5.0",
@@ -5340,7 +5341,8 @@ dependencies = [
 [[package]]
 name = "stoffelnet"
 version = "0.1.0"
-source = "git+https://github.com/Stoffel-Labs/stoffel-networking.git?branch=main#866b45c95bcbe48f0bbd45b0084fd64de5967536"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3dedfe14784d0d5d9fa4a3c5c9c36b49581c43789ac44449be3ade72fa025223"
 dependencies = [
  "ark-ff 0.5.0",
  "async-trait",

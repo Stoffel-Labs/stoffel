@@ -18,6 +18,9 @@ COPY crates/stoffel-vm-types /StoffelVM/crates/stoffel-vm-types
 COPY docker/coordinator-wrapper /build/coordinator-wrapper
 COPY --from=coordinator . /stoffel-mpc-coordinator
 
+RUN sed -i 's#git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev"#path = "/stoffel-mpc-coordinator"#' \
+      /build/coordinator-wrapper/Cargo.toml
+
 RUN mkdir -p /build/.cargo && \
     printf '%s\n' \
       '[net]' \
@@ -48,6 +51,9 @@ RUN --mount=type=cache,id=stoffel-cargo-registry,target=/usr/local/cargo/registr
     cargo chef cook --release --recipe-path recipe.json
 
 COPY docker/coordinator-wrapper /build/coordinator-wrapper
+
+RUN sed -i 's#git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev"#path = "/stoffel-mpc-coordinator"#' \
+      /build/coordinator-wrapper/Cargo.toml
 
 RUN mkdir -p /build/.cargo && \
     printf '%s\n' \
