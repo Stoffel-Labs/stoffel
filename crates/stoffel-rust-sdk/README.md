@@ -623,9 +623,12 @@ release requires these dependencies to be published or replaced with registry
 dependencies first:
 
 - `stoffellang`
+- `stoffel-mpc-coordinator-off-chain`
+- `stoffel-mpc-coordinator-on-chain`
+- `stoffel-mpc-coordinator-shared`
 - `stoffel-vm`
+- `stoffel-vm-runner`
 - `stoffel-vm-types`
-- `stoffel-mpc-coordinator`
 - `stoffelnet`
 - `stoffelmpc-mpc`
 
