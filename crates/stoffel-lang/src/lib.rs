@@ -3,6 +3,8 @@
 //! This library provides the core compilation functionality for the Stoffel programming language.
 //! It can be used as a standalone compiler or integrated into other tools.
 
+#![allow(clippy::result_large_err)]
+
 pub mod ast;
 pub mod binary_converter;
 pub mod builtin_registry;

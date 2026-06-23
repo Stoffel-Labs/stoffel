@@ -160,6 +160,7 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
 
 #[test]
 fn common_command_aliases_work() {
+    let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("hello");
     Command::cargo_bin("stoffel")
@@ -434,6 +435,7 @@ fn run_auto_discovers_built_bytecode() {
 
 #[test]
 fn run_recompiles_when_project_source_is_newer_than_bytecode() {
+    let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app");
     Command::cargo_bin("stoffel")
@@ -529,6 +531,7 @@ fn run_ignores_stray_bytecode_when_project_source_is_newer() {
 
 #[test]
 fn run_recompiles_when_project_config_is_newer_than_bytecode() {
+    let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app");
     Command::cargo_bin("stoffel")
@@ -573,6 +576,7 @@ fn run_recompiles_when_project_config_is_newer_than_bytecode() {
 
 #[test]
 fn run_folder_compiles_project_when_bytecode_is_missing() {
+    let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app.with.dot");
     Command::cargo_bin("stoffel")
@@ -605,6 +609,7 @@ fn run_folder_compiles_project_when_bytecode_is_missing() {
 
 #[test]
 fn run_rejects_non_project_directories_inside_a_project() {
+    let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -659,6 +664,7 @@ fn dev_once_executes_default_secret_bool_circuit_project() {
 
 #[test]
 fn dev_once_explains_input_mistakes() {
+    let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app");
     Command::cargo_bin("stoffel")
@@ -763,6 +769,7 @@ fn dev_watch_explains_input_mistakes_before_starting() {
 
 #[test]
 fn dev_once_uses_explicit_source_file() {
+    let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app");
     Command::cargo_bin("stoffel")
@@ -1140,6 +1147,7 @@ fn typoed_commands_suggest_only_available_commands() {
 
 #[test]
 fn common_flag_aliases_work_or_explain_defaults() {
+    let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -1424,6 +1432,7 @@ fn run_rejects_build_only_flags_and_honors_program_info() {
 
 #[test]
 fn run_validates_entry_and_inputs_before_timeout() {
+    let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
         .unwrap()

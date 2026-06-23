@@ -430,7 +430,7 @@ fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
 
     let Some(workspace_root) = workspace_root() else {
         return Err(Error::Unsupported(
-            "SDK local coordinator execution requires a built stoffel-run binary; set STOFFEL_RUN_BIN, call `local_runner_path`, or build `cargo build -p stoffel-vm --bin stoffel-run`"
+            "SDK local coordinator execution requires a built stoffel-run binary; set STOFFEL_RUN_BIN, call `local_runner_path`, or build `cargo build -p stoffel-vm-runner --bin stoffel-run`"
                 .to_owned(),
         ));
     };
@@ -440,7 +440,7 @@ fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
         .join("stoffel-run");
     candidate.exists().then_some(candidate).ok_or_else(|| {
         Error::Unsupported(
-            "SDK local coordinator execution requires a built stoffel-run binary; set STOFFEL_RUN_BIN, call `local_runner_path`, or build `cargo build -p stoffel-vm --bin stoffel-run`"
+            "SDK local coordinator execution requires a built stoffel-run binary; set STOFFEL_RUN_BIN, call `local_runner_path`, or build `cargo build -p stoffel-vm-runner --bin stoffel-run`"
                 .to_owned(),
         )
     })

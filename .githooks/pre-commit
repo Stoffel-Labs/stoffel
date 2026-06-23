@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+runner_bin="stoffel-run"
+runner_package="stoffel-vm-runner"
+ci_workflow=".github/workflows/ci.yml"
+
+published_package_pattern="stoffel-vm|stoffel-vm-types|stoffel-vm-runner|stoffellang|stoffel-rust-sdk|stoffel-bindgen|stoffelcrypto|stoffelnet|stoffel-mpc-coordinator-shared|stoffel-mpc-coordinator-off-chain"
+stale_package_refs="$(mktemp)"
+trap 'rm -f "$stale_package_refs"' EXIT
+
+git grep -n -E "(git|branch|rev|tag)[[:space:]]*=[[:space:]]*\"" -- \
+  '*.toml' '*.rs' '*.sh' '*.yml' '*.yaml' \
+  ':!target' \
+  ':!.git' \
+  ':!.githooks/pre-commit' |
+  grep -E "$published_package_pattern|StoffelVM|Stoffel-Labs/stoffel" >>"$stale_package_refs" || true
+
+git grep -n -E "(package[[:space:]]*=[[:space:]]*\"(${published_package_pattern})\"[^}]*path[[:space:]]*=|(${published_package_pattern})[[:space:]]*=[[:space:]]*\\{[^}]*path[[:space:]]*=)" -- \
+  '*.toml' '*.rs' '*.sh' '*.yml' '*.yaml' \
+  ':!target' \
+  ':!.git' \
+  ':!.githooks/pre-commit' |
+  grep -v -E \
+    '^(crates/stoffel-cli/Cargo.toml|crates/stoffel-rust-sdk/Cargo.toml|crates/stoffel-lang/examples/mpc_aes128_cbc_client_io/Cargo.toml|crates/stoffel-cli/tests/cli.rs):' \
+  >>"$stale_package_refs" || true
+
+git grep -n -E "(-p|--package)[[:space:]]+stoffel-vm[[:space:]]+--bin[[:space:]]+${runner_bin}" -- \
+  ':!target' \
+  ':!.git' \
+  ':!.githooks/pre-commit' >>"$stale_package_refs" || true
+
+if [ -s "$stale_package_refs" ]; then
+  cat >&2 <<MSG
+
+error: found stale package references.
+
+Stoffel crates and generated SDK templates should use published crate
+dependencies unless the path dependency is an explicit monorepo-development
+exception in this hook.
+
+MSG
+  cat "$stale_package_refs" >&2
+  exit 1
+fi
+
+if [ -f "$ci_workflow" ] && ! grep -Eq "cargo build .*--package[[:space:]]+${runner_package}[[:space:]]+--bin[[:space:]]+${runner_bin}" "$ci_workflow"; then
+  cat >&2 <<MSG
+error: ${ci_workflow} does not build ${runner_bin} from ${runner_package}.
+MSG
+  exit 1
+fi
+
+echo "pre-commit: checking formatting"
+cargo +nightly fmt --all -- --check
+
+echo "pre-commit: checking package/bin mapping"
+cargo +nightly check --package "$runner_package" --bin "$runner_bin"
+
+echo "pre-commit: running clippy"
+cargo +nightly clippy --workspace --all-targets -- -D warnings
+
+echo "pre-commit: running tests"
+cargo +nightly test --workspace --all-features

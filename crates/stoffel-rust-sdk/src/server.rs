@@ -964,7 +964,7 @@ fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
         .filter(|path| path.exists())
         .ok_or_else(|| {
             Error::Unsupported(
-                "server start requires a built stoffel-run binary; set STOFFEL_RUN_BIN, call runner_path, or build `cargo build -p stoffel-vm --bin stoffel-run`"
+                "server start requires a built stoffel-run binary; set STOFFEL_RUN_BIN, call runner_path, or build `cargo build -p stoffel-vm-runner --bin stoffel-run`"
                     .to_owned(),
             )
         })

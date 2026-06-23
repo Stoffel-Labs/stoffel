@@ -23,7 +23,7 @@ fi
 RUNNER="${VM_DIR}/target/debug/stoffel-run"
 if [ ! -x "$RUNNER" ]; then
   echo "Building StoffelVM runner..."
-  cargo build --quiet --manifest-path "${VM_DIR}/Cargo.toml" -p stoffel-vm --bin stoffel-run
+  cargo build --quiet --manifest-path "${VM_DIR}/Cargo.toml" -p stoffel-vm-runner --bin stoffel-run
 fi
 
 PROGRAM="${OUT_DIR}/${PROGRAM_NAME}"

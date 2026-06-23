@@ -805,12 +805,12 @@ def main_lit() -> list[int64]:
     };
 
     let o0 = run_at(0, false, source.clone()).await;
-    eprintln!("CTR1_O0 = {:?}", &o0);
+    eprintln!("CTR1_O0 = {:?}", o0);
     std::env::set_var("STOFFEL_INLINE_BUDGET", "100000000");
     std::env::set_var("STOFFEL_UNROLL_BUDGET", "100000000");
     std::env::set_var("STOFFEL_UNROLL_MAX_EXPANSION", "100000000");
     let o3 = run_at(3, false, source).await;
-    eprintln!("CTR1_O3 = {:?}", &o3);
+    eprintln!("CTR1_O3 = {:?}", o3);
     eprintln!("match: {}", o0 == o3);
     assert_eq!(
         o0, o3,
