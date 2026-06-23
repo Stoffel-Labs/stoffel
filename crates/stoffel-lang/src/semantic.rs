@@ -779,7 +779,8 @@ impl<'a> SemanticAnalyzer<'a> {
                         } => (name.clone(), parameters.clone(), return_type.clone(), true),
                         _ => return None,
                     }
-                } else if let Some(first_arg) = arguments.first() {
+                } else {
+                    let first_arg = arguments.first()?;
                     let receiver_type = self.inference_expr_type(first_arg, &HashMap::new());
                     let method = self
                         .symbol_table
@@ -790,8 +791,6 @@ impl<'a> SemanticAnalyzer<'a> {
                         method.return_type.clone(),
                         true,
                     )
-                } else {
-                    return None;
                 }
             }
             AstNode::FieldAccess {

@@ -178,21 +178,19 @@ where
                 let shares = node.share_gen_avss.avss.shares.lock().await;
                 let stored = self.stored_shares.lock().await;
 
-                for (_session_id, maybe_shares) in shares.iter() {
-                    if let Some(share_vec) = maybe_shares {
-                        if let Some(share) = share_vec.first() {
-                            let already_stored = stored
-                                .values()
-                                .any(|s| s.feldmanshare.share == share.feldmanshare.share);
-                            if !already_stored {
-                                let share = share.clone();
-                                drop(stored);
-                                drop(shares);
-                                drop(node);
-                                let mut stored = self.stored_shares.lock().await;
-                                stored.insert(key_name.to_string(), share.clone());
-                                return Ok(share);
-                            }
+                for share_vec in shares.values().flatten() {
+                    if let Some(share) = share_vec.first() {
+                        let already_stored = stored
+                            .values()
+                            .any(|s| s.feldmanshare.share == share.feldmanshare.share);
+                        if !already_stored {
+                            let share = share.clone();
+                            drop(stored);
+                            drop(shares);
+                            drop(node);
+                            let mut stored = self.stored_shares.lock().await;
+                            stored.insert(key_name.to_string(), share.clone());
+                            return Ok(share);
                         }
                     }
                 }

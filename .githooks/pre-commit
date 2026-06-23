@@ -52,13 +52,13 @@ MSG
 fi
 
 echo "pre-commit: checking formatting"
-cargo fmt --all -- --check
+cargo +nightly fmt --all -- --check
 
 echo "pre-commit: checking package/bin mapping"
-cargo check --package "$runner_package" --bin "$runner_bin"
+cargo +nightly check --package "$runner_package" --bin "$runner_bin"
 
 echo "pre-commit: running clippy"
-cargo clippy --workspace --all-targets -- -D warnings
+cargo +nightly clippy --workspace --all-targets -- -D warnings
 
 echo "pre-commit: running tests"
-cargo test --workspace --all-features
+cargo +nightly test --workspace --all-features

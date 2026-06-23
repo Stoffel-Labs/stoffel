@@ -562,10 +562,6 @@ pub fn color_graph(
     }
 
     let mut sg = graph.clone();
-    // Validate precolored mapping: forbid using reserved R0
-    for (_vr, _pr) in precolored.iter() {
-        // Allow precoloring to R0: parameters may live in the ABI return/arg register.
-    }
 
     // Start with precolored allocation (e.g., ABI-fixed registers like parameters)
     let mut allocation: Allocation = precolored.clone();
