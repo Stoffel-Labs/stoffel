@@ -208,12 +208,22 @@ from the compiled `.stflb` program manifest.
 
 ## Stoffel CLI
 
-The `stoffel` binary is a Cargo-like project CLI built on top of `crates/stoffel-rust-sdk`.
+The `stoffel` binary is a Cargo-like project CLI built on top of `crates/stoffel-rust-sdk`. Install the released CLI with the Stoffel installer:
+
+```bash
+curl -fsSL https://get.stoffelmpc.com | sh
+```
+
+The installer places `stoffel` in `~/.local/bin` by default. Add it to your shell path if needed:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+stoffel --help
+```
 
 Create and run a project:
 
 ```bash
-cargo install --path crates/stoffel-cli
 stoffel init hello-mpc
 cd hello-mpc
 stoffel run --input a=40 --input b=2
@@ -244,8 +254,10 @@ provided. Use `--output` when compiling a single file.
 Run local MPC development mode when `stoffel-run` is available:
 
 ```bash
+git clone https://github.com/Stoffel-Labs/stoffel.git
+cd stoffel
 cargo build -p stoffel-vm-runner --bin stoffel-run
-stoffel dev --runner /path/to/StoffelVM/target/debug/stoffel-run --parties 5 --threshold 1 --input a=40 --input b=2
+stoffel dev --runner /path/to/stoffel/target/debug/stoffel-run --parties 5 --threshold 1 --input a=40 --input b=2
 ```
 
 `stoffel dev` runs once, watches `Stoffel.toml` and the configured source tree,
@@ -290,7 +302,7 @@ stoffel update
 configured sources, and reports local MPC network configuration. `clean` removes
 the project `target/` directory and Stoffel build cache; `--all` also removes
 known ecosystem caches such as `node_modules`, Foundry cache/output, and Python
-test caches. `update` reinstalls the local CLI from source and runs detected
+test caches. `update` checks for CLI/project dependency updates and runs detected
 project dependency update commands; use `--check` to inspect without changing
 files.
 
