@@ -94,7 +94,7 @@ jobs:
       - name: Verify packaging (dry run)
         env:
           CRATE: ${{ steps.ref.outputs.crate }}
-        run: cargo publish -p "$CRATE" --dry-run
+        run: cargo publish -p "$CRATE" --locked --dry-run
 
       - name: Check whether already published
         id: published
@@ -117,7 +117,7 @@ jobs:
         env:
           CRATE: ${{ steps.ref.outputs.crate }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p "$CRATE"
+        run: cargo publish -p "$CRATE" --locked
 
       - name: Create or update GitHub Release
         env:
