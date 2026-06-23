@@ -1,10 +1,33 @@
-# StoffelVM
+# Stoffel
 ![Discord](https://img.shields.io/discord/1300834528042160150?label=discord)
-[![GitHub License](https://img.shields.io/github/license/Stoffel-Labs/StoffelVM)](LICENSE)
+[![GitHub License](https://img.shields.io/github/license/Stoffel-Labs/stoffel)](LICENSE)
 
-This repository contains the core crates of the Stoffel Virtual Machine, a register-based VM built for both local execution and networked multiparty computation (MPC).
+This repository contains the core crates for Stoffel: the CLI, Stoffel-Lang compiler, Rust SDK, and Stoffel VM runtime for local execution and networked multiparty computation (MPC).
 
-## Background on Stoffel VM!
+## Installation
+
+Install the released Stoffel CLI with the installer:
+
+```bash
+curl -fsSL https://get.stoffelmpc.com | sh
+```
+
+The installer places `stoffel` in `~/.local/bin` by default. Add it to your shell path if needed:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+stoffel --help
+```
+
+Create and run a project:
+
+```bash
+stoffel init hello-mpc
+cd hello-mpc
+stoffel run --input a=40 --input b=2
+```
+
+## Background on Stoffel
 
 In its current form, Stoffel is designed to handle both simple and complex programs. The VM supports basic values such as integers, booleans, strings, and floating point numbers, along with more complex runtime types such as objects, arrays, closures, foreign objects, and secret shares. The VM is designed as a register machine to make execution predictable and to map cleanly onto optimized runtimes and physical MPC backends.
 
@@ -166,11 +189,11 @@ Now that you're familiar with the basics of Stoffel VM, good places to explore n
 ## Learn More
 
 To learn more about what you can build with Stoffel, visit 
-[stoffelmpc.com](https://stoffelmpc.com?utm_source=github&utm_medium=readme&utm_campaign=stoffelvm-repo&utm_term=mpc)
+[stoffelmpc.com](https://stoffelmpc.com?utm_source=github&utm_medium=readme&utm_campaign=stoffel-repo&utm_term=mpc)
 
 ## Compiled Bytecode
 
-StoffelVM also ships a portable compiled binary format through `stoffel-vm-types::compiled_binary::CompiledBinary`. The format uses the magic bytes `STFL` and can round-trip between `VMFunction` definitions and serialized binaries.
+Stoffel also ships a portable compiled binary format through `stoffel-vm-types::compiled_binary::CompiledBinary`. The format uses the magic bytes `STFL` and can round-trip between `VMFunction` definitions and serialized binaries.
 
 You can generate a compiled binary from Rust-defined functions like this:
 
@@ -208,26 +231,7 @@ from the compiled `.stflb` program manifest.
 
 ## Stoffel CLI
 
-The `stoffel` binary is a Cargo-like project CLI built on top of `crates/stoffel-rust-sdk`. Install the released CLI with the Stoffel installer:
-
-```bash
-curl -fsSL https://get.stoffelmpc.com | sh
-```
-
-The installer places `stoffel` in `~/.local/bin` by default. Add it to your shell path if needed:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-stoffel --help
-```
-
-Create and run a project:
-
-```bash
-stoffel init hello-mpc
-cd hello-mpc
-stoffel run --input a=40 --input b=2
-```
+The `stoffel` binary is a Cargo-like project CLI built on top of `crates/stoffel-rust-sdk`.
 
 Project templates:
 
