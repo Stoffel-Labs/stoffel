@@ -13,6 +13,3 @@ resolver = "2"
 exclude = [
     "vendor/mpc-protocols-limit-test",
 ]
-
-[patch.crates-io]
-stoffel-vm-runner = { path = "crates/stoffel-vm-runner" }
