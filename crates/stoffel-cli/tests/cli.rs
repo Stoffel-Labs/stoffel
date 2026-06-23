@@ -141,7 +141,10 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
         )
         .replace(
             "stoffel-bindgen = \"0.1.0\"",
-            &format!("stoffel-bindgen = {{ path = \"{}\" }}", bindgen_path.display()),
+            &format!(
+                "stoffel-bindgen = {{ path = \"{}\" }}",
+                bindgen_path.display()
+            ),
         )
         + &format!(
             "\n[patch.crates-io]\nstoffel-vm-runner = {{ path = \"{}\" }}\n",
