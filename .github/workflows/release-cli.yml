@@ -1,0 +1,119 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - "cli-v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "CLI release tag, e.g. cli-v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build the stoffel CLI and create a GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve release ref
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+            echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
+          else
+            tag="${GITHUB_REF_NAME}"
+            echo "ref=${GITHUB_REF}" >> "$GITHUB_OUTPUT"
+          fi
+          version="${tag#cli-v}"
+          if [ "$version" = "$tag" ]; then
+            echo "Tag '$tag' is not of the form 'cli-v<version>'"; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check tag matches stoffel-cli version
+        run: |
+          crate_version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import sys,json; m=json.load(sys.stdin); print(next(p['version'] for p in m['packages'] if p['name']=='stoffel-cli'))")"
+          if [ "$crate_version" != "${{ steps.ref.outputs.version }}" ]; then
+            echo "Tag ${{ steps.ref.outputs.tag }} does not match stoffel-cli version $crate_version"
+            exit 1
+          fi
+
+      - name: Check tag commit is contained in main
+        run: |
+          git fetch origin main
+          git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/main'
+
+      # Builds only the stoffel-cli package's bin ("stoffel"). Pulls the rest of
+      # the graph transitively, but those are all published registry crates now.
+      # No anvil needed: this compiles, it does not run on-chain tests.
+      - name: Build stoffel CLI
+        run: cargo build --release -p stoffel-cli --bin stoffel --locked
+
+      - name: Package binary
+        id: package
+        run: |
+          target="x86_64-unknown-linux-gnu"
+          version="${{ steps.ref.outputs.version }}"
+
+          stage_dir="stoffel-$version-$target"
+          stage="$RUNNER_TEMP/$stage_dir"
+          mkdir -p "$stage"
+          cp "target/release/stoffel" "$stage/"
+
+          tarball="$RUNNER_TEMP/$stage_dir.tar.gz"
+          tar -C "$RUNNER_TEMP" -czf "$tarball" "$stage_dir"
+
+          ( cd "$RUNNER_TEMP" && sha256sum "$(basename "$tarball")" > SHA256SUMS )
+          echo "----- SHA256SUMS -----"
+          cat "$RUNNER_TEMP/SHA256SUMS"
+
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "sha_file=$RUNNER_TEMP/SHA256SUMS" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes_file="$(mktemp)"
+          {
+            echo "Stoffel CLI ${{ steps.ref.outputs.tag }} (version ${{ steps.ref.outputs.version }})."
+            echo
+            echo "Binary: stoffel (x86_64-unknown-linux-gnu)"
+            echo
+            echo "Install:  curl -fsSL https://get.stoffelmpc.com | sh"
+            echo "commit: https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+            echo "Checksum is attached as the SHA256SUMS asset."
+          } > "$notes_file"
+
+          if gh release view "${{ steps.ref.outputs.tag }}" >/dev/null 2>&1; then
+            gh release edit "${{ steps.ref.outputs.tag }}" \
+              --title "${{ steps.ref.outputs.tag }}" --notes-file "$notes_file"
+          else
+            gh release create "${{ steps.ref.outputs.tag }}" \
+              --title "${{ steps.ref.outputs.tag }}" --notes-file "$notes_file"
+          fi
+
+          gh release upload "${{ steps.ref.outputs.tag }}" \
+            "${{ steps.package.outputs.tarball }}" \
+            "${{ steps.package.outputs.sha_file }}" \
+            --clobber
