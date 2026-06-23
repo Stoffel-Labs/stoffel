@@ -55,7 +55,7 @@ assert_eq!(result, vec![Value::I64(100)]);
   `stoffel-vm` and is intended for fast local development of clear logic.
 - `execute_local()` uses `stoffel-vm`'s real local coordinator runner for
   local HoneyBadger and AVSS smoke runs. Build
-  `stoffel-run` first with `cargo build -p stoffel-vm --bin stoffel-run`, or
+  `stoffel-run` first with `cargo build -p stoffel-vm-runner --bin stoffel-run`, or
   set `STOFFEL_RUN_BIN` or `local_runner_path(...)`. Relative runner paths are
   resolved from the process working directory first and then from the workspace
   root, so `target/debug/stoffel-run` works for normal workspace runs. Named
@@ -655,7 +655,7 @@ The local MPC examples use the real localhost coordinator/party runner. Build
 the VM runner first, then run them:
 
 ```sh
-cargo build -p stoffel-vm --bin stoffel-run
+cargo build -p stoffel-vm-runner --bin stoffel-run
 cargo run -p stoffel-rust-sdk --example quickstart_mpc
 cargo run -p stoffel-rust-sdk --example local_mpc_client_input
 cargo run -p stoffel-rust-sdk --example local_mpc_named_inputs
