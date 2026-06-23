@@ -1,5 +1,4 @@
 # Stoffel
-![Discord](https://img.shields.io/discord/1300834528042160150?label=discord)
 [![GitHub License](https://img.shields.io/github/license/Stoffel-Labs/stoffel)](LICENSE)
 
 This repository contains the core crates for Stoffel: the CLI, Stoffel-Lang compiler, Rust SDK, and Stoffel VM runtime for local execution and networked multiparty computation (MPC).
