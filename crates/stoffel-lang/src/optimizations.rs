@@ -624,11 +624,16 @@ fn can_move_multiply_to_group_start(
         return true;
     };
 
-    for idx in (first.statement_index + 1)..candidate.statement_index {
+    for (idx, statement) in statements
+        .iter()
+        .enumerate()
+        .take(candidate.statement_index)
+        .skip(first.statement_index + 1)
+    {
         if group.iter().any(|grouped| grouped.statement_index == idx) {
             continue;
         }
-        if !can_move_multiply_before_statement(candidate, &statements[idx]) {
+        if !can_move_multiply_before_statement(candidate, statement) {
             return false;
         }
     }
@@ -2682,7 +2687,7 @@ fn inline_call(
     // Preserve the parameter's secrecy and type annotation so a secret argument
     // binding stays secret: dropping these would let codegen lower a secret
     // value into a clear register (or compile a secret op as a clear op).
-    for (param, arg) in info.params.iter().zip(args.into_iter()) {
+    for (param, arg) in info.params.iter().zip(args) {
         prelude.push(AstNode::VariableDeclaration {
             name: map.get(&param.name).cloned().unwrap(),
             type_annotation: param.type_annotation.clone(),
@@ -4856,9 +4861,9 @@ fn body_has_effect_for_purity(
                     if !target_ok {
                         return true;
                     }
-                } else if is_effectful_call_name(name) {
-                    return true;
-                } else if !pure_fns.contains(name) && !is_pure_builtin(name) {
+                } else if is_effectful_call_name(name)
+                    || (!pure_fns.contains(name) && !is_pure_builtin(name))
+                {
                     return true;
                 }
             } else {

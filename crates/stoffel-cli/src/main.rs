@@ -1915,13 +1915,9 @@ fn validate_mpc_overrides(args: &BuildArgs) -> Result<()> {
 }
 
 fn effective_opt_level(args: &BuildArgs, configured: Option<u8>) -> u8 {
-    args.opt_level.or(configured).unwrap_or(if args.release {
-        3
-    } else if args.optimize {
-        2
-    } else {
-        2
-    })
+    args.opt_level
+        .or(configured)
+        .unwrap_or(if args.release { 3 } else { 2 })
 }
 
 fn selected_sources(project: &Project, args: &BuildArgs) -> Result<Vec<PathBuf>> {
@@ -3230,7 +3226,7 @@ fn parse_hex_bytes(raw: &str) -> Result<Vec<u8>> {
     if raw.is_empty() {
         anyhow::bail!("hex byte input must include at least one byte after 0x");
     }
-    if raw.len() % 2 != 0 {
+    if !raw.len().is_multiple_of(2) {
         anyhow::bail!(
             "hex byte input must contain an even number of digits; write 0x0{raw} for one byte"
         );

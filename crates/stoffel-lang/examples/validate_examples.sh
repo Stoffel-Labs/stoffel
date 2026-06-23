@@ -103,7 +103,7 @@ run_vm() {
   echo "Running local VM example: ${binary_name}"
   (
     cd "$VM_DIR"
-    cargo run --quiet --manifest-path Cargo.toml -p stoffel-vm --bin stoffel-run -- \
+    cargo run --quiet --manifest-path Cargo.toml -p stoffel-vm-runner --bin stoffel-run -- \
       "${OUT_DIR}/${binary_name}" main "$@"
   )
 }

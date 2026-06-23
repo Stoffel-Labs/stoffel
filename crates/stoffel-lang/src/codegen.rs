@@ -368,6 +368,7 @@ impl CodeGenerator {
         vr
     }
 
+    #[allow(dead_code)]
     fn emit_spill_key_load(
         out: &mut Vec<Instruction>,
         constants: &mut Vec<Constant>,
@@ -385,6 +386,7 @@ impl CodeGenerator {
         key_vr
     }
 
+    #[allow(dead_code)]
     fn emit_spill_load(
         out: &mut Vec<Instruction>,
         constants: &mut Vec<Constant>,
@@ -405,6 +407,7 @@ impl CodeGenerator {
         value_vr
     }
 
+    #[allow(dead_code)]
     fn emit_spill_store(
         out: &mut Vec<Instruction>,
         constants: &mut Vec<Constant>,
@@ -586,7 +589,6 @@ impl CodeGenerator {
     fn allocate_registers_with_object_spills(
         instructions: &mut Vec<Instruction>,
         labels: &mut HashMap<String, usize>,
-        constants: &mut Vec<Constant>,
         next_virtual_reg: &mut usize,
         secrecy_map: &mut HashMap<VirtualRegister, bool>,
         precolored: &HashMap<VirtualRegister, PhysicalRegister>,
@@ -1062,14 +1064,20 @@ impl CodeGenerator {
 
     fn is_clear_scalar_literal_for_share(node: &AstNode, share_type: ShareType) -> bool {
         match node {
-            AstNode::Literal { value, .. } => match (share_type, value) {
+            AstNode::Literal { value, .. } => matches!(
+                (share_type, value),
                 (ShareType::SecretInt { .. }, crate::ast::Value::Int { .. })
-                | (ShareType::SecretInt { .. }, crate::ast::Value::Bool(_)) => true,
-                (ShareType::SecretUInt { .. }, crate::ast::Value::Int { .. }) => true,
-                (ShareType::SecretFixedPoint { .. }, crate::ast::Value::Int { .. })
-                | (ShareType::SecretFixedPoint { .. }, crate::ast::Value::Float(_)) => true,
-                _ => false,
-            },
+                    | (ShareType::SecretInt { .. }, crate::ast::Value::Bool(_))
+                    | (ShareType::SecretUInt { .. }, crate::ast::Value::Int { .. })
+                    | (
+                        ShareType::SecretFixedPoint { .. },
+                        crate::ast::Value::Int { .. }
+                    )
+                    | (
+                        ShareType::SecretFixedPoint { .. },
+                        crate::ast::Value::Float(_)
+                    )
+            ),
             AstNode::UnaryOperation { op, operand, .. } if op == "-" => {
                 Self::is_clear_scalar_literal_for_share(operand, share_type)
             }
@@ -2473,7 +2481,7 @@ impl CodeGenerator {
                 let mut virtual_instructions = function_generator.current_instructions;
                 let mut function_labels = function_generator.current_labels;
                 let mut secrecy_map = function_generator.vr_secrecy;
-                let mut function_constants = function_generator.identified_constants;
+                let function_constants = function_generator.identified_constants;
                 let mut next_virtual_reg = function_generator.next_virtual_reg;
 
                 // Precolor parameter VRs to ABI registers R0..Rn-1
@@ -2485,7 +2493,6 @@ impl CodeGenerator {
                 let allocation = Self::allocate_registers_with_object_spills(
                     &mut virtual_instructions,
                     &mut function_labels,
-                    &mut function_constants,
                     &mut next_virtual_reg,
                     &mut secrecy_map,
                     &precolored,
@@ -2738,7 +2745,7 @@ impl CodeGenerator {
         // Perform register allocation for the main chunk's instructions
         let mut main_instructions = self.current_instructions; // Instructions generated for the main body
         let mut main_labels = self.current_labels;
-        let mut main_constants = self.identified_constants;
+        let main_constants = self.identified_constants;
         let mut secrecy_map = self.vr_secrecy;
         let mut next_virtual_reg = self.next_virtual_reg;
         // No precolored mapping for top-level/main chunk
@@ -2746,7 +2753,6 @@ impl CodeGenerator {
         let allocation = Self::allocate_registers_with_object_spills(
             &mut main_instructions,
             &mut main_labels,
-            &mut main_constants,
             &mut next_virtual_reg,
             &mut secrecy_map,
             &empty_pre,
