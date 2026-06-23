@@ -15,10 +15,14 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build the stoffel CLI and create a GitHub Release
+  # ---- Resolve + validate the tag once, before building anything. ----
+  meta:
+    name: Resolve release
     runs-on: ubuntu-latest
-
+    outputs:
+      tag: ${{ steps.ref.outputs.tag }}
+      version: ${{ steps.ref.outputs.version }}
+      ref: ${{ steps.ref.outputs.ref }}
     steps:
       - name: Resolve release ref
         id: ref
@@ -46,16 +50,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-
       - name: Check tag matches stoffel-cli version
         run: |
           crate_version="$(cargo metadata --no-deps --format-version 1 \
             | python3 -c "import sys,json; m=json.load(sys.stdin); print(next(p['version'] for p in m['packages'] if p['name']=='stoffel-cli'))")"
           if [ "$crate_version" != "${{ steps.ref.outputs.version }}" ]; then
-            echo "Tag ${{ steps.ref.outputs.tag }} does not match stoffel-cli version $crate_version"
-            exit 1
+            echo "Tag ${{ steps.ref.outputs.tag }} does not match stoffel-cli version $crate_version"; exit 1
           fi
 
       - name: Check tag commit is contained in main
@@ -63,57 +63,111 @@ jobs:
           git fetch origin main
           git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/main'
 
-      # Builds only the stoffel-cli package's bin ("stoffel"). Pulls the rest of
-      # the graph transitively, but those are all published registry crates now.
-      # No anvil needed: this compiles, it does not run on-chain tests.
+  # ---- Build each target natively (no cross-compilation). ----
+  build:
+    name: Build ${{ matrix.target }}
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu,  runner: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin,        runner: macos-13 }
+          - { target: aarch64-apple-darwin,       runner: macos-14 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
       - name: Build stoffel CLI
-        run: cargo build --release -p stoffel-cli --bin stoffel --locked
+        run: cargo build --release -p stoffel-cli --bin stoffel --locked --target ${{ matrix.target }}
 
       - name: Package binary
-        id: package
         run: |
-          target="x86_64-unknown-linux-gnu"
-          version="${{ steps.ref.outputs.version }}"
+          target="${{ matrix.target }}"
+          version="${{ needs.meta.outputs.version }}"
+          stage="stoffel-$version-$target"
 
-          stage_dir="stoffel-$version-$target"
-          stage="$RUNNER_TEMP/$stage_dir"
-          mkdir -p "$stage"
-          cp "target/release/stoffel" "$stage/"
+          mkdir -p "dist/$stage"
+          cp "target/$target/release/stoffel" "dist/$stage/"
 
-          tarball="$RUNNER_TEMP/$stage_dir.tar.gz"
-          tar -C "$RUNNER_TEMP" -czf "$tarball" "$stage_dir"
+          # COPYFILE_DISABLE avoids AppleDouble (._*) entries from macOS tar.
+          COPYFILE_DISABLE=1 tar -C dist -czf "dist/$stage.tar.gz" "$stage"
+          rm -rf "dist/$stage"
 
-          ( cd "$RUNNER_TEMP" && sha256sum "$(basename "$tarball")" > SHA256SUMS )
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$stage.tar.gz" > "$stage.tar.gz.sha256"
+          else
+            shasum -a 256 "$stage.tar.gz" > "$stage.tar.gz.sha256"
+          fi
+          cat "$stage.tar.gz.sha256"
+
+      - name: Upload target artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ---- Collect all targets, build one SHA256SUMS, publish the release. ----
+  release:
+    name: Publish GitHub Release
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all target artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Assemble SHA256SUMS
+        run: |
+          cd dist
+          cat *.tar.gz.sha256 > SHA256SUMS
+          rm -f *.tar.gz.sha256
           echo "----- SHA256SUMS -----"
-          cat "$RUNNER_TEMP/SHA256SUMS"
-
-          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
-          echo "sha_file=$RUNNER_TEMP/SHA256SUMS" >> "$GITHUB_OUTPUT"
+          cat SHA256SUMS
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
         run: |
           notes_file="$(mktemp)"
           {
-            echo "Stoffel CLI ${{ steps.ref.outputs.tag }} (version ${{ steps.ref.outputs.version }})."
-            echo
-            echo "Binary: stoffel (x86_64-unknown-linux-gnu)"
+            echo "Stoffel CLI $TAG (version $VERSION)."
             echo
             echo "Install:  curl -fsSL https://get.stoffelmpc.com | sh"
+            echo
+            echo "Prebuilt targets: linux x86_64/aarch64, macOS x86_64/aarch64."
             echo "commit: https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
-            echo "Checksum is attached as the SHA256SUMS asset."
+            echo "Checksums are attached as the SHA256SUMS asset."
           } > "$notes_file"
 
-          if gh release view "${{ steps.ref.outputs.tag }}" >/dev/null 2>&1; then
-            gh release edit "${{ steps.ref.outputs.tag }}" \
-              --title "${{ steps.ref.outputs.tag }}" --notes-file "$notes_file"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" -R "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes-file "$notes_file"
           else
-            gh release create "${{ steps.ref.outputs.tag }}" \
-              --title "${{ steps.ref.outputs.tag }}" --notes-file "$notes_file"
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes-file "$notes_file"
           fi
 
-          gh release upload "${{ steps.ref.outputs.tag }}" \
-            "${{ steps.package.outputs.tarball }}" \
-            "${{ steps.package.outputs.sha_file }}" \
-            --clobber
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" \
+            dist/*.tar.gz dist/SHA256SUMS --clobber
