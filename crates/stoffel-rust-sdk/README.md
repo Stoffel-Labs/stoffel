@@ -5,10 +5,10 @@ bytecode loading, VM execution, and MPC participant configuration in Rust apps.
 
 ## Getting Started
 
-Add the workspace crate and import the prelude:
+Add the crate and import the prelude:
 
 ```toml
-stoffel-rust-sdk = { path = "crates/stoffel-rust-sdk" }
+stoffel-rust-sdk = "0.1.0"
 ```
 
 ```rust
