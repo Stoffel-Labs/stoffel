@@ -145,10 +145,6 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
                 "stoffel-bindgen = {{ path = \"{}\" }}",
                 bindgen_path.display()
             ),
-        )
-        + &format!(
-            "\n[patch.crates-io]\nstoffel-vm-runner = {{ path = \"{}\" }}\n",
-            crates_dir.join("stoffel-vm-runner").display(),
         );
     fs::write(&cargo_toml_path, cargo_toml).unwrap();
 

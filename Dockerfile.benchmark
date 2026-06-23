@@ -36,7 +36,14 @@ COPY --from=planner /build/.cargo /build/.cargo
 RUN mkdir -p ~/.ssh && \
     ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true
 
-RUN true
+RUN --mount=type=ssh \
+    --mount=type=cache,id=stoffel-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=stoffel-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=stoffel-benchmark-target-${PROFILE_BUILD}-${ENABLE_NAT},target=/build/target,sharing=locked \
+    if [ "$PROFILE_BUILD" = "true" ]; then \
+        export CARGO_PROFILE_RELEASE_DEBUG=1; \
+    fi; \
+    cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
 
