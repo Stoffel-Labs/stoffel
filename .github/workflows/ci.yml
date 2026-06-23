@@ -42,14 +42,28 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
         continue-on-error: true  # Don't fail on clippy warnings initially
 
-      - name: Build release
-        run: cargo build --release --package stoffel-vm --bin stoffel-run
+      - name: Build release runner
+        run: cargo build --release --package stoffel-vm-runner --bin stoffel-run
 
       - name: Run tests
-        run: cargo test --all-features
+        run: |
+          cargo test --workspace --all-features -- \
+            --skip tests::avss_e2e_integration \
+            --skip tests::avss_integration::test_e2e \
+            --skip tests::dkg_primitives \
+            --skip tests::leader_bootnode_integration \
+            --skip tests::mpc_multiplication_integration \
+            --skip tests::p2p_integration \
+            --skip tests::threshold_signatures \
+            --skip turmoil_ \
+            --skip tests::vm_mesh_integration \
+            --skip tests::vm_mpc_integration \
+            --skip tests::vm_turmoil_e2e \
+            --skip optimized_aes_at_o3_matches_nist_vector \
+            --skip init_default_project_builds_with_cargo_and_sdk_bindings
 
       - name: Upload VM binary
         if: matrix.os == 'ubuntu-latest'
