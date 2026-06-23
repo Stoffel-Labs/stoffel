@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Cargo-like command line tool for Stoffel projects"
 license = "Apache-2.0"
-repository = "https://github.com/Stoffel-Labs/StoffelVM"
+repository = "https://github.com/Stoffel-Labs/stoffel"
 publish = false
 
 [[bin]]

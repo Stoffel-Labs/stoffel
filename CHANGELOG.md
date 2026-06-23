@@ -11,5 +11,5 @@ All notable changes to the Stoffel crates are tracked here.
 
 ### Notes
 
-- `stoffel-cli` and `stoffel-bindgen` are currently marked `publish = false`.
-- Publish order for the initial crate release is `stoffel-vm-types`, `stoffellang`, `stoffel-vm`, `stoffel-vm-runner`, then downstream SDK crates such as `stoffel-rust-sdk`.
+- `stoffel-bindgen` is currently marked `publish = false`; `stoffel-cli` is released as a GitHub binary artifact rather than a crates.io package.
+- Publish order for the initial crate release is `stoffel-vm-types`, `stoffellang`, `stoffel-vm`, `stoffel-vm-runner`, `stoffel-rust-sdk`, then downstream binary artifacts such as `stoffel-cli`.
