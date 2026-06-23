@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Rust SDK for building Stoffel MPC applications"
 license = "Apache-2.0"
-repository = "https://github.com/Stoffel-Labs/StoffelVM"
+repository = "https://github.com/Stoffel-Labs/stoffel"
 readme = "README.md"
 keywords = ["mpc", "sdk", "compiler", "vm", "cryptography"]
 categories = ["api-bindings", "compilers", "cryptography"]
@@ -44,6 +44,6 @@ stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
 
 [dev-dependencies]
 aes = "0.8"
-stoffel-bindgen = { version = "0.1.0", path = "../stoffel-bindgen" }
+stoffel-bindgen = { path = "../stoffel-bindgen" }
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
 trybuild = "1"
