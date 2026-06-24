@@ -91,10 +91,12 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Build stoffel CLI
-        run: cargo build --release -p stoffel-cli --bin stoffel --locked --target ${{ matrix.target }}
+      - name: Build stoffel CLI and runner
+        run: |
+          cargo build --release -p stoffel-cli --bin stoffel --locked --target ${{ matrix.target }}
+          cargo build --release -p stoffel-vm-runner --bin stoffel-run --locked --target ${{ matrix.target }}
 
-      - name: Package binary
+      - name: Package binaries
         run: |
           target="${{ matrix.target }}"
           version="${{ needs.meta.outputs.version }}"
@@ -102,6 +104,7 @@ jobs:
 
           mkdir -p "dist/$stage"
           cp "target/$target/release/stoffel" "dist/$stage/"
+          cp "target/$target/release/stoffel-run" "dist/$stage/"
 
           # COPYFILE_DISABLE avoids AppleDouble (._*) entries from macOS tar.
           COPYFILE_DISABLE=1 tar -C dist -czf "dist/$stage.tar.gz" "$stage"
