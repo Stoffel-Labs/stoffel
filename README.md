@@ -57,10 +57,12 @@ cd hello-mpc
 stoffel run --input a=40 --input b=2
 ```
 
-> **Runner caveat:** local runs need the `stoffel-run` MPC runner. Stoffel looks
-> for it on your Cargo bin path (`~/.cargo/bin/stoffel-run`, e.g. after
-> `cargo install stoffel-vm-runner`); otherwise point at a specific binary with
-> `--runner <path>` or the `STOFFEL_RUN_BIN` environment variable.
+> **Runner caveat:** local runs need the `stoffel-run` MPC runner. The installer
+> drops it next to `stoffel`, and the CLI discovers it automatically. If you
+> installed `stoffel` another way, Stoffel also looks on your Cargo bin path
+> (`~/.cargo/bin/stoffel-run`, e.g. after `cargo install stoffel-vm-runner`), or
+> you can point at a specific binary with `--runner <path>` or the
+> `STOFFEL_RUN_BIN` environment variable.
 
 To build from source instead, see [Build and Test](#build-and-test).
 
@@ -73,7 +75,8 @@ It reads `Stoffel.toml`, defaults to `src/main.stfl`, and writes bytecode to
 > **Local runner:** local execution (`stoffel run` without `--network`, and
 > `stoffel dev`) drives the `stoffel-run` MPC runner. Stoffel resolves it in order:
 > an explicit `--runner <path>`, the `STOFFEL_RUN_BIN` environment variable, a
-> `stoffel-run` on your Cargo bin path (`~/.cargo/bin`, e.g. via
+> `stoffel-run` sitting next to the `stoffel` binary (where the installer puts it),
+> a `stoffel-run` on your Cargo bin path (`~/.cargo/bin`, e.g. via
 > `cargo install stoffel-vm-runner`), then a `stoffel-run` built in the current
 > Cargo workspace. See [Build and Test](#build-and-test) to build one from source.
 
