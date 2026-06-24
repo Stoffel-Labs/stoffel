@@ -57,6 +57,11 @@ cd hello-mpc
 stoffel run --input a=40 --input b=2
 ```
 
+> **Runner caveat:** local runs need the `stoffel-run` MPC runner. Stoffel looks
+> for it on your Cargo bin path (`~/.cargo/bin/stoffel-run`, e.g. after
+> `cargo install stoffel-vm-runner`); otherwise point at a specific binary with
+> `--runner <path>` or the `STOFFEL_RUN_BIN` environment variable.
+
 To build from source instead, see [Build and Test](#build-and-test).
 
 ## Stoffel CLI
@@ -64,6 +69,13 @@ To build from source instead, see [Build and Test](#build-and-test).
 The `stoffel` binary is a Cargo-like project CLI built on top of `crates/stoffel-rust-sdk`.
 It reads `Stoffel.toml`, defaults to `src/main.stfl`, and writes bytecode to
 `target/debug/<package>.stflb` or `target/release/<package>.stflb`.
+
+> **Local runner:** local execution (`stoffel run` without `--network`, and
+> `stoffel dev`) drives the `stoffel-run` MPC runner. Stoffel resolves it in order:
+> an explicit `--runner <path>`, the `STOFFEL_RUN_BIN` environment variable, a
+> `stoffel-run` on your Cargo bin path (`~/.cargo/bin`, e.g. via
+> `cargo install stoffel-vm-runner`), then a `stoffel-run` built in the current
+> Cargo workspace. See [Build and Test](#build-and-test) to build one from source.
 
 ### Create a project
 
@@ -110,10 +122,7 @@ config validates and connects to real node addresses.
 ### Develop with live reload
 
 ```bash
-git clone https://github.com/Stoffel-Labs/stoffel.git
-cd stoffel
-cargo build -p stoffel-vm-runner --bin stoffel-run
-stoffel dev --runner /path/to/stoffel/target/debug/stoffel-run --parties 5 --threshold 1 --input a=40 --input b=2
+stoffel dev --parties 5 --threshold 1 --input a=40 --input b=2
 ```
 
 `stoffel dev` runs once, watches `Stoffel.toml` and the configured source tree,
