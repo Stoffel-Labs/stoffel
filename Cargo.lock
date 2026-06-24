@@ -5536,7 +5536,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 name = "stoffel-bindgen"
 version = "0.1.0"
 dependencies = [
- "stoffellang 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "stoffellang",
  "thiserror 2.0.18",
 ]
 
@@ -5629,11 +5629,11 @@ dependencies = [
  "stoffel-bindgen",
  "stoffel-mpc-coordinator-off-chain",
  "stoffel-mpc-coordinator-shared",
- "stoffel-vm 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "stoffel-vm-runner 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "stoffel-vm-types 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "stoffel-vm",
+ "stoffel-vm-runner",
+ "stoffel-vm-types",
  "stoffelcrypto",
- "stoffellang 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "stoffellang",
  "stoffelnet",
  "tempfile",
  "thiserror 2.0.18",
@@ -5690,9 +5690,9 @@ dependencies = [
  "serde",
  "sha2",
  "smallvec",
- "stoffel-vm-types 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "stoffel-vm-types",
  "stoffelcrypto",
- "stoffellang 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "stoffellang",
  "stoffelnet",
  "tempfile",
  "thiserror 2.0.18",
@@ -5706,62 +5706,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stoffel-vm"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "460231b91c81d1a7b0c98f26a012f854c8aee94b527c754943e9b23dbc4a27df"
-dependencies = [
- "alloy",
- "alloy-primitives",
- "ark-bls12-381",
- "ark-bn254",
- "ark-curve25519",
- "ark-ec",
- "ark-ed25519",
- "ark-ff 0.5.0",
- "ark-poly",
- "ark-secp256k1",
- "ark-secp256r1",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
- "async-trait",
- "bincode",
- "bitflags 2.13.0",
- "blake3",
- "bytes",
- "curve25519-dalek",
- "dashmap 5.5.3",
- "dirs",
- "ed25519-dalek",
- "futures",
- "heed",
- "hex",
- "libc",
- "once_cell",
- "parking_lot 0.12.5",
- "quinn",
- "rand 0.9.4",
- "rcgen",
- "redb",
- "rustc-hash",
- "rustls",
- "rustls-pemfile",
- "serde",
- "sha2",
- "smallvec",
- "stoffel-vm-types 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "stoffelcrypto",
- "stoffelnet",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "x509-parser 0.18.1",
-]
-
-[[package]]
 name = "stoffel-vm-runner"
 version = "0.1.0"
 dependencies = [
@@ -5784,46 +5728,10 @@ dependencies = [
  "serde",
  "stoffel-mpc-coordinator-off-chain",
  "stoffel-mpc-coordinator-shared",
- "stoffel-vm 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "stoffel-vm-types 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "stoffel-vm",
+ "stoffel-vm-types",
  "stoffelcrypto",
- "stoffellang 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "stoffelnet",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
- "x509-parser 0.18.1",
-]
-
-[[package]]
-name = "stoffel-vm-runner"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bc29e0372cab192a0fefc93a88f00cf0626194f177455e298a5351624a63457"
-dependencies = [
- "ark-bls12-381",
- "ark-bn254",
- "ark-curve25519",
- "ark-ec",
- "ark-ed25519",
- "ark-ff 0.5.0",
- "ark-secp256k1",
- "ark-secp256r1",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
- "async-trait",
- "bincode",
- "futures",
- "hex",
- "libc",
- "rustls",
- "serde",
- "stoffel-mpc-coordinator-off-chain",
- "stoffel-mpc-coordinator-shared",
- "stoffel-vm 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "stoffel-vm-types 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "stoffelcrypto",
+ "stoffellang",
  "stoffelnet",
  "thiserror 2.0.18",
  "tokio",
@@ -5835,21 +5743,6 @@ dependencies = [
 [[package]]
 name = "stoffel-vm-types"
 version = "0.1.0"
-dependencies = [
- "num-bigint 0.4.6",
- "num-integer",
- "num-traits",
- "parking_lot 0.12.5",
- "rustc-hash",
- "serde",
- "smallvec",
-]
-
-[[package]]
-name = "stoffel-vm-types"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76197577cc06cc04d0cf07070d1063766a6f51a031162bcc79df3752b37fb6b2"
 dependencies = [
  "num-bigint 0.4.6",
  "num-integer",
@@ -5905,20 +5798,8 @@ dependencies = [
  "clap",
  "colored",
  "edit-distance",
- "stoffel-vm-types 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "stoffel-vm-types",
  "tempfile",
-]
-
-[[package]]
-name = "stoffellang"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f3e994a7b440795b694c1c2ec19ec1947f92798a70f6c3b686f8f90b77d9f92"
-dependencies = [
- "clap",
- "colored",
- "edit-distance",
- "stoffel-vm-types 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
