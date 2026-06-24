@@ -504,4 +504,4 @@ select the backend from the compiled `.stflb` program manifest.
 ## Learn More
 
 To learn more about what you can build with Stoffel, visit
-[stoffelmpc.com](https://stoffelmpc.com?utm_source=github&utm_medium=readme&utm_campaign=stoffel-repo&utm_term=mpc).
+[stoffelmpc.com](https://stoffelmpc.com).
