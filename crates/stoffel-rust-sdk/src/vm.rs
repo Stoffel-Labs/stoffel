@@ -428,22 +428,47 @@ fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
         });
     }
 
-    let Some(workspace_root) = workspace_root() else {
-        return Err(Error::Unsupported(
-            "SDK local coordinator execution requires a built stoffel-run binary; set STOFFEL_RUN_BIN, call `local_runner_path`, or build `cargo build -p stoffel-vm-runner --bin stoffel-run`"
-                .to_owned(),
-        ));
-    };
-    let candidate = workspace_root
-        .join("target")
-        .join("debug")
-        .join("stoffel-run");
-    candidate.exists().then_some(candidate).ok_or_else(|| {
-        Error::Unsupported(
-            "SDK local coordinator execution requires a built stoffel-run binary; set STOFFEL_RUN_BIN, call `local_runner_path`, or build `cargo build -p stoffel-vm-runner --bin stoffel-run`"
-                .to_owned(),
-        )
-    })
+    if let Some(path) = sibling_runner() {
+        return Ok(path);
+    }
+
+    if let Some(path) = cargo_bin_runner() {
+        return Ok(path);
+    }
+
+    if let Some(workspace_root) = workspace_root() {
+        let candidate = workspace_root
+            .join("target")
+            .join("debug")
+            .join("stoffel-run");
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(Error::Unsupported(
+        "SDK local coordinator execution requires a stoffel-run binary; install it with `cargo install --path crates/stoffel-vm-runner` (or `cargo install stoffel-vm-runner`) so it lands on your Cargo bin path, set STOFFEL_RUN_BIN, call `local_runner_path`, or build `cargo build -p stoffel-vm-runner --bin stoffel-run`"
+            .to_owned(),
+    ))
+}
+
+/// Look for a `stoffel-run` binary sitting next to the current executable.
+/// This is the case after the `stoffel` CLI installer, which drops both
+/// `stoffel` and `stoffel-run` into the same directory (e.g. `~/.local/bin`).
+fn sibling_runner() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let candidate = exe.with_file_name("stoffel-run");
+    candidate.exists().then_some(candidate)
+}
+
+/// Look for a `stoffel-run` binary installed on the user's Cargo bin path
+/// (`$CARGO_HOME/bin` or `~/.cargo/bin`), e.g. via `cargo install`.
+fn cargo_bin_runner() -> Option<PathBuf> {
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))?;
+    let candidate = cargo_home.join("bin").join("stoffel-run");
+    candidate.exists().then_some(candidate)
 }
 
 fn resolve_existing_runner_path(path: &Path) -> Option<PathBuf> {

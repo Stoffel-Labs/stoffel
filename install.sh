@@ -11,6 +11,7 @@ set -eu
 
 REPO="Stoffel-Labs/stoffel"
 BIN="stoffel"
+RUNNER="stoffel-run"
 INSTALL_DIR="${STOFFEL_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${STOFFEL_VERSION:-}"
 
@@ -91,14 +92,31 @@ info "checksum verified"
 
 # --- extract & install ---
 tar xzf "$TARBALL"
-src="stoffel-${VERSION}-${TARGET}/${BIN}"
-[ -f "$src" ] || src="$(find . -type f -name "$BIN" | head -n 1)"
-[ -n "${src:-}" ] && [ -f "$src" ] || err "binary '${BIN}' not found in archive"
+stage="stoffel-${VERSION}-${TARGET}"
 
 mkdir -p "$INSTALL_DIR"
-install -m 0755 "$src" "$INSTALL_DIR/${BIN}" 2>/dev/null \
-  || { cp "$src" "$INSTALL_DIR/${BIN}" && chmod 0755 "$INSTALL_DIR/${BIN}"; }
-info "installed to ${INSTALL_DIR}/${BIN}"
+
+# install_binary <name> <required:0|1>
+install_binary() {
+  name="$1"; required="$2"
+  src="${stage}/${name}"
+  [ -f "$src" ] || src="$(find . -type f -name "$name" | head -n 1)"
+  if [ -z "${src:-}" ] || [ ! -f "$src" ]; then
+    if [ "$required" -eq 1 ]; then
+      err "binary '${name}' not found in archive"
+    fi
+    info "note: '${name}' not bundled in this release; skipping"
+    return 0
+  fi
+  install -m 0755 "$src" "$INSTALL_DIR/${name}" 2>/dev/null \
+    || { cp "$src" "$INSTALL_DIR/${name}" && chmod 0755 "$INSTALL_DIR/${name}"; }
+  info "installed to ${INSTALL_DIR}/${name}"
+}
+
+# The CLI is required; the runner powers local MPC execution (`stoffel run`,
+# `stoffel dev`). `stoffel` discovers `stoffel-run` as a sibling on disk.
+install_binary "$BIN" 1
+install_binary "$RUNNER" 0
 
 # --- PATH hint ---
 case ":${PATH}:" in
