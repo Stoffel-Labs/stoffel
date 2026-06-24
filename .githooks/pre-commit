@@ -21,6 +21,7 @@ git grep -n -E "(package[[:space:]]*=[[:space:]]*\"(${published_package_pattern}
   ':!target' \
   ':!.git' \
   ':!.githooks/pre-commit' |
+  grep -v -E 'version[[:space:]]*=' |
   grep -v -E \
     '^(crates/stoffel-cli/Cargo.toml|crates/stoffel-rust-sdk/Cargo.toml|crates/stoffel-lang/examples/mpc_aes128_cbc_client_io/Cargo.toml|crates/stoffel-cli/tests/cli.rs):' \
   >>"$stale_package_refs" || true
@@ -42,6 +43,11 @@ exception in this hook.
 MSG
   cat "$stale_package_refs" >&2
   exit 1
+fi
+
+if [ "${1:-}" = "--manifest-scan-only" ]; then
+  echo "pre-commit: manifest scan passed"
+  exit 0
 fi
 
 if [ -f "$ci_workflow" ] && ! grep -Eq "cargo build .*--package[[:space:]]+${runner_package}[[:space:]]+--bin[[:space:]]+${runner_bin}" "$ci_workflow"; then

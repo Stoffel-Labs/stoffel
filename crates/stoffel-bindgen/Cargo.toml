@@ -11,5 +11,5 @@ categories = ["development-tools::build-utils", "compilers"]
 publish = true
 
 [dependencies]
-stoffellang = "0.1.0"
+stoffellang = { version = "0.1.0", path = "../stoffel-lang" }
 thiserror = "2"
