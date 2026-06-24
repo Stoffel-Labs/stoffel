@@ -1,7 +1,38 @@
 # Stoffel
 [![GitHub License](https://img.shields.io/github/license/Stoffel-Labs/stoffel)](LICENSE)
 
-This repository contains the core crates for Stoffel: the CLI, Stoffel-Lang compiler, Rust SDK, and Stoffel VM runtime for local execution and networked multiparty computation (MPC).
+Stoffel is a toolchain for writing, compiling, and running programs that compute
+over private data using secure Multi-Party Computation (MPC). You write ordinary
+looking code, mark the values that must stay secret, and Stoffel compiles and
+executes it so that no single party ever sees the secret inputs in the clear.
+
+This repository is the Stoffel monorepo. It contains everything from the
+language and compiler down to the runtime and the networking/MPC layer:
+
+| Product | Crate | What it is |
+|---------|-------|------------|
+| **Stoffel CLI** | `crates/stoffel-cli` | The Cargo-like `stoffel` command for creating, building, and running MPC projects |
+| **StoffelLang** | `crates/stoffel-lang` | The `stoffel` language compiler (`.stfl` → `.stflb` bytecode) |
+| **Stoffel SDK** | `crates/stoffel-rust-sdk` | The Rust SDK (`stoffel` crate) for embedding compilation, execution, and MPC config in apps |
+| **Stoffel VM** | `crates/stoffel-vm` | The register-based VM runtime, networking, and MPC backends (HoneyBadger, AVSS), plus the C FFI |
+
+Supporting crates:
+
+- `crates/stoffel-vm-runner`: the `stoffel-run` binary — local runner and distributed MPC party/client node
+- `crates/stoffel-vm-types`: shared VM types, the instruction set, runtime `Value`s, and the compiled bytecode format
+- `crates/stoffel-bindgen`: build-time generation of typed Rust bindings for Stoffel programs
+- `include/`: the public C header and FFI notes for embedding the VM from C-compatible environments
+
+```
+StoffelLang source (.stfl)
+        │  stoffel build / stoffel-lang
+        ▼
+Compiled bytecode (.stflb)        ← stoffel-vm-types::compiled_binary
+        │  stoffel run / stoffel-run / Stoffel SDK
+        ▼
+Stoffel VM  ── local execution  (clear or simulated MPC)
+            └─ distributed MPC  (HoneyBadger / AVSS over QUIC)
+```
 
 ## Installation
 
@@ -26,122 +57,194 @@ cd hello-mpc
 stoffel run --input a=40 --input b=2
 ```
 
-## Background on Stoffel
+> **Runner caveat:** local runs need the `stoffel-run` MPC runner. Stoffel looks
+> for it on your Cargo bin path (`~/.cargo/bin/stoffel-run`, e.g. after
+> `cargo install stoffel-vm-runner`); otherwise point at a specific binary with
+> `--runner <path>` or the `STOFFEL_RUN_BIN` environment variable.
 
-In its current form, Stoffel is designed to handle both simple and complex programs. The VM supports basic values such as integers, booleans, strings, and floating point numbers, along with more complex runtime types such as objects, arrays, closures, foreign objects, and secret shares. The VM is designed as a register machine to make execution predictable and to map cleanly onto optimized runtimes and physical MPC backends.
+To build from source instead, see [Build and Test](#build-and-test).
 
-The instruction set covers memory operations, arithmetic, bitwise operations, control flow, and function calls. Stoffel also has a closure system with true lexical scoping, where functions can capture values from their surrounding environment as upvalues and continue using them after the original scope has exited.
+## Stoffel CLI
 
-Stoffel supports Rust <> Stoffel FFI out of the box. This lets you extend the runtime with native Rust functions and objects while keeping the VM execution model intact. The runtime also exposes a configurable hook system that can intercept instruction execution, register access, stack events, object and array access, closure creation, and more for debugging or instrumentation.
+The `stoffel` binary is a Cargo-like project CLI built on top of `crates/stoffel-rust-sdk`.
+It reads `Stoffel.toml`, defaults to `src/main.stfl`, and writes bytecode to
+`target/debug/<package>.stflb` or `target/release/<package>.stflb`.
 
-The workspace currently includes:
+> **Local runner:** local execution (`stoffel run` without `--network`, and
+> `stoffel dev`) drives the `stoffel-run` MPC runner. Stoffel resolves it in order:
+> an explicit `--runner <path>`, the `STOFFEL_RUN_BIN` environment variable, a
+> `stoffel-run` on your Cargo bin path (`~/.cargo/bin`, e.g. via
+> `cargo install stoffel-vm-runner`), then a `stoffel-run` built in the current
+> Cargo workspace. See [Build and Test](#build-and-test) to build one from source.
 
-- `crates/stoffel-cli`: the Cargo-like `stoffel` project CLI
-- `crates/stoffel-lang`: the Stoffel-Lang compiler
-- `crates/stoffel-rust-sdk`: the Rust SDK used by the CLI and applications
-- `crates/stoffel-vm`: the runtime, networking layer, MPC integrations, and C FFI
-- `crates/stoffel-vm-runner`: the `stoffel-run` binary and local runner
-- `crates/stoffel-vm-types`: shared VM types, instruction definitions, and the compiled bytecode format
-- `include/`: the public C header and FFI notes
+### Create a project
 
-## Features
+```bash
+stoffel init my-lib --lib
+stoffel init rust-app --template rust
+stoffel init py-app --template python
+stoffel init contract-app --template solidity-foundry
+stoffel init hardhat-app --template solidity-hardhat
+```
 
-Stoffel VM currently supports the following instructions:
+### Build, check, and inspect
 
-### Memory Operations
+```bash
+stoffel build
+stoffel check
+stoffel compile src/main.stfl -O2 --output target/debug/hello-mpc.stflb
+stoffel compile --disassemble target/debug/hello-mpc.stflb
+```
 
-- `LD(dest_reg, stack_offset)`: Load a value from the current activation record into a register
-- `LDI(dest_reg, value)`: Load an immediate value into a register
-- `MOV(dest_reg, src_reg)`: Move a value from one register to another
-- `PUSHARG(reg)`: Push a register value as a function argument
+`build` and `compile` default to all `src/**/*.stfl` files when no source path is
+provided. Use `--output` when compiling a single file.
 
-### Arithmetic Operations
+### Run
 
-- `ADD(dest_reg, src1_reg, src2_reg)`: Add two registers
-- `SUB(dest_reg, src1_reg, src2_reg)`: Subtract two registers
-- `MUL(dest_reg, src1_reg, src2_reg)`: Multiply two registers
-- `DIV(dest_reg, src1_reg, src2_reg)`: Divide two registers
-- `MOD(dest_reg, src1_reg, src2_reg)`: Modulo operation
+```bash
+stoffel run target/debug/hello-mpc.stflb --entry main --input a=40 --input b=2
+stoffel run --input a=40 --input b=2
+stoffel run program.stfl --local --client-input 0=42 --parties 5 --threshold 1
+stoffel run program.stfl --local --expected-output-clients 2
+stoffel run target/debug/program.stflb --network --config offchain-client.toml --input x=42
+stoffel run target/debug/program.stflb --network --config party-network.toml --connect-timeout-ms 1000
+```
 
-### Bitwise Operations
+`run` accepts `.stfl` source or `.stflb` bytecode. By default it runs through the
+local MPC coordinator; `--local` is accepted as an explicit local mode selector.
+Use `--client-input SLOT=VALUE` for `ClientStore` input providers, and
+`--expected-output-clients N` to declare output-capable local client slots
+`0..N-1` for dynamic output loops or output-only runs (this does not synthesize
+client inputs). `--network --config` uses SDK network configuration: an off-chain
+client config executes through the coordinator/node RPC path, while a network
+config validates and connects to real node addresses.
 
-- `AND(dest_reg, src1_reg, src2_reg)`: Bitwise AND
-- `OR(dest_reg, src1_reg, src2_reg)`: Bitwise OR
-- `XOR(dest_reg, src1_reg, src2_reg)`: Bitwise XOR
-- `NOT(dest_reg, src_reg)`: Bitwise NOT
-- `SHL(dest_reg, src_reg, amount_reg)`: Shift left
-- `SHR(dest_reg, src_reg, amount_reg)`: Shift right
+### Develop with live reload
 
-### Control Flow
+```bash
+stoffel dev --parties 5 --threshold 1 --input a=40 --input b=2
+```
 
-- `JMP(label)`: Unconditional jump
-- `JMPEQ(label)`: Jump if equal
-- `JMPNEQ(label)`: Jump if not equal
-- `JMPLT(label)`: Jump if less than
-- `JMPGT(label)`: Jump if greater than
-- `CMP(reg1, reg2)`: Compare two registers
-- `CALL(function_name)`: Call a function
-- `RET(reg)`: Return from the current function with the value in a register
+`stoffel dev` runs once, watches `Stoffel.toml` and the configured source tree,
+then rebuilds and reruns whenever a `.stfl` file or project config changes. Use
+`stoffel dev --once` for one-shot behavior, or `--poll-ms <N>` to tune reload latency.
 
-### Values
+### Test and manage projects
 
-Stoffel VM currently exposes the following runtime value variants:
+```bash
+stoffel test
+stoffel test --test selected --verbose
+stoffel status --verbose
+stoffel clean
+stoffel clean --all
+stoffel update --check
+stoffel update
+```
 
-- `Value::I64(i64)`: 64-bit signed integer
-- `Value::I32(i32)`: 32-bit signed integer
-- `Value::I16(i16)`: 16-bit signed integer
-- `Value::I8(i8)`: 8-bit signed integer
-- `Value::U8(u8)`: 8-bit unsigned integer
-- `Value::U16(u16)`: 16-bit unsigned integer
-- `Value::U32(u32)`: 32-bit unsigned integer
-- `Value::U64(u64)`: 64-bit unsigned integer
-- `Value::Float(F64)`: 64-bit floating point
-- `Value::Bool(bool)`: Boolean value
-- `Value::String(String)`: String value
-- `Value::Object(ObjectRef)`: Object table reference
-- `Value::Array(ArrayRef)`: Array table reference
-- `Value::Foreign(ForeignObjectRef)`: Foreign object reference
-- `Value::Closure(Arc<Closure>)`: Function closure with captured environment
-- `Value::Unit`: Unit/void/nil value
-- `Value::Share(ShareType, ShareData)`: Secret-shared value for MPC
+`status` validates project config, checks detected dependency managers, compiles
+configured sources, and reports local MPC network configuration. `clean` removes
+the project `target/` directory and Stoffel build cache; `--all` also removes
+known ecosystem caches such as `node_modules`, Foundry cache/output, and Python
+test caches. `update` checks for CLI/project dependency updates and runs detected
+project dependency update commands; use `--check` to inspect without changing files.
 
-### Standard Library Builtins!
+## StoffelLang
 
-Stoffel VM registers the following general runtime builtins by default:
+StoffelLang (`.stfl`) is the source language compiled by `crates/stoffel-lang`
+into Stoffel VM bytecode. It is a Python-flavored, statically typed language: it
+uses indentation and `def`, but values carry concrete types and the `secret`
+qualifier marks data that must remain private under MPC.
 
-- `print`: Print values to the console
-- `type`: Get the type of a value as a string
-- `create_object`: Create a new object
-- `create_array`: Create a new array
-- `get_field`: Get a field from an object or array
-- `set_field`: Set a field in an object or array
-- `array_length`: Get the length of an array
-- `array_push`: Append one or more values to an array
-- `create_closure`: Create a closure
-- `call_closure`: Call a closure
-- `get_upvalue`: Read a captured upvalue from a closure
-- `set_upvalue`: Update a captured upvalue in a closure
-- `ClientStore.get_number_clients`: Get the number of known local client slots
-- `ClientStore.get_number_input_clients`: Get the number of clients with input material
-- `ClientStore.get_number_output_clients`: Get the number of output-capable clients
-- `ClientStore.take_share`: Load a client share into the VM
-- `ClientStore.take_share_fixed`: Load a client fixed-point share into the VM
-- `MpcOutput.send_to_client`: Send a share result to a client
+```python
+def main(a: secret int64, b: secret int64) -> secret int64:
+  return a + b
+```
 
-### MPC Builtins
+Arithmetic, comparisons, and control flow work transparently on both clear and
+`secret` values; the compiler and VM insert the MPC operations needed for secret
+operands. Programs interact with the runtime through module-style builtins such
+as `Share.*`, `Field.*`, and `Mpc.*` (see [Builtins](#standard-library-builtins)).
 
-The VM also registers MPC-focused module-style builtins:
+Many worked programs live in `crates/stoffel-lang/examples/`, including local
+collections/control-flow demos, AES-128 (CTR/CBC/circuit) under MPC, and
+threshold ECDSA / certificate-signing flows. See
+`crates/stoffel-lang/examples/README.md` for an index.
 
-- `Share.*`: clear-to-share conversion, arithmetic on shares, opening, random share generation, client output, local interpolation, and commitment inspection
-- `Mpc.*`: runtime MPC metadata such as party id, threshold, instance id, readiness, and randomness helpers
-- `Rbc.*`: reliable broadcast helpers
-- `Crypto.*`: hashing and curve/field conversion helpers
-- `Bytes.*`: byte-array helpers
-- `Avss.*`: AVSS-specific helper functions
+The compiler can be driven directly (`stoffel compile`) or through the SDK; bump
+the binary format version when serialization changes (see
+`crates/stoffel-vm-types/src/compiled_binary/`).
 
-## How do I use it!?
+## Stoffel SDK (Rust)
 
-At the moment, the most direct way to use the runtime is to embed it in a Rust program and register `VMFunction` values. `VirtualMachine::new()` automatically registers the standard library and MPC builtins.
+`crates/stoffel-rust-sdk` publishes the `stoffel` crate: the library entry point
+for embedding Stoffel-Lang compilation, bytecode loading, VM execution, and MPC
+participant configuration in Rust applications. The CLI itself is built on it.
+
+```toml
+# Cargo.toml
+stoffel-rust-sdk = "0.1.0"
+```
+
+```rust
+use stoffel::prelude::*;
+
+let result = Stoffel::compile(
+    "def main(a: int64, b: int64) -> int64:\n  return a + b",
+)?
+.with_inputs(&[("a", 42_i64), ("b", 58_i64)])
+.execute_clear()?;
+
+assert_eq!(result[0].as_i64(), Some(100));
+# Ok::<(), stoffel::Error>(())
+```
+
+For local MPC smoke runs, use the same builder and call `execute_local().await`.
+This starts real localhost VM parties through `stoffel-vm`'s local coordinator
+runner when a built `stoffel-run` binary is available:
+
+```rust
+use stoffel::prelude::*;
+
+# async fn example() -> stoffel::Result<()> {
+let result = Stoffel::compile(
+    "def main(a: secret int64, b: secret int64) -> secret int64:\n  return a + b",
+)?
+.parties(5)
+.threshold(1)
+.execute_local()
+.await?;
+# Ok(())
+# }
+```
+
+`crates/stoffel-bindgen` complements the SDK by generating typed Rust bindings
+for a Stoffel program at build time, so host code can call into compiled
+programs with a checked interface.
+
+## Stoffel VM
+
+`stoffel-vm` is a register machine optimized for MPC. The register design keeps
+execution predictable and maps cleanly onto optimized runtimes and physical MPC
+backends. It supports basic values (integers, booleans, strings, floats) and
+complex runtime types (objects, arrays, closures, foreign objects, and secret
+shares), and has a closure system with true lexical scoping where functions
+capture upvalues from their surrounding environment.
+
+Stoffel supports Rust ⇆ Stoffel FFI out of the box, so you can extend the
+runtime with native Rust functions and objects while keeping the execution model
+intact. A configurable hook system can intercept instruction execution, register
+access, stack events, object/array access, closure creation, and more for
+debugging or instrumentation.
+
+HoneyBadger and AVSS MPC backends are built by default. Distributed party runs
+select the backend from the compiled `.stflb` program manifest.
+
+### Embedding the VM directly
+
+The most direct low-level use of the runtime is to embed it in a Rust program
+and register `VMFunction` values. `VirtualMachine::new()` automatically registers
+the standard library and MPC builtins. (Most applications should prefer the SDK
+above; this is the raw API.)
 
 ```rust
 use std::collections::HashMap;
@@ -179,22 +282,82 @@ fn main() -> Result<(), String> {
 }
 ```
 
-Now that you're familiar with the basics of Stoffel VM, good places to explore next are:
+Good places to explore next:
 
-1. `crates/stoffel-vm-types/examples/generate_client_mul_program.rs` for a bytecode-generation example
-2. `crates/stoffel-vm/src/tests/vm_mpc_integration.rs` for VM + MPC execution flows
-3. `tests/p2p_integration.rs` for QUIC networking coverage
+1. `crates/stoffel-vm-types/examples/generate_client_mul_program.rs` — a bytecode-generation example
+2. `crates/stoffel-vm/src/tests/vm_mpc_integration.rs` — VM + MPC execution flows
+3. `tests/p2p_integration.rs` — QUIC networking coverage
 
-## Learn More
+### Instruction Set
 
-To learn more about what you can build with Stoffel, visit 
-[stoffelmpc.com](https://stoffelmpc.com?utm_source=github&utm_medium=readme&utm_campaign=stoffel-repo&utm_term=mpc)
+**Memory Operations**
 
-## Compiled Bytecode
+- `LD(dest_reg, stack_offset)`: Load a value from the current activation record into a register
+- `LDI(dest_reg, value)`: Load an immediate value into a register
+- `MOV(dest_reg, src_reg)`: Move a value from one register to another
+- `PUSHARG(reg)`: Push a register value as a function argument
 
-Stoffel also ships a portable compiled binary format through `stoffel-vm-types::compiled_binary::CompiledBinary`. The format uses the magic bytes `STFL` and can round-trip between `VMFunction` definitions and serialized binaries.
+**Arithmetic Operations**
 
-You can generate a compiled binary from Rust-defined functions like this:
+- `ADD`, `SUB`, `MUL`, `DIV`, `MOD` `(dest_reg, src1_reg, src2_reg)`
+
+**Bitwise Operations**
+
+- `AND`, `OR`, `XOR` `(dest_reg, src1_reg, src2_reg)`
+- `NOT(dest_reg, src_reg)`
+- `SHL`, `SHR` `(dest_reg, src_reg, amount_reg)`
+
+**Control Flow**
+
+- `JMP(label)`: Unconditional jump
+- `JMPEQ`, `JMPNEQ`, `JMPLT`, `JMPGT` `(label)`: Conditional jumps
+- `CMP(reg1, reg2)`: Compare two registers
+- `CALL(function_name)`: Call a function
+- `RET(reg)`: Return from the current function with the value in a register
+
+### Values
+
+```
+Value::I64/I32/I16/I8   — signed integers
+Value::U64/U32/U16/U8   — unsigned integers
+Value::Float(F64)       — 64-bit floating point
+Value::Bool(bool)       — boolean
+Value::String(String)   — string
+Value::Object(ObjectRef)        — object table reference
+Value::Array(ArrayRef)          — array table reference
+Value::Foreign(ForeignObjectRef) — foreign object reference
+Value::Closure(Arc<Closure>)    — closure with captured environment
+Value::Unit                     — unit/void/nil
+Value::Share(ShareType, ShareData) — secret-shared value for MPC
+```
+
+### Standard Library Builtins
+
+General runtime builtins registered by default:
+
+- `print` / `type`: print values; get a value's type as a string
+- `create_object` / `create_array`: create an object or array
+- `get_field` / `set_field`: get/set a field on an object or array
+- `array_length` / `array_push`: length of an array; append values
+- `create_closure` / `call_closure`: create and invoke closures
+- `get_upvalue` / `set_upvalue`: read/update captured upvalues
+- `ClientStore.*`: client slot counts and `take_share` / `take_share_fixed`
+- `MpcOutput.send_to_client`: send a share result to a client
+
+MPC-focused, module-style builtins:
+
+- `Share.*`: clear-to-share conversion, arithmetic on shares, opening, random share generation, client output, local interpolation, and commitment inspection
+- `Mpc.*`: runtime MPC metadata such as party id, threshold, instance id, readiness, and randomness helpers
+- `Rbc.*`: reliable broadcast helpers
+- `Crypto.*`: hashing and curve/field conversion helpers
+- `Bytes.*`: byte-array helpers
+- `Avss.*`: AVSS-specific helper functions
+
+### Compiled Bytecode
+
+Stoffel ships a portable compiled binary format through
+`stoffel-vm-types::compiled_binary::CompiledBinary`. The format uses the magic
+bytes `STFL` and round-trips between `VMFunction` definitions and serialized binaries.
 
 ```rust
 use stoffel_vm_types::compiled_binary::{utils::save_to_file, CompiledBinary};
@@ -204,127 +367,13 @@ let binary = CompiledBinary::from_vm_functions(&functions);
 save_to_file(&binary, "program.stflb").unwrap();
 ```
 
-## Build and Test
+## VM Runner CLI (`stoffel-run`)
 
-Build everything:
-
-```bash
-cargo build
-```
-
-Run the test suite:
-
-```bash
-cargo test
-cargo test -- --ignored
-```
-
-Build the runtime and CLI in release mode:
-
-```bash
-cargo build --release -p stoffel-vm -p stoffel-vm-runner
-```
-
-HoneyBadger and AVSS backend code is built by default. Distributed party runs select the backend
-from the compiled `.stflb` program manifest.
-
-## Stoffel CLI
-
-The `stoffel` binary is a Cargo-like project CLI built on top of `crates/stoffel-rust-sdk`.
-
-Project templates:
-
-```bash
-stoffel init my-lib --lib
-stoffel init rust-app --template rust
-stoffel init py-app --template python
-stoffel init contract-app --template solidity-foundry
-stoffel init hardhat-app --template solidity-hardhat
-```
-
-Compile project bytecode, validate source, or inspect bytecode:
-
-```bash
-stoffel build
-stoffel check
-stoffel compile src/main.stfl -O2 --output target/debug/hello-mpc.stflb
-stoffel compile --disassemble target/debug/hello-mpc.stflb
-```
-
-`build` and `compile` default to all `src/**/*.stfl` files when no source path is
-provided. Use `--output` when compiling a single file.
-
-Run local MPC development mode when `stoffel-run` is available:
-
-```bash
-git clone https://github.com/Stoffel-Labs/stoffel.git
-cd stoffel
-cargo build -p stoffel-vm-runner --bin stoffel-run
-stoffel dev --runner /path/to/stoffel/target/debug/stoffel-run --parties 5 --threshold 1 --input a=40 --input b=2
-```
-
-`stoffel dev` runs once, watches `Stoffel.toml` and the configured source tree,
-then rebuilds and reruns whenever a `.stfl` file or project config changes. Use
-`stoffel dev --once` for the old script-friendly one-shot behavior, or
-`--poll-ms <N>` to tune reload latency.
-
-Run compiled bytecode or project tests:
-
-```bash
-stoffel run target/debug/hello-mpc.stflb --entry main --input a=40 --input b=2
-stoffel run --input a=40 --input b=2
-stoffel run program.stfl --local --client-input 0=42 --parties 5 --threshold 1
-stoffel run program.stfl --local --expected-output-clients 2
-stoffel run target/debug/program.stflb --network --config offchain-client.toml --input x=42
-stoffel run target/debug/program.stflb --network --config party-network.toml --connect-timeout-ms 1000
-stoffel test
-stoffel test --test selected --verbose
-```
-
-`run` accepts `.stfl` source or `.stflb` bytecode. By default it runs
-through the local MPC coordinator; `--local` is accepted as an explicit local
-mode selector. Use `--client-input SLOT=VALUE` for `ClientStore` input
-providers. Use `--expected-output-clients N` to declare output-capable local
-client slots `0..N-1` for dynamic output loops or output-only runs; this does
-not synthesize client inputs.
-`--network --config` uses SDK network configuration: an off-chain client config
-executes through the coordinator/node RPC path, while a network config validates
-and connects to real node addresses.
-
-Project management utilities:
-
-```bash
-stoffel status --verbose
-stoffel clean
-stoffel clean --all
-stoffel update --check
-stoffel update
-```
-
-`status` validates project config, checks detected dependency managers, compiles
-configured sources, and reports local MPC network configuration. `clean` removes
-the project `target/` directory and Stoffel build cache; `--all` also removes
-known ecosystem caches such as `node_modules`, Foundry cache/output, and Python
-test caches. `update` checks for CLI/project dependency updates and runs detected
-project dependency update commands; use `--check` to inspect without changing
-files.
-
-The CLI reads `Stoffel.toml`, defaults to `src/main.stfl`, and writes bytecode to
-`target/debug/<package>.stflb` or `target/release/<package>.stflb`.
-
-## VM Runner CLI
-
-A CLI is included to run a compiled Stoffel bytecode file locally or as part of a distributed MPC session.
-
-Build the CLI:
+`stoffel-vm-runner` provides `stoffel-run`, which executes a compiled Stoffel
+bytecode file locally or as part of a distributed MPC session.
 
 ```bash
 cargo build --release -p stoffel-vm-runner
-```
-
-Show the available flags:
-
-```bash
 cargo run -p stoffel-vm-runner --bin stoffel-run -- --help
 ```
 
@@ -383,8 +432,7 @@ Notes:
 
 - `STOFFEL_AUTH_TOKEN` is required for authenticated discovery in bootnode, leader, and party flows
 - The CLI accepts any file path; this repository conventionally stores compiled fixtures as `.stflb`
-- `--mpc-backend` supports `honeybadger` and `avss` for client mode and legacy binaries; v3+
-  `.stflb` party runs use the manifest backend and reject conflicting CLI overrides
+- `--mpc-backend` supports `honeybadger` and `avss` for client mode; `.stflb` party runs use the backend recorded in the program manifest and reject conflicting CLI overrides
 - `--mpc-curve` supports `bls12-381`, `bn254`, `curve25519`, `ed25519`, `secp256k1`, and `p-256` (`secp256r1`) for AVSS
 
 ## Docker Flows
@@ -396,7 +444,7 @@ STOFFEL_AUTH_TOKEN=replace-with-random-secret \
 docker compose -f docker-compose.coordinator.reserve-index.yml up --build
 ```
 
-That coordinator path currently runs through the HoneyBadger/BLS12-381 VM path. The AVSS compose stack is separate and is the persistence testbed for AVSS curves and local share storage:
+That coordinator path runs through the HoneyBadger/BLS12-381 VM path. The AVSS compose stack is separate and covers AVSS curves and local share storage:
 
 ```bash
 STOFFEL_AUTH_TOKEN=replace-with-random-secret \
@@ -405,7 +453,7 @@ docker compose -f docker-compose.avss.yml up --build
 
 `docker-compose.avss.yml` mounts a per-party local data volume and forwards `STOFFEL_LOCAL_STORE` to `stoffel-run`.
 
-The AVSS threshold ECDSA examples mirror the existing threshold signature fixtures:
+The AVSS threshold ECDSA examples mirror the threshold signature fixtures:
 
 ```bash
 STOFFEL_AUTH_TOKEN=replace-with-random-secret \
@@ -437,3 +485,32 @@ Platform-specific library names:
 - Linux: `libstoffel_vm.so`
 - macOS: `libstoffel_vm.dylib`
 - Windows: `stoffel_vm.dll`
+
+## Build and Test
+
+Build everything:
+
+```bash
+cargo build
+```
+
+Run the test suite:
+
+```bash
+cargo test
+cargo test -- --ignored
+```
+
+Build the runtime and CLI in release mode:
+
+```bash
+cargo build --release -p stoffel-vm -p stoffel-vm-runner
+```
+
+HoneyBadger and AVSS backend code is built by default. Distributed party runs
+select the backend from the compiled `.stflb` program manifest.
+
+## Learn More
+
+To learn more about what you can build with Stoffel, visit
+[stoffelmpc.com](https://stoffelmpc.com).
