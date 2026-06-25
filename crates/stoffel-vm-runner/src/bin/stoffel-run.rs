@@ -42,6 +42,7 @@ use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::common::MPCProtocol;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use stoffelmpc_mpc::honeybadger::benchmark::NodeBenchmarkCounters;
 use stoffelmpc_mpc::honeybadger::SessionId as HbSessionId;
 use stoffelmpc_mpc::honeybadger::{HoneyBadgerMPCClient, HoneyBadgerMPCNode};
 use stoffelnet::network_utils::ClientId;
@@ -4654,6 +4655,7 @@ async fn main() {
     let mut hb_bls12381_coord_engine: Option<
         Arc<HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>>,
     > = None;
+    let mut hb_node_counters: Option<Arc<NodeBenchmarkCounters>> = None;
 
     if matches!(backend_kind, MpcBackendKind::HoneyBadger) {
         if let Some(ref ca) = coord_addr {
@@ -4767,7 +4769,13 @@ async fn main() {
                         )
                         .await
                         {
-                            Ok(_) => {}
+                            Ok(engine) => {
+                                hb_node_counters = engine
+                                    .node_handle()
+                                    .try_lock()
+                                    .ok()
+                                    .map(|guard| Arc::clone(&guard.benchmark_counters));
+                            }
                             Err(e) => {
                                 eprintln!("[party {}] HoneyBadger setup failed: {}", my_id, e);
                                 exit(13);
@@ -5188,6 +5196,13 @@ async fn main() {
             eprintln!("Execution error in '{}': {}", agreed_entry, err);
             exit(4);
         }
+    }
+
+    if let Some(engine) = hb_bls12381_coord_engine.as_ref() {
+        let node = engine.node_handle().lock().await;
+        eprintln!("HoneyBadger MPC statistics:\n{}", node.benchmark_snapshot());
+    } else if let Some(counters) = hb_node_counters.as_ref() {
+        eprintln!("HoneyBadger MPC statistics:\n{}", counters.snapshot());
     }
 }
 
