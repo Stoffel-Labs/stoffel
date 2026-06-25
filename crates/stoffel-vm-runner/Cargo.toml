@@ -19,7 +19,7 @@ stoffel-vm = { version = "0.1.0", path = "../stoffel-vm" }
 stoffel-vm-types = { version = "0.1.0", path = "../stoffel-vm-types" }
 stoffel-mpc-coordinator-shared = "0.1.0"
 stoffel-mpc-coordinator-off-chain = "0.1.0"
-stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0" }
+stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.0", features = ["benchmark"] }
 stoffelnet = "0.1.0"
 ark-bls12-381 = "0.5.0"
 ark-bn254 = "0.5.0"
