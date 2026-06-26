@@ -2465,6 +2465,19 @@ where
     // This is the ONLY clone that calls process() on incoming messages.
     let mut processing_node = mpc_node.clone();
 
+    // Wire a send hook into the shared QuicNetworkManager so that ALL outbound
+    // sends — both reactive sends from process() and proactive sends from the
+    // engine during preprocessing/operations — are counted.  The hook captures
+    // the processing_node's NodeBenchmarkCounters, which is the same Arc that
+    // the engine node will inherit, so both paths write to the same counters.
+    #[cfg(feature = "benchmark")]
+    {
+        let counters = processing_node.benchmark_counters.clone();
+        net.set_send_hook(std::sync::Arc::new(move |data: &[u8], n: usize| {
+            counters.record_outbound(data, n as u64);
+        }));
+    }
+
     // Clone 2: the engine node — used for preprocessing initiation only.
     // Created via from_existing_node which wraps it in Arc<Mutex>.
     let open_message_router = Arc::new(stoffel_vm::net::OpenMessageRouter::new());
