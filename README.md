@@ -1,5 +1,9 @@
 # Stoffel
 [![GitHub License](https://img.shields.io/github/license/Stoffel-Labs/stoffel)](LICENSE)
+[![Static Badge](https://img.shields.io/badge/docs-stoffel-%23FDC448)](https://docs.stoffelmpc.com)
+[![Static Badge](https://img.shields.io/badge/built%20by-Stoffel%20Labs-%232D39E0)](https://stoffelmpc.com)
+
+
 
 Stoffel is a toolchain for writing, compiling, and running programs that compute
 over private data using secure Multi-Party Computation (MPC). You write ordinary
