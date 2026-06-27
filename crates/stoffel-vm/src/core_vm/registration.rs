@@ -7,7 +7,8 @@ use crate::{error::VmError, VirtualMachineResult};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use stoffel_vm_types::core_types::{ForeignObjectRef, Value};
-use stoffel_vm_types::functions::VMFunction;
+use stoffel_vm_types::functions::{ResolvedFunctionHeader, VMFunction};
+use stoffel_vm_types::instructions::ResolvedInstructionInput;
 
 impl VirtualMachine {
     pub fn try_register_standard_library(&mut self) -> VirtualMachineResult<()> {
@@ -72,6 +73,16 @@ impl VirtualMachine {
         Ok(self
             .state
             .try_insert_function_without_vm_source(Function::vm(function))?)
+    }
+
+    pub fn try_register_resolved_function_without_source(
+        &mut self,
+        header: ResolvedFunctionHeader,
+        next_instruction: impl FnMut() -> Option<ResolvedInstructionInput>,
+    ) -> VirtualMachineResult<()> {
+        Ok(self
+            .state
+            .try_insert_resolved_function_without_vm_source(header, next_instruction)?)
     }
 
     #[track_caller]

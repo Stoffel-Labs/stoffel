@@ -171,6 +171,7 @@ fn main() {
         print_ir: args.print_ir,
         mpc_backend,
         mpc_curve,
+        entry_points: Vec::new(),
     };
 
     println!("Compiling {}...", filename);

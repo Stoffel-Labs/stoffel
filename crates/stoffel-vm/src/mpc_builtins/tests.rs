@@ -12,7 +12,7 @@ use std::error::Error;
 use std::sync::{Arc, Mutex};
 use stoffel_vm_types::core_types::{
     ArrayRef, ClearShareInput, ClearShareValue, ObjectRef, ObjectStore, ShareData, ShareType,
-    TableMemory, TableRef, Value,
+    TableMemory, TableRef, Value, DEFAULT_FIXED_POINT_FRACTIONAL_BITS, F64,
 };
 use stoffel_vm_types::functions::VMFunction;
 use stoffel_vm_types::instructions::Instruction;
@@ -165,6 +165,135 @@ impl MpcEngineOpenInExponent for RecordingOpenExpEngine {
 
         Ok(vec![5, 6, 7, 8])
     }
+}
+
+/// Test engine that implements `input_share` as a trivial public-constant
+/// sharing: a degree-1 BLS `RobustShare` whose evaluation at this party equals
+/// the scaled clear value (`round(value * 2^f)` for fixed-point). All other
+/// local share algebra falls through to the real `share_algebra` default impls,
+/// so add/scalar-mul over these shares is genuine field arithmetic.
+struct ConstantInputEngine;
+
+fn encode_robust_share_bls(value: i64) -> ShareData {
+    use ark_serialize::CanonicalSerialize;
+    use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+    let share = RobustShare::new(ark_bls12_381::Fr::from(value as u64), 1, 1);
+    let mut out = Vec::new();
+    share
+        .serialize_compressed(&mut out)
+        .expect("serialize test share");
+    ShareData::Opaque(out.into())
+}
+
+impl MpcEngine for ConstantInputEngine {
+    fn protocol_name(&self) -> &'static str {
+        "constant-input"
+    }
+    fn topology(&self) -> MpcSessionTopology {
+        MpcSessionTopology::try_new(0, 0, 3, 1).expect("test topology should be valid")
+    }
+    fn is_ready(&self) -> bool {
+        true
+    }
+    fn start(&self) -> MpcEngineResult<()> {
+        Ok(())
+    }
+    fn input_share(&self, clear: ClearShareInput) -> MpcEngineResult<ShareData> {
+        let scaled = match clear.value() {
+            ClearShareValue::FixedPoint(F64(v)) => {
+                let f = match clear.share_type() {
+                    ShareType::SecretFixedPoint { precision } => precision.f(),
+                    _ => 0,
+                };
+                (v * 2f64.powi(f as i32)).round() as i64
+            }
+            ClearShareValue::Integer(v) => v,
+            ClearShareValue::UnsignedInteger(v) => v as i64,
+            ClearShareValue::Boolean(b) => b as i64,
+        };
+        Ok(encode_robust_share_bls(scaled))
+    }
+    fn open_share(&self, _ty: ShareType, _share_bytes: &[u8]) -> MpcEngineResult<ClearShareValue> {
+        Err(MpcEngineError::operation_failed(
+            "constant-input",
+            "not implemented",
+        ))
+    }
+    fn shutdown(&self) {}
+    fn field_kind(&self) -> MpcFieldKind {
+        MpcFieldKind::Bls12_381Fr
+    }
+}
+
+#[test]
+fn share_add_constant_and_alias_are_both_registered() {
+    let mut vm = VirtualMachine::builder().with_mpc_builtins(false).build();
+    register_mpc_builtins(&mut vm);
+
+    assert!(vm.has_function("Share.add_constant"));
+    assert!(
+        vm.has_function("Share.add_scalar"),
+        "deprecated Share.add_scalar alias must stay registered for old bytecode"
+    );
+}
+
+#[test]
+fn share_add_constant_adds_fixed_point_float_in_scaled_domain() {
+    use ark_serialize::CanonicalDeserialize;
+    use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+
+    let scale = 2f64.powi(DEFAULT_FIXED_POINT_FRACTIONAL_BITS as i32);
+
+    let mut vm = VirtualMachine::builder().with_mpc_builtins(false).build();
+    register_mpc_builtins(&mut vm);
+    vm.set_mpc_engine(Arc::new(ConstantInputEngine));
+
+    // Fixed-point share holding 2.5, plus the fixed-point constant 1.25 -> 3.75.
+    let fixed_ty = ShareType::default_secret_fixed_point();
+    let base = vm
+        .create_share_object(
+            fixed_ty,
+            encode_robust_share_bls((2.5 * scale).round() as i64),
+            0,
+        )
+        .expect("create fixed-point share object");
+    let result = vm
+        .execute_with_args("Share.add_constant", &[base, Value::Float(F64(1.25))])
+        .expect("Share.add_constant on a fixed-point share with a float constant");
+    let (_ty, data) = vm
+        .read_share_object(&result)
+        .expect("result is a Share object");
+    let share = RobustShare::<ark_bls12_381::Fr>::deserialize_compressed(data.as_bytes())
+        .expect("deserialize result share");
+    assert_eq!(
+        share.share[0],
+        ark_bls12_381::Fr::from((3.75 * scale).round() as u64),
+        "fixed + float must add in the 2^f-scaled fixed-point domain"
+    );
+
+    // Integer share holding 3, plus the float constant 1.25 -> fixed-point 4.25:
+    // the integer share is promoted into the fixed-point domain before adding.
+    let int_ty = ShareType::secret_int(64);
+    let base_int = vm
+        .create_share_object(int_ty, encode_robust_share_bls(3), 0)
+        .expect("create integer share object");
+    let result_int = vm
+        .execute_with_args("Share.add_constant", &[base_int, Value::Float(F64(1.25))])
+        .expect("Share.add_constant promotes an integer share to fixed-point");
+    let (result_int_ty, data_int) = vm
+        .read_share_object(&result_int)
+        .expect("result is a Share object");
+    assert!(
+        matches!(result_int_ty, ShareType::SecretFixedPoint { .. }),
+        "integer + float must yield a fixed-point share, got {result_int_ty:?}"
+    );
+    let share_int = RobustShare::<ark_bls12_381::Fr>::deserialize_compressed(data_int.as_bytes())
+        .expect("deserialize promoted result share");
+    assert_eq!(
+        share_int.share[0],
+        ark_bls12_381::Fr::from((4.25 * scale).round() as u64),
+        "integer + float must promote the share to the fixed-point domain before adding"
+    );
 }
 
 #[test]

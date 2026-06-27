@@ -24,6 +24,8 @@ pub struct CompilerOptions {
     pub mpc_backend: MpcBackend,
     /// MPC curve expected by AVSS when running the emitted binary.
     pub mpc_curve: MpcCurve,
+    /// Additional function chunks that should be preserved as executable entrypoints.
+    pub entry_points: Vec<String>,
     // Add more options as needed: output_path, target_platform, etc.
 }
 
@@ -124,6 +126,8 @@ pub fn compile(
             return Err(error_reporter.get_all().into_iter().cloned().collect());
         }
     };
+    compiled_program
+        .prune_unreachable_functions_with_roots(options.entry_points.iter().map(String::as_str));
     compiled_program.client_io_manifest.mpc_backend = options.mpc_backend;
     compiled_program.client_io_manifest.mpc_curve = options.mpc_curve;
 
