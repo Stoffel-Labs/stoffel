@@ -16,9 +16,17 @@ pub(super) fn register(vm: &mut VirtualMachine) -> VirtualMachineResult<()> {
     vm.try_register_typed_foreign_method("Share", "neg", "Share.neg", share_neg)?;
     vm.try_register_typed_foreign_method(
         "Share",
+        "add_constant",
+        "Share.add_constant",
+        share_add_constant,
+    )?;
+    // Deprecated alias for `add_constant`; kept so bytecode compiled before the
+    // rename (which still calls `Share.add_scalar`) resolves to the same handler.
+    vm.try_register_typed_foreign_method(
+        "Share",
         "add_scalar",
         "Share.add_scalar",
-        share_add_scalar,
+        share_add_constant,
     )?;
     vm.try_register_typed_foreign_method(
         "Share",
@@ -106,20 +114,51 @@ fn share_neg(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<V
     create_result_share_value(ty, result_data)
 }
 
-fn share_add_scalar(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
-    let (ty, data, scalar) = {
-        let (share_value, scalar_value) = {
-            let args = ctx.named_args("Share.add_scalar");
-            args.require_min(2, "2 arguments: share, scalar")?;
-            (args.cloned(0)?, args.cloned(1)?)
-        };
-
-        let (ty, data) = ctx.extract_share_data(&share_value)?;
-        let scalar = value_to_i64(&scalar_value, "scalar")?;
-        (ty, data, scalar)
+fn share_add_constant(mut ctx: ForeignFunctionContext) -> ForeignFunctionCallbackResult<Value> {
+    let (share_value, constant_value) = {
+        let args = ctx.named_args("Share.add_constant");
+        args.require_min(2, "2 arguments: share, constant")?;
+        (args.cloned(0)?, args.cloned(1)?)
     };
+    let (ty, data) = ctx.extract_share_data(&share_value)?;
 
-    let result_data = ctx.secret_share_add_scalar_data(ty, &data, scalar)?;
+    // A fixed-point (non-integer) constant promotes the result to fixed-point.
+    // Addition does not change the number of fractional bits, so both operands
+    // are represented in the same `f`-bit fixed-point domain and added locally
+    // (share + share, no communication):
+    // - fixed share + fixed constant: operands already share precision `f`, so
+    //   locally share the constant and add it directly.
+    // - integer share + fixed constant: scale the integer share into the
+    //   fixed-point domain (multiply its value by `2^f`) before adding.
+    if let Value::Float(F64(constant)) = constant_value {
+        let (total_bits, target_f) = match ty {
+            ShareType::SecretFixedPoint { precision } => {
+                (precision.total_bits(), precision.fractional_bits())
+            }
+            _ => (
+                DEFAULT_FIXED_POINT_TOTAL_BITS,
+                DEFAULT_FIXED_POINT_FRACTIONAL_BITS,
+            ),
+        };
+        let result_ty = ShareType::SecretFixedPoint {
+            precision: FixedPointPrecision::new(total_bits, target_f),
+        };
+        let constant_share = ctx.input_share_data(ClearShareInput::new(
+            result_ty,
+            ClearShareValue::FixedPoint(F64(constant)),
+        ))?;
+        let result_data = if matches!(ty, ShareType::SecretFixedPoint { .. }) {
+            ctx.secret_share_add_data(result_ty, &data, &constant_share)?
+        } else {
+            let scale = scale_fixed_scalar(1.0, target_f)?;
+            let promoted = ctx.secret_share_mul_scalar_data(ty, &data, scale)?;
+            ctx.secret_share_add_data(result_ty, &promoted, &constant_share)?
+        };
+        return create_result_share_value(result_ty, result_data);
+    }
+
+    let constant = value_to_i64(&constant_value, "constant")?;
+    let result_data = ctx.secret_share_add_scalar_data(ty, &data, constant)?;
     create_result_share_value(ty, result_data)
 }
 

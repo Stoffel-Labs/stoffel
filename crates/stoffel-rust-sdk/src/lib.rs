@@ -311,6 +311,18 @@ impl Stoffel {
         self
     }
 
+    /// Preserve additional named functions as executable entrypoints when
+    /// compiling source. This is useful for programs that expose more than
+    /// `main` through generated bindings.
+    pub fn entry_points<I, S>(mut self, entry_points: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.compiler_options.entry_points = entry_points.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// Attach named inputs for local execution.
     pub fn with_inputs<V>(mut self, inputs: &[(&str, V)]) -> Self
     where

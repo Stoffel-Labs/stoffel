@@ -55,6 +55,13 @@ impl Program {
     }
 
     pub fn compile_file(path: impl AsRef<Path>) -> Result<Self> {
+        Self::compile_file_with_entrypoints(path, std::iter::empty::<&str>())
+    }
+
+    pub fn compile_file_with_entrypoints<'a>(
+        path: impl AsRef<Path>,
+        entry_points: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self> {
         let path = path.as_ref();
         let source = std::fs::read_to_string(path)?;
         let options = stoffellang::CompilerOptions {
@@ -63,6 +70,7 @@ impl Program {
             print_ir: false,
             mpc_backend: MpcBackend::HoneyBadger,
             mpc_curve: MpcCurve::Bls12_381,
+            entry_points: entry_points.into_iter().map(ToOwned::to_owned).collect(),
         };
         let compiled = stoffellang::compile_file(path, &source, &options)
             .map_err(|errors| Error::Compilation(format_compiler_errors(&errors)))?;
@@ -269,7 +277,11 @@ pub fn generate_bindings_from_source(
     out_file: impl AsRef<Path>,
     config: BindingsConfig,
 ) -> Result<()> {
-    let program = Program::compile_file(source_path)?;
+    let entry_points = config
+        .entrypoints
+        .iter()
+        .map(|entrypoint| entrypoint.entrypoint.as_str());
+    let program = Program::compile_file_with_entrypoints(source_path, entry_points)?;
     generate_bindings_from_program(&program, out_file, config)
 }
 
@@ -1137,6 +1149,12 @@ fn emit_entrypoint_method(
     writeln!(
         source,
         "        let mut program = {crate_path}::Stoffel::compile_file(&self.program_path)?"
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        source,
+        "            .entry_points([{:?}])",
+        entrypoint.entrypoint
     )
     .expect("writing to String cannot fail");
     writeln!(source, "            .manifest::<ProgramManifest>()")

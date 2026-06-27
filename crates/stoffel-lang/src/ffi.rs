@@ -23,6 +23,7 @@ impl From<CCompilerOptions> for CompilerOptions {
             print_ir: c_options.print_ir != 0,
             mpc_backend: MpcBackend::default(),
             mpc_curve: MpcCurve::default(),
+            entry_points: Vec::new(),
         }
     }
 }

@@ -3249,10 +3249,72 @@ where
         .collect();
 
     if input_ids.is_empty() {
+        // No input clients, but the program may still need preprocessed
+        // randomness (e.g. an ADKG keygen built on `Share.random`). Stand up the
+        // AVSS engine and run the coordinator's preprocessing phase so that
+        // randomness-consuming builtins work; just skip the client input-mask /
+        // input-collection dance, which is meaningless without clients.
         eprintln!(
-            "[party {}] AVSS coordinator mode has no client inputs; executing '{}' without preprocessing",
+            "[party {}] AVSS coordinator mode has no client inputs; running preprocessing for '{}'",
             my_id, agreed_entry
         );
+
+        let coord: AvssOffChainCoordinator<F, G> =
+            AvssOffChainCoordinator::<F, G>::start_rpc_client(
+                &coord_addr.0,
+                coord_addr.1,
+                t as u64,
+                n as u64,
+                2,
+                cert_der.clone(),
+                key_der.clone(),
+            )
+            .await
+            .map_err(|error| format!("Failed to connect to AVSS off-chain coordinator: {error}"))?;
+
+        let _node_rpc: AvssOffChainNodeRpcServer<F, G> = AvssOffChainNodeRpcServer::<F, G>::start(
+            &rpc_addr.0,
+            rpc_addr.1,
+            cert_der.clone(),
+            key_der.clone(),
+        )
+        .await
+        .map_err(|error| format!("Failed to start AVSS node RPC server: {error}"))?;
+
+        if as_leader {
+            coord.reset_coord().await.map_err(|e| e.to_string())?;
+            coord
+                .start_preprocessing()
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
+        let client_input_types = std::collections::BTreeMap::new();
+        let _engine = setup_avss_party_for_curve::<F, G>(
+            vm,
+            net,
+            AvssPartySetup {
+                my_id,
+                local_identity: durable_identity_from_cert(&cert_der),
+                n,
+                t,
+                instance_id,
+                expected_client_count: None,
+                client_input_count: 1,
+                client_input_types: &client_input_types,
+            },
+        )
+        .await?;
+
+        if as_leader {
+            coord.start_mpc().await.map_err(|e| e.to_string())?;
+        }
+        coord
+            .wait_for_round(Round::MPCExecution)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        eprintln!("Starting VM execution of '{}'...", agreed_entry);
         let result = vm
             .execute(agreed_entry)
             .map_err(|err| format!("Execution error in '{}': {}", agreed_entry, err))?;
@@ -4451,13 +4513,30 @@ async fn main() {
         (function_count, bytecode_version, client_io_manifest)
     } else {
         // Register all functions as they are read and lowered to avoid retaining
-        // the compiled function table beside the runtime program.
+        // the compiled or resolved function table beside the runtime program.
         let f = File::open(&load_path).expect("open binary file");
-        match CompiledBinary::try_for_each_vm_function_from_reader(&mut BufReader::new(f), |f| {
-            vm.try_register_function_without_source(f)
-                .map_err(|err| BinaryError::InvalidData(format!("invalid VM function: {err}")))?;
-            Ok(())
-        }) {
+        match CompiledBinary::try_for_each_resolved_vm_function_from_reader(
+            &mut BufReader::new(f),
+            |header, stream| {
+                let mut stream_error = None;
+                let result = vm.try_register_resolved_function_without_source(header, || {
+                    match stream.next_instruction() {
+                        Ok(instruction) => instruction,
+                        Err(err) => {
+                            stream_error = Some(err);
+                            None
+                        }
+                    }
+                });
+                if let Some(err) = stream_error {
+                    return Err(err);
+                }
+                result.map_err(|err| {
+                    BinaryError::InvalidData(format!("invalid VM function: {err}"))
+                })?;
+                Ok(())
+            },
+        ) {
             Ok(result) => result,
             Err(err) => {
                 eprintln!("Error: invalid compiled program: {:?}", err);

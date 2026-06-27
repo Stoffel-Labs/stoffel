@@ -33,6 +33,16 @@ type ResolvedFunctionParts = (
     SmallVec<[String; 16]>,
 );
 
+#[derive(Debug, Clone)]
+pub struct ResolvedFunctionHeader {
+    pub name: String,
+    pub parameters: Vec<String>,
+    pub upvalues: Vec<String>,
+    pub parent: Option<String>,
+    pub register_count: usize,
+    pub instruction_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FunctionError {
     ParametersExceedRegisters {
@@ -59,6 +69,11 @@ pub enum FunctionError {
     RegisterIndexOverflow {
         function: String,
         register: usize,
+    },
+    ResolvedOperandOverflow {
+        function: String,
+        operand: &'static str,
+        value: usize,
     },
 }
 
@@ -97,6 +112,14 @@ impl fmt::Display for FunctionError {
             FunctionError::RegisterIndexOverflow { function, register } => write!(
                 f,
                 "Function {function} references register r{register}, which cannot fit in a frame register count"
+            ),
+            FunctionError::ResolvedOperandOverflow {
+                function,
+                operand,
+                value,
+            } => write!(
+                f,
+                "Function {function} references {operand} {value}, which cannot fit in the compact resolved instruction format"
             ),
         }
     }
@@ -378,88 +401,177 @@ impl VMFunction {
                     resolved.push(ResolvedInstruction::NOP);
                 }
                 Instruction::LD(reg, offset) => {
-                    resolved.push(ResolvedInstruction::LD(*reg, *offset));
+                    resolved.push(ResolvedInstruction::LD(
+                        resolved_operand(&self.name, "register", *reg)?,
+                        *offset,
+                    ));
                 }
                 Instruction::LDI(reg, value) => {
                     let const_idx = constants.len();
                     constants.push(value.clone());
-                    resolved.push(ResolvedInstruction::LDI(*reg, const_idx));
+                    resolved.push(ResolvedInstruction::LDI(
+                        resolved_operand(&self.name, "register", *reg)?,
+                        resolved_operand(&self.name, "constant index", const_idx)?,
+                    ));
                 }
                 Instruction::MOV(dest, src) => {
-                    resolved.push(ResolvedInstruction::MOV(*dest, *src));
+                    resolved.push(ResolvedInstruction::MOV(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src)?,
+                    ));
                 }
                 Instruction::ADD(dest, src1, src2) => {
-                    resolved.push(ResolvedInstruction::ADD(*dest, *src1, *src2));
+                    resolved.push(ResolvedInstruction::ADD(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src1)?,
+                        resolved_operand(&self.name, "register", *src2)?,
+                    ));
                 }
                 Instruction::SUB(dest, src1, src2) => {
-                    resolved.push(ResolvedInstruction::SUB(*dest, *src1, *src2));
+                    resolved.push(ResolvedInstruction::SUB(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src1)?,
+                        resolved_operand(&self.name, "register", *src2)?,
+                    ));
                 }
                 Instruction::MUL(dest, src1, src2) => {
-                    resolved.push(ResolvedInstruction::MUL(*dest, *src1, *src2));
+                    resolved.push(ResolvedInstruction::MUL(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src1)?,
+                        resolved_operand(&self.name, "register", *src2)?,
+                    ));
                 }
                 Instruction::DIV(dest, src1, src2) => {
-                    resolved.push(ResolvedInstruction::DIV(*dest, *src1, *src2));
+                    resolved.push(ResolvedInstruction::DIV(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src1)?,
+                        resolved_operand(&self.name, "register", *src2)?,
+                    ));
                 }
                 Instruction::MOD(dest, src1, src2) => {
-                    resolved.push(ResolvedInstruction::MOD(*dest, *src1, *src2));
+                    resolved.push(ResolvedInstruction::MOD(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src1)?,
+                        resolved_operand(&self.name, "register", *src2)?,
+                    ));
                 }
                 Instruction::AND(dest, src1, src2) => {
-                    resolved.push(ResolvedInstruction::AND(*dest, *src1, *src2));
+                    resolved.push(ResolvedInstruction::AND(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src1)?,
+                        resolved_operand(&self.name, "register", *src2)?,
+                    ));
                 }
                 Instruction::OR(dest, src1, src2) => {
-                    resolved.push(ResolvedInstruction::OR(*dest, *src1, *src2));
+                    resolved.push(ResolvedInstruction::OR(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src1)?,
+                        resolved_operand(&self.name, "register", *src2)?,
+                    ));
                 }
                 Instruction::XOR(dest, src1, src2) => {
-                    resolved.push(ResolvedInstruction::XOR(*dest, *src1, *src2));
+                    resolved.push(ResolvedInstruction::XOR(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src1)?,
+                        resolved_operand(&self.name, "register", *src2)?,
+                    ));
                 }
                 Instruction::NOT(dest, src) => {
-                    resolved.push(ResolvedInstruction::NOT(*dest, *src));
+                    resolved.push(ResolvedInstruction::NOT(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src)?,
+                    ));
                 }
                 Instruction::SHL(dest, src, amount) => {
-                    resolved.push(ResolvedInstruction::SHL(*dest, *src, *amount));
+                    resolved.push(ResolvedInstruction::SHL(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src)?,
+                        resolved_operand(&self.name, "register", *amount)?,
+                    ));
                 }
                 Instruction::SHR(dest, src, amount) => {
-                    resolved.push(ResolvedInstruction::SHR(*dest, *src, *amount));
+                    resolved.push(ResolvedInstruction::SHR(
+                        resolved_operand(&self.name, "register", *dest)?,
+                        resolved_operand(&self.name, "register", *src)?,
+                        resolved_operand(&self.name, "register", *amount)?,
+                    ));
                 }
                 Instruction::JMP(label) => {
                     let target = resolve_label(&self.name, &label_indices, label)?;
-                    resolved.push(ResolvedInstruction::JMP(target));
+                    resolved.push(ResolvedInstruction::JMP(resolved_operand(
+                        &self.name,
+                        "jump target",
+                        target,
+                    )?));
                 }
                 Instruction::JMPEQ(label) => {
                     let target = resolve_label(&self.name, &label_indices, label)?;
-                    resolved.push(ResolvedInstruction::JMPEQ(target));
+                    resolved.push(ResolvedInstruction::JMPEQ(resolved_operand(
+                        &self.name,
+                        "jump target",
+                        target,
+                    )?));
                 }
                 Instruction::JMPNEQ(label) => {
                     let target = resolve_label(&self.name, &label_indices, label)?;
-                    resolved.push(ResolvedInstruction::JMPNEQ(target));
+                    resolved.push(ResolvedInstruction::JMPNEQ(resolved_operand(
+                        &self.name,
+                        "jump target",
+                        target,
+                    )?));
                 }
                 Instruction::JMPLT(label) => {
                     let target = resolve_label(&self.name, &label_indices, label)?;
-                    resolved.push(ResolvedInstruction::JMPLT(target));
+                    resolved.push(ResolvedInstruction::JMPLT(resolved_operand(
+                        &self.name,
+                        "jump target",
+                        target,
+                    )?));
                 }
                 Instruction::JMPGT(label) => {
                     let target = resolve_label(&self.name, &label_indices, label)?;
-                    resolved.push(ResolvedInstruction::JMPGT(target));
+                    resolved.push(ResolvedInstruction::JMPGT(resolved_operand(
+                        &self.name,
+                        "jump target",
+                        target,
+                    )?));
                 }
                 Instruction::CALL(func_name) => {
                     let call_idx = call_target_names.len();
                     call_target_names.push(func_name.clone());
-                    resolved.push(ResolvedInstruction::CALL(call_idx));
+                    resolved.push(ResolvedInstruction::CALL(resolved_operand(
+                        &self.name,
+                        "call target index",
+                        call_idx,
+                    )?));
                 }
                 Instruction::RET(reg) => {
-                    resolved.push(ResolvedInstruction::RET(*reg));
+                    resolved.push(ResolvedInstruction::RET(resolved_operand(
+                        &self.name, "register", *reg,
+                    )?));
                 }
                 Instruction::PUSHARG(reg) => {
-                    resolved.push(ResolvedInstruction::PUSHARG(*reg));
+                    resolved.push(ResolvedInstruction::PUSHARG(resolved_operand(
+                        &self.name, "register", *reg,
+                    )?));
                 }
                 Instruction::CMP(reg1, reg2) => {
-                    resolved.push(ResolvedInstruction::CMP(*reg1, *reg2));
+                    resolved.push(ResolvedInstruction::CMP(
+                        resolved_operand(&self.name, "register", *reg1)?,
+                        resolved_operand(&self.name, "register", *reg2)?,
+                    ));
                 }
                 Instruction::LDS(reg, slot) => {
-                    resolved.push(ResolvedInstruction::LDS(*reg, *slot));
+                    resolved.push(ResolvedInstruction::LDS(
+                        resolved_operand(&self.name, "register", *reg)?,
+                        resolved_operand(&self.name, "spill slot", *slot)?,
+                    ));
                 }
                 Instruction::STS(slot, reg) => {
-                    resolved.push(ResolvedInstruction::STS(*slot, *reg));
+                    resolved.push(ResolvedInstruction::STS(
+                        resolved_operand(&self.name, "spill slot", *slot)?,
+                        resolved_operand(&self.name, "register", *reg)?,
+                    ));
                 }
             }
         }
@@ -469,6 +581,18 @@ impl VMFunction {
         self.call_target_names = Some(call_target_names);
         Ok(())
     }
+}
+
+fn resolved_operand(
+    function_name: &str,
+    operand: &'static str,
+    value: usize,
+) -> FunctionResult<u32> {
+    u32::try_from(value).map_err(|_| FunctionError::ResolvedOperandOverflow {
+        function: function_name.to_owned(),
+        operand,
+        value,
+    })
 }
 
 fn referenced_register_count(
@@ -548,10 +672,10 @@ fn max_referenced_resolved_register(instruction: &ResolvedInstruction) -> Option
         | ResolvedInstruction::RET(reg)
         | ResolvedInstruction::PUSHARG(reg)
         | ResolvedInstruction::LDS(reg, _)
-        | ResolvedInstruction::STS(_, reg) => Some(*reg),
+        | ResolvedInstruction::STS(_, reg) => Some(*reg as usize),
         ResolvedInstruction::MOV(dest, src)
         | ResolvedInstruction::NOT(dest, src)
-        | ResolvedInstruction::CMP(dest, src) => Some((*dest).max(*src)),
+        | ResolvedInstruction::CMP(dest, src) => Some((*dest).max(*src) as usize),
         ResolvedInstruction::ADD(dest, src1, src2)
         | ResolvedInstruction::SUB(dest, src1, src2)
         | ResolvedInstruction::MUL(dest, src1, src2)
@@ -561,7 +685,9 @@ fn max_referenced_resolved_register(instruction: &ResolvedInstruction) -> Option
         | ResolvedInstruction::OR(dest, src1, src2)
         | ResolvedInstruction::XOR(dest, src1, src2)
         | ResolvedInstruction::SHL(dest, src1, src2)
-        | ResolvedInstruction::SHR(dest, src1, src2) => Some((*dest).max(*src1).max(*src2)),
+        | ResolvedInstruction::SHR(dest, src1, src2) => {
+            Some((*dest).max(*src1).max(*src2) as usize)
+        }
         ResolvedInstruction::JMP(_)
         | ResolvedInstruction::JMPEQ(_)
         | ResolvedInstruction::JMPNEQ(_)

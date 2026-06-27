@@ -14,8 +14,10 @@
 //! codebase without modification.
 
 use crate::core_types::{F64, FixedPointPrecision, ShareType, Value};
-use crate::functions::{FunctionError, VMFunction};
-use crate::instructions::{Instruction, ReducedOpcode, ResolvedInstruction};
+use crate::functions::{FunctionError, ResolvedFunctionHeader, VMFunction};
+use crate::instructions::{
+    Instruction, ReducedOpcode, ResolvedInstruction, ResolvedInstructionInput,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -97,6 +99,76 @@ fn resolve_compiled_label(
         )));
     }
     Ok(target)
+}
+
+fn compact_resolved_operand(field: &'static str, value: usize) -> BinaryResult<u32> {
+    u32::try_from(value).map_err(|_| invalid_data(format!("{field} {value} exceeds u32::MAX")))
+}
+
+pub struct ResolvedInstructionReader<'a, R: Read> {
+    reader: &'a mut R,
+    name: String,
+    parameters: Vec<String>,
+    upvalues: Vec<String>,
+    parent: Option<String>,
+    register_count: usize,
+    labels: HashMap<String, usize>,
+    constants: &'a [Value],
+    instruction_count: usize,
+    remaining: usize,
+    instruction_index: usize,
+    hasher: DefaultHasher,
+}
+
+impl<R: Read> ResolvedInstructionReader<'_, R> {
+    pub fn header(&self) -> ResolvedFunctionHeader {
+        ResolvedFunctionHeader {
+            name: self.name.clone(),
+            parameters: self.parameters.clone(),
+            upvalues: self.upvalues.clone(),
+            parent: self.parent.clone(),
+            register_count: self.register_count,
+            instruction_count: self.instruction_count,
+        }
+    }
+
+    pub fn next_instruction(&mut self) -> BinaryResult<Option<ResolvedInstructionInput>> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+
+        let instruction = CompiledBinary::deserialize_instruction(self.reader)?;
+        instruction.hash(&mut self.hasher);
+        let instruction_index = self.instruction_index;
+        self.instruction_index += 1;
+        self.remaining -= 1;
+
+        CompiledBinary::compiled_instruction_into_resolved_input(
+            instruction,
+            &self.labels,
+            self.instruction_count,
+            |const_idx| {
+                self.constants.get(const_idx).cloned().ok_or_else(|| {
+                    invalid_data(format!(
+                        "Function instruction {} references constant {} but constant pool has {} values",
+                        instruction_index,
+                        const_idx,
+                        self.constants.len()
+                    ))
+                })
+            },
+        )
+        .map(Some)
+    }
+
+    fn drain(&mut self) -> BinaryResult<()> {
+        while self.next_instruction()?.is_some() {}
+        Ok(())
+    }
+
+    fn finish(self) -> u64 {
+        self.hasher.finish()
+    }
 }
 
 fn usize_to_u16(value: usize, field: &str) -> BinaryResult<u16> {
@@ -719,70 +791,257 @@ impl CompiledBinary {
     {
         Ok(match instruction {
             CompiledInstruction::NOP => ResolvedInstruction::NOP,
-            CompiledInstruction::LD(reg, offset) => ResolvedInstruction::LD(reg, offset),
+            CompiledInstruction::LD(reg, offset) => {
+                ResolvedInstruction::LD(compact_resolved_operand("LD register", reg)?, offset)
+            }
             CompiledInstruction::LDI(reg, const_idx) => {
                 let value = constant_lookup(const_idx)?;
                 let local_const_idx = constants.len();
                 constants.push(value);
-                ResolvedInstruction::LDI(reg, local_const_idx)
+                ResolvedInstruction::LDI(
+                    compact_resolved_operand("LDI register", reg)?,
+                    compact_resolved_operand("LDI constant index", local_const_idx)?,
+                )
             }
-            CompiledInstruction::MOV(target, source) => ResolvedInstruction::MOV(target, source),
-            CompiledInstruction::ADD(target, src1, src2) => {
-                ResolvedInstruction::ADD(target, src1, src2)
-            }
-            CompiledInstruction::SUB(target, src1, src2) => {
-                ResolvedInstruction::SUB(target, src1, src2)
-            }
-            CompiledInstruction::MUL(target, src1, src2) => {
-                ResolvedInstruction::MUL(target, src1, src2)
-            }
-            CompiledInstruction::DIV(target, src1, src2) => {
-                ResolvedInstruction::DIV(target, src1, src2)
-            }
-            CompiledInstruction::MOD(target, src1, src2) => {
-                ResolvedInstruction::MOD(target, src1, src2)
-            }
-            CompiledInstruction::AND(target, src1, src2) => {
-                ResolvedInstruction::AND(target, src1, src2)
-            }
-            CompiledInstruction::OR(target, src1, src2) => {
-                ResolvedInstruction::OR(target, src1, src2)
-            }
-            CompiledInstruction::XOR(target, src1, src2) => {
-                ResolvedInstruction::XOR(target, src1, src2)
-            }
-            CompiledInstruction::NOT(target, source) => ResolvedInstruction::NOT(target, source),
-            CompiledInstruction::SHL(target, src1, src2) => {
-                ResolvedInstruction::SHL(target, src1, src2)
-            }
-            CompiledInstruction::SHR(target, src1, src2) => {
-                ResolvedInstruction::SHR(target, src1, src2)
-            }
-            CompiledInstruction::JMP(label) => {
-                ResolvedInstruction::JMP(resolve_compiled_label(&label, labels, instruction_count)?)
-            }
-            CompiledInstruction::JMPEQ(label) => ResolvedInstruction::JMPEQ(
-                resolve_compiled_label(&label, labels, instruction_count)?,
+            CompiledInstruction::MOV(target, source) => ResolvedInstruction::MOV(
+                compact_resolved_operand("MOV target register", target)?,
+                compact_resolved_operand("MOV source register", source)?,
             ),
-            CompiledInstruction::JMPNEQ(label) => ResolvedInstruction::JMPNEQ(
-                resolve_compiled_label(&label, labels, instruction_count)?,
+            CompiledInstruction::ADD(target, src1, src2) => ResolvedInstruction::ADD(
+                compact_resolved_operand("ADD target register", target)?,
+                compact_resolved_operand("ADD left register", src1)?,
+                compact_resolved_operand("ADD right register", src2)?,
             ),
-            CompiledInstruction::JMPLT(label) => ResolvedInstruction::JMPLT(
-                resolve_compiled_label(&label, labels, instruction_count)?,
+            CompiledInstruction::SUB(target, src1, src2) => ResolvedInstruction::SUB(
+                compact_resolved_operand("SUB target register", target)?,
+                compact_resolved_operand("SUB left register", src1)?,
+                compact_resolved_operand("SUB right register", src2)?,
             ),
-            CompiledInstruction::JMPGT(label) => ResolvedInstruction::JMPGT(
-                resolve_compiled_label(&label, labels, instruction_count)?,
+            CompiledInstruction::MUL(target, src1, src2) => ResolvedInstruction::MUL(
+                compact_resolved_operand("MUL target register", target)?,
+                compact_resolved_operand("MUL left register", src1)?,
+                compact_resolved_operand("MUL right register", src2)?,
             ),
+            CompiledInstruction::DIV(target, src1, src2) => ResolvedInstruction::DIV(
+                compact_resolved_operand("DIV target register", target)?,
+                compact_resolved_operand("DIV left register", src1)?,
+                compact_resolved_operand("DIV right register", src2)?,
+            ),
+            CompiledInstruction::MOD(target, src1, src2) => ResolvedInstruction::MOD(
+                compact_resolved_operand("MOD target register", target)?,
+                compact_resolved_operand("MOD left register", src1)?,
+                compact_resolved_operand("MOD right register", src2)?,
+            ),
+            CompiledInstruction::AND(target, src1, src2) => ResolvedInstruction::AND(
+                compact_resolved_operand("AND target register", target)?,
+                compact_resolved_operand("AND left register", src1)?,
+                compact_resolved_operand("AND right register", src2)?,
+            ),
+            CompiledInstruction::OR(target, src1, src2) => ResolvedInstruction::OR(
+                compact_resolved_operand("OR target register", target)?,
+                compact_resolved_operand("OR left register", src1)?,
+                compact_resolved_operand("OR right register", src2)?,
+            ),
+            CompiledInstruction::XOR(target, src1, src2) => ResolvedInstruction::XOR(
+                compact_resolved_operand("XOR target register", target)?,
+                compact_resolved_operand("XOR left register", src1)?,
+                compact_resolved_operand("XOR right register", src2)?,
+            ),
+            CompiledInstruction::NOT(target, source) => ResolvedInstruction::NOT(
+                compact_resolved_operand("NOT target register", target)?,
+                compact_resolved_operand("NOT source register", source)?,
+            ),
+            CompiledInstruction::SHL(target, src1, src2) => ResolvedInstruction::SHL(
+                compact_resolved_operand("SHL target register", target)?,
+                compact_resolved_operand("SHL left register", src1)?,
+                compact_resolved_operand("SHL right register", src2)?,
+            ),
+            CompiledInstruction::SHR(target, src1, src2) => ResolvedInstruction::SHR(
+                compact_resolved_operand("SHR target register", target)?,
+                compact_resolved_operand("SHR left register", src1)?,
+                compact_resolved_operand("SHR right register", src2)?,
+            ),
+            CompiledInstruction::JMP(label) => ResolvedInstruction::JMP(compact_resolved_operand(
+                "JMP target",
+                resolve_compiled_label(&label, labels, instruction_count)?,
+            )?),
+            CompiledInstruction::JMPEQ(label) => {
+                ResolvedInstruction::JMPEQ(compact_resolved_operand(
+                    "JMPEQ target",
+                    resolve_compiled_label(&label, labels, instruction_count)?,
+                )?)
+            }
+            CompiledInstruction::JMPNEQ(label) => {
+                ResolvedInstruction::JMPNEQ(compact_resolved_operand(
+                    "JMPNEQ target",
+                    resolve_compiled_label(&label, labels, instruction_count)?,
+                )?)
+            }
+            CompiledInstruction::JMPLT(label) => {
+                ResolvedInstruction::JMPLT(compact_resolved_operand(
+                    "JMPLT target",
+                    resolve_compiled_label(&label, labels, instruction_count)?,
+                )?)
+            }
+            CompiledInstruction::JMPGT(label) => {
+                ResolvedInstruction::JMPGT(compact_resolved_operand(
+                    "JMPGT target",
+                    resolve_compiled_label(&label, labels, instruction_count)?,
+                )?)
+            }
             CompiledInstruction::CALL(function_name) => {
                 let call_idx = call_target_names.len();
                 call_target_names.push(function_name);
-                ResolvedInstruction::CALL(call_idx)
+                ResolvedInstruction::CALL(compact_resolved_operand("CALL target index", call_idx)?)
             }
-            CompiledInstruction::RET(reg) => ResolvedInstruction::RET(reg),
-            CompiledInstruction::PUSHARG(reg) => ResolvedInstruction::PUSHARG(reg),
-            CompiledInstruction::CMP(reg1, reg2) => ResolvedInstruction::CMP(reg1, reg2),
-            CompiledInstruction::LDS(reg, slot) => ResolvedInstruction::LDS(reg, slot),
-            CompiledInstruction::STS(slot, reg) => ResolvedInstruction::STS(slot, reg),
+            CompiledInstruction::RET(reg) => {
+                ResolvedInstruction::RET(compact_resolved_operand("RET register", reg)?)
+            }
+            CompiledInstruction::PUSHARG(reg) => {
+                ResolvedInstruction::PUSHARG(compact_resolved_operand("PUSHARG register", reg)?)
+            }
+            CompiledInstruction::CMP(reg1, reg2) => ResolvedInstruction::CMP(
+                compact_resolved_operand("CMP left register", reg1)?,
+                compact_resolved_operand("CMP right register", reg2)?,
+            ),
+            CompiledInstruction::LDS(reg, slot) => ResolvedInstruction::LDS(
+                compact_resolved_operand("LDS register", reg)?,
+                compact_resolved_operand("LDS slot", slot)?,
+            ),
+            CompiledInstruction::STS(slot, reg) => ResolvedInstruction::STS(
+                compact_resolved_operand("STS slot", slot)?,
+                compact_resolved_operand("STS register", reg)?,
+            ),
+        })
+    }
+
+    fn compiled_instruction_into_resolved_input<F>(
+        instruction: CompiledInstruction,
+        labels: &HashMap<String, usize>,
+        instruction_count: usize,
+        mut constant_lookup: F,
+    ) -> BinaryResult<ResolvedInstructionInput>
+    where
+        F: FnMut(usize) -> BinaryResult<Value>,
+    {
+        Ok(match instruction {
+            CompiledInstruction::NOP => ResolvedInstructionInput::NOP,
+            CompiledInstruction::LD(reg, offset) => {
+                ResolvedInstructionInput::LD(compact_resolved_operand("LD register", reg)?, offset)
+            }
+            CompiledInstruction::LDI(reg, const_idx) => ResolvedInstructionInput::LDI(
+                compact_resolved_operand("LDI register", reg)?,
+                constant_lookup(const_idx)?,
+            ),
+            CompiledInstruction::MOV(target, source) => ResolvedInstructionInput::MOV(
+                compact_resolved_operand("MOV target register", target)?,
+                compact_resolved_operand("MOV source register", source)?,
+            ),
+            CompiledInstruction::ADD(target, src1, src2) => ResolvedInstructionInput::ADD(
+                compact_resolved_operand("ADD target register", target)?,
+                compact_resolved_operand("ADD left register", src1)?,
+                compact_resolved_operand("ADD right register", src2)?,
+            ),
+            CompiledInstruction::SUB(target, src1, src2) => ResolvedInstructionInput::SUB(
+                compact_resolved_operand("SUB target register", target)?,
+                compact_resolved_operand("SUB left register", src1)?,
+                compact_resolved_operand("SUB right register", src2)?,
+            ),
+            CompiledInstruction::MUL(target, src1, src2) => ResolvedInstructionInput::MUL(
+                compact_resolved_operand("MUL target register", target)?,
+                compact_resolved_operand("MUL left register", src1)?,
+                compact_resolved_operand("MUL right register", src2)?,
+            ),
+            CompiledInstruction::DIV(target, src1, src2) => ResolvedInstructionInput::DIV(
+                compact_resolved_operand("DIV target register", target)?,
+                compact_resolved_operand("DIV left register", src1)?,
+                compact_resolved_operand("DIV right register", src2)?,
+            ),
+            CompiledInstruction::MOD(target, src1, src2) => ResolvedInstructionInput::MOD(
+                compact_resolved_operand("MOD target register", target)?,
+                compact_resolved_operand("MOD left register", src1)?,
+                compact_resolved_operand("MOD right register", src2)?,
+            ),
+            CompiledInstruction::AND(target, src1, src2) => ResolvedInstructionInput::AND(
+                compact_resolved_operand("AND target register", target)?,
+                compact_resolved_operand("AND left register", src1)?,
+                compact_resolved_operand("AND right register", src2)?,
+            ),
+            CompiledInstruction::OR(target, src1, src2) => ResolvedInstructionInput::OR(
+                compact_resolved_operand("OR target register", target)?,
+                compact_resolved_operand("OR left register", src1)?,
+                compact_resolved_operand("OR right register", src2)?,
+            ),
+            CompiledInstruction::XOR(target, src1, src2) => ResolvedInstructionInput::XOR(
+                compact_resolved_operand("XOR target register", target)?,
+                compact_resolved_operand("XOR left register", src1)?,
+                compact_resolved_operand("XOR right register", src2)?,
+            ),
+            CompiledInstruction::NOT(target, source) => ResolvedInstructionInput::NOT(
+                compact_resolved_operand("NOT target register", target)?,
+                compact_resolved_operand("NOT source register", source)?,
+            ),
+            CompiledInstruction::SHL(target, src1, src2) => ResolvedInstructionInput::SHL(
+                compact_resolved_operand("SHL target register", target)?,
+                compact_resolved_operand("SHL left register", src1)?,
+                compact_resolved_operand("SHL right register", src2)?,
+            ),
+            CompiledInstruction::SHR(target, src1, src2) => ResolvedInstructionInput::SHR(
+                compact_resolved_operand("SHR target register", target)?,
+                compact_resolved_operand("SHR left register", src1)?,
+                compact_resolved_operand("SHR right register", src2)?,
+            ),
+            CompiledInstruction::JMP(label) => {
+                ResolvedInstructionInput::JMP(compact_resolved_operand(
+                    "JMP target",
+                    resolve_compiled_label(&label, labels, instruction_count)?,
+                )?)
+            }
+            CompiledInstruction::JMPEQ(label) => {
+                ResolvedInstructionInput::JMPEQ(compact_resolved_operand(
+                    "JMPEQ target",
+                    resolve_compiled_label(&label, labels, instruction_count)?,
+                )?)
+            }
+            CompiledInstruction::JMPNEQ(label) => {
+                ResolvedInstructionInput::JMPNEQ(compact_resolved_operand(
+                    "JMPNEQ target",
+                    resolve_compiled_label(&label, labels, instruction_count)?,
+                )?)
+            }
+            CompiledInstruction::JMPLT(label) => {
+                ResolvedInstructionInput::JMPLT(compact_resolved_operand(
+                    "JMPLT target",
+                    resolve_compiled_label(&label, labels, instruction_count)?,
+                )?)
+            }
+            CompiledInstruction::JMPGT(label) => {
+                ResolvedInstructionInput::JMPGT(compact_resolved_operand(
+                    "JMPGT target",
+                    resolve_compiled_label(&label, labels, instruction_count)?,
+                )?)
+            }
+            CompiledInstruction::CALL(function_name) => {
+                ResolvedInstructionInput::CALL(function_name)
+            }
+            CompiledInstruction::RET(reg) => {
+                ResolvedInstructionInput::RET(compact_resolved_operand("RET register", reg)?)
+            }
+            CompiledInstruction::PUSHARG(reg) => ResolvedInstructionInput::PUSHARG(
+                compact_resolved_operand("PUSHARG register", reg)?,
+            ),
+            CompiledInstruction::CMP(reg1, reg2) => ResolvedInstructionInput::CMP(
+                compact_resolved_operand("CMP left register", reg1)?,
+                compact_resolved_operand("CMP right register", reg2)?,
+            ),
+            CompiledInstruction::LDS(reg, slot) => ResolvedInstructionInput::LDS(
+                compact_resolved_operand("LDS register", reg)?,
+                compact_resolved_operand("LDS slot", slot)?,
+            ),
+            CompiledInstruction::STS(slot, reg) => ResolvedInstructionInput::STS(
+                compact_resolved_operand("STS slot", slot)?,
+                compact_resolved_operand("STS register", reg)?,
+            ),
         })
     }
 
@@ -1472,6 +1731,79 @@ impl CompiledBinary {
         Ok((function_count, version, client_io_manifest))
     }
 
+    pub fn try_for_each_resolved_vm_function_from_reader<R, F>(
+        reader: &mut R,
+        mut callback: F,
+    ) -> BinaryResult<(usize, u16, ClientIoManifest)>
+    where
+        R: Read,
+        F: FnMut(ResolvedFunctionHeader, &mut ResolvedInstructionReader<'_, R>) -> BinaryResult<()>,
+    {
+        let mut magic = [0u8; 4];
+        reader.read_exact(&mut magic)?;
+        if magic != *MAGIC_BYTES {
+            return Err(BinaryError::InvalidMagicBytes);
+        }
+
+        let version = read_u16(reader)?;
+        if version > FORMAT_VERSION {
+            return Err(BinaryError::UnsupportedVersion(version));
+        }
+
+        let constant_count =
+            read_u32_len_bounded(reader, "constant count", MAX_BINARY_COLLECTION_LEN)?;
+
+        let mut constants = Vec::new();
+        reserve_vec(&mut constants, constant_count, "constant count")?;
+        for _ in 0..constant_count {
+            constants.push(Self::deserialize_value(reader)?);
+        }
+
+        let function_record_count =
+            read_u32_len_bounded(reader, "function count", MAX_BINARY_COLLECTION_LEN)?;
+        let mut seen: HashMap<String, u64> = HashMap::new();
+        let mut function_count = 0;
+
+        for _ in 0..function_record_count {
+            let (name, mut stream) =
+                Self::deserialize_resolved_function_stream(reader, version, &constants)?;
+            if seen.contains_key(&name) {
+                stream.drain()?;
+            } else {
+                let header = stream.header();
+                callback(header, &mut stream)?;
+                stream.drain()?;
+            }
+
+            let fingerprint = stream.finish();
+            if let Some(existing_fingerprint) = seen.get(&name) {
+                if *existing_fingerprint != fingerprint {
+                    return Err(invalid_data(format!(
+                        "duplicate function '{}' has conflicting definitions",
+                        name
+                    )));
+                }
+                continue;
+            }
+
+            seen.insert(name, fingerprint);
+            function_count += 1;
+        }
+
+        let client_io_manifest = if version >= CLIENT_IO_MANIFEST_FORMAT_VERSION {
+            Self::deserialize_client_io_manifest(
+                reader,
+                version >= MPC_BACKEND_MANIFEST_FORMAT_VERSION,
+                version >= MPC_CURVE_MANIFEST_FORMAT_VERSION,
+                version >= PREPROCESSING_DEMAND_MANIFEST_FORMAT_VERSION,
+            )?
+        } else {
+            ClientIoManifest::default()
+        };
+
+        Ok((function_count, version, client_io_manifest))
+    }
+
     fn deserialize_client_io_manifest<R: Read>(
         reader: &mut R,
         has_backend: bool,
@@ -1962,6 +2294,138 @@ impl CompiledBinary {
             call_target_names,
         )?;
         Ok((vm_function, hasher.finish()))
+    }
+
+    fn deserialize_resolved_function_stream<'a, R: Read>(
+        reader: &'a mut R,
+        version: u16,
+        constants: &'a [Value],
+    ) -> BinaryResult<(String, ResolvedInstructionReader<'a, R>)> {
+        let name = read_len_prefixed_string_u16(
+            reader,
+            "function name length",
+            "Invalid UTF-8 in function name",
+        )?;
+        let mut hasher = DefaultHasher::new();
+        name.hash(&mut hasher);
+
+        let mut register_count = usize::from(read_u16(reader)?);
+        register_count.hash(&mut hasher);
+
+        let param_count = usize::from(read_u16(reader)?);
+        let mut parameters = Vec::new();
+        reserve_vec(&mut parameters, param_count, "parameter count")?;
+        for _ in 0..param_count {
+            parameters.push(read_len_prefixed_string_u16(
+                reader,
+                "parameter name length",
+                "Invalid UTF-8 in parameter name",
+            )?);
+        }
+        parameters.hash(&mut hasher);
+
+        let (parameter_types, return_type) = if version >= FUNCTION_TYPE_METADATA_FORMAT_VERSION {
+            let type_count = usize::from(read_u16(reader)?);
+            if type_count != parameters.len() {
+                return Err(invalid_data(format!(
+                    "function '{}' declares {} parameter name(s) but {} parameter type(s)",
+                    name,
+                    parameters.len(),
+                    type_count
+                )));
+            }
+            let mut parameter_types = Vec::new();
+            reserve_vec(&mut parameter_types, type_count, "parameter type count")?;
+            for _ in 0..type_count {
+                parameter_types.push(Self::deserialize_function_type(reader)?);
+            }
+            let return_type = Self::deserialize_function_type(reader)?;
+            (parameter_types, return_type)
+        } else {
+            (
+                vec![FunctionType::Unknown; parameters.len()],
+                FunctionType::Unknown,
+            )
+        };
+        parameter_types.hash(&mut hasher);
+        return_type.hash(&mut hasher);
+
+        let upvalue_count = usize::from(read_u16(reader)?);
+        let mut upvalues = Vec::new();
+        reserve_vec(&mut upvalues, upvalue_count, "upvalue count")?;
+        for _ in 0..upvalue_count {
+            upvalues.push(read_len_prefixed_string_u16(
+                reader,
+                "upvalue name length",
+                "Invalid UTF-8 in upvalue name",
+            )?);
+        }
+        upvalues.hash(&mut hasher);
+
+        let mut has_parent_byte = [0u8; 1];
+        reader.read_exact(&mut has_parent_byte)?;
+        let parent = match has_parent_byte[0] {
+            0 => None,
+            1 => Some(read_len_prefixed_string_u16(
+                reader,
+                "parent function name length",
+                "Invalid UTF-8 in parent function name",
+            )?),
+            other => {
+                return Err(invalid_data(format!(
+                    "Invalid parent presence flag: {other}"
+                )));
+            }
+        };
+        parent.hash(&mut hasher);
+
+        let label_count = usize::from(read_u16(reader)?);
+        let mut labels = HashMap::new();
+        labels.try_reserve(label_count).map_err(|err| {
+            invalid_data(format!(
+                "label count {label_count} could not be allocated: {err}"
+            ))
+        })?;
+        for _ in 0..label_count {
+            let label = read_len_prefixed_string_u16(
+                reader,
+                "label name length",
+                "Invalid UTF-8 in label name",
+            )?;
+            let offset = read_usize_u32(reader, "label offset")?;
+            labels.insert(label, offset);
+        }
+        let mut sorted_labels: Vec<_> = labels.iter().collect();
+        sorted_labels.sort_unstable_by_key(|(label, _)| *label);
+        sorted_labels.len().hash(&mut hasher);
+        for (label, offset) in sorted_labels {
+            label.hash(&mut hasher);
+            offset.hash(&mut hasher);
+        }
+
+        let instruction_count =
+            read_u32_len_bounded(reader, "instruction count", MAX_INSTRUCTION_COUNT)?;
+        instruction_count.hash(&mut hasher);
+
+        register_count = register_count
+            .max(crate::registers::MIN_FRAME_REGISTER_COUNT)
+            .max(parameters.len());
+
+        let stream = ResolvedInstructionReader {
+            reader,
+            name: name.clone(),
+            parameters,
+            upvalues,
+            parent,
+            register_count,
+            labels,
+            constants,
+            instruction_count,
+            remaining: instruction_count,
+            instruction_index: 0,
+            hasher,
+        };
+        Ok((name, stream))
     }
 
     fn deserialize_function_type<R: Read>(reader: &mut R) -> BinaryResult<FunctionType> {
