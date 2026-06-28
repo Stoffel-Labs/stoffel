@@ -2238,6 +2238,23 @@ fn optimize_all_inner(node: AstNode, optimization_level: u8) -> AstNode {
     } else {
         node
     };
+    // Fold `if`/`else` whose condition is a compile-time constant (-O3 only).
+    // Unrolling substitutes the loop index with a literal, turning index guards
+    // such as `if i == 0:` into `if 0 == 0:` / `if 1 == 0:`. Left in place these
+    // residual constant branches are dead-but-present `IfExpression` nodes, and
+    // `stmt_is_schedulable` treats ANY `if` as a barrier — so they fragment the
+    // straight-line region the round-minimizing scheduler needs to cluster
+    // independent same-depth multiplies. Pruning each constant branch to its taken
+    // side (splicing a taken block into its parent statement list so no residual
+    // `Block` barrier remains) lets the scheduler see across them. This is what
+    // unblocks AES *decrypt*: its per-byte `inv_affine` is a `for i in 0..8` of
+    // scalar `xor` multiplies guarded by `if i == 0 / if i == 2`, so without this
+    // every one of those secret-bool xors runs as its own unbatched round.
+    let node = if optimization_level >= 3 {
+        fold_constant_branches(node)
+    } else {
+        node
+    };
     let node = inline_multiply_wrappers(node);
     // Round-minimizing list scheduler (-O3): within each side-effect-free region,
     // reorder statements so that all mutually-independent multiplies at the same
@@ -4304,6 +4321,213 @@ fn bind_loop_var(env: &mut LenEnv, variables: &[String], iterable: &AstNode) {
             env.shapes.insert(first.clone(), elem);
         }
     }
+}
+
+// ===========================================================================
+// Constant-branch folding
+//
+// After unrolling substitutes a loop index with a literal, branch conditions that
+// were `i == 0` / `i % 4 == 0` become fully constant (`0 == 0`, `5 % 4 == 0`).
+// Such residual `if`s are dead control flow, but the scheduler treats every `if`
+// as a barrier, so they block same-depth multiply clustering. This pass evaluates
+// constant conditions and replaces the branch with its taken side, splicing taken
+// blocks into their parent statement list so no barrier `Block`/`if` remains.
+// ===========================================================================
+
+/// Statically evaluate a constant integer expression (literals + `+ - * / %` and
+/// unary `-`). Returns `None` for anything not provably constant.
+fn const_eval_int(node: &AstNode) -> Option<i128> {
+    match node {
+        AstNode::Literal {
+            value: crate::ast::Value::Int { value, .. },
+            ..
+        } => i128::try_from(*value).ok(),
+        AstNode::UnaryOperation { op, operand, .. } if op == "-" => {
+            const_eval_int(operand).map(|v| -v)
+        }
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => {
+            let l = const_eval_int(left)?;
+            let r = const_eval_int(right)?;
+            match op.as_str() {
+                "+" => l.checked_add(r),
+                "-" => l.checked_sub(r),
+                "*" => l.checked_mul(r),
+                "/" => (r != 0).then(|| l / r),
+                "%" => (r != 0).then(|| l % r),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Statically evaluate a constant boolean condition (literal bools, integer
+/// comparisons over constant ints, and `and`/`or`/`not` of constant bools).
+/// Returns `None` unless the value is provably constant.
+fn const_eval_bool(node: &AstNode) -> Option<bool> {
+    match node {
+        AstNode::Literal {
+            value: crate::ast::Value::Bool(b),
+            ..
+        } => Some(*b),
+        AstNode::UnaryOperation { op, operand, .. } if op == "not" => {
+            const_eval_bool(operand).map(|b| !b)
+        }
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => {
+            if let (Some(l), Some(r)) = (const_eval_int(left), const_eval_int(right)) {
+                return match op.as_str() {
+                    "==" => Some(l == r),
+                    "!=" => Some(l != r),
+                    "<" => Some(l < r),
+                    ">" => Some(l > r),
+                    "<=" => Some(l <= r),
+                    ">=" => Some(l >= r),
+                    _ => None,
+                };
+            }
+            match op.as_str() {
+                // Short-circuiting constant truth: a constant-false `and` operand or
+                // constant-true `or` operand fixes the result regardless of the
+                // other (possibly non-constant) side.
+                "and" => match (const_eval_bool(left), const_eval_bool(right)) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (Some(true), Some(true)) => Some(true),
+                    _ => None,
+                },
+                "or" => match (const_eval_bool(left), const_eval_bool(right)) {
+                    (Some(true), _) | (_, Some(true)) => Some(true),
+                    (Some(false), Some(false)) => Some(false),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The statements a (taken) branch contributes to its parent statement list:
+/// a `Block`'s own statements (spliced flat, so no residual `Block` barrier), or
+/// the single node otherwise.
+fn branch_into_stmts(branch: AstNode) -> Vec<AstNode> {
+    match branch {
+        AstNode::Block(stmts) => stmts,
+        single => vec![single],
+    }
+}
+
+/// Fold constant-condition `if`s throughout the program. Entry point.
+pub fn fold_constant_branches(node: AstNode) -> AstNode {
+    fold_branches_in_node(node)
+}
+
+/// Recurse, folding constant `if`s. Statement lists are processed specially so a
+/// taken branch is spliced flat into the enclosing list.
+fn fold_branches_in_node(node: AstNode) -> AstNode {
+    match node {
+        AstNode::Block(stmts) => AstNode::Block(fold_branches_in_stmts(stmts)),
+        AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body,
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        } => AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body: Box::new(fold_branches_in_node(*body)),
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        },
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => AstNode::WhileLoop {
+            condition,
+            body: Box::new(fold_branches_in_node(*body)),
+            location,
+        },
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => AstNode::ForLoop {
+            variables,
+            iterable,
+            body: Box::new(fold_branches_in_node(*body)),
+            location,
+        },
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            // Fold children first.
+            let then_branch = Box::new(fold_branches_in_node(*then_branch));
+            let else_branch = else_branch.map(|e| Box::new(fold_branches_in_node(*e)));
+            match const_eval_bool(&condition) {
+                Some(true) => *then_branch,
+                Some(false) => else_branch
+                    .map(|e| *e)
+                    .unwrap_or_else(|| AstNode::Block(Vec::new())),
+                None => AstNode::IfExpression {
+                    condition,
+                    then_branch,
+                    else_branch,
+                },
+            }
+        }
+        other => other,
+    }
+}
+
+/// Fold constant `if`s appearing as statements, splicing a taken branch's
+/// statements directly into the list (no residual `Block`/`if` barrier).
+fn fold_branches_in_stmts(stmts: Vec<AstNode>) -> Vec<AstNode> {
+    let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        match stmt {
+            AstNode::IfExpression {
+                condition,
+                then_branch,
+                else_branch,
+            } => match const_eval_bool(&condition) {
+                Some(true) => {
+                    out.extend(fold_branches_in_stmts(branch_into_stmts(*then_branch)));
+                }
+                Some(false) => {
+                    if let Some(e) = else_branch {
+                        out.extend(fold_branches_in_stmts(branch_into_stmts(*e)));
+                    }
+                }
+                None => {
+                    let then_branch = Box::new(fold_branches_in_node(*then_branch));
+                    let else_branch = else_branch.map(|e| Box::new(fold_branches_in_node(*e)));
+                    out.push(AstNode::IfExpression {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    });
+                }
+            },
+            other => out.push(fold_branches_in_node(other)),
+        }
+    }
+    out
 }
 
 /// Flatten `for` loops with statically-known trip counts throughout the program.
