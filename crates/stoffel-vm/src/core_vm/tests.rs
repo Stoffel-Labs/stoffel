@@ -53,6 +53,9 @@ fn compile_vm_source(source: &str) -> VirtualMachine {
         print_ir: false,
         mpc_backend: MpcBackend::HoneyBadger,
         mpc_curve: MpcCurve::default(),
+        inline_budget: None,
+        unroll_budget: None,
+        unroll_max_expansion: None,
     };
     let program =
         stoffellang::compile(source, "vm-test.stfl", &options).expect("test source should compile");

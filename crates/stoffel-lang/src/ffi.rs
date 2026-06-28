@@ -23,6 +23,9 @@ impl From<CCompilerOptions> for CompilerOptions {
             print_ir: c_options.print_ir != 0,
             mpc_backend: MpcBackend::default(),
             mpc_curve: MpcCurve::default(),
+            inline_budget: None,
+            unroll_budget: None,
+            unroll_max_expansion: None,
         }
     }
 }

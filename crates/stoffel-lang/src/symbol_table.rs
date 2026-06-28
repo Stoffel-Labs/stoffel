@@ -92,6 +92,26 @@ impl SymbolType {
         matches!(self, SymbolType::Secret(_))
     }
 
+    /// Checks if the type *contains* a secret leaf anywhere — a scalar
+    /// `Secret(_)`, a runtime `Share` object handle (which carries secret shares
+    /// even though it is a clear object handle, see `with_secret_modifier`), or
+    /// either nested inside a `List`/`Dict`/`Generic` element type. This is
+    /// distinct from `is_secret()` (which is scalar-`Secret(_)`-only and gates
+    /// secret-register allocation): a `list[Share]` / `list[secret bool]` is NOT
+    /// a secret scalar, but it *carries* secret shares, so an operation producing
+    /// one (e.g. `Share.batch_mul`) still costs an MPC round. Used only by the
+    /// round-batching optimizer to classify batched multiplies.
+    pub fn contains_secret(&self) -> bool {
+        match self {
+            SymbolType::Secret(_) => true,
+            SymbolType::Object(name) => name == "Share",
+            SymbolType::List(inner) => inner.contains_secret(),
+            SymbolType::Dict(k, v) => k.contains_secret() || v.contains_secret(),
+            SymbolType::Generic(_, args) => args.iter().any(|t| t.contains_secret()),
+            _ => false,
+        }
+    }
+
     /// Gets the underlying type if secret.
     pub fn underlying_type(&self) -> &SymbolType {
         match self {

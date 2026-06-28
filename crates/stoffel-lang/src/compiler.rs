@@ -24,7 +24,29 @@ pub struct CompilerOptions {
     pub mpc_backend: MpcBackend,
     /// MPC curve expected by AVSS when running the emitted binary.
     pub mpc_curve: MpcCurve,
+    /// Override for the inliner blowup budget (`None` = compiler default).
+    ///
+    /// These budget overrides are threaded explicitly (rather than read from
+    /// process-global environment variables inside the optimizer) so that
+    /// compilation is hermetic: in a process that compiles more than once, a
+    /// budget chosen for one compile never leaks into another.
+    pub inline_budget: Option<usize>,
+    /// Override for the global loop-unroll blowup budget (`None` = default).
+    pub unroll_budget: Option<usize>,
+    /// Override for the per-loop unroll expansion cap (`None` = default).
+    pub unroll_max_expansion: Option<usize>,
     // Add more options as needed: output_path, target_platform, etc.
+}
+
+impl CompilerOptions {
+    /// The optimizer expansion budgets carried by these options.
+    pub fn opt_budgets(&self) -> optimizations::OptBudgets {
+        optimizations::OptBudgets {
+            inline: self.inline_budget,
+            unroll: self.unroll_budget,
+            unroll_max_expansion: self.unroll_max_expansion,
+        }
+    }
 }
 
 /// Compiles the given source code string.
@@ -104,7 +126,11 @@ pub fn compile(
 
     // 5. Optimization Passes
     let optimized_ast = if options.optimize {
-        let ast = optimizations::optimize_all(analyzed_ast, options.optimization_level);
+        let ast = optimizations::optimize_all_with_budgets(
+            analyzed_ast,
+            options.optimization_level,
+            options.opt_budgets(),
+        );
         if options.print_ir {
             println!("--- Optimized AST (full optimize_all pipeline) ---");
             println!("{:#?}", ast);

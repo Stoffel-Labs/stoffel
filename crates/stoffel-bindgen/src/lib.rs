@@ -63,6 +63,7 @@ impl Program {
             print_ir: false,
             mpc_backend: MpcBackend::HoneyBadger,
             mpc_curve: MpcCurve::Bls12_381,
+            ..Default::default()
         };
         let compiled = stoffellang::compile_file(path, &source, &options)
             .map_err(|errors| Error::Compilation(format_compiler_errors(&errors)))?;

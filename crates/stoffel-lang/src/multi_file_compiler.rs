@@ -220,7 +220,11 @@ impl MultiFileCompiler {
 
         // Apply optimizations
         let optimized_ast = if self.options.optimize {
-            optimizations::optimize_all(analyzed_ast, self.options.optimization_level)
+            optimizations::optimize_all_with_budgets(
+                analyzed_ast,
+                self.options.optimization_level,
+                self.options.opt_budgets(),
+            )
         } else {
             analyzed_ast
         };

@@ -30,6 +30,7 @@ fn default_options() -> CompilerOptions {
         print_ir: false,
         mpc_backend: MpcBackend::default(),
         mpc_curve: MpcCurve::default(),
+        ..Default::default()
     }
 }
 

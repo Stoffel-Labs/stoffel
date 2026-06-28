@@ -4,8 +4,47 @@
 
 use crate::ast::AstNode;
 use crate::errors::SourceLocation;
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Optimizer expansion budgets, threaded explicitly through `optimize_all` from
+/// `CompilerOptions`.
+///
+/// These were previously read from process-global environment variables
+/// (`STOFFEL_INLINE_BUDGET`, `STOFFEL_UNROLL_BUDGET`,
+/// `STOFFEL_UNROLL_MAX_EXPANSION`) directly inside the optimizer. That made
+/// compilation non-hermetic: in a process that compiles more than once (e.g. the
+/// parallel test runner), a budget set for one compile leaked into every other
+/// compile in the process — flipping unrelated programs into a full-unroll regime
+/// and producing wrong/crashing bytecode. Budgets now flow in via this struct so
+/// each compile is independent. `None` means "use the built-in default constant".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OptBudgets {
+    /// Override for `INLINE_BUDGET` (inliner blowup guard).
+    pub inline: Option<usize>,
+    /// Override for `UNROLL_BUDGET` (global unroll blowup guard).
+    pub unroll: Option<usize>,
+    /// Override for `UNROLL_MAX_EXPANSION` (per-loop unroll expansion cap).
+    pub unroll_max_expansion: Option<usize>,
+}
+
+thread_local! {
+    /// Per-thread, per-`optimize_all`-call snapshot of the active budgets. Set at
+    /// the start of `optimize_all` and cleared at the end, so the value is only
+    /// ever live for the duration of a single (synchronous) optimize pass on the
+    /// current thread. Thread-local + per-call scoping is what makes budget
+    /// selection hermetic across the parallel test runner.
+    static ACTIVE_BUDGETS: Cell<OptBudgets> = const { Cell::new(OptBudgets {
+        inline: None,
+        unroll: None,
+        unroll_max_expansion: None,
+    }) };
+}
+
+fn active_budgets() -> OptBudgets {
+    ACTIVE_BUDGETS.with(|c| c.get())
+}
 
 /// Counter for generating unique temporary variable names
 static BATCH_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -76,6 +115,12 @@ struct MultiplyCandidate {
     is_mutable: bool,
     /// Whether the variable is secret.
     is_secret: bool,
+    /// Whether this candidate is a call-form `Share.batch_mul(L, R)` whose
+    /// operands and result are *lists* of shares (element-wise product), as
+    /// opposed to a scalar `and`/`or`/`xor` product. Batched candidates fuse by
+    /// concatenating operand lists and re-slicing the wide result, rather than
+    /// by building a list literal of scalar operands.
+    is_batched: bool,
 }
 
 /// Collects all variable names referenced in an expression
@@ -380,6 +425,28 @@ fn secret_multiply_operands(value: &AstNode) -> Option<(&str, &AstNode, &AstNode
     }
 }
 
+/// Detects a call-form `Share.batch_mul(L, R)` and returns its two list
+/// operands. This is the vectorized multiply form used throughout the AES/CTR/CBC
+/// circuits (operands and result are `list[secret bool]`, multiplied
+/// element-wise). Only recognizes the 2-argument form the batcher can fuse.
+fn batch_mul_call_operands(value: &AstNode) -> Option<(&AstNode, &AstNode)> {
+    if let AstNode::FunctionCall {
+        function,
+        arguments,
+        ..
+    } = value
+    {
+        if arguments.len() == 2 {
+            if let AstNode::Identifier(name, _) = function.as_ref() {
+                if builtin_base_name(name) == "batch_mul" {
+                    return Some((&arguments[0], &arguments[1]));
+                }
+            }
+        }
+    }
+    None
+}
+
 fn lvalue_key(node: &AstNode) -> Option<String> {
     match node {
         AstNode::Identifier(name, _) => Some(name.clone()),
@@ -467,6 +534,32 @@ fn extract_multiply_candidates(statements: &[AstNode]) -> Vec<MultiplyCandidate>
                             type_annotation: type_annotation.clone(),
                             is_mutable: *is_mutable,
                             is_secret: *is_secret,
+                            is_batched: false,
+                        });
+                    }
+                } else if let Some((left, right)) = batch_mul_call_operands(value) {
+                    // Call-form `var m = Share.batch_mul(L, R)`: a list result, so
+                    // not flagged secret on the binding, but it carries secret
+                    // shares and is a network round. Confirm via the resolved type
+                    // (falling back to the name when none was attached).
+                    if node_resolved_contains_secret(value).unwrap_or(true) {
+                        let mut referenced_vars = HashSet::new();
+                        collect_multiply_dependency_vars(left, &mut referenced_vars);
+                        collect_multiply_dependency_vars(right, &mut referenced_vars);
+                        candidates.push(MultiplyCandidate {
+                            statement_index: idx,
+                            target_key: name.clone(),
+                            target_expr: AstNode::Identifier(name.clone(), location.clone()),
+                            left_expr: left.clone(),
+                            right_expr: right.clone(),
+                            op: "batch_mul".to_string(),
+                            referenced_vars,
+                            location: location.clone(),
+                            is_declaration: true,
+                            type_annotation: type_annotation.clone(),
+                            is_mutable: *is_mutable,
+                            is_secret: *is_secret,
+                            is_batched: true,
                         });
                     }
                 }
@@ -497,6 +590,7 @@ fn extract_multiply_candidates(statements: &[AstNode]) -> Vec<MultiplyCandidate>
                                 type_annotation: None,
                                 is_mutable: false,
                                 is_secret: true,
+                                is_batched: false,
                             });
                         }
                     }
@@ -621,7 +715,7 @@ fn group_batchable_multiplies(
     }
 
     let mut groups = Vec::new();
-    let mut current_group = Vec::new();
+    let mut current_group: Vec<MultiplyCandidate> = Vec::new();
     let mut defined_vars: HashSet<String> = HashSet::new();
     let mut last_index = None;
 
@@ -629,7 +723,13 @@ fn group_batchable_multiplies(
         let can_batch = match last_index {
             None => true,
             Some(last_idx) => {
-                candidate.statement_index > last_idx
+                // Scalar (`and`/`or`/`xor`) and batched (`Share.batch_mul`)
+                // candidates fuse with different output shapes, so never mix them
+                // in one group.
+                current_group
+                    .first()
+                    .is_none_or(|g| g.is_batched == candidate.is_batched)
+                    && candidate.statement_index > last_idx
                     && !candidate.referenced_vars.iter().any(|var| {
                         defined_vars
                             .iter()
@@ -676,6 +776,9 @@ fn group_batchable_multiplies(
 ///   var a: secret bool = __batch_mul_results_K[0]
 ///   var b: secret bool = __batch_mul_results_K[1]
 fn create_batch_multiply_statements(group: &[MultiplyCandidate]) -> Vec<AstNode> {
+    if group.first().is_some_and(|c| c.is_batched) {
+        return create_batched_call_fusion(group);
+    }
     let lefts_name = generate_named_temp_name("batch_mul_lefts");
     let rights_name = generate_named_temp_name("batch_mul_rights");
     let results_name = generate_named_temp_name("batch_mul_results");
@@ -754,6 +857,211 @@ fn create_batch_multiply_statements(group: &[MultiplyCandidate]) -> Vec<AstNode>
                 location: candidate.location.clone(),
             });
         }
+    }
+
+    result
+}
+
+/// Builds a `Share.batch_mul(left, right)` call expression.
+fn make_batch_mul_call(left: AstNode, right: AstNode, location: &SourceLocation) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier(
+            "Share.batch_mul".to_string(),
+            location.clone(),
+        )),
+        arguments: vec![left, right],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+/// Builds a single-argument builtin call `name(arg)` (e.g. `len`, `copy`).
+fn make_unary_builtin_call(name: &str, arg: AstNode, location: &SourceLocation) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier(name.to_string(), location.clone())),
+        arguments: vec![arg],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+/// Builds an `extend(receiver, values)` mutator call statement.
+fn make_extend_call(receiver: &str, values: AstNode, location: &SourceLocation) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier("extend".to_string(), location.clone())),
+        arguments: vec![
+            AstNode::Identifier(receiver.to_string(), location.clone()),
+            values,
+        ],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+/// Builds a `slice(container, start, stop)` call expression.
+fn make_slice_call(
+    container: &str,
+    start: AstNode,
+    stop: AstNode,
+    location: &SourceLocation,
+) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier("slice".to_string(), location.clone())),
+        arguments: vec![
+            AstNode::Identifier(container.to_string(), location.clone()),
+            start,
+            stop,
+        ],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+fn make_int_literal(value: u128, location: &SourceLocation) -> AstNode {
+    AstNode::Literal {
+        value: crate::ast::Value::Int { value, kind: None },
+        location: location.clone(),
+    }
+}
+
+fn make_int_add(left: AstNode, right: AstNode, location: &SourceLocation) -> AstNode {
+    AstNode::BinaryOperation {
+        op: "+".to_string(),
+        left: Box::new(left),
+        right: Box::new(right),
+        location: location.clone(),
+    }
+}
+
+/// Emits the target binding for a batched candidate from an already-built value
+/// expression (a `slice(...)` of the fused result, or the lone call itself).
+fn emit_batched_target(candidate: &MultiplyCandidate, value_expr: AstNode) -> AstNode {
+    if candidate.is_declaration {
+        AstNode::VariableDeclaration {
+            name: candidate.target_key.clone(),
+            type_annotation: candidate.type_annotation.clone(),
+            value: Some(Box::new(value_expr)),
+            is_mutable: candidate.is_mutable,
+            is_secret: candidate.is_secret,
+            location: candidate.location.clone(),
+        }
+    } else {
+        AstNode::Assignment {
+            target: Box::new(candidate.target_expr.clone()),
+            value: Box::new(value_expr),
+            location: candidate.location.clone(),
+        }
+    }
+}
+
+/// Fuses a group of independent call-form `Share.batch_mul(L, R)` candidates into
+/// a single wide `Share.batch_mul`. Each candidate's list operands are
+/// concatenated into one pair of accumulator lists, multiplied once, then the
+/// per-candidate products are recovered by slicing the wide result back at the
+/// cumulative operand-length offsets.
+///
+/// Transforms (operands/results are `list[secret bool]`, multiplied element-wise):
+///   var m1 = Share.batch_mul(a, b)
+///   var m2 = Share.batch_mul(c, d)
+/// Into:
+///   var __bm_lefts_N  = copy(a)
+///   var __bm_rights_M = copy(b)
+///   extend(__bm_lefts_N, c)
+///   extend(__bm_rights_M, d)
+///   var __bm_results_K = Share.batch_mul(__bm_lefts_N, __bm_rights_M)
+///   var m1 = slice(__bm_results_K, 0, len(a))
+///   var __bm_off_P = len(a) + len(c)
+///   var m2 = slice(__bm_results_K, len(a), __bm_off_P)
+///
+/// A lone candidate has nothing to fuse and is emitted back unchanged.
+fn create_batched_call_fusion(group: &[MultiplyCandidate]) -> Vec<AstNode> {
+    let location = group[0].location.clone();
+
+    if group.len() == 1 {
+        let c = &group[0];
+        let call = make_batch_mul_call(c.left_expr.clone(), c.right_expr.clone(), &location);
+        return vec![emit_batched_target(c, call)];
+    }
+
+    let lefts_name = generate_named_temp_name("bm_lefts");
+    let rights_name = generate_named_temp_name("bm_rights");
+    let results_name = generate_named_temp_name("bm_results");
+
+    let mut result = Vec::new();
+
+    // Seed the accumulators with a *copy* of the first operands (copy yields a
+    // fresh, correctly-typed mutable list so `extend` can grow it without
+    // mutating the original operand lists).
+    result.push(AstNode::VariableDeclaration {
+        name: lefts_name.clone(),
+        type_annotation: None,
+        value: Some(Box::new(make_unary_builtin_call(
+            "copy",
+            group[0].left_expr.clone(),
+            &location,
+        ))),
+        is_mutable: true,
+        is_secret: false,
+        location: location.clone(),
+    });
+    result.push(AstNode::VariableDeclaration {
+        name: rights_name.clone(),
+        type_annotation: None,
+        value: Some(Box::new(make_unary_builtin_call(
+            "copy",
+            group[0].right_expr.clone(),
+            &location,
+        ))),
+        is_mutable: true,
+        is_secret: false,
+        location: location.clone(),
+    });
+    for candidate in &group[1..] {
+        result.push(make_extend_call(
+            &lefts_name,
+            candidate.left_expr.clone(),
+            &location,
+        ));
+        result.push(make_extend_call(
+            &rights_name,
+            candidate.right_expr.clone(),
+            &location,
+        ));
+    }
+
+    result.push(AstNode::VariableDeclaration {
+        name: results_name.clone(),
+        type_annotation: None,
+        value: Some(Box::new(make_batch_mul_call(
+            AstNode::Identifier(lefts_name.clone(), location.clone()),
+            AstNode::Identifier(rights_name.clone(), location.clone()),
+            &location,
+        ))),
+        is_mutable: false,
+        is_secret: false,
+        location: location.clone(),
+    });
+
+    // Recover each product by slicing at the cumulative operand-length offsets.
+    // `cur_off` is the start offset expression for the current candidate; the end
+    // is `cur_off + len(operand)`, bound to a temp so it is both the slice's stop
+    // and the next candidate's start.
+    let mut cur_off = make_int_literal(0, &location);
+    for candidate in group {
+        let len_call = make_unary_builtin_call("len", candidate.left_expr.clone(), &location);
+        let end_name = generate_named_temp_name("bm_off");
+        result.push(AstNode::VariableDeclaration {
+            name: end_name.clone(),
+            type_annotation: None,
+            value: Some(Box::new(make_int_add(cur_off.clone(), len_call, &location))),
+            is_mutable: false,
+            is_secret: false,
+            location: location.clone(),
+        });
+        let end_ident = AstNode::Identifier(end_name, location.clone());
+        let slice_expr = make_slice_call(&results_name, cur_off, end_ident.clone(), &location);
+        result.push(emit_batched_target(candidate, slice_expr));
+        cur_off = end_ident;
     }
 
     result
@@ -1847,6 +2155,24 @@ pub fn reorder_for_reveal_batching(node: AstNode) -> AstNode {
 
 /// Combined optimization: applies both Share.open() batching and instruction reordering
 pub fn optimize_all(node: AstNode, optimization_level: u8) -> AstNode {
+    optimize_all_with_budgets(node, optimization_level, OptBudgets::default())
+}
+
+/// Like [`optimize_all`] but with explicit expansion budgets (instead of the
+/// built-in defaults). The budgets are installed in a thread-local for the
+/// duration of this call only, then cleared — keeping each compile hermetic.
+pub fn optimize_all_with_budgets(
+    node: AstNode,
+    optimization_level: u8,
+    budgets: OptBudgets,
+) -> AstNode {
+    let previous = ACTIVE_BUDGETS.with(|c| c.replace(budgets));
+    let result = optimize_all_inner(node, optimization_level);
+    ACTIVE_BUDGETS.with(|c| c.set(previous));
+    result
+}
+
+fn optimize_all_inner(node: AstNode, optimization_level: u8) -> AstNode {
     // Passes compose forward: each one runs on the previous pass's output, so the
     // pipeline refines the program incrementally rather than each pass re-reading
     // the original AST. Order is deliberate — general function inlining runs first so
@@ -1933,15 +2259,13 @@ fn root_var(node: &AstNode) -> Option<String> {
 }
 
 /// The semantic secret/clear ground truth for a node, when semantic analysis
-/// attached it. This is the real type — preferred over name-based guessing.
-///
-/// Today the only per-node type the analyzer leaves on the AST is the resolved
-/// return type of a call (`resolved_return_type`), so that is the one source we
-/// can read directly. Returns `None` when no type was attached (e.g. nodes the
+/// attached it (the resolved return type of a call). Uses `contains_secret` so a
+/// call returning a *list/collection of* secret (e.g. `Share.batch_mul` →
+/// `list[secret bool]`) is recognized as carrying secret data — and therefore as
+/// a network round. Returns `None` when no type was attached (e.g. nodes the
 /// optimizer synthesised itself), in which case callers fall back to the name
-/// heuristic. Kept as a single accessor so later passes share one ground-truth
-/// hook instead of re-deriving secret-ness ad hoc.
-fn node_resolved_secret(node: &AstNode) -> Option<bool> {
+/// heuristic.
+fn node_resolved_contains_secret(node: &AstNode) -> Option<bool> {
     match node {
         AstNode::FunctionCall {
             resolved_return_type,
@@ -1950,7 +2274,7 @@ fn node_resolved_secret(node: &AstNode) -> Option<bool> {
         | AstNode::CommandCall {
             resolved_return_type,
             ..
-        } => resolved_return_type.as_ref().map(|ty| ty.is_secret()),
+        } => resolved_return_type.as_ref().map(|ty| ty.contains_secret()),
         _ => None,
     }
 }
@@ -1960,7 +2284,7 @@ fn node_resolved_secret(node: &AstNode) -> Option<bool> {
 /// `Share.batch_mul`). `*` is intentionally excluded: in this codebase it is
 /// clear index arithmetic, not a secret product.
 ///
-/// For call forms we PREFER the semantic ground truth (`node_resolved_secret`):
+/// For call forms we PREFER the semantic ground truth (`node_resolved_contains_secret`):
 /// a `mul`/`batch_mul` is only a network round if it actually yields a secret.
 /// When the analyzer left no type on the node we fall back to the historical
 /// name-only guess. On the current corpus every batched multiply returns a
@@ -1973,9 +2297,11 @@ fn value_is_multiply(value: &AstNode) -> bool {
                 call_name(value).map(builtin_base_name),
                 Some("mul") | Some("batch_mul")
             );
-            match node_resolved_secret(value) {
-                // Real type known: a clear `mul` result is not a secret round.
-                Some(is_secret) => name_is_multiply && is_secret,
+            // Use `contains_secret` so a batched multiply yielding a
+            // `list[secret bool]` (not a scalar secret) still counts as a round.
+            match node_resolved_contains_secret(value) {
+                // Real type known: a clear `mul`/`batch_mul` result is not a round.
+                Some(carries_secret) => name_is_multiply && carries_secret,
                 // No attached type: fall back to the name heuristic.
                 None => name_is_multiply,
             }
@@ -3197,10 +3523,7 @@ pub fn inline_functions(node: AstNode) -> AstNode {
         return node;
     }
     let mut node = node;
-    let mut budget = std::env::var("STOFFEL_INLINE_BUDGET")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(INLINE_BUDGET);
+    let mut budget = active_budgets().inline.unwrap_or(INLINE_BUDGET);
     for _ in 0..12 {
         let before = budget;
         node = inline_in_node(node, &infos, &mut budget);
@@ -3243,20 +3566,16 @@ const UNROLL_MAX_ITERATIONS: u128 = 1024;
 /// would otherwise allow it.
 const UNROLL_MAX_EXPANSION: usize = 50_000;
 
-/// Global blowup budget, overridable via `STOFFEL_UNROLL_BUDGET` for measuring
-/// the unrolling ceiling without recompiling.
+/// Global blowup budget, overridable via the `unroll` budget (threaded from
+/// `CompilerOptions`) for measuring the unrolling ceiling without recompiling.
 fn unroll_budget() -> usize {
-    std::env::var("STOFFEL_UNROLL_BUDGET")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(UNROLL_BUDGET)
+    active_budgets().unroll.unwrap_or(UNROLL_BUDGET)
 }
 
-/// Per-loop expansion cap, overridable via `STOFFEL_UNROLL_MAX_EXPANSION`.
+/// Per-loop expansion cap, overridable via the `unroll_max_expansion` budget.
 fn unroll_max_expansion() -> usize {
-    std::env::var("STOFFEL_UNROLL_MAX_EXPANSION")
-        .ok()
-        .and_then(|v| v.parse().ok())
+    active_budgets()
+        .unroll_max_expansion
         .unwrap_or(UNROLL_MAX_EXPANSION)
 }
 
@@ -7640,5 +7959,126 @@ mod tests {
         )]);
         let out = eliminate_dead_bindings(block);
         assert_eq!(count_decls(&out), 0, "dead multiply eliminated");
+    }
+
+    // ----- Batched `Share.batch_mul` call coalescing ---------------------------
+
+    /// `Share.batch_mul(L, R)` whose resolved return type is `list[Share]` (the
+    /// real type of a vectorized secret product in the AES/CTR/CBC circuits).
+    fn make_typed_batch_mul(left: &str, right: &str) -> AstNode {
+        use crate::symbol_table::SymbolType;
+        AstNode::FunctionCall {
+            function: Box::new(make_identifier("Share.batch_mul")),
+            arguments: vec![make_identifier(left), make_identifier(right)],
+            location: make_loc(),
+            resolved_return_type: Some(SymbolType::List(Box::new(SymbolType::Object(
+                "Share".to_string(),
+            )))),
+        }
+    }
+
+    fn count_calls_named(node: &AstNode, target: &str) -> usize {
+        let mut n = 0;
+        if let AstNode::FunctionCall { function, .. } = node {
+            if let AstNode::Identifier(name, _) = function.as_ref() {
+                if name == target {
+                    n += 1;
+                }
+            }
+        }
+        for_each_child(node, &mut |c| n += count_calls_named(c, target));
+        n
+    }
+
+    #[test]
+    fn test_contains_secret_recognizes_share_collections() {
+        use crate::symbol_table::SymbolType;
+        let share = SymbolType::Object("Share".to_string());
+        assert!(
+            share.contains_secret(),
+            "Share object carries secret shares"
+        );
+        assert!(
+            SymbolType::List(Box::new(share.clone())).contains_secret(),
+            "list[Share] carries secret shares"
+        );
+        assert!(
+            !SymbolType::List(Box::new(SymbolType::Bool)).contains_secret(),
+            "list[bool] is clear"
+        );
+        // The scalar-only predicate must stay narrow.
+        assert!(!share.is_secret(), "Share object is not a scalar Secret(_)");
+    }
+
+    #[test]
+    fn test_value_is_multiply_recognizes_batched_share_mul() {
+        assert!(
+            value_is_multiply(&make_typed_batch_mul("a", "b")),
+            "batch_mul yielding list[Share] is a multiply round"
+        );
+    }
+
+    #[test]
+    fn test_independent_batch_muls_fused_into_one_wide_call() {
+        // var m1 = Share.batch_mul(a, b)
+        // var m2 = Share.batch_mul(c, d)   -- independent -> one fused round.
+        let block = AstNode::Block(vec![
+            make_var_decl("m1", make_typed_batch_mul("a", "b")),
+            make_var_decl("m2", make_typed_batch_mul("c", "d")),
+        ]);
+        let out = optimize_multiplies(block);
+        assert_eq!(
+            count_calls_named(&out, "Share.batch_mul"),
+            1,
+            "two independent batched multiplies collapse to one wide batch_mul"
+        );
+        // The fusion uses concat (extend) + re-slice to recover each product.
+        assert_eq!(
+            count_calls_named(&out, "extend"),
+            2,
+            "lefts+rights extended"
+        );
+        assert_eq!(
+            count_calls_named(&out, "slice"),
+            2,
+            "each product recovered by a slice of the wide result"
+        );
+    }
+
+    #[test]
+    fn test_dependent_batch_muls_not_fused() {
+        // var m1 = Share.batch_mul(a, b)
+        // var m2 = Share.batch_mul(m1, d)  -- m2 depends on m1 -> stays separate.
+        let block = AstNode::Block(vec![
+            make_var_decl("m1", make_typed_batch_mul("a", "b")),
+            make_var_decl("m2", make_typed_batch_mul("m1", "d")),
+        ]);
+        let out = optimize_multiplies(block);
+        assert_eq!(
+            count_calls_named(&out, "Share.batch_mul"),
+            2,
+            "a dependent batched multiply cannot share a round"
+        );
+        assert_eq!(
+            count_calls_named(&out, "extend"),
+            0,
+            "no fusion, so no concatenation"
+        );
+    }
+
+    #[test]
+    fn test_single_batch_mul_left_unfused() {
+        let block = AstNode::Block(vec![make_var_decl("m1", make_typed_batch_mul("a", "b"))]);
+        let out = optimize_multiplies(block);
+        assert_eq!(
+            count_calls_named(&out, "Share.batch_mul"),
+            1,
+            "a lone batched multiply is unchanged"
+        );
+        assert_eq!(
+            count_calls_named(&out, "extend"),
+            0,
+            "a lone batched multiply needs no concatenation"
+        );
     }
 }

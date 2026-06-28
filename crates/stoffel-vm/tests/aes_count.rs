@@ -15,6 +15,22 @@ struct CountingEngine {
     scalar_mul_calls: AtomicUsize,
     batch_mul_calls: AtomicUsize,
     batch_mul_items: AtomicUsize,
+    // === Lever-B / depth instrumentation (measurement only) ===
+    // public_operand_muls: number of individual multiply PAIRS executed whose
+    // value (the round-charging `ab` term) has at least one operand that traces
+    // back to a compile-time public literal (`Share.from_clear_int` / a literal
+    // vector) through only LOCAL ops (never through a prior multiply). These are
+    // exactly the `bits_xor` (secret⊕public) and constant-fold multiplies that
+    // lever B could turn into a local `mul_scalar`, so this is lever B's headroom.
+    public_operand_muls: AtomicUsize,
+    // both_public_muls: subset where BOTH operands are public literals (the
+    // multiply is fully constant-foldable, not just lever-B-local).
+    both_public_muls: AtomicUsize,
+    // max_mul_depth: critical-path multiply depth = the theoretical round floor
+    // with perfect batching. A share's depth is the number of multiplies on the
+    // longest data-dependency path from inputs; a multiply output is
+    // max(operand depths)+1, local ops keep the max, inputs are depth 0.
+    max_mul_depth: AtomicUsize,
 }
 
 impl CountingEngine {
@@ -26,8 +42,61 @@ impl CountingEngine {
         )
     }
 
+    /// (public_operand_muls, both_public_muls, max_mul_depth) — see field docs.
+    fn lever_b_counts(&self) -> (usize, usize, usize) {
+        (
+            self.public_operand_muls.load(Ordering::SeqCst),
+            self.both_public_muls.load(Ordering::SeqCst),
+            self.max_mul_depth.load(Ordering::SeqCst),
+        )
+    }
+
     fn bool_byte(bytes: &[u8]) -> u8 {
         bytes.first().copied().unwrap_or_default() & 1
+    }
+
+    // --- Share metadata layout -------------------------------------------------
+    // Every share this engine emits is `[value, public, d0, d1, d2, d3]`:
+    //   byte 0      : the GF(2) value bit (read by `bool_byte`, unchanged).
+    //   byte 1      : public-literal taint flag (1 = traces to a literal through
+    //                 only local ops).
+    //   bytes 2..6  : critical-path multiply depth as u32 little-endian.
+    // Legacy 1-byte shares (e.g. raw client inputs) decode as public=false,
+    // depth=0, which is the correct default for a secret input.
+    fn pack(value: u8, public: bool, depth: u32) -> Vec<u8> {
+        let d = depth.to_le_bytes();
+        vec![value & 1, u8::from(public), d[0], d[1], d[2], d[3]]
+    }
+
+    fn is_public(bytes: &[u8]) -> bool {
+        bytes.get(1).copied().unwrap_or(0) != 0
+    }
+
+    fn depth_of(bytes: &[u8]) -> u32 {
+        if bytes.len() >= 6 {
+            u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]])
+        } else {
+            0
+        }
+    }
+
+    /// Execute one secret multiply `ab`: compute its value, record lever-B and
+    /// depth instrumentation, and return packed metadata for the product (a
+    /// product is never a public literal). Shared by scalar/async/batch paths.
+    fn record_multiply(&self, left: &[u8], right: &[u8]) -> Vec<u8> {
+        let value = Self::bool_byte(left) & Self::bool_byte(right);
+        let out_depth = Self::depth_of(left).max(Self::depth_of(right)) + 1;
+        self.max_mul_depth
+            .fetch_max(out_depth as usize, Ordering::SeqCst);
+        let left_pub = Self::is_public(left);
+        let right_pub = Self::is_public(right);
+        if left_pub || right_pub {
+            self.public_operand_muls.fetch_add(1, Ordering::SeqCst);
+        }
+        if left_pub && right_pub {
+            self.both_public_muls.fetch_add(1, Ordering::SeqCst);
+        }
+        Self::pack(value, false, out_depth)
     }
 
     fn share_from_clear(clear: ClearShareInput) -> ShareData {
@@ -37,7 +106,8 @@ impl CountingEngine {
             ClearShareValue::FixedPoint(value) => ((value.0 as i64) & 1) as u8,
             ClearShareValue::Boolean(value) => u8::from(value),
         };
-        ShareData::Opaque(vec![byte].into())
+        // A `from_clear` value is a compile-time public literal: public=true, depth 0.
+        ShareData::Opaque(Self::pack(byte, true, 0).into())
     }
 
     fn open_bool(share_bytes: &[u8]) -> ClearShareValue {
@@ -84,9 +154,11 @@ impl MpcEngine for CountingEngine {
         lhs_bytes: &[u8],
         rhs_bytes: &[u8],
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(vec![
-            Self::bool_byte(lhs_bytes) ^ Self::bool_byte(rhs_bytes),
-        ])
+        // Local linear op: public iff both operands public; depth = max of inputs.
+        let value = Self::bool_byte(lhs_bytes) ^ Self::bool_byte(rhs_bytes);
+        let public = Self::is_public(lhs_bytes) && Self::is_public(rhs_bytes);
+        let depth = Self::depth_of(lhs_bytes).max(Self::depth_of(rhs_bytes));
+        Ok(Self::pack(value, public, depth))
     }
 
     fn sub_share_local(
@@ -95,9 +167,19 @@ impl MpcEngine for CountingEngine {
         lhs_bytes: &[u8],
         rhs_bytes: &[u8],
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(vec![
-            Self::bool_byte(lhs_bytes) ^ Self::bool_byte(rhs_bytes),
-        ])
+        let value = Self::bool_byte(lhs_bytes) ^ Self::bool_byte(rhs_bytes);
+        let public = Self::is_public(lhs_bytes) && Self::is_public(rhs_bytes);
+        let depth = Self::depth_of(lhs_bytes).max(Self::depth_of(rhs_bytes));
+        Ok(Self::pack(value, public, depth))
+    }
+
+    fn neg_share_local(&self, _ty: ShareType, share_bytes: &[u8]) -> ShareAlgebraResult<Vec<u8>> {
+        // GF(2) negation == identity on the value; metadata is preserved.
+        Ok(Self::pack(
+            Self::bool_byte(share_bytes),
+            Self::is_public(share_bytes),
+            Self::depth_of(share_bytes),
+        ))
     }
 
     fn mul_share_scalar_local(
@@ -106,7 +188,13 @@ impl MpcEngine for CountingEngine {
         share_bytes: &[u8],
         scalar: i64,
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(vec![Self::bool_byte(share_bytes) & ((scalar & 1) as u8)])
+        // Scalar (public constant) factor: keeps publicness and depth of the share.
+        let value = Self::bool_byte(share_bytes) & ((scalar & 1) as u8);
+        Ok(Self::pack(
+            value,
+            Self::is_public(share_bytes),
+            Self::depth_of(share_bytes),
+        ))
     }
 
     fn add_share_scalar_local(
@@ -115,7 +203,12 @@ impl MpcEngine for CountingEngine {
         share_bytes: &[u8],
         scalar: i64,
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(vec![Self::bool_byte(share_bytes) ^ ((scalar & 1) as u8)])
+        let value = Self::bool_byte(share_bytes) ^ ((scalar & 1) as u8);
+        Ok(Self::pack(
+            value,
+            Self::is_public(share_bytes),
+            Self::depth_of(share_bytes),
+        ))
     }
 
     fn sub_share_scalar_local(
@@ -124,7 +217,12 @@ impl MpcEngine for CountingEngine {
         share_bytes: &[u8],
         scalar: i64,
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(vec![Self::bool_byte(share_bytes) ^ ((scalar & 1) as u8)])
+        let value = Self::bool_byte(share_bytes) ^ ((scalar & 1) as u8);
+        Ok(Self::pack(
+            value,
+            Self::is_public(share_bytes),
+            Self::depth_of(share_bytes),
+        ))
     }
 
     fn scalar_sub_share_local(
@@ -133,7 +231,12 @@ impl MpcEngine for CountingEngine {
         scalar: i64,
         share_bytes: &[u8],
     ) -> ShareAlgebraResult<Vec<u8>> {
-        Ok(vec![((scalar & 1) as u8) ^ Self::bool_byte(share_bytes)])
+        let value = ((scalar & 1) as u8) ^ Self::bool_byte(share_bytes);
+        Ok(Self::pack(
+            value,
+            Self::is_public(share_bytes),
+            Self::depth_of(share_bytes),
+        ))
     }
 
     fn div_share_scalar_local(
@@ -143,7 +246,11 @@ impl MpcEngine for CountingEngine {
         scalar: i64,
     ) -> ShareAlgebraResult<Vec<u8>> {
         assert_ne!(scalar & 1, 0, "division by zero in GF(2)");
-        Ok(vec![Self::bool_byte(share_bytes)])
+        Ok(Self::pack(
+            Self::bool_byte(share_bytes),
+            Self::is_public(share_bytes),
+            Self::depth_of(share_bytes),
+        ))
     }
 }
 
@@ -155,9 +262,7 @@ impl MpcEngineMultiplication for CountingEngine {
         right: &[u8],
     ) -> MpcEngineResult<ShareData> {
         self.scalar_mul_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ShareData::Opaque(
-            vec![CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right)].into(),
-        ))
+        Ok(ShareData::Opaque(self.record_multiply(left, right).into()))
     }
 }
 
@@ -174,9 +279,7 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
         right: &[u8],
     ) -> MpcEngineResult<ShareData> {
         self.scalar_mul_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ShareData::Opaque(
-            vec![CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right)].into(),
-        ))
+        Ok(ShareData::Opaque(self.record_multiply(left, right).into()))
     }
 
     async fn batch_multiply_share_async(
@@ -189,11 +292,7 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
             .fetch_add(pairs.len(), Ordering::SeqCst);
         Ok(pairs
             .iter()
-            .map(|(left, right)| {
-                ShareData::Opaque(
-                    vec![CountingEngine::bool_byte(left) & CountingEngine::bool_byte(right)].into(),
-                )
-            })
+            .map(|(left, right)| ShareData::Opaque(self.record_multiply(left, right).into()))
             .collect())
     }
 
@@ -507,6 +606,46 @@ async fn optimized_aes_at_o3_matches_nist_vector_impl() {
     );
 }
 
+/// Regression for the cross-compile optimizer-budget leak.
+///
+/// The inline/unroll budgets used to be read from process-global environment
+/// variables inside the optimizer. In a process that compiles more than once
+/// (e.g. the parallel test runner), a sibling compile that raised those budgets
+/// to flatten its program leaked the full-unroll regime into every other
+/// compile — pushing this AES-O3 build into the known-buggy full-unroll path,
+/// which crashes at runtime with
+/// `get_field: array index 0 out of range (length 0)`.
+///
+/// Budgets are now threaded per-compile via `CompilerOptions`, so this ordering
+/// — a heavy full-unroll compile immediately followed by a *default*-budget
+/// AES-O3 compile in the same process/thread — must leave AES-O3 in its correct
+/// rolled regime and still match the NIST vector.
+#[test]
+fn repro_aes_o3_double_compile() {
+    run_on_large_stack(async move {
+        // 1. A sibling compile that opts into the full-unroll regime via
+        //    hermetic per-compile budgets (previously: leaking env vars). The
+        //    literal-bound loop ensures the raised unroll budget is exercised.
+        let sibling_src = "def main() -> int64:\n  var acc = 0\n  for i in 0..64:\n    acc = acc + i\n  return acc\n";
+        let sibling_options = stoffellang::CompilerOptions {
+            optimize: true,
+            optimization_level: 3,
+            mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+            inline_budget: Some(100_000_000),
+            unroll_budget: Some(100_000_000),
+            unroll_max_expansion: Some(100_000_000),
+            ..Default::default()
+        };
+        stoffellang::compile(sibling_src, "<sibling-full-unroll>", &sibling_options)
+            .expect("sibling full-unroll compile");
+
+        // 2. AES at -O3 with DEFAULT budgets, in the same process/thread. If the
+        //    sibling's budgets leaked, this would full-unroll and crash; instead
+        //    it must reproduce the exact NIST ciphertext (asserted by the impl).
+        optimized_aes_at_o3_matches_nist_vector_impl().await;
+    });
+}
+
 /// Full-optimization path: with the unroll/inline budgets raised so the whole
 /// circuit is flattened, the round-minimizing scheduler collapses the ~34k secret
 /// multiplies into only a few hundred `batch_mul` communication rounds — a ~60x
@@ -519,15 +658,18 @@ async fn optimized_aes_at_o3_matches_nist_vector_impl() {
 #[test]
 #[ignore]
 fn optimized_aes_full_unroll_minimizes_rounds() {
-    std::env::set_var("STOFFEL_UNROLL_BUDGET", "100000000");
-    std::env::set_var("STOFFEL_UNROLL_MAX_EXPANSION", "100000000");
-    std::env::set_var("STOFFEL_INLINE_BUDGET", "100000000");
     run_on_large_stack(async move {
         let source = include_str!("../../stoffel-lang/examples/mpc_aes128_circuit/main.stfl");
+        // Full-unroll budgets are passed hermetically via CompilerOptions rather
+        // than process-global env vars, so this heavy run can't pollute any
+        // concurrent compile in the same test process.
         let options = stoffellang::CompilerOptions {
             optimize: true,
             optimization_level: 3,
             mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+            inline_budget: Some(100_000_000),
+            unroll_budget: Some(100_000_000),
+            unroll_max_expansion: Some(100_000_000),
             ..Default::default()
         };
         let compiled = stoffellang::compile(source, "<m>", &options).expect("compile");
@@ -760,15 +902,17 @@ def main_lit() -> list[int64]:
     let source = format!("{base}\n{main_lit}");
 
     let run_at = |level: u8, full_unroll: bool, source: String| async move {
-        if full_unroll {
-            std::env::set_var("STOFFEL_INLINE_BUDGET", "100000000");
-            std::env::set_var("STOFFEL_UNROLL_BUDGET", "100000000");
-            std::env::set_var("STOFFEL_UNROLL_MAX_EXPANSION", "100000000");
-        }
+        // Full-unroll budgets are threaded hermetically through CompilerOptions
+        // (never via process-global env vars), so this test cannot leak a
+        // full-unroll regime into any concurrent compile in the same process.
+        let budget = if full_unroll { Some(100_000_000) } else { None };
         let options = stoffellang::CompilerOptions {
             optimize: level > 0,
             optimization_level: level,
             mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+            inline_budget: budget,
+            unroll_budget: budget,
+            unroll_max_expansion: budget,
             ..Default::default()
         };
         let compiled = stoffellang::compile(&source, "<ctr-lit>", &options)
@@ -806,14 +950,234 @@ def main_lit() -> list[int64]:
 
     let o0 = run_at(0, false, source.clone()).await;
     eprintln!("CTR1_O0 = {:?}", o0);
-    std::env::set_var("STOFFEL_INLINE_BUDGET", "100000000");
-    std::env::set_var("STOFFEL_UNROLL_BUDGET", "100000000");
-    std::env::set_var("STOFFEL_UNROLL_MAX_EXPANSION", "100000000");
-    let o3 = run_at(3, false, source).await;
+    // Full-unroll O3 via hermetic per-compile budgets (no env-var leak).
+    let o3 = run_at(3, true, source).await;
     eprintln!("CTR1_O3 = {:?}", o3);
     eprintln!("match: {}", o0 == o3);
     assert_eq!(
         o0, o3,
         "ctr1 (counter increment) must match between -O0 and -O3"
+    );
+}
+
+// ===========================================================================
+// Round-count + correctness gate
+// ===========================================================================
+//
+// Reusable, reproducible gate for round-reducing optimizer work. For each of
+// AES-circuit, CTR, and CBC at -O0/-O2/-O3 it COMPILES the live source, runs it
+// through the GF(2) `CountingEngine`, and reports BOTH the multiply round count
+// (each scalar `multiply_share` or batched `batch_multiply_share` call is one
+// communication round) AND whether the revealed output is correct.
+//
+// Correctness oracle (per program, independent of optimization level):
+//   * AES-circuit: the program returns the ciphertext block; it must equal the
+//     NIST SP 800-38A AES-128 vector.
+//   * CTR / CBC: the program returns the round-tripped second plaintext block
+//     (encrypt then decrypt), so it must equal NIST plaintext block P1. This is
+//     a true value oracle and ALSO implies -O2/-O3 == -O0 when all three match.
+//
+// Output: one stable line per (program, level):
+//   ROUNDGATE <prog> O<level> mul_rounds=<n> correct=<true|false>
+//
+// Run with:
+//   cargo test -p stoffel-vm --test aes_count round_gate -- --nocapture
+//
+// The test PRINTS the measurements for every (program, level) and only asserts
+// the invariants that are known-stable (see assertions at the end), so it stays
+// green as a measurement harness while still surfacing any regression.
+
+/// NIST SP 800-38A AES-128 ciphertext for the single-block circuit example.
+const AES_NIST_CIPHERTEXT: [i64; 16] = [
+    105, 196, 224, 216, 106, 123, 4, 48, 216, 205, 183, 128, 112, 180, 197, 90,
+];
+
+/// NIST SP 800-38A AES-128 second plaintext block (P1 = ae2d8a57...8e51). Both
+/// CTR and CBC encrypt then decrypt and return this round-tripped block.
+const AES_NIST_PLAINTEXT_P1: [i64; 16] = [
+    174, 45, 138, 87, 30, 3, 172, 156, 158, 183, 111, 172, 69, 175, 142, 81,
+];
+
+/// Two-block NIST plaintext (P0 || P1) and 128-bit key, as the client secret
+/// inputs CTR/CBC consume via `ClientStore.take_share_bool`.
+const CTR_CBC_PLAINTEXT_HEX: &str =
+    "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51";
+const CTR_CBC_KEY_HEX: &str = "2b7e151628aed2a6abf7158809cf4f3c";
+
+/// Decode a hex string to bytes.
+fn hex_bytes(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex byte"))
+        .collect()
+}
+
+/// Expand bytes into one secret-bool client share per bit, LSB-first within each
+/// byte (bit i = 2^i) — the exact ordering `take_client_byte` expects.
+fn bits_as_bool_shares(bytes: &[u8]) -> Vec<stoffel_vm::ClientShare> {
+    let mut shares = Vec::with_capacity(bytes.len() * 8);
+    for byte in bytes {
+        for bit in 0..8 {
+            let value = (byte >> bit) & 1;
+            shares.push(stoffel_vm::ClientShare::typed(
+                ShareType::boolean(),
+                ShareData::Opaque(vec![value].into()),
+            ));
+        }
+    }
+    shares
+}
+
+/// Compile `source` at the given optimization level, seed any client inputs,
+/// run `main` through the `CountingEngine`, and return
+/// `(mul_rounds, revealed_output)`. `mul_rounds` is the number of multiply
+/// communication rounds: scalar `multiply_share` calls (one round each) plus
+/// `batch_multiply_share` calls (one round each, regardless of batch size).
+/// Lever-B / depth measurements for one (program, level) run.
+struct LeverMetrics {
+    /// Multiply pairs with >=1 public-literal operand (lever B's headroom).
+    public_operand_muls: usize,
+    /// Subset of the above where BOTH operands are public (fully foldable).
+    both_public_muls: usize,
+    /// Critical-path multiply depth (theoretical round floor).
+    mul_depth: usize,
+}
+
+async fn round_gate_run(
+    source: &str,
+    level: u8,
+    client_inputs: &[(usize, Vec<stoffel_vm::ClientShare>)],
+) -> (usize, Vec<i64>, LeverMetrics) {
+    let options = stoffellang::CompilerOptions {
+        optimize: level > 0,
+        optimization_level: level,
+        mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+        ..Default::default()
+    };
+    let compiled = stoffellang::compile(source, "<round-gate>", &options)
+        .unwrap_or_else(|e| panic!("compile at -O{level}: {e:?}"));
+    let binary = stoffellang::convert_to_binary(&compiled);
+    let functions = binary.try_to_vm_functions().expect("vm functions");
+
+    let engine = Arc::new(CountingEngine::default());
+    let mut vm = VirtualMachine::builder()
+        .with_mpc_engine(engine.clone())
+        .build();
+    for function in functions {
+        vm.try_register_function(function)
+            .expect("register function");
+    }
+    for (client_id, shares) in client_inputs {
+        vm.store_client_shares(*client_id, shares.clone());
+    }
+
+    let result = vm
+        .execute_async("main", engine.as_ref())
+        .await
+        .unwrap_or_else(|e| panic!("execute at -O{level}: {e:?}"));
+    let Value::Array(result_ref) = result else {
+        panic!("main should return an array, got something else");
+    };
+    let mut out = Vec::new();
+    for index in 0..vm.read_array_len(result_ref).expect("result length") {
+        let value = vm
+            .read_table_field(TableRef::from(result_ref), &Value::I64(index as i64))
+            .expect("read byte")
+            .expect("byte present");
+        let Value::I64(byte) = value else {
+            panic!("output byte should be int64, got {value:?}");
+        };
+        out.push(byte);
+    }
+
+    let (scalar, batch_calls, _items) = engine.counts();
+    let (public_operand_muls, both_public_muls, mul_depth) = engine.lever_b_counts();
+    (
+        scalar + batch_calls,
+        out,
+        LeverMetrics {
+            public_operand_muls,
+            both_public_muls,
+            mul_depth,
+        },
+    )
+}
+
+// Heavy measurement harness (compiles + runs AES/CTR/CBC at O0/O2/O3): run
+// manually as the round-reduction gate with `-- --ignored`. Ignored by default so
+// it does not add parallel compile/VM load to the standard test run.
+#[ignore = "round-reduction measurement gate; run manually with --ignored"]
+#[test]
+fn round_gate() {
+    run_on_large_stack(round_gate_impl());
+}
+
+async fn round_gate_impl() {
+    let aes_src = include_str!("../../stoffel-lang/examples/mpc_aes128_circuit/main.stfl");
+    let ctr_src = include_str!("../../stoffel-lang/examples/mpc_aes128_ctr/main.stfl");
+    let cbc_src = include_str!("../../stoffel-lang/examples/mpc_aes128_cbc/main.stfl");
+
+    // CTR/CBC consume 2 plaintext blocks from client slot 0 and the key from
+    // client slot 1. With no explicit roster the client store sorts by id, so
+    // id 0 -> slot 0 (plaintext) and id 1 -> slot 1 (key).
+    let plaintext_shares = bits_as_bool_shares(&hex_bytes(CTR_CBC_PLAINTEXT_HEX));
+    let key_shares = bits_as_bool_shares(&hex_bytes(CTR_CBC_KEY_HEX));
+    type ClientInputs = Vec<(usize, Vec<stoffel_vm::ClientShare>)>;
+    let ctr_cbc_inputs: ClientInputs = vec![(0usize, plaintext_shares), (1usize, key_shares)];
+
+    // (program label, source, no-input or client-input, expected output)
+    let programs: Vec<(&str, &str, ClientInputs, &[i64])> = vec![
+        ("AES", aes_src, Vec::new(), &AES_NIST_CIPHERTEXT[..]),
+        (
+            "CTR",
+            ctr_src,
+            ctr_cbc_inputs.clone(),
+            &AES_NIST_PLAINTEXT_P1[..],
+        ),
+        (
+            "CBC",
+            cbc_src,
+            ctr_cbc_inputs.clone(),
+            &AES_NIST_PLAINTEXT_P1[..],
+        ),
+    ];
+
+    // Collected so we can assert known-stable invariants after printing every line.
+    let mut aes_all_correct = true;
+
+    for (label, source, inputs, expected) in &programs {
+        for level in [0u8, 2, 3] {
+            let (mul_rounds, output, lever) = round_gate_run(source, level, inputs).await;
+            let correct = output == *expected;
+            // The stable, machine-parseable gate line.
+            println!("ROUNDGATE {label} O{level} mul_rounds={mul_rounds} correct={correct}");
+            // Lever-B headroom: multiplies whose `ab` term has a public-literal
+            // operand (could become a local `mul_scalar`). `both_public` is the
+            // fully-constant-foldable subset.
+            println!(
+                "PUBMUL {label} O{level} public_operand_muls={} both_public={}",
+                lever.public_operand_muls, lever.both_public_muls
+            );
+            // Critical-path multiply depth = theoretical round floor.
+            println!("MULDEPTH {label} O{level} mul_depth={}", lever.mul_depth);
+            if !correct {
+                eprintln!(
+                    "ROUNDGATE {label} O{level} MISMATCH: got {output:?}, expected {expected:?}"
+                );
+            }
+            if *label == "AES" && !correct {
+                aes_all_correct = false;
+            }
+        }
+    }
+
+    // AES correctness at every level is already guaranteed by the dedicated
+    // `optimized_aes_*` tests, so it is safe to assert here and keeps the gate
+    // honest. CTR/CBC correctness is reported per-line (above) but NOT asserted:
+    // a known -O3 full-unroll CTR bug means we must surface reality rather than
+    // fail the measurement harness.
+    assert!(
+        aes_all_correct,
+        "AES must reveal the NIST ciphertext at every optimization level"
     );
 }
