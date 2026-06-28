@@ -84,49 +84,11 @@ fn collect_referenced_vars(node: &AstNode, vars: &mut HashSet<String>) {
         AstNode::Identifier(name, _) => {
             vars.insert(name.clone());
         }
-        AstNode::BinaryOperation { left, right, .. } => {
-            collect_referenced_vars(left, vars);
-            collect_referenced_vars(right, vars);
-        }
-        AstNode::UnaryOperation { operand, .. } => {
-            collect_referenced_vars(operand, vars);
-        }
-        AstNode::FunctionCall {
-            function,
-            arguments,
-            ..
-        } => {
-            collect_referenced_vars(function, vars);
-            for arg in arguments {
-                collect_referenced_vars(arg, vars);
-            }
-        }
-        AstNode::FieldAccess { object, .. } => {
-            collect_referenced_vars(object, vars);
-        }
-        AstNode::IndexAccess { base, index, .. } => {
-            collect_referenced_vars(base, vars);
-            collect_referenced_vars(index, vars);
-        }
-        AstNode::ListLiteral { elements, .. } => {
-            for elem in elements {
-                collect_referenced_vars(elem, vars);
-            }
-        }
-        AstNode::IfExpression {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            collect_referenced_vars(condition, vars);
-            collect_referenced_vars(then_branch, vars);
-            if let Some(else_b) = else_branch {
-                collect_referenced_vars(else_b, vars);
-            }
-        }
-        // Any other node kind: still recurse so a variable buried in an
-        // unhandled node type is tracked (a miss here would skip invalidation in
-        // CSE/GVN and produce a stale alias).
+        // Any other node kind: recurse into every child so a variable buried in
+        // an unhandled node type is still tracked (a miss here would skip
+        // invalidation in CSE/GVN and produce a stale alias). The structural
+        // node kinds need no bespoke arm because `for_each_child` already visits
+        // exactly the same children.
         _ => for_each_child(node, &mut |c| collect_referenced_vars(c, vars)),
     }
 }
@@ -561,6 +523,13 @@ fn key_set_contains_conflict(keys: &HashSet<String>, needle: &str) -> bool {
     keys.iter().any(|key| keys_conflict(key, needle))
 }
 
+// Reads/writes for the multiply batcher. This dep model is intentionally
+// specialized: it keys on *field-level* lvalue paths (`lvalue_key`, e.g. `a.b`
+// vs `a.c`) compared with `keys_conflict`, which the batcher needs to prove two
+// candidate multiplies touch disjoint object fields. It is deliberately NOT
+// shared with the scheduler's / reorderer's heap-level keying (`sched_info`,
+// `reveal_dep_keys`), which collapses a whole object to one `heap:` key —
+// merging them would drop this field precision.
 fn statement_reads_and_writes(statement: &AstNode) -> (HashSet<String>, HashSet<String>) {
     let mut reads = HashSet::new();
     let mut writes = HashSet::new();
@@ -1419,10 +1388,6 @@ struct StatementInfo {
     index: usize,
     /// The AST node
     node: AstNode,
-    /// Variables defined by this statement
-    defines: HashSet<String>,
-    /// Variables used/referenced by this statement
-    uses: HashSet<String>,
     /// Is this an implicit reveal? (clear var = secret expr)
     is_implicit_reveal: bool,
     /// Does this statement use a revealed variable in a computation (triggers flush)?
@@ -1444,6 +1409,100 @@ fn collect_defined_vars(node: &AstNode) -> HashSet<String> {
         _ => {}
     }
     defined
+}
+
+/// Read/write *location* keys for the reveal reorderer's dependency graph.
+///
+/// Keys mirror `sched_info`'s `var:`/`heap:`/`global:*` scheme (see the note
+/// there): a scalar reassignment keys on `var:name`, an in-place index/field
+/// store or a recognized mutator's receiver keys on `heap:root` (and reads it
+/// too — it is a read-modify-write), and an unknown store target falls back to
+/// the catch-all `global:*`. Reading a name yields *both* its `var:` and `heap:`
+/// key so the read is ordered against either flavor of write to that name.
+///
+/// This deliberately keeps the scheduler's heap-level (whole-object) precision
+/// rather than the multiply batcher's field-level `keys_conflict` precision: the
+/// reorderer only needs hazard-safety, and matching `sched_info` keeps the two
+/// dep models consistent. See also `statement_reads_and_writes` (field-level).
+fn reveal_dep_keys(node: &AstNode) -> (HashSet<String>, HashSet<String>) {
+    fn read_keys(node: &AstNode, out: &mut HashSet<String>) {
+        let mut vars = HashSet::new();
+        collect_referenced_vars(node, &mut vars);
+        for var in vars {
+            out.insert(scalar_key(&var));
+            out.insert(heap_key(&var));
+        }
+    }
+
+    let mut reads = HashSet::new();
+    let mut writes = HashSet::new();
+
+    match node {
+        AstNode::VariableDeclaration { name, value, .. } => {
+            writes.insert(scalar_key(name));
+            if let Some(value) = value {
+                read_keys(value, &mut reads);
+            }
+        }
+        AstNode::Assignment { target, value, .. } => {
+            read_keys(value, &mut reads);
+            match target.as_ref() {
+                AstNode::Identifier(name, _) => {
+                    writes.insert(scalar_key(name));
+                }
+                // In-place index/field store: reads and writes the base object.
+                other => {
+                    if let Some(root) = root_var(other) {
+                        let key = heap_key(&root);
+                        writes.insert(key.clone());
+                        reads.insert(key);
+                    } else {
+                        writes.insert(global_key());
+                    }
+                    read_keys(other, &mut reads);
+                }
+            }
+        }
+        AstNode::DiscardStatement { expression, .. } => {
+            return reveal_dep_keys(expression);
+        }
+        AstNode::Return {
+            value: Some(value), ..
+        } => {
+            read_keys(value, &mut reads);
+        }
+        // A recognized in-place mutator: the receiver (first argument) is read
+        // and written; the remaining arguments are read.
+        AstNode::FunctionCall { arguments, .. }
+            if call_name(node).is_some_and(is_mutator_call_name) =>
+        {
+            if let Some(receiver) = arguments.first() {
+                if let Some(root) = root_var(receiver) {
+                    let key = heap_key(&root);
+                    writes.insert(key.clone());
+                    reads.insert(key);
+                } else {
+                    writes.insert(global_key());
+                }
+                read_keys(receiver, &mut reads);
+            }
+            for arg in arguments.iter().skip(1) {
+                read_keys(arg, &mut reads);
+            }
+        }
+        _ => {
+            read_keys(node, &mut reads);
+        }
+    }
+
+    (reads, writes)
+}
+
+/// Two location keys (as produced by `reveal_dep_keys`) conflict when they name
+/// the same location, or when either is the catch-all `global:*` write target
+/// (`global_key()`), which aliases everything.
+fn reveal_keys_conflict(a: &str, b: &str) -> bool {
+    a == b || a == GLOBAL_KEY || b == GLOBAL_KEY
 }
 
 /// Checks if a statement is an implicit reveal (clear variable assigned from secret)
@@ -1553,24 +1612,6 @@ fn reorder_block_for_reveals(statements: Vec<AstNode>) -> Vec<AstNode> {
 
     for (index, node) in statements.into_iter().enumerate() {
         let defines = collect_defined_vars(&node);
-        let mut uses = HashSet::new();
-
-        // Collect uses based on node type
-        match &node {
-            AstNode::VariableDeclaration { value: Some(v), .. } => {
-                collect_referenced_vars(v, &mut uses);
-            }
-            AstNode::Assignment { value, .. } => {
-                collect_referenced_vars(value, &mut uses);
-            }
-            AstNode::DiscardStatement { expression, .. } => {
-                collect_referenced_vars(expression, &mut uses);
-            }
-            AstNode::Return { value: Some(v), .. } => {
-                collect_referenced_vars(v, &mut uses);
-            }
-            _ => {}
-        }
 
         let is_reveal = is_implicit_reveal(&node, &secret_vars);
 
@@ -1586,8 +1627,6 @@ fn reorder_block_for_reveals(statements: Vec<AstNode>) -> Vec<AstNode> {
         stmt_infos.push(StatementInfo {
             index,
             node,
-            defines,
-            uses,
             is_implicit_reveal: is_reveal,
             uses_revealed_var: uses_revealed,
         });
@@ -1601,25 +1640,65 @@ fn reorder_block_for_reveals(statements: Vec<AstNode>) -> Vec<AstNode> {
         return stmt_infos.into_iter().map(|s| s.node).collect();
     }
 
-    // Build dependency map: for each statement, which statements must come before it?
+    // Build the dependency map: for each statement, which statements must come
+    // before it? Edges use the same var:/heap:/global: location keys as
+    // `sched_info` (via `reveal_dep_keys`) and cover all three name hazards so
+    // the topological reorder below can never violate them:
+    //   * RAW — a read stays after the write it observes,
+    //   * WAR — a write stays after earlier reads of the same location,
+    //   * WAW — writes to the same location keep their original order.
+    // Adding edges only constrains the schedule (it is monotonically safe). The
+    // earlier RAW-only graph was a latent miscompile: a neutral reassignment
+    // (or an index/field/mutator write, which the old graph ignored entirely)
+    // could hoist ahead of a reveal that read the old value.
     let mut must_precede: HashMap<usize, HashSet<usize>> = HashMap::new();
-    let mut var_defined_at: HashMap<String, usize> = HashMap::new();
+    let mut last_writer: HashMap<String, usize> = HashMap::new();
+    let mut active_readers: HashMap<String, Vec<usize>> = HashMap::new();
 
     for info in &stmt_infos {
+        let (reads, writes) = reveal_dep_keys(&info.node);
         let mut predecessors = HashSet::new();
 
-        // Statement depends on all statements that define variables it uses
-        for used_var in &info.uses {
-            if let Some(&def_idx) = var_defined_at.get(used_var) {
-                predecessors.insert(def_idx);
+        // RAW: depend on the latest writer of any conflicting location.
+        for read in &reads {
+            for (key, &widx) in &last_writer {
+                if reveal_keys_conflict(key, read) {
+                    predecessors.insert(widx);
+                }
+            }
+        }
+        // WAR + WAW: a write stays after earlier reads and the latest writer of
+        // any conflicting location.
+        for write in &writes {
+            for (key, readers) in &active_readers {
+                if reveal_keys_conflict(key, write) {
+                    predecessors.extend(readers.iter().copied());
+                }
+            }
+            for (key, &widx) in &last_writer {
+                if reveal_keys_conflict(key, write) {
+                    predecessors.insert(widx);
+                }
             }
         }
 
+        // A read-modify-write statement may have keyed itself on both sides;
+        // it must never depend on itself.
+        predecessors.remove(&info.index);
         must_precede.insert(info.index, predecessors);
 
-        // Record where each variable is defined
-        for def_var in &info.defines {
-            var_defined_at.insert(def_var.clone(), info.index);
+        // Advance the live state. A write retires the reads it now orders ahead
+        // of itself (later statements reach them transitively through this
+        // write) and becomes the latest writer of its location.
+        for write in &writes {
+            active_readers.retain(|key, _| !reveal_keys_conflict(key, write));
+            last_writer.insert(write.clone(), info.index);
+        }
+        for read in &reads {
+            active_readers
+                .entry(read.clone())
+                .or_default()
+                .push(info.index);
         }
     }
 
@@ -1853,18 +1932,53 @@ fn root_var(node: &AstNode) -> Option<String> {
     }
 }
 
+/// The semantic secret/clear ground truth for a node, when semantic analysis
+/// attached it. This is the real type — preferred over name-based guessing.
+///
+/// Today the only per-node type the analyzer leaves on the AST is the resolved
+/// return type of a call (`resolved_return_type`), so that is the one source we
+/// can read directly. Returns `None` when no type was attached (e.g. nodes the
+/// optimizer synthesised itself), in which case callers fall back to the name
+/// heuristic. Kept as a single accessor so later passes share one ground-truth
+/// hook instead of re-deriving secret-ness ad hoc.
+fn node_resolved_secret(node: &AstNode) -> Option<bool> {
+    match node {
+        AstNode::FunctionCall {
+            resolved_return_type,
+            ..
+        }
+        | AstNode::CommandCall {
+            resolved_return_type,
+            ..
+        } => resolved_return_type.as_ref().map(|ty| ty.is_secret()),
+        _ => None,
+    }
+}
+
 /// Whether a statement's value is an operation the batcher treats as a secret
 /// multiply round (boolean `and`/`or`/`xor`, or an explicit `Share.mul` /
 /// `Share.batch_mul`). `*` is intentionally excluded: in this codebase it is
 /// clear index arithmetic, not a secret product.
+///
+/// For call forms we PREFER the semantic ground truth (`node_resolved_secret`):
+/// a `mul`/`batch_mul` is only a network round if it actually yields a secret.
+/// When the analyzer left no type on the node we fall back to the historical
+/// name-only guess. On the current corpus every batched multiply returns a
+/// secret, so the two agree and behavior is unchanged.
 fn value_is_multiply(value: &AstNode) -> bool {
     match value {
         AstNode::BinaryOperation { op, .. } => matches!(op.as_str(), "and" | "or" | "xor"),
         AstNode::FunctionCall { .. } => {
-            matches!(
+            let name_is_multiply = matches!(
                 call_name(value).map(builtin_base_name),
                 Some("mul") | Some("batch_mul")
-            )
+            );
+            match node_resolved_secret(value) {
+                // Real type known: a clear `mul` result is not a secret round.
+                Some(is_secret) => name_is_multiply && is_secret,
+                // No attached type: fall back to the name heuristic.
+                None => name_is_multiply,
+            }
         }
         _ => false,
     }
@@ -1887,8 +2001,12 @@ fn heap_key(name: &str) -> String {
     format!("heap:{name}")
 }
 
+/// The catch-all dependency key that aliases every location (used when a write
+/// target cannot be resolved to a specific scalar/heap location).
+const GLOBAL_KEY: &str = "global:*";
+
 fn global_key() -> String {
-    "global:*".to_string()
+    GLOBAL_KEY.to_string()
 }
 
 fn collect_direct_read_keys(node: &AstNode, out: &mut HashSet<String>) {
@@ -1938,6 +2056,13 @@ fn stmt_is_schedulable(stmt: &AstNode, pure_fns: &HashSet<String>) -> bool {
 }
 
 /// Compute reads/writes/effect facts for a schedulable statement.
+///
+/// Keying is intentionally *heap-level* (`var:`/`heap:`/`global:*`): a whole
+/// object collapses to one `heap:` key. The reveal reorderer's `reveal_dep_keys`
+/// shares this exact scheme so the two reordering passes agree on hazards. This
+/// is deliberately coarser than the multiply batcher's field-level keying
+/// (`statement_reads_and_writes` / `keys_conflict`) and must not be merged with
+/// it — see the note on `statement_reads_and_writes`.
 fn sched_info(stmt: &AstNode, env: &HashMap<String, HashSet<String>>) -> SchedInfo {
     let mut direct_reads = HashSet::new();
     let mut logical_reads = HashSet::new();
@@ -2530,73 +2655,6 @@ fn rename_in(node: AstNode, map: &HashMap<String, String>) -> AstNode {
             is_secret,
             location,
         },
-        AstNode::Assignment {
-            target,
-            value,
-            location,
-        } => AstNode::Assignment {
-            target: rb(target),
-            value: rb(value),
-            location,
-        },
-        AstNode::BinaryOperation {
-            op,
-            left,
-            right,
-            location,
-        } => AstNode::BinaryOperation {
-            op,
-            left: rb(left),
-            right: rb(right),
-            location,
-        },
-        AstNode::UnaryOperation {
-            op,
-            operand,
-            location,
-        } => AstNode::UnaryOperation {
-            op,
-            operand: rb(operand),
-            location,
-        },
-        AstNode::FunctionCall {
-            function,
-            arguments,
-            location,
-            resolved_return_type,
-        } => AstNode::FunctionCall {
-            function: rb(function),
-            arguments: arguments.into_iter().map(|a| rename_in(a, map)).collect(),
-            location,
-            resolved_return_type,
-        },
-        AstNode::NamedArgument {
-            name,
-            value,
-            location,
-        } => AstNode::NamedArgument {
-            name,
-            value: rb(value),
-            location,
-        },
-        AstNode::IfExpression {
-            condition,
-            then_branch,
-            else_branch,
-        } => AstNode::IfExpression {
-            condition: rb(condition),
-            then_branch: rb(then_branch),
-            else_branch: else_branch.map(rb),
-        },
-        AstNode::WhileLoop {
-            condition,
-            body,
-            location,
-        } => AstNode::WhileLoop {
-            condition: rb(condition),
-            body: rb(body),
-            location,
-        },
         AstNode::ForLoop {
             variables,
             iterable,
@@ -2611,57 +2669,28 @@ fn rename_in(node: AstNode, map: &HashMap<String, String>) -> AstNode {
             body: rb(body),
             location,
         },
-        AstNode::Block(stmts) => {
-            AstNode::Block(stmts.into_iter().map(|s| rename_in(s, map)).collect())
-        }
-        AstNode::Return { value, location } => AstNode::Return {
-            value: value.map(rb),
-            location,
-        },
-        AstNode::Yield(v) => AstNode::Yield(v.map(rb)),
-        AstNode::FieldAccess {
-            object,
-            field_name,
-            location,
-        } => AstNode::FieldAccess {
-            object: rb(object),
-            field_name,
-            location,
-        },
-        AstNode::IndexAccess {
-            base,
-            index,
-            location,
-        } => AstNode::IndexAccess {
-            base: rb(base),
-            index: rb(index),
-            location,
-        },
-        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
-            elements: elements.into_iter().map(|e| rename_in(e, map)).collect(),
-            location,
-        },
-        AstNode::TupleLiteral(e) => {
-            AstNode::TupleLiteral(e.into_iter().map(|x| rename_in(x, map)).collect())
-        }
-        AstNode::SetLiteral(e) => {
-            AstNode::SetLiteral(e.into_iter().map(|x| rename_in(x, map)).collect())
-        }
-        AstNode::DictLiteral { pairs, location } => AstNode::DictLiteral {
-            pairs: pairs
-                .into_iter()
-                .map(|(k, v)| (rename_in(k, map), rename_in(v, map)))
-                .collect(),
-            location,
-        },
-        AstNode::DiscardStatement {
-            expression,
-            location,
-        } => AstNode::DiscardStatement {
-            expression: rb(expression),
-            location,
-        },
-        // Literals, Break/Continue, type nodes, nested definitions: pass through.
+        // Every other node with runtime children is a uniform alpha-rename of
+        // each child — delegate the rebuild to `map_children`.
+        AstNode::Assignment { .. }
+        | AstNode::BinaryOperation { .. }
+        | AstNode::UnaryOperation { .. }
+        | AstNode::FunctionCall { .. }
+        | AstNode::NamedArgument { .. }
+        | AstNode::IfExpression { .. }
+        | AstNode::WhileLoop { .. }
+        | AstNode::Block(_)
+        | AstNode::Return { .. }
+        | AstNode::Yield(_)
+        | AstNode::FieldAccess { .. }
+        | AstNode::IndexAccess { .. }
+        | AstNode::ListLiteral { .. }
+        | AstNode::TupleLiteral(_)
+        | AstNode::SetLiteral(_)
+        | AstNode::DictLiteral { .. }
+        | AstNode::DiscardStatement { .. } => map_children(node, &mut |c| rename_in(c, map)),
+        // Literals, Break/Continue, type nodes, nested definitions, Import, and
+        // TryCatch/CommandCall: pass through unchanged. (rename_in only performs
+        // inline alpha-renaming, which never needs to descend into these.)
         other => other,
     }
 }
@@ -3384,6 +3413,72 @@ fn builtin_base_name(name: &str) -> &str {
     canon.rsplit('.').next().unwrap_or(canon)
 }
 
+/// Single source of truth for the purity/effect/length facts of the modeled
+/// builtins, keyed by canonical VM base name (`builtin_base_name`). These facts
+/// were previously spread across four hand-maintained `matches!` lists that had
+/// to be kept in sync by hand (a dropped `insert` once caused a stale-alias
+/// miscompile). Each axis is an INDEPENDENT boolean so the deliberate overlaps
+/// and asymmetries are preserved exactly:
+///   - `pure`: effect-free, deterministic value computation.
+///   - `mutates_receiver`: in-place mutator (the is_mutator set, incl. `set_field`).
+///   - `grows_list`: length-growing list mutator (append/array_push/insert/extend).
+///   - `len_safe`: does not invalidate a tracked list passed as an argument.
+///   - `is_len_builtin`: queries a list's length (len/array_length/length).
+#[derive(Clone, Copy, Default)]
+struct BuiltinEffect {
+    pure: bool,
+    mutates_receiver: bool,
+    grows_list: bool,
+    len_safe: bool,
+    is_len_builtin: bool,
+}
+
+/// Look up the effect descriptor for a call's base name. A name absent from the
+/// table gets the all-false default, which is the safe-by-default polarity at
+/// every call site (impure / mutates-unknown / not-len-safe), matching the old
+/// `matches!`-returns-false behavior exactly.
+fn builtin_effect(name: &str) -> BuiltinEffect {
+    // `e(pure, mutates_receiver, grows_list, len_safe, is_len_builtin)`.
+    const fn e(
+        pure: bool,
+        mutates_receiver: bool,
+        grows_list: bool,
+        len_safe: bool,
+        is_len_builtin: bool,
+    ) -> BuiltinEffect {
+        BuiltinEffect {
+            pure,
+            mutates_receiver,
+            grows_list,
+            len_safe,
+            is_len_builtin,
+        }
+    }
+    match builtin_base_name(name) {
+        // Length queries: pure, len-safe, and the len builtins themselves.
+        "len" | "array_length" | "length" => e(true, false, false, true, true),
+        // Growth mutators: mutate AND grow their receiver, yet len-safe (the
+        // receiver is updated precisely beforehand and the element isn't
+        // aliased by the growth). `insert`/`extend` MUST stay mutators: omitting
+        // them once corrupted block-1's keystream under -O3 (stale `out` alias).
+        "append" | "array_push" | "insert" | "extend" => e(false, true, true, true, false),
+        // Non-growing in-place mutator.
+        "set_field" => e(false, true, false, false, false),
+        // Pure, len-safe value computations (`mul_scalar` is a local secret×public
+        // multiply — no communication — so it is pure too).
+        "add" | "sub" | "mul" | "mul_scalar" | "batch_mul" | "from_clear" | "from_clear_int"
+        | "from_clear_uint" | "from_clear_fixed" | "slice" | "contains" | "to_string" | "type" => {
+            e(true, false, false, true, false)
+        }
+        // Pure value read, but deliberately NOT len-safe (audit-flagged asymmetry).
+        "get_field" => e(true, false, false, false, false),
+        // Effectful, but len-safe (they don't invalidate a tracked list argument).
+        "open" | "reveal" | "print" | "assert" => e(false, false, false, true, false),
+        // Unknown: safe-by-default (impure / mutates-unknown / not-len-safe).
+        _ => BuiltinEffect::default(),
+    }
+}
+
 /// Calls that neither mutate the length of a list argument nor store an alias of
 /// it that could be mutated later. Passing a tracked list to anything *not* on
 /// this list conservatively invalidates it. (The modeled mutators
@@ -3391,37 +3486,11 @@ fn builtin_base_name(name: &str) -> &str {
 /// receiver is updated precisely beforehand and their element argument is not
 /// aliased by the growth.)
 fn is_len_safe_call(name: &str) -> bool {
-    matches!(
-        builtin_base_name(name),
-        "len"
-            | "array_length"
-            | "length"
-            | "append"
-            | "array_push"
-            | "insert"
-            | "extend"
-            | "add"
-            | "sub"
-            | "mul"
-            | "mul_scalar"
-            | "batch_mul"
-            | "open"
-            | "reveal"
-            | "from_clear"
-            | "from_clear_int"
-            | "from_clear_uint"
-            | "from_clear_fixed"
-            | "to_string"
-            | "type"
-            | "contains"
-            | "slice"
-            | "print"
-            | "assert"
-    )
+    builtin_effect(name).len_safe
 }
 
 fn is_len_builtin(name: &str) -> bool {
-    matches!(builtin_base_name(name), "len" | "array_length" | "length")
+    builtin_effect(name).is_len_builtin
 }
 
 /// Best-effort static shape of an expression in `env`.
@@ -3707,7 +3776,7 @@ fn collect_mutated_vars(node: &AstNode, out: &mut HashSet<String>) {
         } => {
             let safe = match function.as_ref() {
                 AstNode::Identifier(name, _) => {
-                    if matches!(name.as_str(), "append" | "array_push" | "insert" | "extend") {
+                    if builtin_effect(name).grows_list {
                         if let Some(AstNode::Identifier(recv, _)) = arguments.first() {
                             out.insert(recv.clone());
                         }
@@ -4069,97 +4138,6 @@ fn substitute_ident_with_int(node: AstNode, var_name: &str, value: u128) -> AstN
                 AstNode::Identifier(name, loc)
             }
         }
-        AstNode::VariableDeclaration {
-            name,
-            type_annotation,
-            value: decl_value,
-            is_mutable,
-            is_secret,
-            location,
-        } => {
-            // The initializer is still in the outer scope, so substitute there;
-            // but if this declaration shadows the loop variable, later siblings
-            // are handled at the statement-list level (this node only owns its
-            // initializer).
-            AstNode::VariableDeclaration {
-                name,
-                type_annotation,
-                value: decl_value.map(sb),
-                is_mutable,
-                is_secret,
-                location,
-            }
-        }
-        AstNode::Assignment {
-            target,
-            value: assign_value,
-            location,
-        } => AstNode::Assignment {
-            target: sb(target),
-            value: sb(assign_value),
-            location,
-        },
-        AstNode::BinaryOperation {
-            op,
-            left,
-            right,
-            location,
-        } => AstNode::BinaryOperation {
-            op,
-            left: sb(left),
-            right: sb(right),
-            location,
-        },
-        AstNode::UnaryOperation {
-            op,
-            operand,
-            location,
-        } => AstNode::UnaryOperation {
-            op,
-            operand: sb(operand),
-            location,
-        },
-        AstNode::FunctionCall {
-            function,
-            arguments,
-            location,
-            resolved_return_type,
-        } => AstNode::FunctionCall {
-            function: sb(function),
-            arguments: arguments
-                .into_iter()
-                .map(|a| substitute_ident_with_int(a, var_name, value))
-                .collect(),
-            location,
-            resolved_return_type,
-        },
-        AstNode::NamedArgument {
-            name,
-            value: arg_value,
-            location,
-        } => AstNode::NamedArgument {
-            name,
-            value: sb(arg_value),
-            location,
-        },
-        AstNode::IfExpression {
-            condition,
-            then_branch,
-            else_branch,
-        } => AstNode::IfExpression {
-            condition: sb(condition),
-            then_branch: sb(then_branch),
-            else_branch: else_branch.map(sb),
-        },
-        AstNode::WhileLoop {
-            condition,
-            body,
-            location,
-        } => AstNode::WhileLoop {
-            condition: sb(condition),
-            body: sb(body),
-            location,
-        },
         AstNode::ForLoop {
             variables,
             iterable,
@@ -4205,70 +4183,33 @@ fn substitute_ident_with_int(node: AstNode, var_name: &str, value: u128) -> AstN
             }
             AstNode::Block(out)
         }
-        AstNode::Return {
-            value: ret_value,
-            location,
-        } => AstNode::Return {
-            value: ret_value.map(sb),
-            location,
-        },
-        AstNode::Yield(v) => AstNode::Yield(v.map(sb)),
-        AstNode::FieldAccess {
-            object,
-            field_name,
-            location,
-        } => AstNode::FieldAccess {
-            object: sb(object),
-            field_name,
-            location,
-        },
-        AstNode::IndexAccess {
-            base,
-            index,
-            location,
-        } => AstNode::IndexAccess {
-            base: sb(base),
-            index: sb(index),
-            location,
-        },
-        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
-            elements: elements
-                .into_iter()
-                .map(|e| substitute_ident_with_int(e, var_name, value))
-                .collect(),
-            location,
-        },
-        AstNode::TupleLiteral(e) => AstNode::TupleLiteral(
-            e.into_iter()
-                .map(|x| substitute_ident_with_int(x, var_name, value))
-                .collect(),
-        ),
-        AstNode::SetLiteral(e) => AstNode::SetLiteral(
-            e.into_iter()
-                .map(|x| substitute_ident_with_int(x, var_name, value))
-                .collect(),
-        ),
-        AstNode::DictLiteral { pairs, location } => AstNode::DictLiteral {
-            pairs: pairs
-                .into_iter()
-                .map(|(k, v)| {
-                    (
-                        substitute_ident_with_int(k, var_name, value),
-                        substitute_ident_with_int(v, var_name, value),
-                    )
-                })
-                .collect(),
-            location,
-        },
-        AstNode::DiscardStatement {
-            expression,
-            location,
-        } => AstNode::DiscardStatement {
-            expression: sb(expression),
-            location,
-        },
+        // Every other node with runtime children substitutes uniformly into each
+        // child (the declaration's initializer is the only child of a
+        // `VariableDeclaration`; shadowing for later siblings is handled at the
+        // `Block` level above). Delegate the rebuild to `map_children`.
+        AstNode::VariableDeclaration { .. }
+        | AstNode::Assignment { .. }
+        | AstNode::BinaryOperation { .. }
+        | AstNode::UnaryOperation { .. }
+        | AstNode::FunctionCall { .. }
+        | AstNode::NamedArgument { .. }
+        | AstNode::IfExpression { .. }
+        | AstNode::WhileLoop { .. }
+        | AstNode::Return { .. }
+        | AstNode::Yield(_)
+        | AstNode::FieldAccess { .. }
+        | AstNode::IndexAccess { .. }
+        | AstNode::ListLiteral { .. }
+        | AstNode::TupleLiteral(_)
+        | AstNode::SetLiteral(_)
+        | AstNode::DictLiteral { .. }
+        | AstNode::DiscardStatement { .. } => {
+            map_children(node, &mut |c| substitute_ident_with_int(c, var_name, value))
+        }
         // Literals, Break/Continue, nested function definitions (own scope),
-        // type nodes: leave unchanged.
+        // type nodes, Import, and TryCatch/CommandCall: leave unchanged. (The
+        // substituter never descends into these — preserving the previous
+        // `other => other` behavior, not broadening recursion.)
         other => other,
     }
 }
@@ -4321,10 +4262,7 @@ fn is_effectful_call_name(name: &str) -> bool {
 /// built with `out.insert(0, ...)`, and an available `out`-reading expression was
 /// never invalidated across the insert, corrupting block-1's keystream under -O3.)
 fn is_mutator_call_name(name: &str) -> bool {
-    matches!(
-        builtin_base_name(name),
-        "append" | "array_push" | "set_field" | "insert" | "extend"
-    )
+    builtin_effect(name).mutates_receiver
 }
 
 /// Builtins known to be pure value computations (no effects, deterministic).
@@ -4335,26 +4273,7 @@ fn is_mutator_call_name(name: &str) -> bool {
 /// spelling are recognized. (`mul_scalar` is a local secret×public multiply — no
 /// communication — so it is pure too.)
 fn is_pure_builtin(name: &str) -> bool {
-    matches!(
-        builtin_base_name(name),
-        "add"
-            | "sub"
-            | "mul"
-            | "mul_scalar"
-            | "batch_mul"
-            | "from_clear"
-            | "from_clear_int"
-            | "from_clear_uint"
-            | "from_clear_fixed"
-            | "get_field"
-            | "array_length"
-            | "length"
-            | "len"
-            | "slice"
-            | "contains"
-            | "to_string"
-            | "type"
-    )
+    builtin_effect(name).pure
 }
 
 fn call_name(node: &AstNode) -> Option<&str> {
@@ -4561,12 +4480,12 @@ fn expr_is_pure(node: &AstNode, pure_fns: &HashSet<String>) -> bool {
     }
 }
 
-/// Append a canonical, location-insensitive structural key for `expr` to `out`,
-/// mirroring [`expr_equiv`] exactly: two expressions are `expr_equiv` iff they
-/// produce the same key. Returns `false` for any node kind `expr_equiv` does not
-/// compare structurally (CSE then declines to dedup it). This lets CSE look up
-/// an equivalent earlier computation by hash in O(1) instead of scanning every
-/// available expression with `expr_equiv` (which is O(n²) over a large block).
+/// Append a canonical, location-insensitive structural key for `expr` to `out`.
+/// Two expressions produce the same key iff they are structurally equivalent
+/// (ignoring source locations). Returns `false` for any node kind this function
+/// does not compare structurally (CSE then declines to dedup it). This lets CSE
+/// look up an equivalent earlier computation by hash in O(1) instead of scanning
+/// every available expression structurally (which is O(n²) over a large block).
 fn expr_key(expr: &AstNode, out: &mut String) -> bool {
     match expr {
         AstNode::Literal { value, .. } => {
@@ -4689,13 +4608,24 @@ fn stmt_has_effect(node: &AstNode, pure_fns: &HashSet<String>) -> bool {
 }
 
 /// Visit the immediate child nodes of `node`.
+///
+/// This is intentionally exhaustive (no `_` wildcard) so that adding a new
+/// `AstNode` variant forces a compile error here instead of silently dropping
+/// its children — a missed child would skip invalidation/collection in the many
+/// callers that build on this walker. It deliberately does NOT descend into
+/// `FunctionDefinition` bodies: that is a scope boundary, and the scope-crossing
+/// walker `for_each_child_def` handles it separately.
 fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
     match node {
         AstNode::Assignment { target, value, .. } => {
             f(target);
             f(value);
         }
-        AstNode::VariableDeclaration { value: Some(v), .. } => f(v),
+        AstNode::VariableDeclaration { value, .. } => {
+            if let Some(v) = value {
+                f(v);
+            }
+        }
         AstNode::BinaryOperation { left, right, .. } => {
             f(left);
             f(right);
@@ -4711,6 +4641,15 @@ fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
                 f(a);
             }
         }
+        AstNode::CommandCall {
+            command, arguments, ..
+        } => {
+            f(command);
+            for a in arguments {
+                f(a);
+            }
+        }
+        AstNode::NamedArgument { value, .. } => f(value),
         AstNode::IndexAccess { base, index, .. } => {
             f(base);
             f(index);
@@ -4721,6 +4660,12 @@ fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
         | AstNode::SetLiteral(elements) => {
             for e in elements {
                 f(e);
+            }
+        }
+        AstNode::DictLiteral { pairs, .. } => {
+            for (k, v) in pairs {
+                f(k);
+                f(v);
             }
         }
         AstNode::Block(stmts) => {
@@ -4749,9 +4694,255 @@ fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
             f(iterable);
             f(body);
         }
-        AstNode::Return { value: Some(v), .. } | AstNode::Yield(Some(v)) => f(v),
+        AstNode::TryCatch {
+            try_block,
+            catch_clauses,
+            finally_block,
+            ..
+        } => {
+            f(try_block);
+            for clause in catch_clauses {
+                f(&clause.body);
+            }
+            if let Some(fin) = finally_block {
+                f(fin);
+            }
+        }
+        AstNode::Return { value, .. } => {
+            if let Some(v) = value {
+                f(v);
+            }
+        }
+        AstNode::Yield(value) => {
+            if let Some(v) = value {
+                f(v);
+            }
+        }
         AstNode::DiscardStatement { expression, .. } => f(expression),
-        _ => {}
+        // Genuinely childless, or scope/type boundaries with no runtime children
+        // to visit. `FunctionDefinition` stops here on purpose (see doc comment);
+        // type-carrying nodes, definitions, and `Import` carry only type/metadata
+        // children, matching the previous behavior of the dropped `_` wildcard.
+        AstNode::Literal { .. }
+        | AstNode::Identifier(_, _)
+        | AstNode::Break
+        | AstNode::Continue
+        | AstNode::FunctionDefinition { .. }
+        | AstNode::TypeAlias { .. }
+        | AstNode::BuiltinTypeDefinition { .. }
+        | AstNode::BuiltinObjectDefinition { .. }
+        | AstNode::ObjectDefinition { .. }
+        | AstNode::EnumDefinition { .. }
+        | AstNode::SecretType(_)
+        | AstNode::FunctionType { .. }
+        | AstNode::TupleType(_)
+        | AstNode::ListType(_)
+        | AstNode::DictType { .. }
+        | AstNode::GenericType { .. }
+        | AstNode::Import { .. } => {}
+    }
+}
+
+/// Owned mirror of [`for_each_child`]: rebuild `node`, applying `f` to each of
+/// its immediate owned children. The structural (non-special) arms of the
+/// by-value transformers (`rename_in`, `substitute_ident_with_int`) delegate
+/// here so the near-identical rebuild boilerplate lives in exactly one place.
+///
+/// Like `for_each_child` this is exhaustive and visits the SAME children; it
+/// does NOT descend into `FunctionDefinition` bodies (a scope boundary) and
+/// returns childless / type / definition nodes unchanged.
+fn map_children(node: AstNode, f: &mut dyn FnMut(AstNode) -> AstNode) -> AstNode {
+    // Apply `f` through an owned `Box` child, re-boxing the result.
+    let fb = |b: Box<AstNode>, f: &mut dyn FnMut(AstNode) -> AstNode| Box::new(f(*b));
+    match node {
+        AstNode::Assignment {
+            target,
+            value,
+            location,
+        } => AstNode::Assignment {
+            target: fb(target, f),
+            value: fb(value, f),
+            location,
+        },
+        AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value,
+            is_mutable,
+            is_secret,
+            location,
+        } => AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value: value.map(|v| fb(v, f)),
+            is_mutable,
+            is_secret,
+            location,
+        },
+        AstNode::BinaryOperation {
+            op,
+            left,
+            right,
+            location,
+        } => AstNode::BinaryOperation {
+            op,
+            left: fb(left, f),
+            right: fb(right, f),
+            location,
+        },
+        AstNode::UnaryOperation {
+            op,
+            operand,
+            location,
+        } => AstNode::UnaryOperation {
+            op,
+            operand: fb(operand, f),
+            location,
+        },
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            resolved_return_type,
+        } => AstNode::FunctionCall {
+            function: fb(function, f),
+            arguments: arguments.into_iter().map(&mut *f).collect(),
+            location,
+            resolved_return_type,
+        },
+        AstNode::CommandCall {
+            command,
+            arguments,
+            location,
+            resolved_return_type,
+        } => AstNode::CommandCall {
+            command: fb(command, f),
+            arguments: arguments.into_iter().map(&mut *f).collect(),
+            location,
+            resolved_return_type,
+        },
+        AstNode::NamedArgument {
+            name,
+            value,
+            location,
+        } => AstNode::NamedArgument {
+            name,
+            value: fb(value, f),
+            location,
+        },
+        AstNode::IndexAccess {
+            base,
+            index,
+            location,
+        } => AstNode::IndexAccess {
+            base: fb(base, f),
+            index: fb(index, f),
+            location,
+        },
+        AstNode::FieldAccess {
+            object,
+            field_name,
+            location,
+        } => AstNode::FieldAccess {
+            object: fb(object, f),
+            field_name,
+            location,
+        },
+        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
+            elements: elements.into_iter().map(&mut *f).collect(),
+            location,
+        },
+        AstNode::TupleLiteral(elements) => {
+            AstNode::TupleLiteral(elements.into_iter().map(&mut *f).collect())
+        }
+        AstNode::SetLiteral(elements) => {
+            AstNode::SetLiteral(elements.into_iter().map(&mut *f).collect())
+        }
+        AstNode::DictLiteral { pairs, location } => AstNode::DictLiteral {
+            pairs: pairs.into_iter().map(|(k, v)| (f(k), f(v))).collect(),
+            location,
+        },
+        AstNode::Block(stmts) => AstNode::Block(stmts.into_iter().map(&mut *f).collect()),
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => AstNode::IfExpression {
+            condition: fb(condition, f),
+            then_branch: fb(then_branch, f),
+            else_branch: else_branch.map(|e| fb(e, f)),
+        },
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => AstNode::WhileLoop {
+            condition: fb(condition, f),
+            body: fb(body, f),
+            location,
+        },
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => AstNode::ForLoop {
+            variables,
+            iterable: fb(iterable, f),
+            body: fb(body, f),
+            location,
+        },
+        AstNode::TryCatch {
+            try_block,
+            catch_clauses,
+            finally_block,
+            location,
+        } => AstNode::TryCatch {
+            try_block: fb(try_block, f),
+            catch_clauses: catch_clauses
+                .into_iter()
+                .map(|c| crate::ast::CatchClause {
+                    exception_type: c.exception_type,
+                    variable_name: c.variable_name,
+                    body: fb(c.body, f),
+                    location: c.location,
+                })
+                .collect(),
+            finally_block: finally_block.map(|b| fb(b, f)),
+            location,
+        },
+        AstNode::Return { value, location } => AstNode::Return {
+            value: value.map(|v| fb(v, f)),
+            location,
+        },
+        AstNode::Yield(value) => AstNode::Yield(value.map(|v| fb(v, f))),
+        AstNode::DiscardStatement {
+            expression,
+            location,
+        } => AstNode::DiscardStatement {
+            expression: fb(expression, f),
+            location,
+        },
+        // Childless / scope / type / definition nodes: no runtime children to
+        // rebuild, returned unchanged. `FunctionDefinition` stops here on
+        // purpose (scope boundary), mirroring `for_each_child`.
+        node @ (AstNode::Literal { .. }
+        | AstNode::Identifier(_, _)
+        | AstNode::Break
+        | AstNode::Continue
+        | AstNode::FunctionDefinition { .. }
+        | AstNode::TypeAlias { .. }
+        | AstNode::BuiltinTypeDefinition { .. }
+        | AstNode::BuiltinObjectDefinition { .. }
+        | AstNode::ObjectDefinition { .. }
+        | AstNode::EnumDefinition { .. }
+        | AstNode::SecretType(_)
+        | AstNode::FunctionType { .. }
+        | AstNode::TupleType(_)
+        | AstNode::ListType(_)
+        | AstNode::DictType { .. }
+        | AstNode::GenericType { .. }
+        | AstNode::Import { .. }) => node,
     }
 }
 
@@ -5053,13 +5244,14 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
         collect_block_mutated_names(stmt, &mut mutated);
     }
 
-    // Hash-keyed availability (O(1) lookup instead of an O(n) `expr_equiv` scan):
+    // Hash-keyed availability (O(1) lookup by structural expr key, no linear
+    // equality scan), using the same value-numbering core as GVN (`AvailEnv`):
     //   key_to_src : structural expr key → the variable already holding that value
     //   src_key    : that source variable → its key (to evict it on invalidation)
     //   ref_index  : referenced variable → source variables whose value depends on it
-    let mut key_to_src: HashMap<String, String> = HashMap::new();
-    let mut src_key: HashMap<String, String> = HashMap::new();
-    let mut ref_index: HashMap<String, Vec<String>> = HashMap::new();
+    // block_cse never joins envs, so it leaves the env's GVN-only `src_refs` map
+    // empty; `invalidate`/`clear`'s upkeep of that map is then a no-op here.
+    let mut env = AvailEnv::new();
     let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
 
     for stmt in stmts {
@@ -5078,7 +5270,7 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
             if expr_is_pure(value, pure_fns) && !mutated.contains(name) {
                 let mut key = String::new();
                 if expr_key(value, &mut key) {
-                    if let Some(src) = key_to_src.get(&key) {
+                    if let Some(src) = env.key_to_src.get(&key) {
                         // Replace the redundant computation with an alias to the earlier result.
                         if let AstNode::VariableDeclaration {
                             name,
@@ -5114,37 +5306,24 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
         // mutation of a tracked var, or of a value an available entry depends on).
         let mut writes = HashSet::new();
         collect_written_vars(&stmt, &mut writes);
-        for w in &writes {
-            // Entries whose value reads `w` are now stale.
-            if let Some(srcs) = ref_index.remove(w) {
-                for s in srcs {
-                    if let Some(k) = src_key.remove(&s) {
-                        if key_to_src.get(&k).map(String::as_str) == Some(s.as_str()) {
-                            key_to_src.remove(&k);
-                        }
-                    }
-                }
-            }
-            // `w` itself, if it is a source variable, is overwritten.
-            if let Some(k) = src_key.remove(w) {
-                if key_to_src.get(&k).map(String::as_str) == Some(w.as_str()) {
-                    key_to_src.remove(&k);
-                }
-            }
-        }
+        env.invalidate(&writes);
 
         if stmt_has_effect(&stmt, pure_fns) {
             // An effect may change get_field reads etc.; drop everything conservatively.
-            key_to_src.clear();
-            src_key.clear();
-            ref_index.clear();
+            env.clear();
         } else if let Some((key, name, refs)) = staged {
             // Commit the freshly-computed expression as available for later reuse.
+            // This is block_cse's own (non-GVN) commit: it intentionally omits the
+            // defensive eviction `AvailEnv::commit` does, preserving the exact set
+            // of expressions eliminated; it also skips `src_refs` (GVN-join-only).
             for r in &refs {
-                ref_index.entry(r.clone()).or_default().push(name.clone());
+                env.ref_index
+                    .entry(r.clone())
+                    .or_default()
+                    .push(name.clone());
             }
-            src_key.insert(name.clone(), key.clone());
-            key_to_src.insert(key, name);
+            env.src_key.insert(name.clone(), key.clone());
+            env.key_to_src.insert(key, name);
         }
 
         out.push(new_stmt);
@@ -5254,7 +5433,7 @@ pub fn optimize_licm_cse(node: AstNode) -> AstNode {
 // redundancy such as `(x+y)*(x+y)`, which would require introducing temporaries
 // and would break the no-fresh-names convergence guarantee).
 //
-// Soundness rests on threading a value-availability environment (`GvnEnv`)
+// Soundness rests on threading a value-availability environment (`AvailEnv`)
 // through the AST and joining/invalidating it at control-flow boundaries:
 //   * `if`: fork the env into both branches; at the merge keep an entry only
 //     when the SAME binding holds the value on both paths AND that binding
@@ -5273,22 +5452,32 @@ pub fn optimize_licm_cse(node: AstNode) -> AstNode {
 // index, conservative clear on effect).
 // ===========================================================================
 
+/// Value-availability environment shared by `block_cse` (local CSE) and GVN.
+///
+/// Both passes track the same core: a structural-expr key (value number) and
+/// the binding currently holding it, plus a reverse index for precise
+/// write-invalidation. The `new`/`invalidate`/`clear` plumbing is identical
+/// across both passes and lives here once; each pass keeps its own commit step
+/// (GVN's adds defensive eviction + `src_refs` upkeep needed by its joins, which
+/// `block_cse` deliberately omits — see the note on `src_refs`).
 #[derive(Clone)]
-struct GvnEnv {
+struct AvailEnv {
     /// Canonical expr key (value number) -> source binding currently holding it.
     key_to_src: HashMap<String, String>,
     /// Source binding -> its value number (inverse, for eviction by name).
     src_key: HashMap<String, String>,
-    /// Source binding -> vars its value reads (kept to rebuild the ref index
-    /// after a join, which `block_cse`'s local maps don't need).
+    /// Source binding -> vars its value reads. Only GVN's join logic needs this
+    /// (to rebuild the ref index after an intersect/restrict); `block_cse` never
+    /// joins envs, so it leaves this map empty (the `invalidate`/`clear` upkeep
+    /// of it is then a harmless no-op).
     src_refs: HashMap<String, HashSet<String>>,
     /// Referenced var -> source bindings whose value reads it (fast invalidation).
     ref_index: HashMap<String, Vec<String>>,
 }
 
-impl GvnEnv {
+impl AvailEnv {
     fn new() -> Self {
-        GvnEnv {
+        AvailEnv {
             key_to_src: HashMap::new(),
             src_key: HashMap::new(),
             src_refs: HashMap::new(),
@@ -5362,8 +5551,8 @@ impl GvnEnv {
     /// both branches map that key to the same name AND `name` dominated the
     /// branch entry (`dominate`), so a branch-local binding is never referenced
     /// past the merge.
-    fn intersect_dominating(&self, other: &GvnEnv, dominate: &HashSet<String>) -> GvnEnv {
-        let mut out = GvnEnv::new();
+    fn intersect_dominating(&self, other: &AvailEnv, dominate: &HashSet<String>) -> AvailEnv {
+        let mut out = AvailEnv::new();
         for (k, n) in &self.key_to_src {
             if other.key_to_src.get(k).map(String::as_str) == Some(n.as_str())
                 && dominate.contains(n)
@@ -5380,8 +5569,8 @@ impl GvnEnv {
     /// `key -> name` iff `name` and none of its referenced vars are in `touched`
     /// (written by the loop body/condition). The body runs 0+ times, so only
     /// genuinely invariant values may be reused inside it.
-    fn restrict_to_invariants(&self, touched: &HashSet<String>) -> GvnEnv {
-        let mut out = GvnEnv::new();
+    fn restrict_to_invariants(&self, touched: &HashSet<String>) -> AvailEnv {
+        let mut out = AvailEnv::new();
         for (k, n) in &self.key_to_src {
             if touched.contains(n) {
                 continue;
@@ -5400,8 +5589,8 @@ impl GvnEnv {
     /// View containing only entries whose source binding already dominated this
     /// point (was available on entry). Used at a nested-block exit so a binding
     /// introduced inside the block can't be aliased once it is out of scope.
-    fn restrict_to_dominators(&self, dominate: &HashSet<String>) -> GvnEnv {
-        let mut out = GvnEnv::new();
+    fn restrict_to_dominators(&self, dominate: &HashSet<String>) -> AvailEnv {
+        let mut out = AvailEnv::new();
         for (k, n) in &self.key_to_src {
             if dominate.contains(n) {
                 if let Some(refs) = self.src_refs.get(n) {
@@ -5415,7 +5604,11 @@ impl GvnEnv {
 
 /// Recursively apply GVN, threading availability `env` through control flow.
 /// Returns the transformed node and the env flowing out of it.
-fn transform_gvn(node: AstNode, mut env: GvnEnv, pure_fns: &HashSet<String>) -> (AstNode, GvnEnv) {
+fn transform_gvn(
+    node: AstNode,
+    mut env: AvailEnv,
+    pure_fns: &HashSet<String>,
+) -> (AstNode, AvailEnv) {
     match node {
         AstNode::Block(stmts) => {
             // A binding introduced inside this block does not dominate its exit,
@@ -5473,7 +5666,7 @@ fn transform_gvn(node: AstNode, mut env: GvnEnv, pure_fns: &HashSet<String>) -> 
             let effect = stmt_has_effect(&condition, pure_fns) || stmt_has_effect(&body, pure_fns);
             // Only genuinely loop-invariant values may be reused inside the body.
             let body_env = if effect {
-                GvnEnv::new()
+                AvailEnv::new()
             } else {
                 env.restrict_to_invariants(&touched)
             };
@@ -5504,7 +5697,7 @@ fn transform_gvn(node: AstNode, mut env: GvnEnv, pure_fns: &HashSet<String>) -> 
             collect_written_vars(&body, &mut touched);
             let effect = stmt_has_effect(&iterable, pure_fns) || stmt_has_effect(&body, pure_fns);
             let body_env = if effect {
-                GvnEnv::new()
+                AvailEnv::new()
             } else {
                 env.restrict_to_invariants(&touched)
             };
@@ -5536,7 +5729,7 @@ fn transform_gvn(node: AstNode, mut env: GvnEnv, pure_fns: &HashSet<String>) -> 
         } => {
             // A function body is a fresh scope; the caller's availability is
             // unaffected (matches `block_cse`, which is local per function).
-            let (body_b, _) = transform_gvn(*body, GvnEnv::new(), pure_fns);
+            let (body_b, _) = transform_gvn(*body, AvailEnv::new(), pure_fns);
             (
                 AstNode::FunctionDefinition {
                     name,
@@ -5600,9 +5793,9 @@ fn transform_gvn(node: AstNode, mut env: GvnEnv, pure_fns: &HashSet<String>) -> 
 /// the same staged-commit CSE step as `block_cse`.
 fn block_gvn(
     stmts: Vec<AstNode>,
-    mut env: GvnEnv,
+    mut env: AvailEnv,
     pure_fns: &HashSet<String>,
-) -> (Vec<AstNode>, GvnEnv) {
+) -> (Vec<AstNode>, AvailEnv) {
     // Names mutated anywhere in this block (computed once, as in `block_cse`),
     // so single-assignment is testable in O(1) per statement.
     let mut mutated: HashSet<String> = HashSet::new();
@@ -5700,7 +5893,7 @@ pub fn optimize_gvn(node: AstNode) -> AstNode {
     // which re-cloned and re-walked the whole AST each iteration (superlinear on a
     // huge flattened function).
     for _ in 0..2 {
-        let (next, _) = transform_gvn(node.clone(), GvnEnv::new(), &pure_fns);
+        let (next, _) = transform_gvn(node.clone(), AvailEnv::new(), &pure_fns);
         if next == node {
             break;
         }
@@ -6738,6 +6931,68 @@ mod tests {
             value: Box::new(value),
             location: make_loc(),
         }
+    }
+
+    #[test]
+    fn reorder_keeps_neutral_write_after_reveal_that_reads_it() {
+        // WAR hazard: the reveal `var r = s + a` reads the *old* value of `a`;
+        // a later neutral `a = 7` must not be hoisted ahead of it. Before the
+        // WAR/WAW edges were added, the reorderer's RAW-only graph left `a = 7`
+        // dependency-free, so its "neutral" priority floated it before the
+        // reveal — a silent miscompile.
+        let secret_decl = AstNode::VariableDeclaration {
+            name: "s".into(),
+            type_annotation: None,
+            value: Some(Box::new(make_int_literal(1))),
+            is_mutable: false,
+            is_secret: true,
+            location: make_loc(),
+        };
+        let a_decl = make_var_decl("a", make_int_literal(5));
+        // Reveal: clear var built from the secret `s` and the clear `a`.
+        let reveal = make_var_decl(
+            "r",
+            AstNode::BinaryOperation {
+                op: "add".into(),
+                left: Box::new(make_identifier("s")),
+                right: Box::new(make_identifier("a")),
+                location: make_loc(),
+            },
+        );
+        // Flush trigger: uses the revealed `r` in a computation.
+        let flush = make_var_decl(
+            "f",
+            AstNode::BinaryOperation {
+                op: "add".into(),
+                left: Box::new(make_identifier("r")),
+                right: Box::new(make_int_literal(1)),
+                location: make_loc(),
+            },
+        );
+        // The neutral reassignment that must stay after the reveal.
+        let write = make_assignment("a", make_int_literal(7));
+
+        let out = reorder_block_for_reveals(vec![secret_decl, a_decl, reveal, flush, write]);
+
+        let reveal_pos = out
+            .iter()
+            .position(|s| matches!(s, AstNode::VariableDeclaration { name, .. } if name == "r"))
+            .expect("reveal statement present");
+        let write_pos = out
+            .iter()
+            .position(|s| {
+                matches!(
+                    s,
+                    AstNode::Assignment { target, .. }
+                        if matches!(target.as_ref(), AstNode::Identifier(n, _) if n == "a")
+                )
+            })
+            .expect("write statement present");
+        assert!(
+            reveal_pos < write_pos,
+            "WAR hazard: `a = 7` (idx {write_pos}) was hoisted ahead of the reveal \
+             reading old `a` (idx {reveal_pos})"
+        );
     }
 
     fn make_insert(list: &str, index: AstNode, value: AstNode) -> AstNode {
