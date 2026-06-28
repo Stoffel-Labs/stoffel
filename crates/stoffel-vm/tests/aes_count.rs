@@ -31,6 +31,25 @@ struct CountingEngine {
     // longest data-dependency path from inputs; a multiply output is
     // max(operand depths)+1, local ops keep the max, inputs are depth 0.
     max_mul_depth: AtomicUsize,
+    // === Per-depth histogram instrumentation (measurement only) ===
+    // call_seq: monotonically allocated id per multiply ROUND (one scalar call or
+    // one batch call). pair_log: one row per multiply pair executed, tagging the
+    // round it ran in, the output depth, and whether it had a public operand.
+    call_seq: AtomicUsize,
+    pair_log: std::sync::Mutex<Vec<PairRecord>>,
+}
+
+/// One executed multiply pair, for the per-depth round histogram.
+#[derive(Clone, Copy)]
+struct PairRecord {
+    /// Round id (one per scalar multiply call or per batch_multiply call).
+    call_id: u32,
+    /// Output (critical-path) depth of this pair: max(operand depths)+1.
+    depth: u32,
+    /// At least one operand traces to a public literal through only local ops.
+    pub_operand: bool,
+    /// Both operands public (fully constant-foldable).
+    both_public: bool,
 }
 
 impl CountingEngine {
@@ -49,6 +68,11 @@ impl CountingEngine {
             self.both_public_muls.load(Ordering::SeqCst),
             self.max_mul_depth.load(Ordering::SeqCst),
         )
+    }
+
+    /// Snapshot of every executed multiply pair (for the per-depth histogram).
+    fn pair_log_snapshot(&self) -> Vec<PairRecord> {
+        self.pair_log.lock().map(|l| l.clone()).unwrap_or_default()
     }
 
     fn bool_byte(bytes: &[u8]) -> u8 {
@@ -83,7 +107,7 @@ impl CountingEngine {
     /// Execute one secret multiply `ab`: compute its value, record lever-B and
     /// depth instrumentation, and return packed metadata for the product (a
     /// product is never a public literal). Shared by scalar/async/batch paths.
-    fn record_multiply(&self, left: &[u8], right: &[u8]) -> Vec<u8> {
+    fn record_multiply(&self, call_id: u32, left: &[u8], right: &[u8]) -> Vec<u8> {
         let value = Self::bool_byte(left) & Self::bool_byte(right);
         let out_depth = Self::depth_of(left).max(Self::depth_of(right)) + 1;
         self.max_mul_depth
@@ -96,7 +120,20 @@ impl CountingEngine {
         if left_pub && right_pub {
             self.both_public_muls.fetch_add(1, Ordering::SeqCst);
         }
+        if let Ok(mut log) = self.pair_log.lock() {
+            log.push(PairRecord {
+                call_id,
+                depth: out_depth,
+                pub_operand: left_pub || right_pub,
+                both_public: left_pub && right_pub,
+            });
+        }
         Self::pack(value, false, out_depth)
+    }
+
+    /// Allocate a fresh round id for one multiply call (scalar or batch).
+    fn next_call_id(&self) -> u32 {
+        self.call_seq.fetch_add(1, Ordering::SeqCst) as u32
     }
 
     fn share_from_clear(clear: ClearShareInput) -> ShareData {
@@ -262,7 +299,10 @@ impl MpcEngineMultiplication for CountingEngine {
         right: &[u8],
     ) -> MpcEngineResult<ShareData> {
         self.scalar_mul_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ShareData::Opaque(self.record_multiply(left, right).into()))
+        let call_id = self.next_call_id();
+        Ok(ShareData::Opaque(
+            self.record_multiply(call_id, left, right).into(),
+        ))
     }
 }
 
@@ -279,7 +319,10 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
         right: &[u8],
     ) -> MpcEngineResult<ShareData> {
         self.scalar_mul_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ShareData::Opaque(self.record_multiply(left, right).into()))
+        let call_id = self.next_call_id();
+        Ok(ShareData::Opaque(
+            self.record_multiply(call_id, left, right).into(),
+        ))
     }
 
     async fn batch_multiply_share_async(
@@ -290,9 +333,12 @@ impl stoffel_vm::net::mpc_engine::AsyncMpcEngine for CountingEngine {
         self.batch_mul_calls.fetch_add(1, Ordering::SeqCst);
         self.batch_mul_items
             .fetch_add(pairs.len(), Ordering::SeqCst);
+        let call_id = self.next_call_id();
         Ok(pairs
             .iter()
-            .map(|(left, right)| ShareData::Opaque(self.record_multiply(left, right).into()))
+            .map(|(left, right)| {
+                ShareData::Opaque(self.record_multiply(call_id, left, right).into())
+            })
             .collect())
     }
 
@@ -1287,4 +1333,180 @@ async fn round_gate_impl() {
         aes_all_correct,
         "AES must reveal the NIST ciphertext at every optimization level"
     );
+}
+
+// ===========================================================================
+// Per-dependency-depth round histogram (measurement only)
+// ===========================================================================
+//
+// For each program at -O3 this compiles + runs the live source through the
+// CountingEngine, then breaks the multiply ROUNDS down by critical-path output
+// depth. Each scalar multiply call or batch_multiply call is one round (one
+// `call_id`). For every output depth d it reports:
+//   pairs   = number of multiply pairs whose output depth is d
+//   ideal   = ceil(pairs/256)  (the minimum rounds depth d can take at the cap)
+//   actual  = number of rounds whose pairs are (max-)at depth d
+//   waste   = actual - ideal   (recoverable rounds at this depth: lever 1/3/5)
+//   pub     = pairs at depth d with a public operand (lever 4 headroom)
+// plus per-program totals: actual rounds, ideal floor (sum of per-depth ideals),
+// max depth, singleton rounds (a round of exactly 1 pair), and mixed-depth
+// rounds (a round whose pairs span more than one output depth).
+//
+// Run with:
+//   cargo test --release -p stoffel-vm --test aes_count round_histogram \
+//     -- --ignored --nocapture
+
+async fn histogram_run(
+    source: &str,
+    level: u8,
+    client_inputs: &[(usize, Vec<stoffel_vm::ClientShare>)],
+) -> (usize, Vec<i64>, Vec<PairRecord>) {
+    let options = stoffellang::CompilerOptions {
+        optimize: level > 0,
+        optimization_level: level,
+        mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+        ..Default::default()
+    };
+    let compiled = stoffellang::compile(source, "<histogram>", &options)
+        .unwrap_or_else(|e| panic!("compile at -O{level}: {e:?}"));
+    let binary = stoffellang::convert_to_binary(&compiled);
+    let functions = binary.try_to_vm_functions().expect("vm functions");
+
+    let engine = Arc::new(CountingEngine::default());
+    let mut vm = VirtualMachine::builder()
+        .with_mpc_engine(engine.clone())
+        .build();
+    for function in functions {
+        vm.try_register_function(function)
+            .expect("register function");
+    }
+    for (client_id, shares) in client_inputs {
+        vm.store_client_shares(*client_id, shares.clone());
+    }
+
+    let result = vm
+        .execute_async("main", engine.as_ref())
+        .await
+        .unwrap_or_else(|e| panic!("execute at -O{level}: {e:?}"));
+    let Value::Array(result_ref) = result else {
+        panic!("main should return an array");
+    };
+    let mut out = Vec::new();
+    for index in 0..vm.read_array_len(result_ref).expect("result length") {
+        let value = vm
+            .read_table_field(TableRef::from(result_ref), &Value::I64(index as i64))
+            .expect("read byte")
+            .expect("byte present");
+        let Value::I64(byte) = value else {
+            panic!("output byte should be int64, got {value:?}");
+        };
+        out.push(byte);
+    }
+    let (scalar, batch_calls, _items) = engine.counts();
+    (scalar + batch_calls, out, engine.pair_log_snapshot())
+}
+
+fn print_depth_histogram(label: &str, rounds: usize, correct: bool, log: &[PairRecord]) {
+    use std::collections::BTreeMap;
+    // Per output depth: total pairs, pairs with a public operand.
+    let mut pairs_at: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut pub_at: BTreeMap<u32, usize> = BTreeMap::new();
+    // Per round (call_id): (min depth, max depth, pair count).
+    let mut calls: BTreeMap<u32, (u32, u32, usize)> = BTreeMap::new();
+    let mut total_pub = 0usize;
+    let mut total_both = 0usize;
+    for r in log {
+        *pairs_at.entry(r.depth).or_default() += 1;
+        if r.pub_operand {
+            *pub_at.entry(r.depth).or_default() += 1;
+            total_pub += 1;
+        }
+        if r.both_public {
+            total_both += 1;
+        }
+        let e = calls.entry(r.call_id).or_insert((u32::MAX, 0, 0));
+        e.0 = e.0.min(r.depth);
+        e.1 = e.1.max(r.depth);
+        e.2 += 1;
+    }
+    // Attribute each round to its max output depth; count singletons / mixed.
+    let mut actual_at: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut singleton_rounds = 0usize;
+    let mut mixed_rounds = 0usize;
+    for (mn, mx, n) in calls.values() {
+        *actual_at.entry(*mx).or_default() += 1;
+        if *n == 1 {
+            singleton_rounds += 1;
+        }
+        if mn != mx {
+            mixed_rounds += 1;
+        }
+    }
+    let mut ideal_total = 0usize;
+    let depths: Vec<u32> = pairs_at.keys().copied().collect();
+    println!(
+        "HIST {label} O3 rounds={rounds} correct={correct} pairs={} max_depth={} pub_pairs={} both_public={}",
+        log.len(),
+        depths.last().copied().unwrap_or(0),
+        total_pub,
+        total_both,
+    );
+    println!("HIST {label} depth | pairs | ideal | actual | waste | pub");
+    for d in &depths {
+        let pairs = pairs_at[d];
+        let ideal = pairs.div_ceil(256);
+        ideal_total += ideal;
+        let actual = actual_at.get(d).copied().unwrap_or(0);
+        let pub_pairs = pub_at.get(d).copied().unwrap_or(0);
+        let waste = actual as i64 - ideal as i64;
+        println!(
+            "HIST {label}  {d:>4} | {pairs:>5} | {ideal:>5} | {actual:>6} | {waste:>5} | {pub_pairs:>5}"
+        );
+    }
+    let total_waste = rounds as i64 - ideal_total as i64;
+    println!(
+        "HIST {label} TOTALS actual_rounds={rounds} ideal_floor={ideal_total} waste={total_waste} \
+distinct_depths={} singleton_rounds={singleton_rounds} mixed_depth_rounds={mixed_rounds}",
+        depths.len(),
+    );
+    println!();
+}
+
+#[ignore = "per-depth round histogram measurement; run manually with --ignored --nocapture"]
+#[test]
+fn round_histogram() {
+    run_on_large_stack(round_histogram_impl());
+}
+
+async fn round_histogram_impl() {
+    let aes_src = include_str!("../../stoffel-lang/examples/mpc_aes128_circuit/main.stfl");
+    let ctr_src = include_str!("../../stoffel-lang/examples/mpc_aes128_ctr/main.stfl");
+    let cbc_src = include_str!("../../stoffel-lang/examples/mpc_aes128_cbc/main.stfl");
+
+    let plaintext_shares = bits_as_bool_shares(&hex_bytes(CTR_CBC_PLAINTEXT_HEX));
+    let key_shares = bits_as_bool_shares(&hex_bytes(CTR_CBC_KEY_HEX));
+    type ClientInputs = Vec<(usize, Vec<stoffel_vm::ClientShare>)>;
+    let ctr_cbc_inputs: ClientInputs = vec![(0usize, plaintext_shares), (1usize, key_shares)];
+
+    let programs: Vec<(&str, &str, ClientInputs, &[i64])> = vec![
+        ("AES", aes_src, Vec::new(), &AES_NIST_CIPHERTEXT[..]),
+        (
+            "CTR",
+            ctr_src,
+            ctr_cbc_inputs.clone(),
+            &AES_NIST_PLAINTEXT_P1[..],
+        ),
+        (
+            "CBC",
+            cbc_src,
+            ctr_cbc_inputs.clone(),
+            &AES_NIST_PLAINTEXT_P1[..],
+        ),
+    ];
+
+    for (label, source, inputs, expected) in &programs {
+        let (rounds, output, log) = histogram_run(source, 3, inputs).await;
+        let correct = output == *expected;
+        print_depth_histogram(label, rounds, correct, &log);
+    }
 }

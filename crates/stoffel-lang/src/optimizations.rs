@@ -3592,7 +3592,7 @@ pub fn inline_functions(node: AstNode) -> AstNode {
 
 /// Total number of AST nodes unrolling may add across the whole pass before it
 /// stops flattening further loops (blowup guard, mirrors `INLINE_BUDGET`).
-const UNROLL_BUDGET: usize = 200_000;
+const UNROLL_BUDGET: usize = 3_000_000;
 
 /// A single loop is never unrolled past this many iterations, regardless of
 /// remaining budget (guards against a huge literal range producing one enormous
@@ -3603,6 +3603,14 @@ const UNROLL_MAX_ITERATIONS: u128 = 1024;
 /// (`iterations * body_node_count`) exceeds this, even if the global budget
 /// would otherwise allow it.
 const UNROLL_MAX_EXPANSION: usize = 50_000;
+
+/// A loop with at most this many iterations is allowed to unroll even when its
+/// inner-unrolled estimate exceeds `UNROLL_MAX_EXPANSION`, provided the *raw*
+/// duplication cost (iterations * raw body) still fits the global budget. This
+/// exposes the statically-known per-iteration shape of low-trip outer loops over
+/// heavy bodies (the CTR/CBC per-block loop) to the inner-loop batcher. See the
+/// LEVER 1 note in `try_unroll_for`.
+const SMALL_TRIP_UNROLL: usize = 10;
 
 /// Global blowup budget, overridable via the `unroll` budget (threaded from
 /// `CompilerOptions`) for measuring the unrolling ceiling without recompiling.
@@ -4564,7 +4572,30 @@ fn try_unroll_for(stmt: AstNode, env: &LenEnv, budget: &mut usize) -> UnrollOutc
     bind_loop_var(&mut benv, &variables, &iterable);
     let inner_unrolled_estimate: usize = estimate_unrolled_size(&body_stmts, &benv);
     let decision_expansion = (iterations as usize).saturating_mul(inner_unrolled_estimate.max(1));
-    if decision_expansion > unroll_max_expansion() || decision_expansion > *budget {
+    // Raw (un-inner-unrolled) duplication cost of flattening this loop. The
+    // flattened copies are re-queued and their inner loops draw from the same
+    // budget when *they* unroll, so this — not `decision_expansion` — is the code
+    // actually materialized at this level.
+    let raw_body_count: usize = body_stmts.iter().map(node_size).sum();
+    let raw_duplication = (iterations as usize).saturating_mul(raw_body_count.max(1));
+
+    // LEVER 1 — small-trip heavy-body unroll. A low-trip outer loop over a heavy
+    // body (the CTR/CBC per-block loop: `for i in 0..blocks.len()` with the whole
+    // inlined AES inside) MUST be unrolled to expose each block's statically-known
+    // state shape to the inner-loop batcher. Kept rolled, the per-block state
+    // shape is unknown, so the inner SubBytes `.len()`-bound loops never unroll and
+    // every S-box multiply degrades to an unbatched scalar round (the CBC 10k
+    // singletons). The inner-unrolled estimate is pessimistic here: the re-queued
+    // copies keep their own round loops rolled by their own decision, so the real
+    // materialized cost is only `raw_duplication`. Gate small-trip unrolls on that
+    // realistic cost (still bounded by the global budget) instead of the cap.
+    let small_trip = (iterations as usize) <= SMALL_TRIP_UNROLL;
+    let fits = if small_trip {
+        raw_duplication <= *budget
+    } else {
+        decision_expansion <= unroll_max_expansion() && decision_expansion <= *budget
+    };
+    if !fits {
         return UnrollOutcome::Kept(AstNode::ForLoop {
             variables,
             iterable,
@@ -4575,8 +4606,7 @@ fn try_unroll_for(stmt: AstNode, env: &LenEnv, budget: &mut usize) -> UnrollOutc
     // Charge only the *raw* duplication here; the flattened copies are re-queued
     // and their inner loops draw from the same budget when they unroll, so
     // charging the inner-unrolled estimate too would double-count.
-    let raw_body_count: usize = body_stmts.iter().map(node_size).sum();
-    *budget = budget.saturating_sub((iterations as usize).saturating_mul(raw_body_count.max(1)));
+    *budget = budget.saturating_sub(raw_duplication);
 
     // Names declared inside the body (locals + nested loop variables) get a
     // fresh per-iteration suffix so the unrolled copies cannot collide or
