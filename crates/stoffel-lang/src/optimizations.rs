@@ -5,6 +5,7 @@
 use crate::ast::AstNode;
 use crate::errors::SourceLocation;
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -44,6 +45,14 @@ thread_local! {
 
 fn active_budgets() -> OptBudgets {
     ACTIVE_BUDGETS.with(|c| c.get())
+}
+
+thread_local! {
+    /// Names of function definitions that are never called anywhere in the program
+    /// (dead after inlining), populated for the duration of a single
+    /// `unroll_literal_loops` call. Unrolling skips these so they don't consume the
+    /// shared global unroll budget that the live entry point needs.
+    static DEAD_FNS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
 /// Counter for generating unique temporary variable names
@@ -639,6 +648,12 @@ fn statement_reads_and_writes(statement: &AstNode) -> (HashSet<String>, HashSet<
             if let Some(key) = lvalue_key(target) {
                 writes.insert(key);
             } else {
+                // In-place index/element store (e.g. `a[i] = x`): the base object
+                // is read-modify-written, so register a write of its root var so a
+                // candidate multiply referencing it cannot be hoisted past it.
+                if let Some(root) = root_var(target) {
+                    writes.insert(root);
+                }
                 collect_multiply_dependency_vars(target, &mut reads);
             }
             collect_multiply_dependency_vars(value, &mut reads);
@@ -647,7 +662,30 @@ fn statement_reads_and_writes(statement: &AstNode) -> (HashSet<String>, HashSet<
             value: Some(value), ..
         } => collect_multiply_dependency_vars(value, &mut reads),
         AstNode::DiscardStatement { expression, .. } => {
-            collect_multiply_dependency_vars(expression, &mut reads);
+            // Recurse so a statement-level in-place mutator wrapped in a discard
+            // (e.g. `lefts.append(x)`) is modeled as a write of its receiver,
+            // mirroring `reveal_dep_keys`'s discard handling.
+            return statement_reads_and_writes(expression);
+        }
+        // A recognized in-place mutator (`append`/`extend`/`insert`/`array_push`/
+        // `set_field`): its receiver (first argument) is read AND written, so a
+        // candidate `Share.batch_mul` referencing that receiver as an operand list
+        // must not be hoisted above this call. The remaining arguments are reads.
+        // Mirrors `reveal_dep_keys`'s mutator arm at this dep model's granularity;
+        // without it the batcher mis-hoists the fused multiply above the appends
+        // that populate its operands, leaving them empty at runtime.
+        AstNode::FunctionCall { arguments, .. }
+            if call_name(statement).is_some_and(is_mutator_call_name) =>
+        {
+            if let Some(receiver) = arguments.first() {
+                if let Some(root) = root_var(receiver) {
+                    writes.insert(root);
+                }
+                collect_multiply_dependency_vars(receiver, &mut reads);
+            }
+            for arg in arguments.iter().skip(1) {
+                collect_multiply_dependency_vars(arg, &mut reads);
+            }
         }
         _ => collect_multiply_dependency_vars(statement, &mut reads),
     }
@@ -4141,7 +4179,36 @@ fn bind_loop_var(env: &mut LenEnv, variables: &[String], iterable: &AstNode) {
 pub fn unroll_literal_loops(node: AstNode) -> AstNode {
     let mut budget = unroll_budget();
     let mut env = LenEnv::default();
-    unroll_in_node(node, &mut env, &mut budget)
+    // Identify dead functions (defined but never called) so their loops don't
+    // consume the shared budget. `main` is always treated as live (it is the
+    // entry point and typically has no call site).
+    let dead = dead_function_names(&node);
+    DEAD_FNS.with(|d| *d.borrow_mut() = dead);
+    let result = unroll_in_node(node, &mut env, &mut budget);
+    DEAD_FNS.with(|d| d.borrow_mut().clear());
+    result
+}
+
+/// Names of top-level/nested function definitions that have no call site anywhere
+/// in the program. `main` (the entry point) is never reported dead even though it
+/// has no caller.
+fn dead_function_names(root: &AstNode) -> HashSet<String> {
+    let mut defined: HashSet<String> = HashSet::new();
+    fn gather_defs(node: &AstNode, out: &mut HashSet<String>) {
+        if let AstNode::FunctionDefinition { name: Some(n), .. } = node {
+            out.insert(n.clone());
+        }
+        for_each_child_def(node, &mut |c| gather_defs(c, out));
+    }
+    gather_defs(root, &mut defined);
+
+    let mut called: HashSet<String> = HashSet::new();
+    collect_called_names(root, &mut called);
+
+    defined
+        .into_iter()
+        .filter(|n| n != "main" && !called.contains(n))
+        .collect()
 }
 
 /// Recurse into a node, unrolling resolvable loops in any statement list it owns
@@ -4164,12 +4231,29 @@ fn unroll_in_node(node: AstNode, env: &mut LenEnv, budget: &mut usize) -> AstNod
             // A function body is a fresh scope; its parameters' lengths are not
             // known intraprocedurally.
             let mut fenv = LenEnv::default();
+            // Do not spend unroll budget inside a function that is never called
+            // from anywhere in the program. After -O3 inlining, helpers that were
+            // fully inlined into their callers (e.g. `aes128_encrypt`, inlined into
+            // `main`) survive as dead definitions. Unrolling them is pure waste:
+            // it bloats compile time AND — because the budget is a single global
+            // pool threaded in source order — starves the live entry point that
+            // appears later in the file. Recurse so the dead body stays valid, but
+            // with a spent (zero) budget so no loop in it is flattened. This frees
+            // the whole budget for live code without changing the budget policy for
+            // live functions.
+            let body = if DEAD_FNS.with(|d| name.as_deref().is_some_and(|n| d.borrow().contains(n)))
+            {
+                let mut spent = 0usize;
+                Box::new(unroll_in_node(*body, &mut fenv, &mut spent))
+            } else {
+                Box::new(unroll_in_node(*body, &mut fenv, budget))
+            };
             AstNode::FunctionDefinition {
                 name,
                 type_params,
                 parameters,
                 return_type,
-                body: Box::new(unroll_in_node(*body, &mut fenv, budget)),
+                body,
                 is_secret,
                 pragmas,
                 location,
@@ -4299,6 +4383,107 @@ enum UnrollOutcome {
     Kept(AstNode),
 }
 
+/// Read-only estimate of how many AST nodes a statement list expands to *after
+/// its inner loops are unrolled*, threading `env` so inner `.len()` bounds
+/// resolve exactly as the real unroller would. This lets the outer flatten/keep
+/// decision account for inner-loop blow-up that the raw `node_size` misses.
+///
+/// Why this matters: a data-dependent outer loop (the AES `for round`, CTR's
+/// per-block loop) has a *raw* body that looks small — its heavy work is hidden
+/// inside inner `for i in 0..state.len()` loops. The old estimate (raw
+/// `node_size × iterations`) therefore judged it cheap and flattened it, which
+/// then forced every one of its copies to unroll those inner loops separately,
+/// exhausting the budget after a few rounds. Estimating the *inner-unrolled* size
+/// instead keeps such a loop rolled (one copy) while the kept-loop path still
+/// unrolls its inner element loops once — clustering each layer's independent
+/// multiplies into a single batched round. Rounds are inherently sequential
+/// (round N depends on N-1), so keeping the outer loop rolled costs almost no
+/// extra rounds while using a fraction of the budget.
+fn estimate_unrolled_size(stmts: &[AstNode], env: &LenEnv) -> usize {
+    let mut env = env.clone();
+    let mut total = 0usize;
+    for stmt in stmts {
+        total = total.saturating_add(estimate_stmt_size(stmt, &mut env));
+    }
+    total
+}
+
+/// Estimate one statement's unrolled node count, advancing `env` with its effect
+/// (mirroring `apply_statement_to_env` / the unroller's control-flow handling).
+fn estimate_stmt_size(stmt: &AstNode, env: &mut LenEnv) -> usize {
+    match stmt {
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            ..
+        } => {
+            let body_stmts: Vec<AstNode> = match body.as_ref() {
+                AstNode::Block(s) => s.clone(),
+                single => vec![single.clone()],
+            };
+            // Estimate one iteration's inner-unrolled size in a child env.
+            let mut benv = env.clone();
+            bind_loop_var(&mut benv, variables, iterable);
+            let inner = estimate_unrolled_size(&body_stmts, &benv).max(1);
+            // Would this loop itself unroll? (Same predicate as `try_unroll_for`.)
+            let unrolls = matches!(variables.as_slice(), [v] if !body_assigns_var(body, v))
+                && range_bounds(iterable, env)
+                    .is_some_and(|(lo, hi)| hi > lo && (hi - lo) <= UNROLL_MAX_ITERATIONS);
+            let size = if unrolls {
+                let (lo, hi) = range_bounds(iterable, env).unwrap();
+                ((hi - lo) as usize).saturating_mul(inner)
+            } else {
+                inner
+            };
+            // The loop's net effect on the outer env: conservatively invalidate
+            // everything its body could mutate (matches the kept-loop path).
+            let mut mutated = HashSet::new();
+            collect_mutated_vars(body, &mut mutated);
+            for m in mutated {
+                env.invalidate(&m);
+            }
+            size
+        }
+        AstNode::IfExpression {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let mut tenv = env.clone();
+            let mut size = 1 + estimate_stmt_size(then_branch, &mut tenv);
+            if let Some(e) = else_branch {
+                let mut eenv = env.clone();
+                size += estimate_stmt_size(e, &mut eenv);
+            }
+            let mut mutated = HashSet::new();
+            collect_mutated_vars(then_branch, &mut mutated);
+            if let Some(e) = else_branch {
+                collect_mutated_vars(e, &mut mutated);
+            }
+            for m in mutated {
+                env.invalidate(&m);
+            }
+            size
+        }
+        AstNode::WhileLoop { body, .. } => {
+            let mut benv = env.clone();
+            let inner = estimate_stmt_size(body, &mut benv);
+            let mut mutated = HashSet::new();
+            collect_mutated_vars(body, &mut mutated);
+            for m in mutated {
+                env.invalidate(&m);
+            }
+            inner
+        }
+        AstNode::Block(s) => estimate_unrolled_size(s, env),
+        other => {
+            apply_statement_to_env(other, env);
+            node_size(other)
+        }
+    }
+}
+
 /// Attempt to flatten a single statement if it is a `for` loop whose trip count
 /// resolves to a constant in `env`. Returns the flattened iterations, or the
 /// original node unchanged.
@@ -4367,11 +4552,19 @@ fn try_unroll_for(stmt: AstNode, env: &LenEnv, budget: &mut usize) -> UnrollOutc
         AstNode::Block(stmts) => stmts.clone(),
         single => vec![single.clone()],
     };
-    let body_node_count: usize = body_stmts.iter().map(node_size).sum();
-
-    // Per-loop expansion estimate and global budget guard.
-    let expansion = (iterations as usize).saturating_mul(body_node_count.max(1));
-    if expansion > unroll_max_expansion() || expansion > *budget {
+    // Decide flatten-vs-keep on the per-iteration size *after inner loops are
+    // unrolled*, not the raw body size: flattening this loop would replicate that
+    // inner-unrolled work `iterations` times. A loop whose body hides heavy inner
+    // element loops (the AES `for round`, CTR's per-block loop) is therefore kept
+    // rolled — the kept-loop path still unrolls its inner loops once, which is
+    // what clusters a layer's independent multiplies into one batched round
+    // without paying to duplicate the whole round body. See
+    // `estimate_unrolled_size`.
+    let mut benv = env.clone();
+    bind_loop_var(&mut benv, &variables, &iterable);
+    let inner_unrolled_estimate: usize = estimate_unrolled_size(&body_stmts, &benv);
+    let decision_expansion = (iterations as usize).saturating_mul(inner_unrolled_estimate.max(1));
+    if decision_expansion > unroll_max_expansion() || decision_expansion > *budget {
         return UnrollOutcome::Kept(AstNode::ForLoop {
             variables,
             iterable,
@@ -4379,7 +4572,11 @@ fn try_unroll_for(stmt: AstNode, env: &LenEnv, budget: &mut usize) -> UnrollOutc
             location,
         });
     }
-    *budget = budget.saturating_sub(expansion);
+    // Charge only the *raw* duplication here; the flattened copies are re-queued
+    // and their inner loops draw from the same budget when they unroll, so
+    // charging the inner-unrolled estimate too would double-count.
+    let raw_body_count: usize = body_stmts.iter().map(node_size).sum();
+    *budget = budget.saturating_sub((iterations as usize).saturating_mul(raw_body_count.max(1)));
 
     // Names declared inside the body (locals + nested loop variables) get a
     // fresh per-iteration suffix so the unrolled copies cannot collide or
@@ -4389,7 +4586,8 @@ fn try_unroll_for(stmt: AstNode, env: &LenEnv, budget: &mut usize) -> UnrollOutc
         collect_declared_names(stmt, &mut body_declared);
     }
 
-    let mut flattened: Vec<AstNode> = Vec::with_capacity(expansion);
+    let mut flattened: Vec<AstNode> =
+        Vec::with_capacity((iterations as usize).saturating_mul(body_stmts.len()));
     for k in lo..hi {
         let suffix = INLINE_SUFFIX.fetch_add(1, Ordering::Relaxed);
         let rename: HashMap<String, String> = body_declared

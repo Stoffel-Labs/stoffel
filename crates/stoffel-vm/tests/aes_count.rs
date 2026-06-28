@@ -960,6 +960,113 @@ def main_lit() -> list[int64]:
     );
 }
 
+/// Full-unroll correctness gate for ALL THREE programs (AES circuit, CTR, CBC).
+///
+/// At large (`100_000_000`) inline/unroll/expansion budgets the whole circuit
+/// flattens into one block, which used to trigger the multiply-batcher
+/// dependency-model bug: `statement_reads_and_writes` did not model in-place
+/// mutators (`append`/`extend`/`insert`) as writes of their receiver, so the
+/// scheduler+batcher hoisted a fused `Share.batch_mul` ABOVE the loop that
+/// populated its operand lists. At runtime the operands were still empty, the
+/// product (and its slices) were empty, and the consumer indexed an empty array
+/// — crashing with `get_field: array index 0 out of range (length 0)`.
+///
+/// With the dep-model fix, all three must run to completion and reveal their
+/// NIST-correct output at full unroll. This is the authoritative cryptographic
+/// gate for Step 1.
+///
+/// Ignored by default (flattening all three circuits is heavy: ~18 min in
+/// release, longer in debug), matching `optimized_aes_full_unroll_minimizes_rounds`.
+/// Run explicitly, ideally in release:
+///   cargo test --release -p stoffel-vm --test aes_count \
+///     full_unroll_aes_ctr_cbc_match_nist -- --ignored
+#[test]
+#[ignore = "heavy full-unroll cryptographic gate; run manually with --ignored"]
+fn full_unroll_aes_ctr_cbc_match_nist() {
+    run_on_large_stack(full_unroll_aes_ctr_cbc_match_nist_impl());
+}
+
+async fn full_unroll_aes_ctr_cbc_match_nist_impl() {
+    let aes_src = include_str!("../../stoffel-lang/examples/mpc_aes128_circuit/main.stfl");
+    let ctr_src = include_str!("../../stoffel-lang/examples/mpc_aes128_ctr/main.stfl");
+    let cbc_src = include_str!("../../stoffel-lang/examples/mpc_aes128_cbc/main.stfl");
+
+    let plaintext_shares = bits_as_bool_shares(&hex_bytes(CTR_CBC_PLAINTEXT_HEX));
+    let key_shares = bits_as_bool_shares(&hex_bytes(CTR_CBC_KEY_HEX));
+    type ClientInputs = Vec<(usize, Vec<stoffel_vm::ClientShare>)>;
+    let ctr_cbc_inputs: ClientInputs = vec![(0usize, plaintext_shares), (1usize, key_shares)];
+
+    let programs: Vec<(&str, &str, ClientInputs, &[i64])> = vec![
+        ("AES", aes_src, Vec::new(), &AES_NIST_CIPHERTEXT[..]),
+        (
+            "CTR",
+            ctr_src,
+            ctr_cbc_inputs.clone(),
+            &AES_NIST_PLAINTEXT_P1[..],
+        ),
+        (
+            "CBC",
+            cbc_src,
+            ctr_cbc_inputs.clone(),
+            &AES_NIST_PLAINTEXT_P1[..],
+        ),
+    ];
+
+    for (label, source, inputs, expected) in &programs {
+        // Full-unroll budgets threaded hermetically through CompilerOptions.
+        let options = stoffellang::CompilerOptions {
+            optimize: true,
+            optimization_level: 3,
+            mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+            inline_budget: Some(100_000_000),
+            unroll_budget: Some(100_000_000),
+            unroll_max_expansion: Some(100_000_000),
+            ..Default::default()
+        };
+        let compiled = stoffellang::compile(source, "<full-unroll-gate>", &options)
+            .unwrap_or_else(|e| panic!("{label}: full-unroll compile failed: {e:?}"));
+        let binary = stoffellang::convert_to_binary(&compiled);
+        let functions = binary.try_to_vm_functions().expect("vm functions");
+
+        let engine = Arc::new(CountingEngine::default());
+        let mut vm = VirtualMachine::builder()
+            .with_mpc_engine(engine.clone())
+            .build();
+        for function in functions {
+            vm.try_register_function(function)
+                .expect("register function");
+        }
+        for (client_id, shares) in inputs {
+            vm.store_client_shares(*client_id, shares.clone());
+        }
+
+        let result = vm
+            .execute_async("main", engine.as_ref())
+            .await
+            .unwrap_or_else(|e| panic!("{label}: full-unroll execution failed: {e:?}"));
+        let Value::Array(result_ref) = result else {
+            panic!("{label}: main should return an array");
+        };
+        let mut out = Vec::new();
+        for index in 0..vm.read_array_len(result_ref).expect("result length") {
+            let value = vm
+                .read_table_field(TableRef::from(result_ref), &Value::I64(index as i64))
+                .expect("read byte")
+                .expect("byte present");
+            let Value::I64(byte) = value else {
+                panic!("{label}: output byte should be int64, got {value:?}");
+            };
+            out.push(byte);
+        }
+
+        assert_eq!(
+            out,
+            expected.to_vec(),
+            "{label}: full-unroll output must match the NIST vector"
+        );
+    }
+}
+
 // ===========================================================================
 // Round-count + correctness gate
 // ===========================================================================
