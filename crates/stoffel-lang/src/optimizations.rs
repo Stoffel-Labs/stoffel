@@ -503,6 +503,42 @@ fn collect_multiply_dependency_vars(node: &AstNode, vars: &mut HashSet<String>) 
     }
 }
 
+/// Conservatively decides whether an operand expression provably evaluates to a
+/// secret share, given the set of block-local lvalues already known to be secret.
+///
+/// This is what lets the batcher recognize the UNFLAGGED inner multiplies that
+/// function inlining synthesises. Inlining a nested gate such as
+/// `gate_xor(gate_xor(a, b), c)` emits the inner `xor` as a temporary
+/// `var __inl_arg = a__inl xor b__inl` with `is_secret: false` and no type
+/// annotation — even though `a__inl`/`b__inl` are themselves secret-typed inlined
+/// param bindings (so the result is secret and runs as a network round). The
+/// round-minimizing scheduler already treats such a scalar `xor` as a multiply and
+/// clusters it with its same-depth siblings; proving it secret here lets the
+/// batcher actually fuse that cluster instead of leaving each as a scalar
+/// singleton round.
+///
+/// Deliberately conservative: it only returns `true` when secrecy is provable from
+/// the tracked secret lvalues (or a call's resolved type), so a clear value is
+/// never misclassified as a secret share and pushed into a `Share.batch_mul`.
+fn expr_yields_secret(node: &AstNode, secret_lvalues: &HashSet<String>) -> bool {
+    match node {
+        AstNode::Identifier(name, _) => secret_lvalues.contains(name),
+        // A secret list/object, indexed or field-accessed, yields a secret element.
+        AstNode::IndexAccess { base, .. } => expr_yields_secret(base, secret_lvalues),
+        AstNode::FieldAccess { object, .. } => expr_yields_secret(object, secret_lvalues),
+        // Any arithmetic/logical combination is secret if either side is secret.
+        AstNode::BinaryOperation { left, right, .. } => {
+            expr_yields_secret(left, secret_lvalues) || expr_yields_secret(right, secret_lvalues)
+        }
+        AstNode::UnaryOperation { operand, .. } => expr_yields_secret(operand, secret_lvalues),
+        // Calls only count when semantic analysis attached a secret-carrying type.
+        AstNode::FunctionCall { .. } | AstNode::CommandCall { .. } => {
+            node_resolved_contains_secret(node).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 /// Extracts consecutive statement-level secret multiply candidates.
 fn extract_multiply_candidates(statements: &[AstNode]) -> Vec<MultiplyCandidate> {
     let mut candidates = Vec::new();
@@ -525,8 +561,24 @@ fn extract_multiply_candidates(statements: &[AstNode]) -> Vec<MultiplyCandidate>
                     secret_lvalues.insert(name.clone());
                 }
 
-                if declared_secret {
-                    if let Some((op, left, right)) = secret_multiply_operands(value) {
+                // A multiply binding is a secret round either when its binding is
+                // explicitly secret, or when it is unflagged but its operands are
+                // provably secret (the inliner's inner-gate temporaries — see
+                // `expr_yields_secret`). In the latter case register the result as a
+                // secret lvalue so a downstream multiply that consumes it is in turn
+                // recognized, flattening a whole nested gate tree.
+                let multiply = secret_multiply_operands(value);
+                let secret_multiply = multiply.is_some_and(|(_, left, right)| {
+                    declared_secret
+                        || expr_yields_secret(left, &secret_lvalues)
+                        || expr_yields_secret(right, &secret_lvalues)
+                });
+                if secret_multiply {
+                    secret_lvalues.insert(name.clone());
+                }
+
+                if secret_multiply {
+                    if let Some((op, left, right)) = multiply {
                         let mut referenced_vars = HashSet::new();
                         collect_multiply_dependency_vars(left, &mut referenced_vars);
                         collect_multiply_dependency_vars(right, &mut referenced_vars);
@@ -546,7 +598,8 @@ fn extract_multiply_candidates(statements: &[AstNode]) -> Vec<MultiplyCandidate>
                             is_batched: false,
                         });
                     }
-                } else if let Some((left, right)) = batch_mul_call_operands(value) {
+                } else if !declared_secret && batch_mul_call_operands(value).is_some() {
+                    let (left, right) = batch_mul_call_operands(value).unwrap();
                     // Call-form `var m = Share.batch_mul(L, R)`: a list result, so
                     // not flagged secret on the binding, but it carries secret
                     // shares and is a network round. Confirm via the resolved type
