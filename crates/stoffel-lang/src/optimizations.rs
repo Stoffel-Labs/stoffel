@@ -2308,6 +2308,16 @@ fn optimize_all_inner(node: AstNode, optimization_level: u8) -> AstNode {
     } else {
         node
     };
+    // Fold provably-public boolean gates (e.g. the CTR counter ripple over the
+    // compile-time-public `ctr0`) to local `Share.from_clear_int` shares so they
+    // stop becoming MPC multiplies. Runs after unrolling + constant-branch
+    // folding (so the counter increment is straight-line) and before the
+    // multiply batchers (so folded gates never reach `Share.batch_mul`). -O3 only.
+    let node = if optimization_level >= 3 {
+        fold_public_gates(node)
+    } else {
+        node
+    };
     let node = inline_multiply_wrappers(node);
     // Round-minimizing list scheduler (-O3): within each side-effect-free region,
     // reorder statements so that all mutually-independent multiplies at the same
@@ -4581,6 +4591,598 @@ fn fold_branches_in_stmts(stmts: Vec<AstNode>) -> Vec<AstNode> {
         }
     }
     out
+}
+
+// ===========================================================================
+// Public-gate folding (`fold_public_gates`)
+//
+// In the CTR example the 128-bit counter `ctr0` is a *publicly known* constant
+// (`public_block([240..255])`), and `increment_counter_block` ripples a serial
+// `gate_and`/`gate_xor` carry across its bits. Those bits are typed `secret
+// bool`, so the type-driven recognizers treat each gate as an MPC multiply — but
+// every operand's clear VALUE is compile-time public. This pass proves, with a
+// strict flow-sensitive provenance analysis, that BOTH operands of an
+// `and`/`or`/`xor` are public bits *read out of a tracked public list*, and only
+// then rewrites that single gate node to `Share.from_clear_int(bit, 1)` (a local,
+// communication-free share of the computed bit).
+//
+// CRYPTO SAFETY (the analysis is conservative-by-default — `Top` = leave alone):
+//   * A `Bit`/`Int`/`List` value originates ONLY from integer/bool literals and
+//     `Share.from_clear_int(<public int>, 1)`. EVERY other expression (a
+//     `take_client_byte`/`take_share_bool` input, a `Share.mul`/`batch_mul`
+//     result, a `reveal`, an unknown call, an untracked variable) evaluates to
+//     `Top`, so a genuinely-secret operand can never be proven public.
+//   * The ONLY AST rewrite performed is replacing a scalar `and`/`or`/`xor`
+//     BinaryOperation with a scalar `Share.from_clear_int` — list values are
+//     never materialized back into the tree, so no list can ever be substituted
+//     where a scalar share is read (e.g. by a later `Share.batch_mul`).
+//   * A gate folds only if at least one operand was read from a public list
+//     (`from_list`). This is what distinguishes the CTR counter (bits live in the
+//     `counter`/`out` byte lists) from two directly-`from_clear_int` scalars
+//     and-ed together, which must stay a real multiply.
+// ===========================================================================
+
+/// A flow-sensitive provenance fact for a value. `Top` is the conservative
+/// unknown (possibly secret) default.
+#[derive(Clone)]
+enum ConstVal {
+    Top,
+    Int(i128),
+    /// A public single bit. `from_list` records that the value was read out of a
+    /// tracked public list (directly or via pure propagation) — the signal that
+    /// gates the rewrite.
+    Bit {
+        val: u8,
+        from_list: bool,
+    },
+    /// A list whose elements are themselves tracked (public) facts.
+    List(Vec<ConstVal>),
+}
+
+type GateEnv = std::collections::HashMap<String, ConstVal>;
+
+/// Fold provably-public boolean gates throughout the program. Entry point.
+pub fn fold_public_gates(node: AstNode) -> AstNode {
+    match node {
+        AstNode::Block(stmts) => AstNode::Block(stmts.into_iter().map(fold_public_gates).collect()),
+        AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body,
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        } => {
+            // Parameters are unknown at the definition site → `Top`, so a
+            // standalone (uninlined) `gate_and` body never folds.
+            let mut env = GateEnv::new();
+            let body = Box::new(gate_process_node(*body, &mut env));
+            AstNode::FunctionDefinition {
+                name,
+                type_params,
+                parameters,
+                return_type,
+                body,
+                is_secret,
+                pragmas,
+                location,
+                node_id,
+            }
+        }
+        other => other,
+    }
+}
+
+/// Process a single (statement-position) node, threading `env` for the
+/// straight-line flow that follows it.
+fn gate_process_node(node: AstNode, env: &mut GateEnv) -> AstNode {
+    match node {
+        AstNode::Block(stmts) => AstNode::Block(gate_process_stmts(stmts, env)),
+        // A nested function definition (closure) starts a fresh scope.
+        def @ AstNode::FunctionDefinition { .. } => fold_public_gates(def),
+        other => gate_process_stmt(other, env),
+    }
+}
+
+/// Process a list of statements in order, updating `env` as facts are learned.
+fn gate_process_stmts(stmts: Vec<AstNode>, env: &mut GateEnv) -> Vec<AstNode> {
+    stmts
+        .into_iter()
+        .map(|s| gate_process_stmt(s, env))
+        .collect()
+}
+
+/// Process one statement: rewrite its expressions (folding gates) and update the
+/// environment to reflect any binding/mutation/control-flow effect.
+fn gate_process_stmt(stmt: AstNode, env: &mut GateEnv) -> AstNode {
+    match stmt {
+        // A nested statement block shares the surrounding straight-line flow
+        // (inlining/unrolling wrap their output in blocks), so thread `env`
+        // through it rather than leaving it unprocessed.
+        AstNode::Block(stmts) => AstNode::Block(gate_process_stmts(stmts, env)),
+        AstNode::FunctionDefinition { .. } => fold_public_gates(stmt),
+        AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value,
+            is_mutable,
+            is_secret,
+            location,
+        } => {
+            let value = value.map(|v| Box::new(gate_rewrite_expr(*v, env)));
+            let cv = match &value {
+                Some(v) => gate_eval(v, env),
+                None => ConstVal::Top,
+            };
+            env.insert(name.clone(), cv);
+            AstNode::VariableDeclaration {
+                name,
+                type_annotation,
+                value,
+                is_mutable,
+                is_secret,
+                location,
+            }
+        }
+        AstNode::Assignment {
+            target,
+            value,
+            location,
+        } => {
+            let value = Box::new(gate_rewrite_expr(*value, env));
+            match target.as_ref() {
+                AstNode::Identifier(name, _) => {
+                    let cv = gate_eval(&value, env);
+                    env.insert(name.clone(), cv);
+                }
+                other => {
+                    // Element/field store: we can't precisely model it, so drop
+                    // any tracked fact for the root variable.
+                    if let Some(root) = base_var_of(other) {
+                        env.insert(root, ConstVal::Top);
+                    }
+                }
+            }
+            AstNode::Assignment {
+                target,
+                value,
+                location,
+            }
+        }
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            resolved_return_type,
+        } => {
+            let call = call_name_of(&function);
+            let base = call.as_deref().map(builtin_base_name);
+            let arguments: Vec<AstNode> = arguments
+                .into_iter()
+                .map(|a| gate_rewrite_expr(a, env))
+                .collect();
+            gate_apply_call_effect(call.as_deref(), base, &arguments, env);
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                location,
+                resolved_return_type,
+            }
+        }
+        AstNode::Return { value, location } => {
+            let value = value.map(|v| Box::new(gate_rewrite_expr(*v, env)));
+            AstNode::Return { value, location }
+        }
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let condition = Box::new(gate_rewrite_expr(*condition, env));
+            // Fold inside each branch using current knowledge (a clone, since the
+            // taken side is unknown), then forget anything either branch wrote.
+            let mut then_env = env.clone();
+            let then_branch = Box::new(gate_process_node(*then_branch, &mut then_env));
+            let else_branch = else_branch.map(|e| {
+                let mut else_env = env.clone();
+                Box::new(gate_process_node(*e, &mut else_env))
+            });
+            let mut written = HashSet::new();
+            collect_written_vars(&then_branch, &mut written);
+            if let Some(e) = &else_branch {
+                collect_written_vars(e, &mut written);
+            }
+            for v in written {
+                env.insert(v, ConstVal::Top);
+            }
+            AstNode::IfExpression {
+                condition,
+                then_branch,
+                else_branch,
+            }
+        }
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => gate_process_loop_body(
+            |body| AstNode::WhileLoop {
+                condition,
+                body,
+                location,
+            },
+            *body,
+            env,
+        ),
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => gate_process_loop_body(
+            |body| AstNode::ForLoop {
+                variables,
+                iterable,
+                body,
+                location,
+            },
+            *body,
+            env,
+        ),
+        other => other,
+    }
+}
+
+/// Process a loop body conservatively: any variable the body writes is unknown
+/// across iterations, so forget those facts before AND after processing, and
+/// process the body with that pessimistic environment (so no stale fact leaks a
+/// fold into the loop). Counter code is unrolled before this pass, so this only
+/// guards the unusual residual-loop case.
+fn gate_process_loop_body(
+    rebuild: impl FnOnce(Box<AstNode>) -> AstNode,
+    body: AstNode,
+    env: &mut GateEnv,
+) -> AstNode {
+    let mut written = HashSet::new();
+    collect_written_vars(&body, &mut written);
+    for v in &written {
+        env.insert(v.clone(), ConstVal::Top);
+    }
+    let mut body_env = env.clone();
+    let body = Box::new(gate_process_node(body, &mut body_env));
+    for v in written {
+        env.insert(v, ConstVal::Top);
+    }
+    rebuild(body)
+}
+
+/// Update `env` for the side effects of a call statement. Handles the tracked
+/// list mutators precisely and conservatively invalidates anything else that
+/// could mutate a tracked variable.
+fn gate_apply_call_effect(
+    call: Option<&str>,
+    base: Option<&str>,
+    args: &[AstNode],
+    env: &mut GateEnv,
+) {
+    let list_var = match args.first() {
+        Some(AstNode::Identifier(name, _)) => Some(name.clone()),
+        _ => None,
+    };
+    match base {
+        Some("append") | Some("array_push") => {
+            if let (Some(var), Some(elem_node)) = (&list_var, args.get(1)) {
+                let elem = gate_eval(elem_node, env);
+                if let Some(ConstVal::List(v)) = env.get_mut(var) {
+                    v.push(elem);
+                }
+            }
+        }
+        Some("insert") => {
+            if let (Some(var), Some(idx_node), Some(elem_node)) =
+                (&list_var, args.get(1), args.get(2))
+            {
+                let idx = gate_eval(idx_node, env);
+                let elem = gate_eval(elem_node, env);
+                match (idx, env.get_mut(var)) {
+                    (ConstVal::Int(i), Some(ConstVal::List(v))) if i >= 0 => {
+                        let i = (i as usize).min(v.len());
+                        v.insert(i, elem);
+                    }
+                    (_, slot @ Some(_)) => {
+                        *slot.unwrap() = ConstVal::Top;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Some("extend") => {
+            if let (Some(var), Some(other_node)) = (&list_var, args.get(1)) {
+                let other = gate_eval(other_node, env);
+                match (other, env.get_mut(var)) {
+                    (ConstVal::List(o), Some(ConstVal::List(v))) => v.extend(o),
+                    (_, Some(slot)) => *slot = ConstVal::Top,
+                    _ => {}
+                }
+            }
+        }
+        Some("set_field") => {
+            if let Some(var) = list_var {
+                env.insert(var, ConstVal::Top);
+            }
+        }
+        _ => {
+            // Known read/pure builtins (recognized by the registry) cannot mutate
+            // a tracked list, so leave facts intact. An UNKNOWN call (a user
+            // function the inliner left in place) might mutate any list argument
+            // by reference, so forget every tracked argument's root variable.
+            let is_known_builtin = call
+                .map(|c| {
+                    crate::builtin_registry::builtin_registry()
+                        .vm_symbol_for_call(c)
+                        .is_some()
+                })
+                .unwrap_or(false);
+            if !is_known_builtin {
+                for a in args {
+                    if let Some(root) = base_var_of(a) {
+                        env.insert(root, ConstVal::Top);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Rewrite an expression bottom-up, folding any provably-public gate to a
+/// `Share.from_clear_int(bit, 1)`. Pure: never mutates `env`.
+fn gate_rewrite_expr(node: AstNode, env: &GateEnv) -> AstNode {
+    match node {
+        AstNode::BinaryOperation {
+            op,
+            left,
+            right,
+            location,
+        } => {
+            let left = Box::new(gate_rewrite_expr(*left, env));
+            let right = Box::new(gate_rewrite_expr(*right, env));
+            // Fold ONLY the serial conjunction (carry) chain — `and`. The CTR
+            // counter ripple's expensive cost is its sequential `gate_and` carry
+            // (each `and` depends on the previous, so the batcher cannot coalesce
+            // them — every one is its own MPC round); folding them removes that
+            // serial round chain. We deliberately do NOT fold the `xor` output
+            // bits: those are stored into the counter byte lists, and emptying a
+            // byte of every gate (making it fully constant) exposes a downstream
+            // cross-block byte-granular batcher that then mis-feeds a whole byte
+            // (an `Array`) into `Share.batch_mul`. Leaving the `xor`s as real
+            // multiplies is the conservative, correct choice.
+            if op == "and" {
+                if let (
+                    ConstVal::Bit {
+                        val: a,
+                        from_list: fa,
+                    },
+                    ConstVal::Bit {
+                        val: b,
+                        from_list: fb,
+                    },
+                ) = (gate_eval(&left, env), gate_eval(&right, env))
+                {
+                    // Only fold a gate that consumes at least one public-list bit
+                    // (the counter-table idiom); two free scalar shares stay a
+                    // real multiply (see `inlining_preserves_secret_multiplication`).
+                    if fa || fb {
+                        return make_from_clear_int_bit((a & b) & 1, &location);
+                    }
+                }
+            }
+            AstNode::BinaryOperation {
+                op,
+                left,
+                right,
+                location,
+            }
+        }
+        AstNode::UnaryOperation {
+            op,
+            operand,
+            location,
+        } => AstNode::UnaryOperation {
+            op,
+            operand: Box::new(gate_rewrite_expr(*operand, env)),
+            location,
+        },
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            resolved_return_type,
+        } => AstNode::FunctionCall {
+            function,
+            arguments: arguments
+                .into_iter()
+                .map(|a| gate_rewrite_expr(a, env))
+                .collect(),
+            location,
+            resolved_return_type,
+        },
+        AstNode::IndexAccess {
+            base,
+            index,
+            location,
+        } => AstNode::IndexAccess {
+            base: Box::new(gate_rewrite_expr(*base, env)),
+            index: Box::new(gate_rewrite_expr(*index, env)),
+            location,
+        },
+        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
+            elements: elements
+                .into_iter()
+                .map(|e| gate_rewrite_expr(e, env))
+                .collect(),
+            location,
+        },
+        other => other,
+    }
+}
+
+/// Build a `Share.from_clear_int(bit, 1)` call — a local share of a public bit.
+fn make_from_clear_int_bit(bit: u8, location: &SourceLocation) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier(
+            "Share.from_clear_int".to_string(),
+            location.clone(),
+        )),
+        arguments: vec![
+            make_int_literal(bit as u128, location),
+            make_int_literal(1, location),
+        ],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+/// Purely evaluate an expression to a provenance fact. Returns `Top` for
+/// anything not provably public — this is the crypto-safety backstop.
+fn gate_eval(node: &AstNode, env: &GateEnv) -> ConstVal {
+    match node {
+        AstNode::Literal {
+            value: crate::ast::Value::Int { value, .. },
+            ..
+        } => i128::try_from(*value)
+            .map(ConstVal::Int)
+            .unwrap_or(ConstVal::Top),
+        AstNode::Literal {
+            value: crate::ast::Value::Bool(b),
+            ..
+        } => ConstVal::Bit {
+            val: *b as u8,
+            from_list: false,
+        },
+        AstNode::Identifier(name, _) => env.get(name).cloned().unwrap_or(ConstVal::Top),
+        AstNode::UnaryOperation { op, operand, .. } => match (op.as_str(), gate_eval(operand, env))
+        {
+            ("-", ConstVal::Int(v)) => ConstVal::Int(-v),
+            ("not", ConstVal::Bit { val, from_list }) => ConstVal::Bit {
+                val: (val ^ 1) & 1,
+                from_list,
+            },
+            _ => ConstVal::Top,
+        },
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => gate_eval_binop(op, left, right, env),
+        AstNode::IndexAccess { base, index, .. } => {
+            match (gate_eval(base, env), gate_eval(index, env)) {
+                (ConstVal::List(elems), ConstVal::Int(i))
+                    if i >= 0 && (i as usize) < elems.len() =>
+                {
+                    // Reading an element out of a tracked public list marks it as
+                    // list-sourced (a foldable counter-table bit).
+                    match elems[i as usize].clone() {
+                        ConstVal::Bit { val, .. } => ConstVal::Bit {
+                            val,
+                            from_list: true,
+                        },
+                        other => other,
+                    }
+                }
+                _ => ConstVal::Top,
+            }
+        }
+        AstNode::ListLiteral { elements, .. } => {
+            ConstVal::List(elements.iter().map(|e| gate_eval(e, env)).collect())
+        }
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            ..
+        } => {
+            let call = call_name_of(function);
+            let base = call.as_deref().map(builtin_base_name);
+            if matches!(base, Some("from_clear_int") | Some("from_clear_uint"))
+                && arguments.len() >= 2
+            {
+                let v = match gate_eval(&arguments[0], env) {
+                    ConstVal::Int(v) => Some(v),
+                    ConstVal::Bit { val, .. } => Some(val as i128),
+                    _ => None,
+                };
+                let width_one = matches!(gate_eval(&arguments[1], env), ConstVal::Int(1));
+                if let (Some(v), true) = (v, width_one) {
+                    if v == 0 || v == 1 {
+                        return ConstVal::Bit {
+                            val: v as u8,
+                            from_list: false,
+                        };
+                    }
+                }
+            }
+            ConstVal::Top
+        }
+        _ => ConstVal::Top,
+    }
+}
+
+/// Evaluate a binary operation over provenance facts. Arithmetic folds over
+/// `Int`; `and`/`or`/`xor` fold ONLY when BOTH sides are public bits (no
+/// short-circuit — that keeps the reasoning trivially sound).
+fn gate_eval_binop(op: &str, left: &AstNode, right: &AstNode, env: &GateEnv) -> ConstVal {
+    let l = gate_eval(left, env);
+    let r = gate_eval(right, env);
+    match op {
+        "+" | "-" | "*" | "/" | "%" => {
+            if let (ConstVal::Int(a), ConstVal::Int(b)) = (&l, &r) {
+                let (a, b) = (*a, *b);
+                let res = match op {
+                    "+" => a.checked_add(b),
+                    "-" => a.checked_sub(b),
+                    "*" => a.checked_mul(b),
+                    "/" => (b != 0).then(|| a / b),
+                    _ => (b != 0).then(|| a % b),
+                };
+                return res.map(ConstVal::Int).unwrap_or(ConstVal::Top);
+            }
+            ConstVal::Top
+        }
+        "and" | "or" | "xor" => {
+            if let (
+                ConstVal::Bit {
+                    val: a,
+                    from_list: fa,
+                },
+                ConstVal::Bit {
+                    val: b,
+                    from_list: fb,
+                },
+            ) = (&l, &r)
+            {
+                let bit = match op {
+                    "and" => a & b,
+                    "or" => a | b,
+                    _ => a ^ b,
+                } & 1;
+                return ConstVal::Bit {
+                    val: bit,
+                    from_list: *fa || *fb,
+                };
+            }
+            ConstVal::Top
+        }
+        _ => ConstVal::Top,
+    }
+}
+
+/// The called identifier's name, owned (for both `Identifier` and the rare
+/// boxed-identifier callee forms).
+fn call_name_of(function: &AstNode) -> Option<String> {
+    match function {
+        AstNode::Identifier(name, _) => Some(name.clone()),
+        _ => None,
+    }
 }
 
 /// Flatten `for` loops with statically-known trip counts throughout the program.
