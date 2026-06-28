@@ -2396,6 +2396,81 @@ fn expr_logical_reads(node: &AstNode, env: &HashMap<String, HashSet<String>>) ->
     out
 }
 
+/// The body statements of a loop, viewed as a slice (a body is normally a
+/// `Block`, but a single-statement body is handled too).
+fn loop_body_statements(body: &AstNode) -> &[AstNode] {
+    match body {
+        AstNode::Block(stmts) => stmts,
+        other => std::slice::from_ref(other),
+    }
+}
+
+/// Whether every statement in a loop body is schedulable (so the loop has no
+/// internal barrier and can be reordered as an atomic unit).
+fn loop_body_is_schedulable(body: &AstNode, pure_fns: &HashSet<String>) -> bool {
+    loop_body_statements(body)
+        .iter()
+        .all(|s| stmt_is_schedulable(s, pure_fns))
+}
+
+/// Aggregate the scheduling facts of a schedulable `for` loop into a single
+/// `SchedInfo`, treating the loop as one atomic node. Reads/writes/effects are
+/// the union over the iterable and every body statement (computed in body order
+/// so logical-dep tracking inside the loop is faithful), minus the loop-local
+/// induction variables. The over-approximation only ever ADDS dependency edges,
+/// so the resulting schedule preserves every observed value; `is_multiply` is
+/// false because a loop is not a single fusable multiply.
+fn loop_sched_info(
+    variables: &[String],
+    iterable: &AstNode,
+    body: &AstNode,
+    env: &HashMap<String, HashSet<String>>,
+) -> SchedInfo {
+    let mut direct_reads = HashSet::new();
+    let mut logical_reads = HashSet::new();
+    let mut writes = HashSet::new();
+    let mut effects = HashSet::new();
+
+    collect_direct_read_keys(iterable, &mut direct_reads);
+
+    // Walk the body with a private env seeded from the outer one so each
+    // statement's logical reads resolve against bindings created earlier in the
+    // loop body (mirroring `schedule_run`'s per-statement env threading).
+    let mut body_env = env.clone();
+    for stmt in loop_body_statements(body) {
+        let info = sched_info(stmt, &body_env);
+        direct_reads.extend(info.direct_reads);
+        logical_reads.extend(info.logical_reads);
+        writes.extend(info.writes);
+        effects.extend(info.effects);
+        update_sched_env(stmt, &mut body_env);
+    }
+
+    // The induction variables are loop-local: drop their keys so they neither
+    // create false hazards with outer bindings nor leak as loop writes.
+    for var in variables {
+        let sk = scalar_key(var);
+        let hk = heap_key(var);
+        for set in [
+            &mut direct_reads,
+            &mut logical_reads,
+            &mut writes,
+            &mut effects,
+        ] {
+            set.remove(&sk);
+            set.remove(&hk);
+        }
+    }
+
+    SchedInfo {
+        direct_reads,
+        logical_reads,
+        writes,
+        effects,
+        is_multiply: false,
+    }
+}
+
 /// Whether a statement can participate in reordering. Anything else is a barrier
 /// (control flow, returns, reveals, unknown/user calls) that pins the schedule.
 fn stmt_is_schedulable(stmt: &AstNode, pure_fns: &HashSet<String>) -> bool {
@@ -2415,6 +2490,20 @@ fn stmt_is_schedulable(stmt: &AstNode, pure_fns: &HashSet<String>) -> bool {
             AstNode::FunctionCall { .. } => stmt_is_schedulable(expression, pure_fns),
             _ => false,
         },
+        // A `for` loop is schedulable as one atomic unit iff its iterable is pure
+        // and EVERY body statement is itself schedulable — i.e. the loop contains
+        // no barrier (no reveal, return, control-flow exit, or unknown/user call),
+        // only pure reads and root-level mutations the dep model (`sched_info`'s
+        // ForLoop arm) can over-approximate exactly. This lets the list scheduler
+        // reorder a pure reconstruction loop (e.g. CTR's per-block bit-XOR rebuild)
+        // as a unit, so two INDEPENDENT keystream blocks that were separated only by
+        // such loops can be interleaved and their same-depth `Share.batch_mul`s
+        // co-scheduled into one round. Loops with real data deps between iterations'
+        // sources (e.g. CBC's block N -> block N-1 ciphertext) are NOT affected:
+        // the DAG still serializes them, so the reorder cannot break CBC.
+        AstNode::ForLoop { iterable, body, .. } => {
+            expr_is_pure(iterable, pure_fns) && loop_body_is_schedulable(body, pure_fns)
+        }
         _ => false,
     }
 }
@@ -2466,6 +2555,14 @@ fn sched_info(stmt: &AstNode, env: &HashMap<String, HashSet<String>>) -> SchedIn
         }
         AstNode::DiscardStatement { expression, .. } => {
             return sched_info(expression, env);
+        }
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            ..
+        } => {
+            return loop_sched_info(variables, iterable, body, env);
         }
         AstNode::FunctionCall { arguments, .. } => {
             // A recognized mutator: first argument is the receiver (read+written),
@@ -2521,6 +2618,33 @@ fn update_sched_env(stmt: &AstNode, env: &mut HashMap<String, HashSet<String>>) 
             }
         }
         AstNode::DiscardStatement { expression, .. } => update_sched_env(expression, env),
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            ..
+        } => {
+            // After the loop, every root it wrote logically depends on everything
+            // the loop read (its inputs). Record that so a later effectful commit
+            // that consumes a loop-written value still cannot move before a write
+            // to one of those inputs.
+            let info = loop_sched_info(variables, iterable, body, env);
+            let deps: HashSet<String> = info
+                .direct_reads
+                .iter()
+                .chain(info.logical_reads.iter())
+                .cloned()
+                .collect();
+            for w in &info.writes {
+                let root = w.strip_prefix("var:").or_else(|| w.strip_prefix("heap:"));
+                if let Some(root) = root {
+                    env.insert(root.to_string(), deps.clone());
+                }
+            }
+            for var in variables {
+                env.remove(var);
+            }
+        }
         AstNode::FunctionCall { arguments, .. } => {
             if let Some(receiver) = arguments.first().and_then(root_var) {
                 env.remove(&receiver);
