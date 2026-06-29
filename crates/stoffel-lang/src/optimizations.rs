@@ -820,6 +820,12 @@ fn group_batchable_multiplies(
                 current_group
                     .first()
                     .is_none_or(|g| g.is_batched == candidate.is_batched)
+                    // A candidate whose operands cannot be flattened in alignment
+                    // (a malformed/unprovable nested-list shape) must never be
+                    // concatenated into a fused accumulator — keep it (and anything
+                    // anchored on it) as its own singleton call.
+                    && candidate_is_fuse_safe(&candidate)
+                    && current_group.first().is_none_or(candidate_is_fuse_safe)
                     && candidate.statement_index > last_idx
                     && !candidate.referenced_vars.iter().any(|var| {
                         defined_vars
@@ -1024,6 +1030,133 @@ fn make_int_add(left: AstNode, right: AstNode, location: &SourceLocation) -> Ast
     }
 }
 
+/// True iff `node` is a `ListLiteral` that *directly* contains a nested
+/// `ListLiteral` element (i.e. its leaves are not all scalars). This is the only
+/// operand shape that makes the gather concatenate whole sub-lists into the fused
+/// accumulator and therefore feed a nested `Array` element to `Share.batch_mul`.
+/// Flat literals and opaque (non-literal) operands return `false` and take the
+/// byte-identical legacy path.
+fn list_literal_is_nested(node: &AstNode) -> bool {
+    match node {
+        AstNode::ListLiteral { elements, .. } => elements
+            .iter()
+            .any(|e| matches!(e, AstNode::ListLiteral { .. })),
+        _ => false,
+    }
+}
+
+/// Recursively flattens a (possibly nested) `ListLiteral` to the ordered vector
+/// of its scalar leaf elements (a non-`ListLiteral` element is a leaf). Returns
+/// `None` for a non-`ListLiteral` (opaque) operand whose runtime shape is not
+/// statically visible. A flat literal `[a, b, c]` flattens to `[a, b, c]`
+/// unchanged. Leaf order is a stable left-to-right depth-first walk, the same
+/// walk `renest_results_like` uses, so flattened leaves stay positionally
+/// aligned with the re-nested result.
+fn flatten_list_literal_leaves(node: &AstNode) -> Option<Vec<AstNode>> {
+    match node {
+        AstNode::ListLiteral { elements, .. } => {
+            let mut leaves = Vec::new();
+            for element in elements {
+                match flatten_list_literal_leaves(element) {
+                    Some(inner) => leaves.extend(inner),
+                    None => leaves.push(element.clone()),
+                }
+            }
+            Some(leaves)
+        }
+        _ => None,
+    }
+}
+
+/// True iff two operand expressions share the same nesting *skeleton*: both
+/// `ListLiteral`s of equal length with element-wise matching skeletons, or both
+/// scalar leaves. A matching skeleton guarantees that flattening each side yields
+/// equal leaf counts in corresponding leaf order — the precondition for an
+/// aligned, element-wise-correct fused multiply. When skeletons differ the
+/// multiply is malformed (or unprovable) and the candidate must be kept out of a
+/// fused batch.
+fn operand_skeletons_match(left: &AstNode, right: &AstNode) -> bool {
+    match (left, right) {
+        (AstNode::ListLiteral { elements: el, .. }, AstNode::ListLiteral { elements: er, .. }) => {
+            el.len() == er.len()
+                && el
+                    .iter()
+                    .zip(er)
+                    .all(|(l, r)| operand_skeletons_match(l, r))
+        }
+        (AstNode::ListLiteral { .. }, _) | (_, AstNode::ListLiteral { .. }) => false,
+        _ => true,
+    }
+}
+
+/// Rebuilds `template`'s nesting skeleton as a value expression that reads the
+/// fused result array element-wise: each scalar leaf becomes
+/// `results_name[base_off + leaf_cursor]` and each sub-list becomes a
+/// `ListLiteral` of the same shape. Walking `template` in the same left-to-right
+/// depth-first order as `flatten_list_literal_leaves` re-nests each product into
+/// the position its operands came from, so the bound value is element-wise equal
+/// to the original (un-flattened) multiply result.
+fn renest_results_like(
+    template: &AstNode,
+    results_name: &str,
+    leaf_cursor: &mut usize,
+    base_off: &AstNode,
+    location: &SourceLocation,
+) -> AstNode {
+    match template {
+        AstNode::ListLiteral { elements, .. } => {
+            let rebuilt = elements
+                .iter()
+                .map(|element| {
+                    renest_results_like(element, results_name, leaf_cursor, base_off, location)
+                })
+                .collect();
+            AstNode::ListLiteral {
+                elements: rebuilt,
+                location: location.clone(),
+            }
+        }
+        _ => {
+            let index = make_int_add(
+                base_off.clone(),
+                make_int_literal(*leaf_cursor as u128, location),
+                location,
+            );
+            *leaf_cursor += 1;
+            AstNode::IndexAccess {
+                base: Box::new(AstNode::Identifier(
+                    results_name.to_string(),
+                    location.clone(),
+                )),
+                index: Box::new(index),
+                location: location.clone(),
+            }
+        }
+    }
+}
+
+/// Whether a batched candidate can be safely fused. A candidate whose operands
+/// are flat / opaque (the AES/CTR/CBC path) is always fuse-safe and takes the
+/// byte-identical legacy lowering. A candidate with a *nested* `ListLiteral`
+/// operand is fuse-safe only when both operands are `ListLiteral`s with matching
+/// nesting skeletons, so flattening produces aligned, equal-count leaves.
+/// Otherwise the multiply is malformed/unprovable and the candidate is kept out
+/// of any fused batch (emitted as its own call) rather than concatenated into a
+/// malformed accumulator.
+fn candidate_is_fuse_safe(candidate: &MultiplyCandidate) -> bool {
+    if !candidate.is_batched {
+        return true;
+    }
+    if !list_literal_is_nested(&candidate.left_expr)
+        && !list_literal_is_nested(&candidate.right_expr)
+    {
+        return true;
+    }
+    matches!(candidate.left_expr, AstNode::ListLiteral { .. })
+        && matches!(candidate.right_expr, AstNode::ListLiteral { .. })
+        && operand_skeletons_match(&candidate.left_expr, &candidate.right_expr)
+}
+
 /// Emits the target binding for a batched candidate from an already-built value
 /// expression (a `slice(...)` of the fused result, or the lone call itself).
 fn emit_batched_target(candidate: &MultiplyCandidate, value_expr: AstNode) -> AstNode {
@@ -1070,6 +1203,45 @@ fn create_batched_call_fusion(group: &[MultiplyCandidate]) -> Vec<AstNode> {
 
     if group.len() == 1 {
         let c = &group[0];
+        // A lone candidate: if both operands are nested list literals that flatten
+        // in alignment, flatten them so a nested `Array` element never reaches
+        // `Share.batch_mul`, then re-nest the result to the original shape.
+        // Otherwise (flat/opaque operands, or a shape that cannot align) emit the
+        // call unchanged — byte-identical to the legacy lowering.
+        if (list_literal_is_nested(&c.left_expr) || list_literal_is_nested(&c.right_expr))
+            && candidate_is_fuse_safe(c)
+        {
+            let lefts = flatten_list_literal_leaves(&c.left_expr)
+                .expect("nested operand is a list literal");
+            let rights = flatten_list_literal_leaves(&c.right_expr)
+                .expect("nested operand is a list literal");
+            let results_name = generate_named_temp_name("bm_results");
+            let mut result = Vec::new();
+            result.push(AstNode::VariableDeclaration {
+                name: results_name.clone(),
+                type_annotation: None,
+                value: Some(Box::new(make_batch_mul_call(
+                    AstNode::ListLiteral {
+                        elements: lefts,
+                        location: location.clone(),
+                    },
+                    AstNode::ListLiteral {
+                        elements: rights,
+                        location: location.clone(),
+                    },
+                    &location,
+                ))),
+                is_mutable: false,
+                is_secret: false,
+                location: location.clone(),
+            });
+            let mut cursor = 0usize;
+            let base = make_int_literal(0, &location);
+            let value =
+                renest_results_like(&c.left_expr, &results_name, &mut cursor, &base, &location);
+            result.push(emit_batched_target(c, value));
+            return result;
+        }
         let call = make_batch_mul_call(c.left_expr.clone(), c.right_expr.clone(), &location);
         return vec![emit_batched_target(c, call)];
     }
@@ -1077,6 +1249,23 @@ fn create_batched_call_fusion(group: &[MultiplyCandidate]) -> Vec<AstNode> {
     let lefts_name = generate_named_temp_name("bm_lefts");
     let rights_name = generate_named_temp_name("bm_rights");
     let results_name = generate_named_temp_name("bm_results");
+
+    // The accumulator contribution for an operand: a nested list literal is
+    // flattened to its scalar leaves (so `extend` never appends a whole sub-list,
+    // which would reach `Share.batch_mul` as a nested `Array` element); a flat or
+    // opaque operand is contributed verbatim — byte-identical to the legacy path
+    // for the AES/CTR/CBC operands, which are opaque identifiers.
+    let contribution = |operand: &AstNode| -> AstNode {
+        if list_literal_is_nested(operand) {
+            AstNode::ListLiteral {
+                elements: flatten_list_literal_leaves(operand)
+                    .expect("nested operand is a list literal"),
+                location: location.clone(),
+            }
+        } else {
+            operand.clone()
+        }
+    };
 
     let mut result = Vec::new();
 
@@ -1088,7 +1277,7 @@ fn create_batched_call_fusion(group: &[MultiplyCandidate]) -> Vec<AstNode> {
         type_annotation: None,
         value: Some(Box::new(make_unary_builtin_call(
             "copy",
-            group[0].left_expr.clone(),
+            contribution(&group[0].left_expr),
             &location,
         ))),
         is_mutable: true,
@@ -1100,7 +1289,7 @@ fn create_batched_call_fusion(group: &[MultiplyCandidate]) -> Vec<AstNode> {
         type_annotation: None,
         value: Some(Box::new(make_unary_builtin_call(
             "copy",
-            group[0].right_expr.clone(),
+            contribution(&group[0].right_expr),
             &location,
         ))),
         is_mutable: true,
@@ -1110,12 +1299,12 @@ fn create_batched_call_fusion(group: &[MultiplyCandidate]) -> Vec<AstNode> {
     for candidate in &group[1..] {
         result.push(make_extend_call(
             &lefts_name,
-            candidate.left_expr.clone(),
+            contribution(&candidate.left_expr),
             &location,
         ));
         result.push(make_extend_call(
             &rights_name,
-            candidate.right_expr.clone(),
+            contribution(&candidate.right_expr),
             &location,
         ));
     }
@@ -1133,25 +1322,49 @@ fn create_batched_call_fusion(group: &[MultiplyCandidate]) -> Vec<AstNode> {
         location: location.clone(),
     });
 
-    // Recover each product by slicing at the cumulative operand-length offsets.
-    // `cur_off` is the start offset expression for the current candidate; the end
-    // is `cur_off + len(operand)`, bound to a temp so it is both the slice's stop
-    // and the next candidate's start.
+    // Recover each product at the cumulative leaf-count offsets. `cur_off` is the
+    // start offset expression for the current candidate; the end is
+    // `cur_off + <leaf count>`, bound to a temp so it is both this candidate's
+    // stop and the next candidate's start. A nested operand contributes a static
+    // leaf count and re-nests its slice back to the original shape; a flat/opaque
+    // operand uses `len(operand)` and a `slice` — byte-identical to the legacy
+    // recovery.
     let mut cur_off = make_int_literal(0, &location);
     for candidate in group {
-        let len_call = make_unary_builtin_call("len", candidate.left_expr.clone(), &location);
+        let nested = list_literal_is_nested(&candidate.left_expr);
+        let len_expr = if nested {
+            make_int_literal(
+                flatten_list_literal_leaves(&candidate.left_expr)
+                    .expect("nested operand is a list literal")
+                    .len() as u128,
+                &location,
+            )
+        } else {
+            make_unary_builtin_call("len", candidate.left_expr.clone(), &location)
+        };
         let end_name = generate_named_temp_name("bm_off");
         result.push(AstNode::VariableDeclaration {
             name: end_name.clone(),
             type_annotation: None,
-            value: Some(Box::new(make_int_add(cur_off.clone(), len_call, &location))),
+            value: Some(Box::new(make_int_add(cur_off.clone(), len_expr, &location))),
             is_mutable: false,
             is_secret: false,
             location: location.clone(),
         });
         let end_ident = AstNode::Identifier(end_name, location.clone());
-        let slice_expr = make_slice_call(&results_name, cur_off, end_ident.clone(), &location);
-        result.push(emit_batched_target(candidate, slice_expr));
+        let value = if nested {
+            let mut cursor = 0usize;
+            renest_results_like(
+                &candidate.left_expr,
+                &results_name,
+                &mut cursor,
+                &cur_off,
+                &location,
+            )
+        } else {
+            make_slice_call(&results_name, cur_off.clone(), end_ident.clone(), &location)
+        };
+        result.push(emit_batched_target(candidate, value));
         cur_off = end_ident;
     }
 
@@ -9406,6 +9619,320 @@ mod tests {
             count_calls_named(&out, "extend"),
             0,
             "a lone batched multiply needs no concatenation"
+        );
+    }
+
+    // ---- nested-operand flatten-on-gather regression tests ----
+    //
+    // `Share.batch_mul` requires every operand-array element to be a SCALAR share;
+    // a nested `Array` element panics the VM with "Expected Share object or Share
+    // value, got Array(..)". Before the fix, the gather concatenated whole operand
+    // sub-lists, so a nested-list operand reached `batch_mul` as a nested element.
+    // These tests drive a synthetic nested-list operand through the gather and
+    // assert (a) NO nested element is ever fed into the fused accumulator (the
+    // exact property whose violation is the runtime panic), and (b) the per-leaf
+    // products are re-nested back to the operand's original shape in sequential
+    // leaf order (correct, element-wise-equal result).
+
+    fn make_list_lit(elements: Vec<AstNode>) -> AstNode {
+        AstNode::ListLiteral {
+            elements,
+            location: make_loc(),
+        }
+    }
+
+    fn batched_candidate(
+        idx: usize,
+        target: &str,
+        left: AstNode,
+        right: AstNode,
+    ) -> MultiplyCandidate {
+        MultiplyCandidate {
+            statement_index: idx,
+            target_key: target.to_string(),
+            target_expr: make_identifier(target),
+            left_expr: left,
+            right_expr: right,
+            op: "batch_mul".to_string(),
+            referenced_vars: std::collections::HashSet::new(),
+            location: make_loc(),
+            is_declaration: true,
+            type_annotation: None,
+            is_mutable: false,
+            is_secret: false,
+            is_batched: true,
+        }
+    }
+
+    /// Collects every expression fed into a fused accumulator: the argument of
+    /// each `copy(arg)` seed and the second argument of each `extend(acc, arg)`.
+    fn accumulator_contributions(stmts: &[AstNode]) -> Vec<AstNode> {
+        let mut out = Vec::new();
+        fn walk(node: &AstNode, out: &mut Vec<AstNode>) {
+            if let AstNode::FunctionCall {
+                function,
+                arguments,
+                ..
+            } = node
+            {
+                if let AstNode::Identifier(name, _) = function.as_ref() {
+                    if name == "copy" && arguments.len() == 1 {
+                        out.push(arguments[0].clone());
+                    } else if name == "extend" && arguments.len() == 2 {
+                        out.push(arguments[1].clone());
+                    }
+                }
+            }
+            for_each_child(node, &mut |c| walk(c, out));
+        }
+        for s in stmts {
+            walk(s, &mut out);
+        }
+        out
+    }
+
+    /// Operands passed to every `Share.batch_mul(L, R)` call in `stmts`.
+    fn batch_mul_operands(stmts: &[AstNode]) -> Vec<(AstNode, AstNode)> {
+        let mut out = Vec::new();
+        fn walk(node: &AstNode, out: &mut Vec<(AstNode, AstNode)>) {
+            if let AstNode::FunctionCall {
+                function,
+                arguments,
+                ..
+            } = node
+            {
+                if let AstNode::Identifier(name, _) = function.as_ref() {
+                    if name == "Share.batch_mul" && arguments.len() == 2 {
+                        out.push((arguments[0].clone(), arguments[1].clone()));
+                    }
+                }
+            }
+            for_each_child(node, &mut |c| walk(c, out));
+        }
+        for s in stmts {
+            walk(s, &mut out);
+        }
+        out
+    }
+
+    /// The bound value of the first `var <name> = <value>` declaration in `stmts`.
+    fn decl_value<'a>(stmts: &'a [AstNode], name: &str) -> &'a AstNode {
+        stmts
+            .iter()
+            .find_map(|s| match s {
+                AstNode::VariableDeclaration {
+                    name: n,
+                    value: Some(v),
+                    ..
+                } if n == name => Some(v.as_ref()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no decl for {name}"))
+    }
+
+    /// Walks a re-nested result value (a `ListLiteral` skeleton of
+    /// `results[base + k]` index accesses) and collects the leaf addends `k` in
+    /// depth-first order. Panics if any leaf is not a `results[base + literal]`.
+    fn renest_leaf_addends(node: &AstNode) -> Vec<u128> {
+        let mut out = Vec::new();
+        fn walk(node: &AstNode, out: &mut Vec<u128>) {
+            match node {
+                AstNode::ListLiteral { elements, .. } => {
+                    for e in elements {
+                        walk(e, out);
+                    }
+                }
+                AstNode::IndexAccess { index, .. } => match index.as_ref() {
+                    AstNode::BinaryOperation { op, right, .. } if op == "+" => {
+                        match right.as_ref() {
+                            AstNode::Literal {
+                                value: crate::ast::Value::Int { value, .. },
+                                ..
+                            } => out.push(*value),
+                            other => panic!("index addend not a literal: {other:?}"),
+                        }
+                    }
+                    other => panic!("renest leaf index not `base + k`: {other:?}"),
+                },
+                other => panic!("renest leaf not an IndexAccess: {other:?}"),
+            }
+        }
+        walk(node, &mut out);
+        out
+    }
+
+    #[test]
+    fn batcher_flattens_nested_operand_no_nested_accumulator() {
+        // A flat batched multiply followed by a nested one (a list-of-2-pairs on
+        // both sides) fused into one wide call. Before the fix the nested operand's
+        // whole pairs were concatenated, producing nested `Array` elements that
+        // panic `Share.batch_mul`.
+        let flat = batched_candidate(
+            0,
+            "m_flat",
+            make_list_lit(vec![make_identifier("a0"), make_identifier("a1")]),
+            make_list_lit(vec![make_identifier("b0"), make_identifier("b1")]),
+        );
+        let nested = batched_candidate(
+            1,
+            "m_nested",
+            make_list_lit(vec![
+                make_list_lit(vec![make_identifier("c0"), make_identifier("c1")]),
+                make_list_lit(vec![make_identifier("c2"), make_identifier("c3")]),
+            ]),
+            make_list_lit(vec![
+                make_list_lit(vec![make_identifier("d0"), make_identifier("d1")]),
+                make_list_lit(vec![make_identifier("d2"), make_identifier("d3")]),
+            ]),
+        );
+        let out = create_batched_call_fusion(&[flat, nested]);
+
+        // (a) NO nested element ever reaches the fused accumulator.
+        for contrib in accumulator_contributions(&out) {
+            assert!(
+                !list_literal_is_nested(&contrib),
+                "a nested-list element was concatenated into the batch_mul accumulator: {contrib:?}"
+            );
+        }
+        // The single fused `Share.batch_mul` operands are flat lists.
+        let operands = batch_mul_operands(&out);
+        assert_eq!(operands.len(), 1, "the group fuses into one wide batch_mul");
+        let (lefts, rights) = &operands[0];
+        // Operands are identifiers to the accumulators, not literals here.
+        assert!(
+            matches!(lefts, AstNode::Identifier(..)) && matches!(rights, AstNode::Identifier(..)),
+            "fused operands are the accumulator identifiers"
+        );
+
+        // (b) the flat candidate still recovers via a `slice(...)` (no regression).
+        let flat_val = decl_value(&out, "m_flat");
+        assert!(
+            matches!(flat_val, AstNode::FunctionCall { function, .. }
+                if matches!(function.as_ref(), AstNode::Identifier(n, _) if n == "slice")),
+            "flat candidate must recover via slice, got {flat_val:?}"
+        );
+
+        // (b) the nested candidate re-nests to the original [[_,_],[_,_]] shape
+        // with sequential leaf indices, starting AFTER the flat candidate's leaves.
+        let nested_val = decl_value(&out, "m_nested");
+        match nested_val {
+            AstNode::ListLiteral { elements, .. } => {
+                assert_eq!(elements.len(), 2, "outer shape preserved (2 pairs)");
+                for inner in elements {
+                    match inner {
+                        AstNode::ListLiteral { elements: e, .. } => {
+                            assert_eq!(e.len(), 2, "inner pair shape preserved")
+                        }
+                        other => panic!("inner element not re-nested: {other:?}"),
+                    }
+                }
+            }
+            other => panic!("nested candidate not re-nested to a list literal: {other:?}"),
+        }
+        assert_eq!(
+            renest_leaf_addends(nested_val),
+            vec![0, 1, 2, 3],
+            "re-nested leaves read the wide result in sequential, aligned order"
+        );
+    }
+
+    #[test]
+    fn batcher_lone_nested_operand_is_flattened() {
+        // Even un-fused, a lone batched multiply with a nested operand must be
+        // flattened so a nested `Array` never reaches `Share.batch_mul`.
+        let nested = batched_candidate(
+            0,
+            "m",
+            make_list_lit(vec![
+                make_list_lit(vec![make_identifier("c0"), make_identifier("c1")]),
+                make_list_lit(vec![make_identifier("c2"), make_identifier("c3")]),
+            ]),
+            make_list_lit(vec![
+                make_list_lit(vec![make_identifier("d0"), make_identifier("d1")]),
+                make_list_lit(vec![make_identifier("d2"), make_identifier("d3")]),
+            ]),
+        );
+        let out = create_batched_call_fusion(&[nested]);
+        let operands = batch_mul_operands(&out);
+        assert_eq!(operands.len(), 1, "still a single batch_mul");
+        let (lefts, rights) = &operands[0];
+        assert!(
+            !list_literal_is_nested(lefts) && !list_literal_is_nested(rights),
+            "lone nested operands must be flattened before batch_mul: {lefts:?} / {rights:?}"
+        );
+        // Flattened to 4 scalar leaves each.
+        for op in [lefts, rights] {
+            match op {
+                AstNode::ListLiteral { elements, .. } => assert_eq!(elements.len(), 4),
+                other => panic!("flattened operand not a list literal: {other:?}"),
+            }
+        }
+        assert_eq!(
+            renest_leaf_addends(decl_value(&out, "m")),
+            vec![0, 1, 2, 3],
+            "lone nested result re-nested in sequential leaf order"
+        );
+    }
+
+    #[test]
+    fn candidate_is_fuse_safe_classification() {
+        let pair = |l: AstNode, r: AstNode| batched_candidate(0, "m", l, r);
+        // Flat literals: fuse-safe (legacy path).
+        assert!(candidate_is_fuse_safe(&pair(
+            make_list_lit(vec![make_identifier("a")]),
+            make_list_lit(vec![make_identifier("b")]),
+        )));
+        // Opaque identifiers (AES/CTR/CBC): fuse-safe (legacy path).
+        assert!(candidate_is_fuse_safe(&pair(
+            make_identifier("xs"),
+            make_identifier("ys"),
+        )));
+        // Both nested with matching skeleton: fuse-safe (will be flattened).
+        assert!(candidate_is_fuse_safe(&pair(
+            make_list_lit(vec![make_list_lit(vec![make_identifier("a")])]),
+            make_list_lit(vec![make_list_lit(vec![make_identifier("b")])]),
+        )));
+        // Nested vs flat (skeleton mismatch): NOT fuse-safe (kept out).
+        assert!(!candidate_is_fuse_safe(&pair(
+            make_list_lit(vec![make_list_lit(vec![make_identifier("a")])]),
+            make_list_lit(vec![make_identifier("b")]),
+        )));
+        // Nested vs opaque (cannot prove alignment): NOT fuse-safe (kept out).
+        assert!(!candidate_is_fuse_safe(&pair(
+            make_list_lit(vec![make_list_lit(vec![make_identifier("a")])]),
+            make_identifier("ys"),
+        )));
+    }
+
+    #[test]
+    fn grouping_keeps_malformed_nested_candidate_out_of_batch() {
+        // Three independent batched candidates; the middle one is malformed
+        // (nested-vs-flat skeleton mismatch) and must land in its OWN singleton
+        // group so it is never concatenated into a fused accumulator.
+        let safe_a = batched_candidate(0, "a", make_identifier("la"), make_identifier("ra"));
+        let bad = batched_candidate(
+            1,
+            "b",
+            make_list_lit(vec![make_list_lit(vec![make_identifier("p")])]),
+            make_list_lit(vec![make_identifier("q")]),
+        );
+        let safe_c = batched_candidate(2, "c", make_identifier("lc"), make_identifier("rc"));
+        let statements = vec![
+            make_var_decl("a", make_typed_batch_mul("la", "ra")),
+            make_var_decl("b", make_typed_batch_mul("lb", "rb")),
+            make_var_decl("c", make_typed_batch_mul("lc", "rc")),
+        ];
+        let groups = group_batchable_multiplies(&statements, vec![safe_a, bad, safe_c]);
+        let bad_group = groups
+            .iter()
+            .find(|g| g.iter().any(|c| c.target_key == "b"))
+            .expect("malformed candidate must appear in some group");
+        assert_eq!(
+            bad_group.len(),
+            1,
+            "malformed nested candidate must be isolated as its own singleton group, \
+             got group of {}",
+            bad_group.len()
         );
     }
 }
