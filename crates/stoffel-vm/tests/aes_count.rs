@@ -644,7 +644,16 @@ async fn optimized_aes_at_o3_matches_nist_vector_impl() {
     // and scalar-free invariants must hold.
     let (scalar, batch_calls, batch_items) = engine.counts();
     assert_eq!(scalar, 0, "every secret multiply must be batched at -O3");
-    assert_eq!(batch_items, 34_080, "total products preserved");
+    // -O3 `fold_public_gates` now localizes provably-public multiply operands to
+    // local `Share.mul_scalar` (secret*public, 0 communication). The AES circuit's
+    // round-0 `add_round_key` XORs the fully-public `nist_plaintext()` (all
+    // `from_clear_int`) into the key, so its 128 byte-bit products become local
+    // scalar muls and drop out of the batched total (34_080 - 128). The NIST
+    // ciphertext above is the correctness oracle and is unchanged.
+    assert_eq!(
+        batch_items, 33_952,
+        "total products preserved (minus localized public add_round_key)"
+    );
     assert!(
         batch_calls < 5_000,
         "scheduler should cut multiply rounds far below the ~25.7k unscheduled \
@@ -753,7 +762,9 @@ fn optimized_aes_full_unroll_minimizes_rounds() {
         );
         let (scalar, batch_calls, batch_items) = engine.counts();
         assert_eq!(scalar, 0);
-        assert_eq!(batch_items, 34_080);
+        // -O3 localizes round-0 `add_round_key` over the public `nist_plaintext()`
+        // (128 secret*public products → local `Share.mul_scalar`), so 34_080 - 128.
+        assert_eq!(batch_items, 33_952);
         assert!(
             batch_calls < 1_000,
             "fully-flattened AES should reach a few hundred multiply rounds; got {batch_calls}"

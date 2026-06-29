@@ -4713,6 +4713,15 @@ fn gate_process_stmt(stmt: AstNode, env: &mut GateEnv) -> AstNode {
             location,
         } => {
             let value = value.map(|v| Box::new(gate_rewrite_expr(*v, env)));
+            // Lower a `Share.batch_mul` with a provably-public operand to local
+            // element-wise `Share.mul_scalar` (secret*public, 0 rounds) before the
+            // batcher can gather it. This both saves the multiply rounds and closes
+            // the only path that would feed a fully-folded public counter byte (a
+            // nested `Array`) into `Share.batch_mul`.
+            let value = value.map(|v| match try_localize_public_batch_mul(&v, env) {
+                Some(localized) => Box::new(localized),
+                None => v,
+            });
             let cv = match &value {
                 Some(v) => gate_eval(v, env),
                 None => ConstVal::Top,
@@ -4949,17 +4958,20 @@ fn gate_rewrite_expr(node: AstNode, env: &GateEnv) -> AstNode {
         } => {
             let left = Box::new(gate_rewrite_expr(*left, env));
             let right = Box::new(gate_rewrite_expr(*right, env));
-            // Fold ONLY the serial conjunction (carry) chain — `and`. The CTR
-            // counter ripple's expensive cost is its sequential `gate_and` carry
-            // (each `and` depends on the previous, so the batcher cannot coalesce
-            // them — every one is its own MPC round); folding them removes that
-            // serial round chain. We deliberately do NOT fold the `xor` output
-            // bits: those are stored into the counter byte lists, and emptying a
-            // byte of every gate (making it fully constant) exposes a downstream
-            // cross-block byte-granular batcher that then mis-feeds a whole byte
-            // (an `Array`) into `Share.batch_mul`. Leaving the `xor`s as real
-            // multiplies is the conservative, correct choice.
-            if op == "and" {
+            // Fold a provably-public boolean gate — `and`, `or`, or `xor` — whose
+            // operands are public bits read out of a tracked public list. The CTR
+            // counter ripple is a serial `gate_and` carry chain plus a parallel
+            // `gate_xor` output per bit; folding BOTH empties the counter of every
+            // gate (it becomes a fully-public list of `Share.from_clear_int` bits),
+            // which removes the serial carry-chain rounds AND the parallel xor-bit
+            // multiplies. Folding the `xor` outputs used to be unsafe because a
+            // fully-constant counter byte is then a nested `Array` that the
+            // cross-block batcher mis-fed into `Share.batch_mul`; that path is now
+            // closed by `try_localize_public_batch_mul`, which lowers any
+            // `Share.batch_mul` with a provably-public operand to local
+            // `Share.mul_scalar` BEFORE the batcher runs, so no public list (and no
+            // nested `Array`) ever reaches `batch_mul`.
+            if op == "and" || op == "or" || op == "xor" {
                 if let (
                     ConstVal::Bit {
                         val: a,
@@ -4975,7 +4987,12 @@ fn gate_rewrite_expr(node: AstNode, env: &GateEnv) -> AstNode {
                     // (the counter-table idiom); two free scalar shares stay a
                     // real multiply (see `inlining_preserves_secret_multiplication`).
                     if fa || fb {
-                        return make_from_clear_int_bit((a & b) & 1, &location);
+                        let bit = match op.as_str() {
+                            "or" => a | b,
+                            "xor" => a ^ b,
+                            _ => a & b,
+                        } & 1;
+                        return make_from_clear_int_bit(bit, &location);
                     }
                 }
             }
@@ -5043,6 +5060,85 @@ fn make_from_clear_int_bit(bit: u8, location: &SourceLocation) -> AstNode {
         location: location.clone(),
         resolved_return_type: None,
     }
+}
+
+/// If `cv` is a non-empty list whose every element is a public bit, return those
+/// bit values; otherwise `None`. This is the "fully-public list operand" test.
+fn all_public_bits(cv: &ConstVal) -> Option<Vec<u8>> {
+    if let ConstVal::List(elems) = cv {
+        if elems.is_empty() {
+            return None;
+        }
+        let mut vals = Vec::with_capacity(elems.len());
+        for e in elems {
+            match e {
+                ConstVal::Bit { val, .. } => vals.push(*val),
+                _ => return None,
+            }
+        }
+        Some(vals)
+    } else {
+        None
+    }
+}
+
+/// Lower a `Share.batch_mul(L, R)` whose ONE operand is a provably-public bit list
+/// to a local element-wise scaling `[Share.mul_scalar(other[i], pub_i), ...]`.
+///
+/// `secret * public` is value-identical to the secret*secret protocol run on a
+/// public-valued share, but costs 0 communication, so this is exact. Critically,
+/// it also removes the only path that can feed a public list (a nested `Array` of
+/// `from_clear_int` bits, once the counter is fully folded) into `Share.batch_mul`
+/// — the batcher never gathers a localized call, so the runtime `extract_share_*`
+/// Array panic cannot occur. Only fires when the public operand is fully public
+/// (every element a tracked public bit) and the OTHER operand is a plain
+/// identifier we can cheaply index without duplicating a large expression.
+fn try_localize_public_batch_mul(value: &AstNode, env: &GateEnv) -> Option<AstNode> {
+    let (function, arguments, location) = match value {
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            ..
+        } => (function, arguments, location),
+        _ => return None,
+    };
+    if arguments.len() != 2 {
+        return None;
+    }
+    match function.as_ref() {
+        AstNode::Identifier(name, _) if builtin_base_name(name) == "batch_mul" => {}
+        _ => return None,
+    }
+    // Pick the provably-public operand; the OTHER (kept) operand is scaled
+    // element-wise by the known public bit values.
+    let (scalars, share_operand) = if let Some(v) = all_public_bits(&gate_eval(&arguments[0], env))
+    {
+        (v, &arguments[1])
+    } else {
+        let v = all_public_bits(&gate_eval(&arguments[1], env))?;
+        (v, &arguments[0])
+    };
+    let share_id = match share_operand {
+        id @ AstNode::Identifier(..) => id.clone(),
+        _ => return None,
+    };
+    let elements = scalars
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let elem = AstNode::IndexAccess {
+                base: Box::new(share_id.clone()),
+                index: Box::new(make_int_literal(i as u128, location)),
+                location: location.clone(),
+            };
+            make_share_mul_scalar_expr(elem, v as u128, location)
+        })
+        .collect();
+    Some(AstNode::ListLiteral {
+        elements,
+        location: location.clone(),
+    })
 }
 
 /// Purely evaluate an expression to a provenance fact. Returns `Top` for
