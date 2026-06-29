@@ -703,16 +703,60 @@ def inv_affine(y: list[secret bool]) -> list[secret bool]:
 def inv_sbox(y: list[secret bool]) -> list[secret bool]:
   return inv_affine(aes_sbox(inv_affine(y)))
 
+# Vectorised inverse affine map, applied to N bytes at once. Mirrors
+# `aes_sbox_vec`: each output bit-plane is computed across ALL N bytes with the
+# list-wide `bits_xor` (one batched multiply over N bytes), so the 8 independent
+# same-depth XOR layers fuse into one batch_mul each instead of running per byte.
+# InvAffine is a fixed, public, linear GF(2) map, so this is byte-for-byte
+# identical to applying `inv_affine` to each byte — only the round in which the
+# provably-disjoint per-byte XORs evaluate changes.
+def inv_affine_vec(bytes: list[list[secret bool]]) -> list[list[secret bool]]:
+  var n = bytes.len()
+  if n == 0:
+    return bytes
+  # Gather the 8 input bit-planes across all bytes.
+  var y0: list[secret bool] = []
+  var y1: list[secret bool] = []
+  var y2: list[secret bool] = []
+  var y3: list[secret bool] = []
+  var y4: list[secret bool] = []
+  var y5: list[secret bool] = []
+  var y6: list[secret bool] = []
+  var y7: list[secret bool] = []
+  for b in 0..n:
+    y0.append(bytes[b][0])
+    y1.append(bytes[b][1])
+    y2.append(bytes[b][2])
+    y3.append(bytes[b][3])
+    y4.append(bytes[b][4])
+    y5.append(bytes[b][5])
+    y6.append(bytes[b][6])
+    y7.append(bytes[b][7])
+  # out[i] = y[(i+2)%8] ^ y[(i+5)%8] ^ y[(i+7)%8].
+  var p0 = bits_xor(bits_xor(y2, y5), y7)
+  var p1 = bits_xor(bits_xor(y3, y6), y0)
+  var p2 = bits_xor(bits_xor(y4, y7), y1)
+  var p3 = bits_xor(bits_xor(y5, y0), y2)
+  var p4 = bits_xor(bits_xor(y6, y1), y3)
+  var p5 = bits_xor(bits_xor(y7, y2), y4)
+  var p6 = bits_xor(bits_xor(y0, y3), y5)
+  var p7 = bits_xor(bits_xor(y1, y4), y6)
+  # ^0x05 flips bits 0 and 2 (local NOT, no multiply round).
+  p0 = vnot(p0)
+  p2 = vnot(p2)
+  # Scatter back to per-byte form.
+  var out: list[list[secret bool]] = []
+  for b in 0..n:
+    out.append([p0[b], p1[b], p2[b], p3[b], p4[b], p5[b], p6[b], p7[b]])
+  return out
+
 def inv_sub_bytes(state: list[list[secret bool]]) -> list[list[secret bool]]:
   # inv_sbox(y) = inv_affine(aes_sbox(inv_affine(y))); inv_affine is linear, so
-  # batch the (only non-linear) S-box across all bytes via aes_sbox_vec.
-  var pre: list[list[secret bool]] = []
-  for i in 0..state.len():
-    pre.append(inv_affine(state[i]))
+  # batch the (only non-linear) S-box across all bytes via aes_sbox_vec, and the
+  # surrounding inverse-affine maps across all bytes via inv_affine_vec.
+  var pre = inv_affine_vec(state)
   var mid = aes_sbox_vec(pre)
-  var out: list[list[secret bool]] = []
-  for i in 0..mid.len():
-    out.append(inv_affine(mid[i]))
+  var out = inv_affine_vec(mid)
   return out
 
 def inv_shift_rows(state: list[list[secret bool]]) -> list[list[secret bool]]:
