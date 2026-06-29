@@ -648,11 +648,15 @@ async fn optimized_aes_at_o3_matches_nist_vector_impl() {
     // local `Share.mul_scalar` (secret*public, 0 communication). The AES circuit's
     // round-0 `add_round_key` XORs the fully-public `nist_plaintext()` (all
     // `from_clear_int`) into the key, so its 128 byte-bit products become local
-    // scalar muls and drop out of the batched total (34_080 - 128). The NIST
+    // scalar muls and drop out of the batched total. On-the-fly key expansion
+    // (round keys derived inside the round loop, adjacent to each round's
+    // sub_bytes) additionally makes the public `Rcon` XORs adjacent to the live
+    // key-schedule words, so more of those public products fold to local scalar
+    // muls — dropping the batched total from 33_952 to 33_736. The NIST
     // ciphertext above is the correctness oracle and is unchanged.
     assert_eq!(
-        batch_items, 33_952,
-        "total products preserved (minus localized public add_round_key)"
+        batch_items, 33_736,
+        "total products preserved (minus localized public add_round_key + Rcon)"
     );
     assert!(
         batch_calls < 5_000,
@@ -763,8 +767,9 @@ fn optimized_aes_full_unroll_minimizes_rounds() {
         let (scalar, batch_calls, batch_items) = engine.counts();
         assert_eq!(scalar, 0);
         // -O3 localizes round-0 `add_round_key` over the public `nist_plaintext()`
-        // (128 secret*public products → local `Share.mul_scalar`), so 34_080 - 128.
-        assert_eq!(batch_items, 33_952);
+        // (128 secret*public products → local `Share.mul_scalar`) plus on-the-fly
+        // key expansion's now-adjacent public `Rcon` XORs, so 34_080 - 344 = 33_736.
+        assert_eq!(batch_items, 33_736);
         assert!(
             batch_calls < 1_000,
             "fully-flattened AES should reach a few hundred multiply rounds; got {batch_calls}"

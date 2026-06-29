@@ -444,17 +444,43 @@ def mix_columns(state: list[list[secret bool]]) -> list[list[secret bool]]:
     d.append(two[offset + 3])
   return bytes_xor4(a, b, c, d)
 
+# On-the-fly key expansion: derive the next 16-byte round key from the
+# previous one using the textbook AES recurrence
+#   W[4r]   = W[4r-4] ^ SubWord(RotWord(W[4r-1])) ^ Rcon[r]
+#   W[4r+1] = W[4r-3] ^ W[4r]
+#   W[4r+2] = W[4r-2] ^ W[4r+1]
+#   W[4r+3] = W[4r-1] ^ W[4r+2]
+# `prev` is the 16 bytes of round key r-1 (4 words of 4 bytes), `round` = r.
+# Value-identical to key_expansion(); returns the 16 bytes of round key r.
+def next_round_key(prev: list[list[secret bool]], round: int64) -> list[list[secret bool]]:
+  var w3: list[list[secret bool]] = [prev[12], prev[13], prev[14], prev[15]]
+  var temp = word_xor(sub_word(rot_word(w3)), rcon(round))
+  var nw0 = word_xor([prev[0], prev[1], prev[2], prev[3]], temp)
+  var nw1 = word_xor([prev[4], prev[5], prev[6], prev[7]], nw0)
+  var nw2 = word_xor([prev[8], prev[9], prev[10], prev[11]], nw1)
+  var nw3 = word_xor(w3, nw2)
+  return [nw0[0], nw0[1], nw0[2], nw0[3], nw1[0], nw1[1], nw1[2], nw1[3], nw2[0], nw2[1], nw2[2], nw2[3], nw3[0], nw3[1], nw3[2], nw3[3]]
+
+# AES-128 encryption with ON-THE-FLY key expansion: each round key is derived
+# inside the round loop, immediately adjacent to that round's sub_bytes. This
+# makes the key-schedule sub_word S-box and the encryption sub_bytes S-box
+# adjacent same-depth multiplies so the per-block batcher fuses them into one
+# batch_mul per depth (~2x fewer MPC rounds) with no compiler change. Round keys
+# and round order are identical to the upfront key_expansion -> bit-identical
+# ciphertext.
 def aes128_encrypt(block: list[list[secret bool]], key: list[list[secret bool]]) -> list[list[secret bool]]:
-  var round_key = key_expansion(key)
-  var state = add_round_key(block, round_key, 0)
+  var rk = key
+  var state = add_round_key(block, rk, 0)
   for round in 1..10:
+    rk = next_round_key(rk, round)
     state = sub_bytes(state)
     state = shift_rows(state)
     state = mix_columns(state)
-    state = add_round_key(state, round_key, round * 16)
+    state = add_round_key(state, rk, 0)
+  rk = next_round_key(rk, 10)
   state = sub_bytes(state)
   state = shift_rows(state)
-  state = add_round_key(state, round_key, 160)
+  state = add_round_key(state, rk, 0)
   return state
 
 def reveal_block(block: list[list[secret bool]]) -> list[int64]:
