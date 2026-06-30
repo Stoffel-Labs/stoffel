@@ -7,7 +7,7 @@ def main() -> int64:
 
   var score = base.add(adjustment)
   score = score.sub(Share.from_clear_int(5, 64))
-  score = score.add_scalar(9)
+  score = score.add_constant(9)
   score = score.mul_scalar(2)
   score = score.add(Share.from_clear_int(-3, 64).neg())
 
