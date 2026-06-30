@@ -740,7 +740,18 @@ fn statement_reads_and_writes(statement: &AstNode) -> (HashSet<String>, HashSet<
                 collect_multiply_dependency_vars(arg, &mut reads);
             }
         }
-        _ => collect_multiply_dependency_vars(statement, &mut reads),
+        // Compound statements (loops, branches, nested blocks) may contain
+        // in-place mutators that write a list (e.g. a kept-rolled combine loop
+        // `for i: out.append(...)` that populates a `Share.batch_mul` operand).
+        // Model BOTH their reads and those nested writes, so a candidate multiply
+        // referencing such a list is never hoisted above the loop that fills it.
+        // (The single-statement mutator arm above only covers a TOP-LEVEL append;
+        // without this, a fused depth-N multiply hoists above the depth-(N-1)
+        // combine loops, leaving its operands empty at runtime.)
+        _ => {
+            collect_multiply_dependency_vars(statement, &mut reads);
+            collect_written_vars(statement, &mut writes);
+        }
     }
 
     (reads, writes)
@@ -2476,6 +2487,791 @@ pub fn optimize_all_with_budgets(
     result
 }
 
+// ===========================================================================
+// Auto loop-vectorizer (MPC-multiply vectorization)
+//
+// Rewrites a kept-rolled "map loop" — `for I in 0..HI: <body>; OUT.append(elem)`
+// whose iterations each perform INDEPENDENT secret multiplies into an
+// append-only output — into transposed gather / `Share.batch_mul` / scatter
+// form. The per-iteration scalar multiplies are gathered across the whole loop
+// range so each multiply layer becomes ONE batched round instead of one round
+// per iteration (the compiler analogue of the hand-written `inv_affine_vec`).
+//
+// The loop body is REPLACED by a fixed number of vector statements (one gather +
+// one `Share.batch_mul` + one combine loop per multiply site, plus a scatter
+// loop), so code size stays O(1) in the iteration count — no unroll blow-up.
+//
+// Soundness is fail-closed: the loop is rewritten ONLY when every body statement
+// is a pure straight-line gate/decl plus a single append-only output commit, no
+// statement reads the output accumulator, every multiply operand is a pure
+// expression of the current index, and the result re-groups the SAME scalar
+// multiplies into wider batches (identical netlist, different round).
+// ===========================================================================
+
+/// -O3 entry point: structurally recurse, vectorizing eligible map-loops in place.
+pub fn vectorize_map_loops(node: AstNode) -> AstNode {
+    match node {
+        AstNode::Block(stmts) => {
+            let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
+            for stmt in stmts {
+                if matches!(stmt, AstNode::ForLoop { .. }) {
+                    if let Some(replacement) = try_vectorize_for(&stmt) {
+                        out.extend(replacement);
+                        continue;
+                    }
+                }
+                out.push(vectorize_map_loops(stmt));
+            }
+            AstNode::Block(out)
+        }
+        AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body,
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        } => AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body: Box::new(vectorize_map_loops(*body)),
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        },
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => AstNode::ForLoop {
+            variables,
+            iterable,
+            body: Box::new(vectorize_map_loops(*body)),
+            location,
+        },
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => AstNode::WhileLoop {
+            condition,
+            body: Box::new(vectorize_map_loops(*body)),
+            location,
+        },
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => AstNode::IfExpression {
+            condition,
+            then_branch: Box::new(vectorize_map_loops(*then_branch)),
+            else_branch: else_branch.map(|e| Box::new(vectorize_map_loops(*e))),
+        },
+        AstNode::TryCatch {
+            try_block,
+            catch_clauses,
+            finally_block,
+            location,
+        } => AstNode::TryCatch {
+            try_block: Box::new(vectorize_map_loops(*try_block)),
+            catch_clauses,
+            finally_block: finally_block.map(|b| Box::new(vectorize_map_loops(*b))),
+            location,
+        },
+        other => other,
+    }
+}
+
+/// True iff `expr` syntactically contains a secret-multiply operator (boolean
+/// `xor`/`and`/`or`, or a `Share.mul`/`Share.batch_mul` call). Clear `*` is NOT
+/// a secret multiply in this codebase, so it is excluded.
+fn vec_expr_contains_multiply(expr: &AstNode) -> bool {
+    match expr {
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => {
+            matches!(op.as_str(), "xor" | "and" | "or")
+                || vec_expr_contains_multiply(left)
+                || vec_expr_contains_multiply(right)
+        }
+        AstNode::UnaryOperation { operand, .. } => vec_expr_contains_multiply(operand),
+        AstNode::IndexAccess { base, index, .. } => {
+            vec_expr_contains_multiply(base) || vec_expr_contains_multiply(index)
+        }
+        AstNode::FieldAccess { object, .. } => vec_expr_contains_multiply(object),
+        AstNode::ListLiteral { elements, .. } | AstNode::TupleLiteral(elements) => {
+            elements.iter().any(vec_expr_contains_multiply)
+        }
+        AstNode::FunctionCall { arguments, .. } => {
+            matches!(
+                call_name(expr).map(builtin_base_name),
+                Some("mul") | Some("batch_mul")
+            ) || arguments.iter().any(vec_expr_contains_multiply)
+        }
+        _ => false,
+    }
+}
+
+/// True iff any statement in the (flattened) body performs a secret multiply.
+fn vec_stmt_contains_multiply(stmt: &AstNode) -> bool {
+    match stmt {
+        AstNode::VariableDeclaration { value: Some(v), .. } => vec_expr_contains_multiply(v),
+        AstNode::Assignment { value, .. } => vec_expr_contains_multiply(value),
+        AstNode::FunctionCall { arguments, .. } => arguments.iter().any(vec_expr_contains_multiply),
+        AstNode::DiscardStatement { expression, .. } => vec_stmt_contains_multiply(expression),
+        AstNode::Block(stmts) => stmts.iter().any(vec_stmt_contains_multiply),
+        _ => false,
+    }
+}
+
+fn is_int_literal_zero(node: &AstNode) -> bool {
+    matches!(
+        node,
+        AstNode::Literal {
+            value: crate::ast::Value::Int { value: 0, .. },
+            ..
+        }
+    )
+}
+
+/// Output reconstruction mode for the scatter step.
+enum VecCommit {
+    /// Output element is a list of per-lane scalar/list expressions.
+    List(Vec<AstNode>),
+    /// Output element is a single per-lane expression (flat output list).
+    Scalar(AstNode),
+}
+
+/// State for scalar-expanding one map-loop body into vectorized lane lists.
+struct VecCtx {
+    loop_var: String,
+    loc: SourceLocation,
+    /// Statements synthesized so far (gathers, batch_muls, combine loops).
+    emitted: Vec<AstNode>,
+    /// expr structural key -> lane-list variable holding that value per lane.
+    cache: HashMap<String, String>,
+    /// body temporary name -> lane-list variable.
+    map: HashMap<String, String>,
+    /// inner-accumulator list name -> ordered appended element expressions.
+    inner_accs: HashMap<String, Vec<AstNode>>,
+    /// alias name -> canonical inner-accumulator name.
+    acc_alias: HashMap<String, String>,
+    /// loop-length variable name (`var __veclen = HI`).
+    veclen: String,
+    /// (output accumulator name, committed value) — set by the single commit.
+    commit: Option<(String, AstNode)>,
+    empty_fns: HashSet<String>,
+    /// Names declared INSIDE the loop body (loop-local temps + the loop var).
+    /// Only these may be the target of an `Assignment` — writing any outer
+    /// variable across iterations is a loop-carried dependence (fail-closed).
+    locals: HashSet<String>,
+    /// Every name written anywhere in the flattened body (declarations + all
+    /// assignment targets). A bare identifier that is in this set but not yet
+    /// mapped to a per-lane list is provably NOT loop-invariant, so it must not
+    /// be broadcast.
+    writes: HashSet<String>,
+}
+
+impl VecCtx {
+    fn new(loop_var: String, loc: SourceLocation) -> Self {
+        let mut locals = HashSet::new();
+        locals.insert(loop_var.clone());
+        VecCtx {
+            loop_var,
+            loc,
+            emitted: Vec::new(),
+            cache: HashMap::new(),
+            map: HashMap::new(),
+            inner_accs: HashMap::new(),
+            acc_alias: HashMap::new(),
+            veclen: generate_named_temp_name("veclen"),
+            commit: None,
+            empty_fns: HashSet::new(),
+            locals,
+            writes: HashSet::new(),
+        }
+    }
+
+    fn id(&self, name: &str) -> AstNode {
+        AstNode::Identifier(name.to_string(), self.loc.clone())
+    }
+
+    /// `name[I]` — index a lane list by the loop variable.
+    fn index_lane(&self, list_name: &str) -> AstNode {
+        AstNode::IndexAccess {
+            base: Box::new(self.id(list_name)),
+            index: Box::new(self.id(&self.loop_var)),
+            location: self.loc.clone(),
+        }
+    }
+
+    fn empty_list_decl(&self, name: &str) -> AstNode {
+        AstNode::VariableDeclaration {
+            name: name.to_string(),
+            type_annotation: None,
+            value: Some(Box::new(AstNode::ListLiteral {
+                elements: vec![],
+                location: self.loc.clone(),
+            })),
+            is_mutable: true,
+            is_secret: false,
+            location: self.loc.clone(),
+        }
+    }
+
+    fn append_stmt(&self, receiver: &str, value: AstNode) -> AstNode {
+        AstNode::FunctionCall {
+            function: Box::new(self.id("append")),
+            arguments: vec![self.id(receiver), value],
+            location: self.loc.clone(),
+            resolved_return_type: None,
+        }
+    }
+
+    /// `for I in 0..__veclen: <body>` — a pure lane loop (adds no MPC rounds).
+    fn lane_loop(&self, body: Vec<AstNode>) -> AstNode {
+        AstNode::ForLoop {
+            variables: vec![self.loop_var.clone()],
+            iterable: Box::new(AstNode::BinaryOperation {
+                op: "..".to_string(),
+                left: Box::new(make_int_literal(0, &self.loc)),
+                right: Box::new(self.id(&self.veclen)),
+                location: self.loc.clone(),
+            }),
+            body: Box::new(AstNode::Block(body)),
+            location: self.loc.clone(),
+        }
+    }
+
+    fn is_inner_acc(&self, name: &str) -> bool {
+        self.inner_accs.contains_key(name) || self.acc_alias.contains_key(name)
+    }
+
+    fn resolve_alias(&self, name: &str) -> String {
+        self.acc_alias
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// Replace every body-temp identifier in `expr` with `temp_list[I]`, leaving
+    /// the loop variable, loop-invariants and literals untouched.
+    fn subst(&self, expr: &AstNode) -> AstNode {
+        match expr {
+            AstNode::Identifier(name, _) => {
+                if let Some(lv) = self.map.get(name) {
+                    self.index_lane(lv)
+                } else {
+                    expr.clone()
+                }
+            }
+            AstNode::BinaryOperation {
+                op,
+                left,
+                right,
+                location,
+            } => AstNode::BinaryOperation {
+                op: op.clone(),
+                left: Box::new(self.subst(left)),
+                right: Box::new(self.subst(right)),
+                location: location.clone(),
+            },
+            AstNode::UnaryOperation {
+                op,
+                operand,
+                location,
+            } => AstNode::UnaryOperation {
+                op: op.clone(),
+                operand: Box::new(self.subst(operand)),
+                location: location.clone(),
+            },
+            AstNode::IndexAccess {
+                base,
+                index,
+                location,
+            } => AstNode::IndexAccess {
+                base: Box::new(self.subst(base)),
+                index: Box::new(self.subst(index)),
+                location: location.clone(),
+            },
+            AstNode::FieldAccess {
+                object,
+                field_name,
+                location,
+            } => AstNode::FieldAccess {
+                object: Box::new(self.subst(object)),
+                field_name: field_name.clone(),
+                location: location.clone(),
+            },
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                location,
+                resolved_return_type,
+            } => AstNode::FunctionCall {
+                // Keep the callee (a builtin name) verbatim; only substitute args.
+                function: function.clone(),
+                arguments: arguments.iter().map(|a| self.subst(a)).collect(),
+                location: location.clone(),
+                resolved_return_type: resolved_return_type.clone(),
+            },
+            AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
+                elements: elements.iter().map(|e| self.subst(e)).collect(),
+                location: location.clone(),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// Emit a pure elementwise lane loop computing `expr` per lane; returns the
+    /// produced lane-list variable.
+    fn emit_elementwise(&mut self, expr: &AstNode) -> Option<String> {
+        if !expr_is_pure(expr, &self.empty_fns) {
+            return None;
+        }
+        let res = generate_named_temp_name("vlane");
+        self.emitted.push(self.empty_list_decl(&res));
+        let body_expr = self.subst(expr);
+        let append = self.append_stmt(&res, body_expr);
+        let loop_stmt = self.lane_loop(vec![append]);
+        self.emitted.push(loop_stmt);
+        Some(res)
+    }
+
+    /// Emit `var prod = Share.batch_mul(l, r)` plus the per-lane reconstruction of
+    /// the boolean `op` (xor/and/or). Returns the result lane-list variable.
+    fn emit_binmul(&mut self, op: &str, l: &str, r: &str) -> String {
+        let prod = generate_named_temp_name("vprod");
+        self.emitted.push(AstNode::VariableDeclaration {
+            name: prod.clone(),
+            type_annotation: None,
+            value: Some(Box::new(make_batch_mul_call(
+                self.id(l),
+                self.id(r),
+                &self.loc,
+            ))),
+            is_mutable: false,
+            is_secret: false,
+            location: self.loc.clone(),
+        });
+        // `and`/`mul`: the product itself is the result — no combine loop needed.
+        if op == "and" || op == "mul" {
+            return prod;
+        }
+        let res = generate_named_temp_name(if op == "or" { "vor" } else { "vxor" });
+        self.emitted.push(self.empty_list_decl(&res));
+        let li = self.index_lane(l);
+        let ri = self.index_lane(r);
+        let pi = self.index_lane(&prod);
+        let recon = if op == "or" {
+            // a + b - ab
+            let sum = make_share_binary_call("Share.add", li, ri, &self.loc);
+            make_share_binary_call("Share.sub", sum, pi, &self.loc)
+        } else {
+            // xor: a + b - 2ab
+            let sum = make_share_binary_call("Share.add", li, ri, &self.loc);
+            let doubled = make_share_mul_scalar_expr(pi, 2, &self.loc);
+            make_share_binary_call("Share.sub", sum, doubled, &self.loc)
+        };
+        let append = self.append_stmt(&res, recon);
+        let loop_stmt = self.lane_loop(vec![append]);
+        self.emitted.push(loop_stmt);
+        res
+    }
+
+    /// Emit a per-lane elementwise call `Share.<base>(a[I], b[I])`.
+    fn emit_share_binary(&mut self, base: &str, a: &str, b: &str) -> String {
+        let res = generate_named_temp_name("vlane");
+        self.emitted.push(self.empty_list_decl(&res));
+        let call = make_share_binary_call(
+            &format!("Share.{base}"),
+            self.index_lane(a),
+            self.index_lane(b),
+            &self.loc,
+        );
+        let append = self.append_stmt(&res, call);
+        let loop_stmt = self.lane_loop(vec![append]);
+        self.emitted.push(loop_stmt);
+        res
+    }
+
+    /// Recursively scalar-expand a per-lane scalar expression into a lane list.
+    fn vec_of(&mut self, expr: &AstNode) -> Option<String> {
+        // A bare reference to a body temp already has a lane list.
+        if let AstNode::Identifier(name, _) = expr {
+            if let Some(lv) = self.map.get(name) {
+                return Some(lv.clone());
+            }
+            // Soundness (fail-closed): an unmapped bare identifier may only be
+            // broadcast if it is a PROVEN loop-invariant. The loop variable is
+            // fine (`subst` rewrites it per lane). Any other name that is a
+            // loop-local temp (declared inside but not expanded to a lane list)
+            // or is written anywhere in the body is NOT invariant — broadcasting
+            // it would silently collapse a loop-carried value, so bail.
+            if name != &self.loop_var && (self.locals.contains(name) || self.writes.contains(name))
+            {
+                return None;
+            }
+        }
+        // Soundness: never gather/broadcast a value that READS an inner output
+        // accumulator (it is being built across the lanes, so reading it as a
+        // loop-invariant would be wrong). Bail so the loop is left unchanged.
+        {
+            let mut refs = HashSet::new();
+            collect_referenced_vars(expr, &mut refs);
+            if refs.iter().any(|r| self.is_inner_acc(r)) {
+                return None;
+            }
+        }
+        let mut key = String::new();
+        let keyed = expr_key(expr, &mut key);
+        if keyed {
+            if let Some(lv) = self.cache.get(&key) {
+                return Some(lv.clone());
+            }
+        }
+
+        let result = if let AstNode::BinaryOperation {
+            op, left, right, ..
+        } = expr
+        {
+            if matches!(op.as_str(), "xor" | "and" | "or") {
+                let l = self.vec_of(left)?;
+                let r = self.vec_of(right)?;
+                self.emit_binmul(op, &l, &r)
+            } else if !vec_expr_contains_multiply(expr) {
+                self.emit_elementwise(expr)?
+            } else {
+                return None;
+            }
+        } else if !vec_expr_contains_multiply(expr) {
+            if !keyed {
+                return None;
+            }
+            self.emit_elementwise(expr)?
+        } else if let AstNode::UnaryOperation { op, operand, .. } = expr {
+            if op != "not" {
+                return None;
+            }
+            // `not x` with a multiply inside x: vectorize x then negate per lane.
+            let x = self.vec_of(operand)?;
+            let res = generate_named_temp_name("vnot");
+            self.emitted.push(self.empty_list_decl(&res));
+            let neg = AstNode::UnaryOperation {
+                op: "not".to_string(),
+                operand: Box::new(self.index_lane(&x)),
+                location: self.loc.clone(),
+            };
+            let append = self.append_stmt(&res, neg);
+            let loop_stmt = self.lane_loop(vec![append]);
+            self.emitted.push(loop_stmt);
+            res
+        } else if let AstNode::FunctionCall { arguments, .. } = expr {
+            let base = builtin_base_name(call_name(expr)?);
+            match base {
+                "add" | "sub" if arguments.len() == 2 => {
+                    let a = self.vec_of(&arguments[0])?;
+                    let b = self.vec_of(&arguments[1])?;
+                    self.emit_share_binary(base, &a, &b)
+                }
+                "mul" if arguments.len() == 2 => {
+                    let a = self.vec_of(&arguments[0])?;
+                    let b = self.vec_of(&arguments[1])?;
+                    self.emit_binmul("mul", &a, &b)
+                }
+                "mul_scalar" if arguments.len() == 2 => {
+                    let a = self.vec_of(&arguments[0])?;
+                    let res = generate_named_temp_name("vlane");
+                    self.emitted.push(self.empty_list_decl(&res));
+                    let call = AstNode::FunctionCall {
+                        function: Box::new(self.id("Share.mul_scalar")),
+                        arguments: vec![self.index_lane(&a), arguments[1].clone()],
+                        location: self.loc.clone(),
+                        resolved_return_type: None,
+                    };
+                    let append = self.append_stmt(&res, call);
+                    let loop_stmt = self.lane_loop(vec![append]);
+                    self.emitted.push(loop_stmt);
+                    res
+                }
+                _ => return None,
+            }
+        } else {
+            return None;
+        };
+
+        if keyed {
+            self.cache.insert(key, result.clone());
+        }
+        Some(result)
+    }
+
+    /// Process one (flattened) body statement, recording lane lists / accumulators
+    /// / the single output commit. Returns `None` (bail) on any unhandled shape.
+    fn process_stmt(&mut self, stmt: &AstNode) -> Option<()> {
+        // The commit must be the last statement.
+        if self.commit.is_some() {
+            return None;
+        }
+        match stmt {
+            AstNode::VariableDeclaration {
+                name,
+                value: Some(v),
+                ..
+            } => {
+                // Every binding introduced inside the body is loop-local.
+                self.locals.insert(name.clone());
+                match v.as_ref() {
+                    AstNode::ListLiteral { elements, .. } if elements.is_empty() => {
+                        self.inner_accs.insert(name.clone(), Vec::new());
+                        Some(())
+                    }
+                    AstNode::Identifier(s, _) if self.is_inner_acc(s) => {
+                        let canon = self.resolve_alias(s);
+                        self.acc_alias.insert(name.clone(), canon);
+                        Some(())
+                    }
+                    _ => {
+                        let lv = self.vec_of(v)?;
+                        self.map.insert(name.clone(), lv);
+                        Some(())
+                    }
+                }
+            }
+            AstNode::Assignment { target, value, .. } => {
+                let AstNode::Identifier(name, _) = target.as_ref() else {
+                    return None;
+                };
+                // Fail-closed: the target must be a loop-LOCAL temp. Mutating an
+                // outer variable across iterations is a loop-carried dependence
+                // (e.g. `acc = acc + x[i]`), which the gather/batch_mul/scatter
+                // rewrite cannot represent — leave the loop unvectorized.
+                if !self.locals.contains(name) {
+                    return None;
+                }
+                if self.is_inner_acc(name) {
+                    return None;
+                }
+                let lv = self.vec_of(value)?;
+                self.map.insert(name.clone(), lv);
+                Some(())
+            }
+            AstNode::FunctionCall { .. } => self.process_call_stmt(stmt),
+            AstNode::DiscardStatement { expression, .. } => self.process_call_stmt(expression),
+            _ => None,
+        }
+    }
+
+    fn process_call_stmt(&mut self, call: &AstNode) -> Option<()> {
+        let AstNode::FunctionCall { arguments, .. } = call else {
+            return None;
+        };
+        let base = builtin_base_name(call_name(call)?);
+        if !matches!(base, "append" | "array_push") || arguments.len() != 2 {
+            return None;
+        }
+        let AstNode::Identifier(rname, _) = &arguments[0] else {
+            return None;
+        };
+        let val = arguments[1].clone();
+        if self.is_inner_acc(rname) {
+            let canon = self.resolve_alias(rname);
+            self.inner_accs.get_mut(&canon)?.push(val);
+            Some(())
+        } else {
+            // The single output commit.
+            self.commit = Some((rname.clone(), val));
+            Some(())
+        }
+    }
+
+    /// Run the recognition+expansion over `flat` (the locally-flattened body),
+    /// returning the replacement statement list or `None` if ineligible.
+    fn run(mut self, flat: &[AstNode], hi: &AstNode) -> Option<Vec<AstNode>> {
+        if flat.is_empty() {
+            return None;
+        }
+        // Precompute every name written in the body (declarations + assignment
+        // targets). `vec_of` uses this to refuse to broadcast a bare identifier
+        // that is provably not loop-invariant.
+        for s in flat {
+            collect_written_names(s, &mut self.writes);
+        }
+        // `var __veclen = HI`.
+        self.emitted.push(AstNode::VariableDeclaration {
+            name: self.veclen.clone(),
+            type_annotation: None,
+            value: Some(Box::new(hi.clone())),
+            is_mutable: false,
+            is_secret: false,
+            location: self.loc.clone(),
+        });
+
+        for stmt in flat {
+            self.process_stmt(stmt)?;
+        }
+
+        let (out_name, commit_val) = self.commit.take()?;
+        if self.is_inner_acc(&out_name) || self.map.contains_key(&out_name) {
+            return None;
+        }
+        // Soundness: the output accumulator must not be READ anywhere in the body
+        // except as the receiver of the final commit (no loop-carried dependence
+        // through OUT). The commit statement itself is skipped below because its
+        // first argument is OUT (the receiver), but its VALUE expression is still
+        // checked — an iteration reading OUT[j] / a prior result there would be
+        // loop-carried, so bail.
+        {
+            let mut refs = HashSet::new();
+            collect_referenced_vars(&commit_val, &mut refs);
+            if refs.contains(&out_name) {
+                return None;
+            }
+        }
+        let last = flat.len() - 1;
+        for (i, s) in flat.iter().enumerate() {
+            if i == last {
+                continue;
+            }
+            let mut refs = HashSet::new();
+            collect_referenced_vars(s, &mut refs);
+            if refs.contains(&out_name) {
+                return None;
+            }
+        }
+
+        // Resolve the committed value into a scatter reconstruction.
+        let commit = match &commit_val {
+            AstNode::Identifier(s, _) => {
+                let canon = self.resolve_alias(s);
+                if let Some(elems) = self.inner_accs.get(&canon) {
+                    VecCommit::List(elems.clone())
+                } else if self.map.contains_key(s) {
+                    VecCommit::Scalar(commit_val.clone())
+                } else {
+                    return None;
+                }
+            }
+            AstNode::ListLiteral { elements, .. } => VecCommit::List(elements.clone()),
+            other => VecCommit::Scalar(other.clone()),
+        };
+
+        let scatter_value = match commit {
+            VecCommit::List(exprs) => {
+                let mut lane_lists = Vec::with_capacity(exprs.len());
+                for e in &exprs {
+                    lane_lists.push(self.vec_of(e)?);
+                }
+                let elements = lane_lists.iter().map(|ll| self.index_lane(ll)).collect();
+                AstNode::ListLiteral {
+                    elements,
+                    location: self.loc.clone(),
+                }
+            }
+            VecCommit::Scalar(e) => {
+                let ll = self.vec_of(&e)?;
+                self.index_lane(&ll)
+            }
+        };
+
+        let append = self.append_stmt(&out_name, scatter_value);
+        let scatter = self.lane_loop(vec![append]);
+        self.emitted.push(scatter);
+        Some(self.emitted)
+    }
+}
+
+/// Attempt to vectorize a single `ForLoop`. Returns the replacement statements
+/// on success, or `None` to leave the loop unchanged.
+fn try_vectorize_for(stmt: &AstNode) -> Option<Vec<AstNode>> {
+    let AstNode::ForLoop {
+        variables,
+        iterable,
+        body,
+        location,
+    } = stmt
+    else {
+        return None;
+    };
+    if variables.len() != 1 {
+        return None;
+    }
+    let loop_var = variables[0].clone();
+
+    // Iterable must be `0 .. HI`.
+    let AstNode::BinaryOperation {
+        op, left, right, ..
+    } = iterable.as_ref()
+    else {
+        return None;
+    };
+    if op != ".." || !is_int_literal_zero(left) {
+        return None;
+    }
+    let hi = right.as_ref();
+    // HI must be loop-invariant.
+    if references_var(hi, &loop_var) {
+        return None;
+    }
+    // Only act on loops the unroller deliberately KEPT rolled (symbolic bound):
+    // static-bound loops are already flattened+scheduled, and rewriting them
+    // risks regressing the already-optimal AES/CTR paths.
+    if range_bounds(iterable, &LenEnv::default()).is_some() {
+        return None;
+    }
+    if body_assigns_var(body, &loop_var) {
+        return None;
+    }
+
+    // Locally flatten the body (unroll inner static loops + fold constant
+    // branches) with a fresh budget, so a per-iteration gate DAG that the global
+    // unroller left rolled (budget spent) becomes straight-line here.
+    let body_stmts: Vec<AstNode> = match body.as_ref() {
+        AstNode::Block(s) => s.clone(),
+        single => vec![single.clone()],
+    };
+    let mut fenv = LenEnv::default();
+    bind_loop_var(&mut fenv, variables, iterable);
+    let mut budget = UNROLL_BUDGET;
+    let flat = unroll_stmt_list(body_stmts, &mut fenv, &mut budget);
+    let flat = match fold_constant_branches(AstNode::Block(flat)) {
+        AstNode::Block(s) => s,
+        x => vec![x],
+    };
+
+    // Nothing to gain (and nothing to risk) unless the body actually multiplies.
+    if !flat.iter().any(vec_stmt_contains_multiply) {
+        return None;
+    }
+    // The flattened body must be straight-line: any residual loop/branch means
+    // recognition cannot prove independence, so bail.
+    if flat.iter().any(|s| {
+        matches!(
+            s,
+            AstNode::ForLoop { .. } | AstNode::WhileLoop { .. } | AstNode::IfExpression { .. }
+        )
+    }) {
+        return None;
+    }
+
+    let ctx = VecCtx::new(loop_var, location.clone());
+    ctx.run(&flat, hi)
+}
+
+/// Does `node` reference identifier `name` anywhere?
+fn references_var(node: &AstNode, name: &str) -> bool {
+    let mut refs = HashSet::new();
+    collect_referenced_vars(node, &mut refs);
+    refs.contains(name)
+}
+
 fn optimize_all_inner(node: AstNode, optimization_level: u8) -> AstNode {
     // Passes compose forward: each one runs on the previous pass's output, so the
     // pipeline refines the program incrementally rather than each pass re-reading
@@ -2528,6 +3324,21 @@ fn optimize_all_inner(node: AstNode, optimization_level: u8) -> AstNode {
     // multiply batchers (so folded gates never reach `Share.batch_mul`). -O3 only.
     let node = if optimization_level >= 3 {
         fold_public_gates(node)
+    } else {
+        node
+    };
+    // Auto loop-vectorizer (-O3): rewrite kept-rolled map-loops whose iterations
+    // each perform independent secret multiplies into transposed
+    // gather / Share.batch_mul / scatter form, so the per-iteration multiplies
+    // batch across the whole loop range (one round per multiply layer instead of
+    // one per iteration). Runs after inlining/unrolling/branch-folding (so the
+    // map-loop body, after local flattening, is a straight-line gate DAG) and
+    // before the multiply batchers (so the synthesized batch_muls are then fused
+    // and scheduled like any hand-vectorized form). It REPLACES the loop body
+    // with a fixed number of vector statements, so code size stays O(1) in the
+    // iteration count (no unroll blow-up).
+    let node = if optimization_level >= 3 {
+        vectorize_map_loops(node)
     } else {
         node
     };
@@ -3429,6 +4240,31 @@ fn collect_declared_names(node: &AstNode, out: &mut HashSet<String>) {
         _ => {}
     }
     for_each_child(node, &mut |c| collect_declared_names(c, out));
+}
+
+/// Collect every name WRITTEN in `node`: variable declarations, loop variables,
+/// and assignment targets. Used by the loop vectorizer to decide whether a bare
+/// identifier is provably loop-invariant (and therefore safe to broadcast).
+/// Does not descend into nested function definitions (a different scope).
+fn collect_written_names(node: &AstNode, out: &mut HashSet<String>) {
+    match node {
+        AstNode::VariableDeclaration { name, .. } => {
+            out.insert(name.clone());
+        }
+        AstNode::ForLoop { variables, .. } => {
+            for v in variables {
+                out.insert(v.clone());
+            }
+        }
+        AstNode::Assignment { target, .. } => {
+            if let AstNode::Identifier(name, _) = target.as_ref() {
+                out.insert(name.clone());
+            }
+        }
+        AstNode::FunctionDefinition { .. } => return,
+        _ => {}
+    }
+    for_each_child(node, &mut |c| collect_written_names(c, out));
 }
 
 /// Apply a name-substitution to identifier uses and binding sites. Type
@@ -6057,18 +6893,30 @@ enum UnrollOutcome {
 /// multiplies into a single batched round. Rounds are inherently sequential
 /// (round N depends on N-1), so keeping the outer loop rolled costs almost no
 /// extra rounds while using a fraction of the budget.
-fn estimate_unrolled_size(stmts: &[AstNode], env: &LenEnv) -> usize {
+///
+/// `limit` early-saturates the walk: this estimate only ever drives a monotone
+/// threshold decision (`<= unroll_max_expansion()` / `<= budget`), so once the
+/// partial sum reaches `limit` the exact value is irrelevant and we stop
+/// recursing. This bounds each estimate at O(limit) instead of O(exact-unrolled
+/// -subtree-size), which on deeply-nested inlined bodies (round ⊃ sbox ⊃ affine
+/// loops) is otherwise astronomically large and super-linear to compute. The
+/// returned value equals the exact sum when below `limit` and is `>= limit`
+/// otherwise, so the flatten/keep decision is identical to an unbounded walk.
+fn estimate_unrolled_size(stmts: &[AstNode], env: &LenEnv, limit: usize) -> usize {
     let mut env = env.clone();
     let mut total = 0usize;
     for stmt in stmts {
-        total = total.saturating_add(estimate_stmt_size(stmt, &mut env));
+        total = total.saturating_add(estimate_stmt_size(stmt, &mut env, limit));
+        if total >= limit {
+            return total;
+        }
     }
     total
 }
 
 /// Estimate one statement's unrolled node count, advancing `env` with its effect
 /// (mirroring `apply_statement_to_env` / the unroller's control-flow handling).
-fn estimate_stmt_size(stmt: &AstNode, env: &mut LenEnv) -> usize {
+fn estimate_stmt_size(stmt: &AstNode, env: &mut LenEnv, limit: usize) -> usize {
     match stmt {
         AstNode::ForLoop {
             variables,
@@ -6083,14 +6931,16 @@ fn estimate_stmt_size(stmt: &AstNode, env: &mut LenEnv) -> usize {
             // Estimate one iteration's inner-unrolled size in a child env.
             let mut benv = env.clone();
             bind_loop_var(&mut benv, variables, iterable);
-            let inner = estimate_unrolled_size(&body_stmts, &benv).max(1);
+            let inner = estimate_unrolled_size(&body_stmts, &benv, limit).max(1);
             // Would this loop itself unroll? (Same predicate as `try_unroll_for`.)
             let unrolls = matches!(variables.as_slice(), [v] if !body_assigns_var(body, v))
                 && range_bounds(iterable, env)
                     .is_some_and(|(lo, hi)| hi > lo && (hi - lo) <= UNROLL_MAX_ITERATIONS);
             let size = if unrolls {
                 let (lo, hi) = range_bounds(iterable, env).unwrap();
-                ((hi - lo) as usize).saturating_mul(inner)
+                // Clamp at `limit`: the product can overflow/explode on nested
+                // loops, and any value `>= limit` drives the same keep decision.
+                ((hi - lo) as usize).saturating_mul(inner).min(limit)
             } else {
                 inner
             };
@@ -6109,10 +6959,10 @@ fn estimate_stmt_size(stmt: &AstNode, env: &mut LenEnv) -> usize {
             ..
         } => {
             let mut tenv = env.clone();
-            let mut size = 1 + estimate_stmt_size(then_branch, &mut tenv);
+            let mut size = 1 + estimate_stmt_size(then_branch, &mut tenv, limit);
             if let Some(e) = else_branch {
                 let mut eenv = env.clone();
-                size += estimate_stmt_size(e, &mut eenv);
+                size += estimate_stmt_size(e, &mut eenv, limit);
             }
             let mut mutated = HashSet::new();
             collect_mutated_vars(then_branch, &mut mutated);
@@ -6126,7 +6976,7 @@ fn estimate_stmt_size(stmt: &AstNode, env: &mut LenEnv) -> usize {
         }
         AstNode::WhileLoop { body, .. } => {
             let mut benv = env.clone();
-            let inner = estimate_stmt_size(body, &mut benv);
+            let inner = estimate_stmt_size(body, &mut benv, limit);
             let mut mutated = HashSet::new();
             collect_mutated_vars(body, &mut mutated);
             for m in mutated {
@@ -6134,7 +6984,7 @@ fn estimate_stmt_size(stmt: &AstNode, env: &mut LenEnv) -> usize {
             }
             inner
         }
-        AstNode::Block(s) => estimate_unrolled_size(s, env),
+        AstNode::Block(s) => estimate_unrolled_size(s, env, limit),
         other => {
             apply_statement_to_env(other, env);
             node_size(other)
@@ -6220,7 +7070,12 @@ fn try_unroll_for(stmt: AstNode, env: &LenEnv, budget: &mut usize) -> UnrollOutc
     // `estimate_unrolled_size`.
     let mut benv = env.clone();
     bind_loop_var(&mut benv, &variables, &iterable);
-    let inner_unrolled_estimate: usize = estimate_unrolled_size(&body_stmts, &benv);
+    // The estimate only gates a monotone threshold (`fits` below): both consumers
+    // compare against `unroll_max_expansion()` and `*budget`, so capping the walk
+    // at the larger of the two is decision-equivalent while bounding cost on
+    // deeply-nested inlined bodies. See `estimate_unrolled_size`.
+    let estimate_limit = unroll_max_expansion().max(*budget);
+    let inner_unrolled_estimate: usize = estimate_unrolled_size(&body_stmts, &benv, estimate_limit);
     let decision_expansion = (iterations as usize).saturating_mul(inner_unrolled_estimate.max(1));
     // Raw (un-inner-unrolled) duplication cost of flattening this loop. The
     // flattened copies are re-queued and their inner loops draw from the same
@@ -10271,6 +11126,88 @@ mod tests {
             "malformed nested candidate must be isolated as its own singleton group, \
              got group of {}",
             bad_group.len()
+        );
+    }
+
+    // ---- loop-vectorizer fail-closed regression ----
+
+    fn vec_index(base: &str, idx: &str) -> AstNode {
+        AstNode::IndexAccess {
+            base: Box::new(make_identifier(base)),
+            index: Box::new(make_identifier(idx)),
+            location: make_loc(),
+        }
+    }
+
+    fn vec_share_mul(a: AstNode, b: AstNode) -> AstNode {
+        AstNode::FunctionCall {
+            function: Box::new(make_identifier("Share.mul")),
+            arguments: vec![a, b],
+            location: make_loc(),
+            resolved_return_type: None,
+        }
+    }
+
+    fn vec_append(receiver: &str, value: AstNode) -> AstNode {
+        AstNode::FunctionCall {
+            function: Box::new(make_identifier("append")),
+            arguments: vec![make_identifier(receiver), value],
+            location: make_loc(),
+            resolved_return_type: None,
+        }
+    }
+
+    /// `for i in 0..n: <body>` over a symbolic (non-literal) upper bound, the
+    /// exact shape the auto-vectorizer is allowed to consider (kept-rolled,
+    /// straight-line, contains a multiply).
+    fn vec_for(body: Vec<AstNode>) -> AstNode {
+        AstNode::ForLoop {
+            variables: vec!["i".to_string()],
+            iterable: Box::new(AstNode::BinaryOperation {
+                op: "..".to_string(),
+                left: Box::new(make_int_literal(0)),
+                right: Box::new(make_identifier("n")),
+                location: make_loc(),
+            }),
+            body: Box::new(AstNode::Block(body)),
+            location: make_loc(),
+        }
+    }
+
+    #[test]
+    fn vectorizer_declines_loop_carried_reduction() {
+        // Control: an INDEPENDENT map-loop with a loop-local temp must vectorize.
+        //   for i in 0..n:
+        //     var t = Share.mul(x[i], x[i])
+        //     append(out, t)
+        let independent = vec_for(vec![
+            make_var_decl("t", vec_share_mul(vec_index("x", "i"), vec_index("x", "i"))),
+            vec_append("out", make_identifier("t")),
+        ]);
+        assert!(
+            try_vectorize_for(&independent).is_some(),
+            "an independent per-lane map-loop must still vectorize (control)"
+        );
+
+        // Loop-carried reduction: `acc` is an OUTER variable read+written across
+        // iterations. Structurally identical to the control (same bound, same
+        // multiply, same output commit) so the ONLY reason to decline is the
+        // loop-carried write. The pass MUST fail closed (return None) rather than
+        // silently broadcast `acc` as a loop-invariant.
+        //   for i in 0..n:
+        //     acc = Share.mul(acc, x[i])
+        //     append(out, acc)
+        let reduction = vec_for(vec![
+            AstNode::Assignment {
+                target: Box::new(make_identifier("acc")),
+                value: Box::new(vec_share_mul(make_identifier("acc"), vec_index("x", "i"))),
+                location: make_loc(),
+            },
+            vec_append("out", make_identifier("acc")),
+        ]);
+        assert!(
+            try_vectorize_for(&reduction).is_none(),
+            "a loop-carried reduction must NOT be vectorized (fail-closed)"
         );
     }
 }
