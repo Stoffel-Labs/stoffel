@@ -3248,80 +3248,6 @@ where
         .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
         .collect();
 
-    if input_ids.is_empty() {
-        // No input clients, but the program may still need preprocessed
-        // randomness (e.g. an ADKG keygen built on `Share.random`). Stand up the
-        // AVSS engine and run the coordinator's preprocessing phase so that
-        // randomness-consuming builtins work; just skip the client input-mask /
-        // input-collection dance, which is meaningless without clients.
-        eprintln!(
-            "[party {}] AVSS coordinator mode has no client inputs; running preprocessing for '{}'",
-            my_id, agreed_entry
-        );
-
-        let coord: AvssOffChainCoordinator<F, G> =
-            AvssOffChainCoordinator::<F, G>::start_rpc_client(
-                &coord_addr.0,
-                coord_addr.1,
-                t as u64,
-                n as u64,
-                2,
-                cert_der.clone(),
-                key_der.clone(),
-            )
-            .await
-            .map_err(|error| format!("Failed to connect to AVSS off-chain coordinator: {error}"))?;
-
-        let _node_rpc: AvssOffChainNodeRpcServer<F, G> = AvssOffChainNodeRpcServer::<F, G>::start(
-            &rpc_addr.0,
-            rpc_addr.1,
-            cert_der.clone(),
-            key_der.clone(),
-        )
-        .await
-        .map_err(|error| format!("Failed to start AVSS node RPC server: {error}"))?;
-
-        if as_leader {
-            coord.reset_coord().await.map_err(|e| e.to_string())?;
-            coord
-                .start_preprocessing()
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-
-        let client_input_types = std::collections::BTreeMap::new();
-        let _engine = setup_avss_party_for_curve::<F, G>(
-            vm,
-            net,
-            AvssPartySetup {
-                my_id,
-                local_identity: durable_identity_from_cert(&cert_der),
-                n,
-                t,
-                instance_id,
-                expected_client_count: None,
-                client_input_count: 1,
-                client_input_types: &client_input_types,
-            },
-        )
-        .await?;
-
-        if as_leader {
-            coord.start_mpc().await.map_err(|e| e.to_string())?;
-        }
-        coord
-            .wait_for_round(Round::MPCExecution)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        eprintln!("Starting VM execution of '{}'...", agreed_entry);
-        let result = vm
-            .execute(agreed_entry)
-            .map_err(|err| format!("Execution error in '{}': {}", agreed_entry, err))?;
-        print_vm_result(vm, result);
-        return Ok(());
-    }
-
     let coord: AvssOffChainCoordinator<F, G> = AvssOffChainCoordinator::<F, G>::start_rpc_client(
         &coord_addr.0,
         coord_addr.1,
@@ -3369,85 +3295,94 @@ where
     .await?;
     engine.enable_client_output_capture().await;
 
-    let mut mask_shares = Vec::with_capacity(input_ids.len());
-    {
-        let node = engine.node_handle().lock().await;
-        for idx in 0..input_ids.len() {
-            let local_shares = node
-                .preprocessing_material
-                .lock()
-                .await
-                .take_v_random_shares(1)
-                .map_err(|e| format!("Not enough AVSS random shares for client {idx}: {:?}", e))?;
-            let share = local_shares
-                .into_iter()
-                .next()
-                .ok_or_else(|| format!("AVSS random share batch for client {idx} was empty"))?;
-            node_rpc
-                .add_mask_share(idx as u64, &share)
-                .await
-                .map_err(|e| format!("add_mask_share: {:?}", e))?;
-            mask_shares.push(share);
+    if input_ids.is_empty() {
+        eprintln!(
+            "[party {}] AVSS coordinator mode has no client inputs; preprocessing complete, skipping input collection",
+            my_id
+        );
+    } else {
+        let mut mask_shares = Vec::with_capacity(input_ids.len());
+        {
+            let node = engine.node_handle().lock().await;
+            for idx in 0..input_ids.len() {
+                let local_shares = node
+                    .preprocessing_material
+                    .lock()
+                    .await
+                    .take_v_random_shares(1)
+                    .map_err(|e| {
+                        format!("Not enough AVSS random shares for client {idx}: {:?}", e)
+                    })?;
+                let share = local_shares
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| format!("AVSS random share batch for client {idx} was empty"))?;
+                node_rpc
+                    .add_mask_share(idx as u64, &share)
+                    .await
+                    .map_err(|e| format!("add_mask_share: {:?}", e))?;
+                mask_shares.push(share);
+            }
         }
-    }
 
-    if as_leader {
+        if as_leader {
+            coord
+                .reserve_input_masks()
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         coord
-            .reserve_input_masks()
+            .wait_for_round(Round::InputMaskReservation)
             .await
             .map_err(|e| e.to_string())?;
-    }
-    coord
-        .wait_for_round(Round::InputMaskReservation)
-        .await
-        .map_err(|e| e.to_string())?;
 
-    let client_to_indices = normalize_client_to_indices(
-        coord
-            .wait_for_indices(input_ids.len() as u64)
-            .await
-            .map_err(|e| e.to_string())?,
-    );
-
-    for (cid, indices) in &client_to_indices {
-        for idx in indices {
-            node_rpc
-                .add_reserved_index(cid.clone(), *idx)
+        let client_to_indices = normalize_client_to_indices(
+            coord
+                .wait_for_indices(input_ids.len() as u64)
                 .await
-                .or_else(|e| match e {
-                    NodeRPCError::JSONError => {
-                        eprintln!(
-                            "[party {}] add_reserved_index observed a stale client sink for index {}; continuing",
-                            my_id, idx
-                        );
-                        Ok(())
-                    }
-                    other => Err(format!("add_reserved_index: {:?}", other)),
-                })?;
+                .map_err(|e| e.to_string())?,
+        );
+
+        for (cid, indices) in &client_to_indices {
+            for idx in indices {
+                node_rpc
+                    .add_reserved_index(cid.clone(), *idx)
+                    .await
+                    .or_else(|e| match e {
+                        NodeRPCError::JSONError => {
+                            eprintln!(
+                                "[party {}] add_reserved_index observed a stale client sink for index {}; continuing",
+                                my_id, idx
+                            );
+                            Ok(())
+                        }
+                        other => Err(format!("add_reserved_index: {:?}", other)),
+                    })?;
+            }
         }
-    }
 
-    if as_leader {
-        coord.collect_inputs().await.map_err(|e| e.to_string())?;
-    }
-    coord
-        .wait_for_round(Round::InputCollection)
-        .await
-        .map_err(|e| e.to_string())?;
+        if as_leader {
+            coord.collect_inputs().await.map_err(|e| e.to_string())?;
+        }
+        coord
+            .wait_for_round(Round::InputCollection)
+            .await
+            .map_err(|e| e.to_string())?;
 
-    let client_inputs = coord
-        .wait_for_inputs(input_ids.len() as u64, mask_shares)
-        .await
-        .map_err(|e| e.to_string())?;
-    let client_input_types = std::collections::BTreeMap::new();
-    store_reserved_client_inputs_feldman::<F, G, _>(
-        vm,
-        &client_to_indices,
-        client_inputs,
-        1,
-        &[],
-        &client_input_types,
-    );
+        let client_inputs = coord
+            .wait_for_inputs(input_ids.len() as u64, mask_shares)
+            .await
+            .map_err(|e| e.to_string())?;
+        let client_input_types = std::collections::BTreeMap::new();
+        store_reserved_client_inputs_feldman::<F, G, _>(
+            vm,
+            &client_to_indices,
+            client_inputs,
+            1,
+            &[],
+            &client_input_types,
+        );
+    }
 
     if as_leader {
         coord.start_mpc().await.map_err(|e| e.to_string())?;
