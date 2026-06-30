@@ -2003,6 +2003,7 @@ pub fn optimize_reveals(node: AstNode) -> AstNode {
 //   var y = b * 3            // uses b - already revealed
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Information about a statement for reordering purposes
 #[derive(Debug, Clone)]
@@ -3486,17 +3487,81 @@ fn collect_direct_read_keys(node: &AstNode, out: &mut HashSet<String>) {
     }
 }
 
-fn expr_logical_reads(node: &AstNode, env: &HashMap<String, HashSet<String>>) -> HashSet<String> {
+/// The scheduling environment: each in-scope binding maps to the *lazy* closure
+/// of logical-dependency keys its initializer reaches.
+///
+/// Historically this stored a fully-materialized `HashSet<String>` per binding,
+/// i.e. the flat transitive closure of every read. On a long straight-line
+/// dependency chain (e.g. fully inlined+unrolled CBC `main`) building binding
+/// `t_i`'s closure cloned binding `t_{i-1}`'s closure, so the closures grew
+/// `O(i)` and constructing the whole environment was `O(N^2)` time and memory —
+/// the dominant cost of `schedule_run` and the reason CBC `-O3` took tens of
+/// minutes / 3GB+ RSS. We now store each binding as a `DepNode` that references
+/// its predecessors by `Rc` (O(1) to build) and only flatten to a concrete key
+/// set where a statement actually *consumes* logical reads (the `FunctionCall`
+/// arm of `sched_info` and the loop-commit case of `update_sched_env`). The
+/// flattened set is membership-identical to the old materialized one, so the
+/// dependency DAG — and therefore the emitted schedule and round counts — is
+/// byte-for-byte unchanged.
+type SchedEnv = HashMap<String, Rc<DepNode>>;
+
+/// A lazily-evaluated set of logical-dependency keys (see [`SchedEnv`]).
+#[derive(Default)]
+struct DepNode {
+    /// Keys contributed directly by this binding: the `var:`/`heap:` keys of the
+    /// variables its initializer references (plus, for loop commits, the concrete
+    /// aggregate keys computed by `loop_sched_info`).
+    own: HashSet<String>,
+    /// Predecessor closures included transitively — the `env` entries of the
+    /// referenced variables, captured by value (`Rc` snapshot) at build time so
+    /// a later reassignment of one of those variables cannot retroactively change
+    /// this binding's closure.
+    parents: Vec<Rc<DepNode>>,
+}
+
+/// Build the lazy dependency node for `node`'s logical reads against `env`,
+/// without flattening the transitive closure (O(referenced vars), not O(N)).
+fn logical_reads_node(node: &AstNode, env: &SchedEnv) -> Rc<DepNode> {
     let mut vars = HashSet::new();
     collect_referenced_vars(node, &mut vars);
-    let mut out = HashSet::new();
+    let mut own = HashSet::new();
+    let mut parents = Vec::new();
     for var in vars {
-        out.insert(scalar_key(&var));
-        out.insert(heap_key(&var));
-        if let Some(deps) = env.get(&var) {
-            out.extend(deps.iter().cloned());
+        own.insert(scalar_key(&var));
+        own.insert(heap_key(&var));
+        if let Some(dep) = env.get(&var) {
+            parents.push(Rc::clone(dep));
         }
     }
+    Rc::new(DepNode { own, parents })
+}
+
+/// Flatten a `DepNode` closure into a concrete key set. The `Rc`-identity
+/// `visited` set both dedups shared sub-closures and guarantees termination;
+/// the result is exactly the transitive union of `own` over the node and all its
+/// (transitive) parents — i.e. the set the old materialized `env` stored.
+fn flatten_dep_node(
+    node: &Rc<DepNode>,
+    out: &mut HashSet<String>,
+    visited: &mut HashSet<*const DepNode>,
+) {
+    if !visited.insert(Rc::as_ptr(node)) {
+        return;
+    }
+    out.extend(node.own.iter().cloned());
+    for parent in &node.parents {
+        flatten_dep_node(parent, out, visited);
+    }
+}
+
+/// The flat set of logical-read keys for `node` against `env`. Membership is
+/// identical to the historical materialized computation; only the intermediate
+/// `env` storage is now lazy (see [`SchedEnv`]).
+fn expr_logical_reads(node: &AstNode, env: &SchedEnv) -> HashSet<String> {
+    let depnode = logical_reads_node(node, env);
+    let mut out = HashSet::new();
+    let mut visited = HashSet::new();
+    flatten_dep_node(&depnode, &mut out, &mut visited);
     out
 }
 
@@ -3528,7 +3593,7 @@ fn loop_sched_info(
     variables: &[String],
     iterable: &AstNode,
     body: &AstNode,
-    env: &HashMap<String, HashSet<String>>,
+    env: &SchedEnv,
 ) -> SchedInfo {
     let mut direct_reads = HashSet::new();
     let mut logical_reads = HashSet::new();
@@ -3620,7 +3685,7 @@ fn stmt_is_schedulable(stmt: &AstNode, pure_fns: &HashSet<String>) -> bool {
 /// is deliberately coarser than the multiply batcher's field-level keying
 /// (`statement_reads_and_writes` / `keys_conflict`) and must not be merged with
 /// it — see the note on `statement_reads_and_writes`.
-fn sched_info(stmt: &AstNode, env: &HashMap<String, HashSet<String>>) -> SchedInfo {
+fn sched_info(stmt: &AstNode, env: &SchedEnv) -> SchedInfo {
     let mut direct_reads = HashSet::new();
     let mut logical_reads = HashSet::new();
     let mut writes = HashSet::new();
@@ -3702,18 +3767,18 @@ fn sched_info(stmt: &AstNode, env: &HashMap<String, HashSet<String>>) -> SchedIn
     }
 }
 
-fn update_sched_env(stmt: &AstNode, env: &mut HashMap<String, HashSet<String>>) {
+fn update_sched_env(stmt: &AstNode, env: &mut SchedEnv) {
     match stmt {
         AstNode::VariableDeclaration { name, value, .. } => {
             let deps = value
                 .as_deref()
-                .map(|v| expr_logical_reads(v, env))
+                .map(|v| logical_reads_node(v, env))
                 .unwrap_or_default();
             env.insert(name.clone(), deps);
         }
         AstNode::Assignment { target, value, .. } => {
             if let AstNode::Identifier(name, _) = target.as_ref() {
-                let deps = expr_logical_reads(value, env);
+                let deps = logical_reads_node(value, env);
                 env.insert(name.clone(), deps);
             } else if let Some(root) = root_var(target) {
                 env.remove(&root);
@@ -3739,10 +3804,17 @@ fn update_sched_env(stmt: &AstNode, env: &mut HashMap<String, HashSet<String>>) 
                 .chain(info.logical_reads.iter())
                 .cloned()
                 .collect();
+            // One shared leaf node holding the concrete aggregate set; every
+            // root the loop wrote points at it (flattens to `deps`, exactly as
+            // the old per-root `deps.clone()` did).
+            let dep_node = Rc::new(DepNode {
+                own: deps,
+                parents: Vec::new(),
+            });
             for w in &info.writes {
                 let root = w.strip_prefix("var:").or_else(|| w.strip_prefix("heap:"));
                 if let Some(root) = root {
-                    env.insert(root.to_string(), deps.clone());
+                    env.insert(root.to_string(), Rc::clone(&dep_node));
                 }
             }
             for var in variables {
@@ -3897,7 +3969,7 @@ fn schedule_run(stmts: Vec<AstNode>) -> Vec<AstNode> {
         return stmts;
     }
 
-    let mut env: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut env: SchedEnv = HashMap::new();
     let infos: Vec<SchedInfo> = stmts
         .iter()
         .map(|stmt| {
