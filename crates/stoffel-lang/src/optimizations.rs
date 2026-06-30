@@ -3389,6 +3389,24 @@ fn node_size(node: &AstNode) -> usize {
     n
 }
 
+/// Total AST node count of the whole program, descending into nested function
+/// definition bodies (which `node_size`/`for_each_child` deliberately do not).
+/// This is the scale on which the post-inline unroll expansion grows, so it gates
+/// the aggressive multi-return inlining (see `MULTI_RETURN_PROGRAM_MAX`).
+fn program_code_size(node: &AstNode) -> usize {
+    let mut n = 1usize;
+    match node {
+        AstNode::FunctionDefinition { body, .. } => n += program_code_size(body),
+        AstNode::Block(stmts) => {
+            for s in stmts {
+                n += program_code_size(s);
+            }
+        }
+        _ => for_each_child(node, &mut |c| n += program_code_size(c)),
+    }
+    n
+}
+
 fn count_returns(node: &AstNode) -> usize {
     let mut n = usize::from(matches!(node, AstNode::Return { .. }));
     for_each_child(node, &mut |c| n += count_returns(c));
@@ -3872,18 +3890,34 @@ fn collect_called_names(node: &AstNode, out: &mut HashSet<String>) {
 /// Build the set of inlinable functions: a block body with exactly one tail
 /// `return <expr>`, only plain positional parameters, and not (transitively)
 /// recursive.
-fn gather_inline_infos(root: &AstNode) -> HashMap<String, InlineInfo> {
-    // Collect every named function definition.
-    let mut defs: Vec<(String, Vec<crate::ast::Parameter>, AstNode)> = Vec::new();
-    fn gather(node: &AstNode, out: &mut Vec<(String, Vec<crate::ast::Parameter>, AstNode)>) {
+fn gather_inline_infos(root: &AstNode, allow_multi_return: bool) -> HashMap<String, InlineInfo> {
+    // Collect every named function definition (with its return type + location, so
+    // a multi-return body can be normalized to a single tail return below).
+    type Def = (
+        String,
+        Vec<crate::ast::Parameter>,
+        AstNode,
+        Option<Box<AstNode>>,
+        SourceLocation,
+    );
+    let mut defs: Vec<Def> = Vec::new();
+    fn gather(node: &AstNode, out: &mut Vec<Def>) {
         if let AstNode::FunctionDefinition {
             name: Some(n),
             parameters,
             body,
+            return_type,
+            location,
             ..
         } = node
         {
-            out.push((n.clone(), parameters.clone(), (**body).clone()));
+            out.push((
+                n.clone(),
+                parameters.clone(),
+                (**body).clone(),
+                return_type.clone(),
+                location.clone(),
+            ));
         }
         for_each_child_def(node, &mut |c| gather(c, out));
     }
@@ -3891,7 +3925,7 @@ fn gather_inline_infos(root: &AstNode) -> HashMap<String, InlineInfo> {
 
     // Direct-call graph for recursion detection.
     let mut callees: HashMap<String, HashSet<String>> = HashMap::new();
-    for (name, _, body) in &defs {
+    for (name, _, body, _, _) in &defs {
         let mut c = HashSet::new();
         collect_called_names(body, &mut c);
         callees.insert(name.clone(), c);
@@ -3913,14 +3947,37 @@ fn gather_inline_infos(root: &AstNode) -> HashMap<String, InlineInfo> {
     };
 
     let mut infos = HashMap::new();
-    for (name, params, body) in defs {
+    for (name, params, body, return_type, location) in defs {
         if is_recursive(&name) {
             continue;
         }
-        if !function_is_inlinable(&params, &body) {
+        // Never inline functions with variadic / defaulted parameters (the binding
+        // prelude assumes one ordered argument per parameter).
+        if params
+            .iter()
+            .any(|p| p.is_variadic || p.default_value.is_some())
+        {
             continue;
         }
-        let size = node_size(&body);
+        // Single-return functions splice directly. Multi-return functions are first
+        // normalized to an equivalent single-tail-return body (structured
+        // early-return elimination); the normalized body is only accepted when it
+        // stays under a per-function size cap. That cap is the selectivity that
+        // keeps relaxing the single-return restriction bounded: a small hot helper
+        // (e.g. `aes_sbox_vec`) inlines and its same-depth multiplies fuse, while a
+        // large early-returning helper stays an opaque call rather than being
+        // spliced at every site and exploding the post-inline unroll.
+        let prepared = if function_is_inlinable(&params, &body) {
+            body
+        } else if !allow_multi_return {
+            continue;
+        } else {
+            match normalize_function_returns(&body, &return_type, &location) {
+                Some(normalized) if node_size(&normalized) <= MULTI_RETURN_INLINE_MAX => normalized,
+                _ => continue,
+            }
+        };
+        let size = node_size(&prepared);
         infos.insert(
             name,
             InlineInfo {
@@ -3932,12 +3989,205 @@ fn gather_inline_infos(root: &AstNode) -> HashMap<String, InlineInfo> {
                         type_annotation: p.type_annotation,
                     })
                     .collect(),
-                body,
+                body: prepared,
                 size,
             },
         );
     }
     infos
+}
+
+/// Largest (post-normalization) body a *multi-return* function may have and still
+/// be inlined. Single-return functions are bounded only by the global inline
+/// budget; multi-return inlining additionally requires the normalized body stay
+/// under this per-function cap. A naive relaxation that inlined every multi-return
+/// function spliced large early-returning helpers at many call sites and exploded
+/// the post-inline unroll; the cap restricts the relaxation to small helpers whose
+/// expansion is bounded.
+const MULTI_RETURN_INLINE_MAX: usize = 6_000;
+
+/// Whole-program AST size (descending into function bodies, see `program_code_size`)
+/// above which multi-return normalization+inlining is disabled entirely. This is
+/// the hard scale guard: multi-return inlining enlarges hot helpers, and stacked on
+/// the existing -O3 inline+unroll a large program can exceed the unroll budget and
+/// fall into the partially-unrolled / heavy-spill regime the large-scale codegen
+/// mishandles (manifesting as IR blowup and a runtime crash). The AES-family
+/// single-block ciphers (CTR ~4.9k) sit well inside the reliable regime and gain
+/// the S-box fusion; the larger encrypt+decrypt programs (CBC ~5.4k) stay on the
+/// conservative single-return-only path, exactly as before this change.
+const MULTI_RETURN_PROGRAM_MAX: usize = 5_120;
+
+/// True when every control-flow path through `node` ends in a `return`.
+fn block_always_returns(node: &AstNode) -> bool {
+    match node {
+        AstNode::Return { .. } => true,
+        AstNode::Block(stmts) => stmts.last().is_some_and(block_always_returns),
+        AstNode::IfExpression {
+            then_branch,
+            else_branch: Some(e),
+            ..
+        } => block_always_returns(then_branch) && block_always_returns(e),
+        _ => false,
+    }
+}
+
+/// An expression the unroller's int env can evaluate (literals, locals, `.len()`,
+/// arithmetic). Used to require that every hoisted early-return guard is a public,
+/// env-foldable condition: only then does the env-aware branch fold delete it
+/// after inlining, so normalization never leaves a residual `if` barrier (a secret
+/// guard would be an illegal secret branch the source could not have contained).
+fn is_int_shape_expr(node: &AstNode) -> bool {
+    match node {
+        AstNode::Literal {
+            value: crate::ast::Value::Int { .. },
+            ..
+        } => true,
+        AstNode::Identifier(..) => true,
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            ..
+        } => {
+            matches!(function.as_ref(), AstNode::Identifier(n, _) if is_len_builtin(n))
+                && arguments.iter().all(is_int_shape_expr)
+        }
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => {
+            matches!(op.as_str(), "+" | "-" | "*" | "/" | "%")
+                && is_int_shape_expr(left)
+                && is_int_shape_expr(right)
+        }
+        _ => false,
+    }
+}
+
+/// A guard condition that the env-aware branch fold can prove constant: an integer
+/// comparison whose operands are both env-evaluable integer shapes.
+fn is_foldable_guard(cond: &AstNode) -> bool {
+    matches!(cond,
+        AstNode::BinaryOperation { op, left, right, .. }
+            if matches!(op.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=")
+                && is_int_shape_expr(left)
+                && is_int_shape_expr(right))
+}
+
+/// Rewrite a statement list so control falls off its end (no `return`), assigning
+/// each return's value to `ret` instead. Trailing statements following a guard
+/// `if cond: <always returns>` are moved into a synthesized `else` (structured
+/// early-return elimination), so the only remaining control merge is the single
+/// tail `return ret` added by [`normalize_function_returns`]. Returns `None` for
+/// any return shape it cannot prove sound to hoist — a return nested in a loop, an
+/// `if` with only some paths returning, or a guard whose condition is not a
+/// foldable integer comparison — leaving the function un-inlined (no miscompile,
+/// only a missed optimization).
+fn rewrite_returns(stmts: &[AstNode], ret: &str) -> Option<Vec<AstNode>> {
+    let mut out: Vec<AstNode> = Vec::new();
+    for (i, s) in stmts.iter().enumerate() {
+        match s {
+            AstNode::Return { value, location } => {
+                if let Some(v) = value {
+                    out.push(AstNode::Assignment {
+                        target: Box::new(AstNode::Identifier(ret.to_string(), location.clone())),
+                        value: v.clone(),
+                        location: location.clone(),
+                    });
+                }
+                // Anything after a return is unreachable; drop it.
+                return Some(out);
+            }
+            AstNode::IfExpression {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let then_terminates = block_always_returns(then_branch);
+                let else_terminates = else_branch
+                    .as_ref()
+                    .is_some_and(|e| block_always_returns(e));
+                if then_terminates && else_branch.is_none() {
+                    // Top-level guard: hoist the trailing statements into a new else.
+                    if !is_foldable_guard(condition) {
+                        return None;
+                    }
+                    let then_rw =
+                        rewrite_returns(&branch_into_stmts((**then_branch).clone()), ret)?;
+                    let else_rw = rewrite_returns(&stmts[i + 1..], ret)?;
+                    out.push(AstNode::IfExpression {
+                        condition: condition.clone(),
+                        then_branch: Box::new(AstNode::Block(then_rw)),
+                        else_branch: Some(Box::new(AstNode::Block(else_rw))),
+                    });
+                    return Some(out);
+                } else if then_terminates && else_terminates {
+                    if !is_foldable_guard(condition) {
+                        return None;
+                    }
+                    let then_rw =
+                        rewrite_returns(&branch_into_stmts((**then_branch).clone()), ret)?;
+                    let else_rw = rewrite_returns(
+                        &branch_into_stmts((**else_branch.as_ref().unwrap()).clone()),
+                        ret,
+                    )?;
+                    out.push(AstNode::IfExpression {
+                        condition: condition.clone(),
+                        then_branch: Box::new(AstNode::Block(then_rw)),
+                        else_branch: Some(Box::new(AstNode::Block(else_rw))),
+                    });
+                    // Both branches return: the rest is unreachable.
+                    return Some(out);
+                } else if count_returns(s) == 0 {
+                    out.push(s.clone());
+                } else {
+                    // Partial returns inside an `if`: not safe to hoist structurally.
+                    return None;
+                }
+            }
+            other => {
+                if count_returns(other) > 0 {
+                    // A return nested in a loop or other construct we don't restructure.
+                    return None;
+                }
+                out.push(other.clone());
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Convert a multi-return function body into an equivalent single-tail-return body
+/// via a synthetic result variable. Returns `None` if the returns cannot be
+/// hoisted soundly. The resulting body is what the inliner splices; its hoisted
+/// guards (e.g. `if n == 0`) are deleted later by the env-aware branch fold once
+/// the call site's lengths are known, restoring a barrier-free straight-line body.
+fn normalize_function_returns(
+    body: &AstNode,
+    return_type: &Option<Box<AstNode>>,
+    location: &SourceLocation,
+) -> Option<AstNode> {
+    let AstNode::Block(stmts) = body else {
+        return None;
+    };
+    let ret = generate_named_temp_name("inlret");
+    let rewritten = rewrite_returns(stmts, &ret)?;
+    let mut out: Vec<AstNode> = Vec::with_capacity(rewritten.len() + 2);
+    // Declare the result with the function's return type so codegen gives it the
+    // right (possibly secret) register; every rewritten path assigns it before the
+    // single tail return below.
+    out.push(AstNode::VariableDeclaration {
+        name: ret.clone(),
+        type_annotation: return_type.clone(),
+        value: None,
+        is_mutable: true,
+        is_secret: type_annotation_is_secret(return_type.as_deref()),
+        location: location.clone(),
+    });
+    out.extend(rewritten);
+    out.push(AstNode::Return {
+        value: Some(Box::new(AstNode::Identifier(ret, location.clone()))),
+        location: location.clone(),
+    });
+    Some(AstNode::Block(out))
 }
 
 /// Like `for_each_child` but also descends into nested function-definition bodies
@@ -3973,7 +4223,16 @@ fn function_is_inlinable(params: &[crate::ast::Parameter], body: &AstNode) -> bo
 /// Entry point: inline non-recursive, single-return functions to a fixpoint
 /// (bounded by `INLINE_BUDGET`), so that nested calls are also inlined.
 pub fn inline_functions(node: AstNode) -> AstNode {
-    let infos = gather_inline_infos(&node);
+    // Multi-return normalization+inlining is an aggressive transform: it enlarges
+    // the functions it touches, which (stacked on the existing -O3 inline+unroll)
+    // can push the post-inline program past the unroll budget into a partially
+    // unrolled, un-foldable, register-spilling regime that the large-scale codegen
+    // does not handle reliably. Restrict it to programs small enough that the
+    // post-inline expansion stays within that reliable regime; larger programs keep
+    // the conservative single-return-only inliner (their multi-return helpers stay
+    // opaque calls, exactly as before this change). See `MULTI_RETURN_PROGRAM_MAX`.
+    let allow_multi_return = program_code_size(&node) <= MULTI_RETURN_PROGRAM_MAX;
+    let infos = gather_inline_infos(&node, allow_multi_return);
     if infos.is_empty() {
         return node;
     }
@@ -4675,6 +4934,58 @@ fn const_eval_bool(node: &AstNode) -> Option<bool> {
                     _ => None,
                 },
                 "or" => match (const_eval_bool(left), const_eval_bool(right)) {
+                    (Some(true), _) | (_, Some(true)) => Some(true),
+                    (Some(false), Some(false)) => Some(false),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Like [`const_eval_bool`] but resolves integer operands through the unroller's
+/// length/int environment, so a comparison over a `.len()`-tracked local (e.g. an
+/// inlined `if n == 0` guard, `n = a.len()`) folds at the call site where the
+/// literal-only [`const_eval_bool`] cannot. Sound: `eval_int` only reports a value
+/// it can statically prove (it already drives loop-bound resolution).
+fn const_eval_bool_env(node: &AstNode, env: &LenEnv) -> Option<bool> {
+    match node {
+        AstNode::Literal {
+            value: crate::ast::Value::Bool(b),
+            ..
+        } => Some(*b),
+        AstNode::UnaryOperation { op, operand, .. } if op == "not" => {
+            const_eval_bool_env(operand, env).map(|b| !b)
+        }
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => {
+            if let (Some(l), Some(r)) = (eval_int(left, env), eval_int(right, env)) {
+                return match op.as_str() {
+                    "==" => Some(l == r),
+                    "!=" => Some(l != r),
+                    "<" => Some(l < r),
+                    ">" => Some(l > r),
+                    "<=" => Some(l <= r),
+                    ">=" => Some(l >= r),
+                    _ => None,
+                };
+            }
+            match op.as_str() {
+                "and" => match (
+                    const_eval_bool_env(left, env),
+                    const_eval_bool_env(right, env),
+                ) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (Some(true), Some(true)) => Some(true),
+                    _ => None,
+                },
+                "or" => match (
+                    const_eval_bool_env(left, env),
+                    const_eval_bool_env(right, env),
+                ) {
                     (Some(true), _) | (_, Some(true)) => Some(true),
                     (Some(false), Some(false)) => Some(false),
                     _ => None,
@@ -5661,6 +5972,33 @@ fn unroll_stmt_list(stmts: Vec<AstNode>, env: &mut LenEnv, budget: &mut usize) -
     let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
     let mut pending: std::collections::VecDeque<AstNode> = stmts.into_iter().collect();
     while let Some(stmt) = pending.pop_front() {
+        // Env-aware constant-branch folding (generalizes `fold_constant_branches`
+        // to conditions over `.len()`/int-tracked locals): when the current env
+        // proves an `if` condition constant, splice the taken branch flat into the
+        // work-list and drop the dead branch. This deletes the public guards left
+        // by multi-return normalization (e.g. an inlined `if n == 0`, n = a.len()),
+        // restoring the barrier-free straight-line region the multiply scheduler
+        // needs. Sound because `const_eval_bool_env` only reports a provable value.
+        if let AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } = &stmt
+        {
+            if let Some(taken) = const_eval_bool_env(condition, env) {
+                let branch = if taken {
+                    Some((**then_branch).clone())
+                } else {
+                    else_branch.as_deref().cloned()
+                };
+                if let Some(b) = branch {
+                    for (offset, produced) in branch_into_stmts(b).into_iter().enumerate() {
+                        pending.insert(offset, produced);
+                    }
+                }
+                continue;
+            }
+        }
         match try_unroll_for(stmt, env, budget) {
             UnrollOutcome::Flattened(iterations) => {
                 // Re-queue the produced statements (preserving order); their env

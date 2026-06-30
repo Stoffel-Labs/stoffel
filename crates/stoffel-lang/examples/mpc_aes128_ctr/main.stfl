@@ -321,14 +321,16 @@ def vnot(x: list[secret bool]) -> list[secret bool]:
 # cost one multiplication in the VM), so SubBytes over the whole state costs the
 # same number of MPC rounds as ONE byte instead of N times as many — the dominant
 # AES speedup.
-# Single-return on purpose: the -O3 inliner only inlines functions with exactly
-# one (tail) return, so an early `if n == 0: return a` guard would keep this
-# helper as an opaque CALL barrier. With it removed, every S-box invocation is
-# spliced into the caller, letting the round scheduler co-batch the same-depth
-# products of independent CTR keystream blocks (the general path already yields
-# an empty result for empty input, so the guard was a redundant fast path).
+# This helper is MULTI-RETURN (the early `if n == 0: return a` fast path below).
+# The -O3 inliner normalizes such functions to a single tail return and inlines
+# them anyway (its early-return guard is folded away once the call-site length is
+# known), so every S-box invocation is still spliced into the caller — letting the
+# round scheduler co-batch the same-depth products of independent CTR keystream
+# blocks. The hand-written single-return form is no longer required for the win.
 def aes_sbox_vec(a: list[list[secret bool]]) -> list[list[secret bool]]:
   var n = a.len()
+  if n == 0:
+    return a
   var u0: list[secret bool] = []
   var u1: list[secret bool] = []
   var u2: list[secret bool] = []
