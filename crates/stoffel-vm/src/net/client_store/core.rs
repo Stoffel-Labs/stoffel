@@ -63,6 +63,11 @@ impl ClientInputStore {
             .collect()
     }
 
+    /// Snapshot the deterministic VM-facing client roster.
+    pub fn snapshot_client_roster(&self) -> Vec<ClientId> {
+        self.client_ids()
+    }
+
     /// Store serialized share bytes from a client.
     pub fn store_client_input_bytes(&self, client_id: ClientId, share_bytes: Vec<Vec<u8>>) {
         self.store_client_shares(

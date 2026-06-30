@@ -2361,6 +2361,36 @@ fn independent_clone_preserves_client_input_snapshot_without_aliasing() {
 }
 
 #[test]
+fn independent_clone_preserves_client_store_counts() {
+    let vm = compile_vm_source(
+        r#"
+def total_clients() -> int64:
+  return ClientStore.get_number_clients()
+
+def input_clients() -> int64:
+  return ClientStore.get_number_input_clients()
+
+def output_clients() -> int64:
+  return ClientStore.get_number_output_clients()
+"#,
+    );
+
+    vm.set_client_roster([20, 10, 30]);
+    vm.store_client_shares(
+        10,
+        vec![ClientShare::untyped(ShareData::Opaque(vec![1].into()))],
+    );
+
+    let mut cloned = vm
+        .try_clone_with_independent_state()
+        .expect("clone VM with client roster");
+
+    assert_eq!(cloned.execute("total_clients").unwrap(), Value::I64(3));
+    assert_eq!(cloned.execute("input_clients").unwrap(), Value::I64(1));
+    assert_eq!(cloned.execute("output_clients").unwrap(), Value::I64(3));
+}
+
+#[test]
 fn vm_open_share_value_uses_configured_mpc_runtime() {
     let vm = VirtualMachine::builder()
         .with_standard_library(false)
