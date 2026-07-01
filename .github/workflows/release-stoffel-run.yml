@@ -71,7 +71,6 @@ jobs:
         include:
           - { target: x86_64-unknown-linux-gnu,  runner: ubuntu-latest }
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
-          - { target: x86_64-apple-darwin,       runner: macos-15-intel }
           - { target: aarch64-apple-darwin,      runner: macos-14 }
     runs-on: ${{ matrix.runner }}
     steps:
@@ -152,7 +151,7 @@ jobs:
             echo
             echo "Install:  curl -fsSL https://get.stoffelmpc.com | sh -s -- --runner-only"
             echo
-            echo "Prebuilt targets: linux x86_64/aarch64, macOS x86_64/aarch64."
+            echo "Prebuilt targets: linux x86_64/aarch64, macOS arm64."
             echo "commit: https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
             echo "Checksums are attached as the SHA256SUMS asset."
           } > "$notes_file"
