@@ -436,6 +436,23 @@ fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
         return Ok(path);
     }
 
+    if !running_from_workspace_target() {
+        if let Some(path) = path_runner() {
+            return Ok(path);
+        }
+    }
+
+    if let Some(workspace_root) = workspace_root() {
+        return Err(Error::Unsupported(format!(
+            "SDK local coordinator execution requires a built workspace stoffel-run binary at {}; build it with `cargo build -p stoffel-vm-runner --bin stoffel-run`, set STOFFEL_RUN_BIN, or call `local_runner_path`",
+            workspace_root
+                .join("target")
+                .join(if cfg!(debug_assertions) { "debug" } else { "release" })
+                .join(format!("stoffel-run{}", std::env::consts::EXE_SUFFIX))
+                .display()
+        )));
+    }
+
     if let Some(path) = path_runner() {
         return Ok(path);
     }
@@ -494,6 +511,17 @@ fn built_workspace_runner() -> Option<PathBuf> {
 fn current_target_profile_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     target_profile_dir_from_exe(&exe)
+}
+
+fn running_from_workspace_target() -> bool {
+    let (Some(workspace_root), Ok(exe)) = (workspace_root(), std::env::current_exe()) else {
+        return false;
+    };
+    path_is_under(&exe, &workspace_root.join("target"))
+}
+
+fn path_is_under(path: &Path, ancestor: &Path) -> bool {
+    path.ancestors().any(|candidate| candidate == ancestor)
 }
 
 fn target_profile_dir_from_exe(exe: &Path) -> Option<PathBuf> {
@@ -720,7 +748,7 @@ fn sdk_value_from_vm_value(
 #[cfg(test)]
 mod tests {
     use super::{
-        find_binary_in_path, local_program_output_without_return_markers,
+        find_binary_in_path, local_program_output_without_return_markers, path_is_under,
         target_profile_dir_from_exe,
     };
     use std::path::PathBuf;
@@ -768,5 +796,17 @@ mod tests {
             target_profile_dir_from_exe(&exe),
             Some(["workspace", "target", "debug"].iter().collect())
         );
+    }
+
+    #[test]
+    fn path_is_under_detects_workspace_target_executables() {
+        let exe: PathBuf = ["workspace", "target", "debug", "deps", "sdk_usage-abc"]
+            .iter()
+            .collect();
+        let target: PathBuf = ["workspace", "target"].iter().collect();
+        let other: PathBuf = ["workspace", "other-target"].iter().collect();
+
+        assert!(path_is_under(&exe, &target));
+        assert!(!path_is_under(&exe, &other));
     }
 }
