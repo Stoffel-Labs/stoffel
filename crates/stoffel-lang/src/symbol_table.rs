@@ -1176,6 +1176,7 @@ mod tests {
             "add",
             "sub",
             "neg",
+            "add_constant",
             "add_scalar",
             "mul_scalar",
             "mul",

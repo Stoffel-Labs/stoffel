@@ -940,7 +940,8 @@ impl<'a> Planner<'a> {
             | "ClientStore.take_share_fixed" => AbstractValue::secret(),
 
             // --- Free MPC builtins (secrecy effects only, no demand) ---------
-            "Share.add" | "Share.sub" | "Share.mul_scalar" => AbstractValue::secret(),
+            "Share.add" | "Share.sub" | "Share.mul_scalar" | "Share.add_constant"
+            | "Share.add_scalar" => AbstractValue::secret(),
             "Share.from_clear"
             | "Share.from_clear_int"
             | "Share.from_clear_uint"
@@ -1238,6 +1239,7 @@ mod tests {
                     print_ir: false,
                     mpc_backend: MpcBackend::HoneyBadger,
                     mpc_curve: Default::default(),
+                    entry_points: Vec::new(),
                 };
                 let program = compile(&src, "t.stfl", &options).expect("compile should succeed");
                 program.client_io_manifest.preprocessing_demand

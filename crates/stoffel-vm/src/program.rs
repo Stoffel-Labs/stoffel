@@ -5,8 +5,8 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use stoffel_vm_types::activations::{ActivationRecord, ActivationResult, InstructionPointer};
 use stoffel_vm_types::core_types::{Closure, Upvalue, Value};
-use stoffel_vm_types::functions::VMFunction;
-use stoffel_vm_types::instructions::Instruction;
+use stoffel_vm_types::functions::{ResolvedFunctionHeader, VMFunction};
+use stoffel_vm_types::instructions::{Instruction, ResolvedInstructionInput};
 use stoffel_vm_types::registers::RegisterLayout;
 
 /// Minimal owned metadata needed to push a VM call frame.
@@ -30,6 +30,20 @@ impl VmCallTarget {
             parameters: function.parameters().to_vec(),
             upvalues: function.upvalues().to_vec(),
             frame_register_count: function.register_count(),
+            runtime,
+        }
+    }
+
+    fn from_resolved_header(
+        header: ResolvedFunctionHeader,
+        frame_register_count: usize,
+        runtime: Arc<RuntimeFunction>,
+    ) -> Self {
+        Self {
+            name: Arc::from(header.name),
+            parameters: header.parameters,
+            upvalues: header.upvalues,
+            frame_register_count,
             runtime,
         }
     }
@@ -179,6 +193,32 @@ impl Program {
 
     pub(crate) fn try_insert_without_vm_source(&mut self, function: Function) -> VmResult<()> {
         self.try_insert_with_source_retention(function, false)
+    }
+
+    pub(crate) fn try_insert_resolved_without_vm_source(
+        &mut self,
+        header: ResolvedFunctionHeader,
+        next_instruction: impl FnMut() -> Option<ResolvedInstructionInput>,
+    ) -> VmResult<()> {
+        let name = header.name.clone();
+        if self.functions.contains_key(&name) {
+            return Err(VmError::FunctionAlreadyRegistered { function: name });
+        }
+
+        let (runtime, frame_register_count) =
+            RuntimeFunction::from_resolved_instruction_input_stream(&header, next_instruction)?;
+        let runtime = Arc::new(runtime);
+        let call_target =
+            VmCallTarget::from_resolved_header(header, frame_register_count, Arc::clone(&runtime));
+        self.functions.insert(
+            name,
+            RegisteredFunction::Vm {
+                source: None,
+                runtime,
+                call_target: Arc::new(call_target),
+            },
+        );
+        Ok(())
     }
 
     pub fn try_insert_method(

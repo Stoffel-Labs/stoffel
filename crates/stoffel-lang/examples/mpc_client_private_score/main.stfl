@@ -1,6 +1,6 @@
 def normalize_score(raw_score: Share) -> Share:
-  var adjusted = raw_score.add_scalar(25)
-  adjusted = adjusted.add_scalar(25)
+  var adjusted = raw_score.add_constant(25)
+  adjusted = adjusted.add_constant(25)
   return adjusted.mul_scalar(2)
 
 def main() -> int64:

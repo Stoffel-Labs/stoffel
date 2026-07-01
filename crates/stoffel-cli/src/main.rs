@@ -1319,10 +1319,7 @@ async fn test(args: TestArgs) -> Result<()> {
         if !files.iter().any(|file| test_name_matches_file(file, name)) {
             let mut matching = Vec::new();
             for file in &files {
-                let runtime = Stoffel::compile_file(file)
-                    .and_then(|builder| builder.build())
-                    .with_context(|| format!("failed to compile {}", file.display()))?;
-                if runtime.program().function(name).is_some() {
+                if source_declares_function(file, name)? {
                     matching.push(file.clone());
                 }
             }
@@ -1335,9 +1332,12 @@ async fn test(args: TestArgs) -> Result<()> {
 
     let mut failures = 0;
     for file in &files {
-        let builder = Stoffel::compile_file(file)?;
+        let entry = selected_test_entry(file, args.test.as_deref())?;
+        let mut builder = Stoffel::compile_file(file)?;
+        if entry != "main" {
+            builder = builder.entry_points([entry]);
+        }
         let mut runtime = builder.build()?;
-        let entry = selected_test_entry(runtime.program(), file, args.test.as_deref());
         validate_test_entry_has_no_parameters(runtime.program(), entry, file)?;
         let result = if args.local {
             if let Some(path) = &args.runner {
@@ -1413,16 +1413,13 @@ fn validate_test_path_hint(path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn selected_test_entry<'a>(program: &Program, file: &Path, test: Option<&'a str>) -> &'a str {
+fn selected_test_entry<'a>(file: &Path, test: Option<&'a str>) -> Result<&'a str> {
     if let Some(name) = test {
-        if program.function(name).is_some() {
-            return name;
-        }
-        if !test_name_matches_file(file, name) {
-            return name;
+        if source_declares_function(file, name)? {
+            return Ok(name);
         }
     }
-    "main"
+    Ok("main")
 }
 
 fn ensure_test_file_path(path: &Path) -> Result<()> {

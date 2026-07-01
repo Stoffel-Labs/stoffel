@@ -4448,13 +4448,30 @@ async fn main() {
         (function_count, bytecode_version, client_io_manifest)
     } else {
         // Register all functions as they are read and lowered to avoid retaining
-        // the compiled function table beside the runtime program.
+        // the compiled or resolved function table beside the runtime program.
         let f = File::open(&load_path).expect("open binary file");
-        match CompiledBinary::try_for_each_vm_function_from_reader(&mut BufReader::new(f), |f| {
-            vm.try_register_function_without_source(f)
-                .map_err(|err| BinaryError::InvalidData(format!("invalid VM function: {err}")))?;
-            Ok(())
-        }) {
+        match CompiledBinary::try_for_each_resolved_vm_function_from_reader(
+            &mut BufReader::new(f),
+            |header, stream| {
+                let mut stream_error = None;
+                let result = vm.try_register_resolved_function_without_source(header, || {
+                    match stream.next_instruction() {
+                        Ok(instruction) => instruction,
+                        Err(err) => {
+                            stream_error = Some(err);
+                            None
+                        }
+                    }
+                });
+                if let Some(err) = stream_error {
+                    return Err(err);
+                }
+                result.map_err(|err| {
+                    BinaryError::InvalidData(format!("invalid VM function: {err}"))
+                })?;
+                Ok(())
+            },
+        ) {
             Ok(result) => result,
             Err(err) => {
                 eprintln!("Error: invalid compiled program: {:?}", err);

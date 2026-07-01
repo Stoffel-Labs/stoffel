@@ -53,6 +53,7 @@ const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Share.add",
     "Share.sub",
     "Share.neg",
+    "Share.add_constant",
     "Share.add_scalar",
     "Share.mul_scalar",
     "Share.mul",

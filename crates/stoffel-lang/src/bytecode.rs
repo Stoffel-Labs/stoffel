@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use stoffel_vm_types::compiled_binary::ClientIoManifest;
 pub(crate) use stoffel_vm_types::core_types::{ShareData, Value, F64};
 pub(crate) use stoffel_vm_types::instructions::Instruction;
@@ -157,7 +159,7 @@ pub enum ResolvedInstruction {
 pub struct BytecodeChunk {
     pub instructions: Vec<Instruction>,
     pub constants: Vec<Constant>,
-    pub labels: std::collections::HashMap<String, usize>,
+    pub labels: HashMap<String, usize>,
     pub parameters: Vec<String>,
     pub parameter_types: Vec<stoffel_vm_types::compiled_binary::FunctionType>,
     pub return_type: stoffel_vm_types::compiled_binary::FunctionType,
@@ -169,8 +171,85 @@ pub struct BytecodeChunk {
 #[derive(Debug, Clone, Default)]
 pub struct CompiledProgram {
     pub main_chunk: BytecodeChunk,
-    pub function_chunks: std::collections::HashMap<String, BytecodeChunk>,
+    pub function_chunks: HashMap<String, BytecodeChunk>,
     pub client_io_manifest: ClientIoManifest,
+}
+
+impl CompiledProgram {
+    /// Remove function chunks that cannot be reached from the executable entry chunk.
+    ///
+    /// The compiler promotes `def main` and pragma-entry functions into `main_chunk`,
+    /// but optimization can inline their callees before bytecode emission. Without
+    /// this pass, the original function chunks are still serialized into binaries
+    /// even when no remaining instruction can call them.
+    pub fn prune_unreachable_functions(&mut self) -> Vec<String> {
+        self.prune_unreachable_functions_with_roots(std::iter::empty::<&str>())
+    }
+
+    /// Remove function chunks that cannot be reached from the executable entry
+    /// chunk or any explicitly named extra entrypoint.
+    pub fn prune_unreachable_functions_with_roots<'a>(
+        &mut self,
+        extra_roots: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
+        let extra_roots: Vec<&str> = extra_roots.into_iter().collect();
+        if self.main_chunk.instructions.is_empty() && extra_roots.is_empty() {
+            return Vec::new();
+        }
+
+        let mut reachable = HashSet::new();
+        let mut worklist = Vec::new();
+        collect_reachable_calls(
+            &self.main_chunk.instructions,
+            &self.function_chunks,
+            &mut reachable,
+            &mut worklist,
+        );
+        for root in extra_roots {
+            if self.function_chunks.contains_key(root) && reachable.insert(root.to_owned()) {
+                worklist.push(root.to_owned());
+            }
+        }
+
+        while let Some(function_name) = worklist.pop() {
+            if let Some(chunk) = self.function_chunks.get(&function_name) {
+                collect_reachable_calls(
+                    &chunk.instructions,
+                    &self.function_chunks,
+                    &mut reachable,
+                    &mut worklist,
+                );
+            }
+        }
+
+        let mut removed = Vec::new();
+        self.function_chunks.retain(|name, _| {
+            let keep = reachable.contains(name);
+            if !keep {
+                removed.push(name.clone());
+            }
+            keep
+        });
+        removed.sort();
+        removed
+    }
+}
+
+fn collect_reachable_calls(
+    instructions: &[Instruction],
+    function_chunks: &HashMap<String, BytecodeChunk>,
+    reachable: &mut HashSet<String>,
+    worklist: &mut Vec<String>,
+) {
+    for instruction in instructions {
+        if let Instruction::CALL(function_name) = instruction {
+            if function_chunks.contains_key(function_name)
+                && reachable.insert(function_name.clone())
+            {
+                worklist.push(function_name.clone());
+            }
+        }
+    }
 }
 
 impl BytecodeChunk {

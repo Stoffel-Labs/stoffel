@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use stoffel_vm_types::activations::{CompareFlag, InstructionPointer};
 use stoffel_vm_types::core_types::Value;
-use stoffel_vm_types::functions::VMFunction;
-use stoffel_vm_types::instructions::ResolvedInstruction;
+use stoffel_vm_types::functions::{ResolvedFunctionHeader, VMFunction};
+use stoffel_vm_types::instructions::{ResolvedInstruction, ResolvedInstructionInput};
 use stoffel_vm_types::registers::{RegisterIndex, RETURN_REGISTER_INDEX};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -557,6 +557,58 @@ impl RuntimeFunction {
         })
     }
 
+    pub(crate) fn from_resolved_instruction_input_stream(
+        header: &ResolvedFunctionHeader,
+        mut next_instruction: impl FnMut() -> Option<ResolvedInstructionInput>,
+    ) -> VmResult<(Self, usize)> {
+        let mut constants = RuntimeConstantInterner::default();
+        let mut call_targets = RuntimeCallTargetInterner::default();
+        let mut instructions = Vec::with_capacity(header.instruction_count);
+        let mut max_register = header
+            .parameters
+            .len()
+            .checked_sub(1)
+            .and_then(|register| u32::try_from(register).ok());
+
+        for _ in 0..header.instruction_count {
+            let instruction =
+                next_instruction().ok_or_else(|| VmError::RuntimeInstructionMetadataMismatch {
+                    function: header.name.clone(),
+                    resolved_instruction_count: instructions.len(),
+                    source_instruction_count: header.instruction_count,
+                })?;
+            let (instruction, instruction_max_register) = lower_instruction_input(
+                instruction,
+                header.instruction_count,
+                &mut constants,
+                &mut call_targets,
+            )?;
+            max_register = max_optional(max_register, instruction_max_register);
+            instructions.push(RuntimeInstructionEntry { instruction });
+        }
+
+        if next_instruction().is_some() {
+            return Err(VmError::RuntimeInstructionMetadataMismatch {
+                function: header.name.clone(),
+                resolved_instruction_count: header.instruction_count + 1,
+                source_instruction_count: header.instruction_count,
+            });
+        }
+
+        let frame_register_count = header
+            .register_count
+            .max(max_register.map_or(0, |register| register as usize + 1));
+
+        Ok((
+            Self {
+                instructions,
+                constants: constants.into_values(),
+                call_targets: call_targets.into_values(),
+            },
+            frame_register_count,
+        ))
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.instructions.len()
@@ -701,6 +753,159 @@ impl RuntimeCallTargetInterner {
     }
 }
 
+fn lower_instruction_input(
+    instruction: ResolvedInstructionInput,
+    instruction_count: usize,
+    constants: &mut RuntimeConstantInterner,
+    call_targets: &mut RuntimeCallTargetInterner,
+) -> VmResult<(PackedRuntimeInstruction, Option<u32>)> {
+    Ok(match instruction {
+        ResolvedInstructionInput::NOP => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::Noop, 0, 0, 0),
+            None,
+        ),
+        ResolvedInstructionInput::LD(dest, offset) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::LoadStack, dest, offset as u32, 0),
+            Some(dest),
+        ),
+        ResolvedInstructionInput::LDI(dest, value) => {
+            let constant = constants.intern(value)?;
+            (
+                PackedRuntimeInstruction::new(
+                    RuntimeOpcode::LoadImmediate,
+                    dest,
+                    constant.raw(),
+                    0,
+                ),
+                Some(dest),
+            )
+        }
+        ResolvedInstructionInput::MOV(dest, src) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::Move, dest, src, 0),
+            Some(dest.max(src)),
+        ),
+        ResolvedInstructionInput::ADD(dest, lhs, rhs) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::Add, dest, lhs, rhs),
+            Some(dest.max(lhs).max(rhs)),
+        ),
+        ResolvedInstructionInput::SUB(dest, lhs, rhs) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::Subtract, dest, lhs, rhs),
+            Some(dest.max(lhs).max(rhs)),
+        ),
+        ResolvedInstructionInput::MUL(dest, lhs, rhs) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::Multiply, dest, lhs, rhs),
+            Some(dest.max(lhs).max(rhs)),
+        ),
+        ResolvedInstructionInput::DIV(dest, lhs, rhs) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::Divide, dest, lhs, rhs),
+            Some(dest.max(lhs).max(rhs)),
+        ),
+        ResolvedInstructionInput::MOD(dest, lhs, rhs) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::Modulo, dest, lhs, rhs),
+            Some(dest.max(lhs).max(rhs)),
+        ),
+        ResolvedInstructionInput::AND(dest, lhs, rhs) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::BitAnd, dest, lhs, rhs),
+            Some(dest.max(lhs).max(rhs)),
+        ),
+        ResolvedInstructionInput::OR(dest, lhs, rhs) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::BitOr, dest, lhs, rhs),
+            Some(dest.max(lhs).max(rhs)),
+        ),
+        ResolvedInstructionInput::XOR(dest, lhs, rhs) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::BitXor, dest, lhs, rhs),
+            Some(dest.max(lhs).max(rhs)),
+        ),
+        ResolvedInstructionInput::NOT(dest, src) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::BitNot, dest, src, 0),
+            Some(dest.max(src)),
+        ),
+        ResolvedInstructionInput::SHL(dest, src, amount) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::ShiftLeft, dest, src, amount),
+            Some(dest.max(src).max(amount)),
+        ),
+        ResolvedInstructionInput::SHR(dest, src, amount) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::ShiftRight, dest, src, amount),
+            Some(dest.max(src).max(amount)),
+        ),
+        ResolvedInstructionInput::JMP(target) => (
+            lower_jump(
+                RuntimeJumpCondition::Always,
+                target as usize,
+                instruction_count,
+            )?,
+            None,
+        ),
+        ResolvedInstructionInput::JMPEQ(target) => (
+            lower_jump(
+                RuntimeJumpCondition::Equal,
+                target as usize,
+                instruction_count,
+            )?,
+            None,
+        ),
+        ResolvedInstructionInput::JMPNEQ(target) => (
+            lower_jump(
+                RuntimeJumpCondition::NotEqual,
+                target as usize,
+                instruction_count,
+            )?,
+            None,
+        ),
+        ResolvedInstructionInput::JMPLT(target) => (
+            lower_jump(
+                RuntimeJumpCondition::Less,
+                target as usize,
+                instruction_count,
+            )?,
+            None,
+        ),
+        ResolvedInstructionInput::JMPGT(target) => (
+            lower_jump(
+                RuntimeJumpCondition::Greater,
+                target as usize,
+                instruction_count,
+            )?,
+            None,
+        ),
+        ResolvedInstructionInput::CALL(function_name) => {
+            let target = call_targets.intern(&function_name)?;
+            (
+                PackedRuntimeInstruction::new(RuntimeOpcode::Call, target.raw(), 0, 0),
+                None,
+            )
+        }
+        ResolvedInstructionInput::RET(src) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::Return, src, 0, 0),
+            Some(src),
+        ),
+        ResolvedInstructionInput::PUSHARG(src) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::PushArg, src, 0, 0),
+            Some(src),
+        ),
+        ResolvedInstructionInput::CMP(lhs, rhs) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::Compare, lhs, rhs, 0),
+            Some(lhs.max(rhs)),
+        ),
+        ResolvedInstructionInput::LDS(dest, slot) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::SpillLoad, dest, slot, 0),
+            Some(dest),
+        ),
+        ResolvedInstructionInput::STS(slot, src) => (
+            PackedRuntimeInstruction::new(RuntimeOpcode::SpillStore, slot, src, 0),
+            Some(src),
+        ),
+    })
+}
+
+fn max_optional(lhs: Option<u32>, rhs: Option<u32>) -> Option<u32> {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => Some(lhs.max(rhs)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
 fn lower_instruction_from_parts(
     register_count: usize,
     constant_values: Option<&[Value]>,
@@ -714,16 +919,16 @@ fn lower_instruction_from_parts(
         ResolvedInstruction::NOP => PackedRuntimeInstruction::new(RuntimeOpcode::Noop, 0, 0, 0),
         ResolvedInstruction::LD(dest, offset) => PackedRuntimeInstruction::new(
             RuntimeOpcode::LoadStack,
-            reg(register_count, dest)?.raw(),
+            reg(register_count, dest as usize)?.raw(),
             offset as u32,
             0,
         ),
         ResolvedInstruction::LDI(dest, const_idx) => {
-            let value = get_constant_value(constant_values, const_idx)?;
+            let value = get_constant_value(constant_values, const_idx as usize)?;
             let constant = constants.intern(value)?;
             PackedRuntimeInstruction::new(
                 RuntimeOpcode::LoadImmediate,
-                reg(register_count, dest)?.raw(),
+                reg(register_count, dest as usize)?.raw(),
                 constant.raw(),
                 0,
             )
@@ -764,54 +969,65 @@ fn lower_instruction_from_parts(
         ResolvedInstruction::SHR(dest, src, amount) => {
             pack3(RuntimeOpcode::ShiftRight, register_count, dest, src, amount)?
         }
-        ResolvedInstruction::JMP(target) => {
-            lower_jump(RuntimeJumpCondition::Always, target, instruction_count)?
-        }
-        ResolvedInstruction::JMPEQ(target) => {
-            lower_jump(RuntimeJumpCondition::Equal, target, instruction_count)?
-        }
-        ResolvedInstruction::JMPNEQ(target) => {
-            lower_jump(RuntimeJumpCondition::NotEqual, target, instruction_count)?
-        }
-        ResolvedInstruction::JMPLT(target) => {
-            lower_jump(RuntimeJumpCondition::Less, target, instruction_count)?
-        }
-        ResolvedInstruction::JMPGT(target) => {
-            lower_jump(RuntimeJumpCondition::Greater, target, instruction_count)?
-        }
+        ResolvedInstruction::JMP(target) => lower_jump(
+            RuntimeJumpCondition::Always,
+            target as usize,
+            instruction_count,
+        )?,
+        ResolvedInstruction::JMPEQ(target) => lower_jump(
+            RuntimeJumpCondition::Equal,
+            target as usize,
+            instruction_count,
+        )?,
+        ResolvedInstruction::JMPNEQ(target) => lower_jump(
+            RuntimeJumpCondition::NotEqual,
+            target as usize,
+            instruction_count,
+        )?,
+        ResolvedInstruction::JMPLT(target) => lower_jump(
+            RuntimeJumpCondition::Less,
+            target as usize,
+            instruction_count,
+        )?,
+        ResolvedInstruction::JMPGT(target) => lower_jump(
+            RuntimeJumpCondition::Greater,
+            target as usize,
+            instruction_count,
+        )?,
         ResolvedInstruction::CALL(func_idx) => {
-            let func_name = get_function_name(constant_values, call_target_names, func_idx)?;
+            let func_name =
+                get_function_name(constant_values, call_target_names, func_idx as usize)?;
             let target = call_targets.intern(func_name)?;
             PackedRuntimeInstruction::new(RuntimeOpcode::Call, target.raw(), 0, 0)
         }
         ResolvedInstruction::RET(src) => PackedRuntimeInstruction::new(
             RuntimeOpcode::Return,
-            reg(register_count, src)?.raw(),
+            reg(register_count, src as usize)?.raw(),
             0,
             0,
         ),
         ResolvedInstruction::PUSHARG(src) => PackedRuntimeInstruction::new(
             RuntimeOpcode::PushArg,
-            reg(register_count, src)?.raw(),
+            reg(register_count, src as usize)?.raw(),
             0,
             0,
         ),
         ResolvedInstruction::CMP(lhs, rhs) => PackedRuntimeInstruction::new(
             RuntimeOpcode::Compare,
-            reg(register_count, lhs)?.raw(),
-            reg(register_count, rhs)?.raw(),
+            reg(register_count, lhs as usize)?.raw(),
+            reg(register_count, rhs as usize)?.raw(),
             0,
         ),
         ResolvedInstruction::LDS(dest, slot) => PackedRuntimeInstruction::new(
             RuntimeOpcode::SpillLoad,
-            reg(register_count, dest)?.raw(),
-            u32::try_from(slot).map_err(|_| VmError::ConstantOutOfBounds { index: slot })?,
+            reg(register_count, dest as usize)?.raw(),
+            slot,
             0,
         ),
         ResolvedInstruction::STS(slot, src) => PackedRuntimeInstruction::new(
             RuntimeOpcode::SpillStore,
-            u32::try_from(slot).map_err(|_| VmError::ConstantOutOfBounds { index: slot })?,
-            reg(register_count, src)?.raw(),
+            slot,
+            reg(register_count, src as usize)?.raw(),
             0,
         ),
     })
@@ -820,13 +1036,13 @@ fn lower_instruction_from_parts(
 fn pack2(
     opcode: RuntimeOpcode,
     register_count: usize,
-    a: usize,
-    b: usize,
+    a: u32,
+    b: u32,
 ) -> VmResult<PackedRuntimeInstruction> {
     Ok(PackedRuntimeInstruction::new(
         opcode,
-        reg(register_count, a)?.raw(),
-        reg(register_count, b)?.raw(),
+        reg(register_count, a as usize)?.raw(),
+        reg(register_count, b as usize)?.raw(),
         0,
     ))
 }
@@ -834,15 +1050,15 @@ fn pack2(
 fn pack3(
     opcode: RuntimeOpcode,
     register_count: usize,
-    a: usize,
-    b: usize,
-    c: usize,
+    a: u32,
+    b: u32,
+    c: u32,
 ) -> VmResult<PackedRuntimeInstruction> {
     Ok(PackedRuntimeInstruction::new(
         opcode,
-        reg(register_count, a)?.raw(),
-        reg(register_count, b)?.raw(),
-        reg(register_count, c)?.raw(),
+        reg(register_count, a as usize)?.raw(),
+        reg(register_count, b as usize)?.raw(),
+        reg(register_count, c as usize)?.raw(),
     ))
 }
 

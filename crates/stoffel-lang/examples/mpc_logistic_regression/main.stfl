@@ -64,7 +64,7 @@ def bit_decompose(a: Share, l: int64, kappa: int64) -> list[Share]:
 
 # Secret-shared [a < b] for a, b in [0, 2^l): masked reveal + carry chain.
 def less_than(a: Share, b: Share, l: int64, kappa: int64) -> Share:
-  var z = Share.add_scalar(Share.sub(Share.retag(a, 64), Share.retag(b, 64)), pow2(l))
+  var z = Share.add_constant(Share.sub(Share.retag(a, 64), Share.retag(b, 64)), pow2(l))
   var rbits: list[Share] = []
   var i = 0
   while i < (l + 1):
@@ -108,7 +108,7 @@ def equal(a: Share, b: Share, l: int64, kappa: int64) -> Share:
 
 # Sign test: x >= 0 for signed x in (-2^(l-1), 2^(l-1)).
 def is_nonneg(x: Share, l: int64, kappa: int64) -> Share:
-  var u = Share.add_scalar(x, pow2(l - 1))
+  var u = Share.add_constant(x, pow2(l - 1))
   var neg = less_than(u, Share.from_clear_int(pow2(l - 1), l), l, kappa)   # x < 0
   return Share.sub(Share.from_clear_int(1, 1), neg)
 
