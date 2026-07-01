@@ -428,22 +428,16 @@ fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
         });
     }
 
+    if let Some(path) = built_workspace_runner() {
+        return Ok(path);
+    }
+
     if let Some(path) = sibling_runner() {
         return Ok(path);
     }
 
     if let Some(path) = path_runner() {
         return Ok(path);
-    }
-
-    if let Some(workspace_root) = workspace_root() {
-        let candidate = workspace_root
-            .join("target")
-            .join("debug")
-            .join("stoffel-run");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
     }
 
     Err(Error::Unsupported(
@@ -464,6 +458,56 @@ fn sibling_runner() -> Option<PathBuf> {
 /// Look for a `stoffel-run` binary anywhere on the user's PATH.
 fn path_runner() -> Option<PathBuf> {
     find_binary_on_path("stoffel-run")
+}
+
+fn built_workspace_runner() -> Option<PathBuf> {
+    let workspace_root = workspace_root()?;
+    let mut candidates = Vec::new();
+
+    if let Some(profile_dir) = current_target_profile_dir() {
+        candidates.push(profile_dir.join(format!("stoffel-run{}", std::env::consts::EXE_SUFFIX)));
+    }
+
+    candidates.push(
+        workspace_root
+            .join("target")
+            .join(if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            })
+            .join(format!("stoffel-run{}", std::env::consts::EXE_SUFFIX)),
+    );
+
+    candidates.push(
+        workspace_root
+            .join("target")
+            .join("debug")
+            .join(format!("stoffel-run{}", std::env::consts::EXE_SUFFIX)),
+    );
+
+    candidates
+        .into_iter()
+        .find(|candidate| is_executable_file(candidate))
+}
+
+fn current_target_profile_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    target_profile_dir_from_exe(&exe)
+}
+
+fn target_profile_dir_from_exe(exe: &Path) -> Option<PathBuf> {
+    let parent = exe.parent()?;
+    let profile_dir = if parent.file_name().is_some_and(|name| name == "deps") {
+        parent.parent()?
+    } else {
+        parent
+    };
+    profile_dir
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "target")
+        .then(|| profile_dir.to_path_buf())
 }
 
 fn find_binary_on_path(binary_name: &str) -> Option<PathBuf> {
@@ -675,7 +719,11 @@ fn sdk_value_from_vm_value(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_binary_in_path, local_program_output_without_return_markers};
+    use super::{
+        find_binary_in_path, local_program_output_without_return_markers,
+        target_profile_dir_from_exe,
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn local_program_output_filter_removes_runner_return_markers() {
@@ -708,5 +756,17 @@ mod tests {
         let path = std::env::join_paths([missing_dir.path(), bin_dir.path()]).unwrap();
 
         assert_eq!(find_binary_in_path("stoffel-run", &path), Some(binary));
+    }
+
+    #[test]
+    fn target_profile_dir_from_test_exe_uses_parent_of_deps_dir() {
+        let exe: PathBuf = ["workspace", "target", "debug", "deps", "sdk_usage-abc"]
+            .iter()
+            .collect();
+
+        assert_eq!(
+            target_profile_dir_from_exe(&exe),
+            Some(["workspace", "target", "debug"].iter().collect())
+        );
     }
 }
