@@ -3,10 +3,12 @@
 #
 #   curl -fsSL https://get.stoffelmpc.com | sh
 #   curl -fsSL https://get.stoffelmpc.com | sh -s -- --version 0.1.0
+#   curl -fsSL https://get.stoffelmpc.com | sh -s -- --runner-only
 #
 # Env overrides:
 #   STOFFEL_VERSION       pin a version (same as --version)
 #   STOFFEL_INSTALL_DIR   install location (default: ~/.local/bin)
+#   STOFFEL_COMPONENT     install "cli" (default) or "runner"
 set -eu
 
 REPO="Stoffel-Labs/stoffel"
@@ -14,18 +16,27 @@ BIN="stoffel"
 RUNNER="stoffel-run"
 INSTALL_DIR="${STOFFEL_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${STOFFEL_VERSION:-}"
+COMPONENT="${STOFFEL_COMPONENT:-cli}"
 
 err()  { echo "stoffel-install: error: $*" >&2; exit 1; }
 info() { echo "stoffel-install: $*"; }
 
-# --- args (only --version) ---
+# --- args ---
 while [ $# -gt 0 ]; do
   case "$1" in
     --version)   VERSION="${2:-}"; shift 2 ;;
     --version=*) VERSION="${1#--version=}"; shift ;;
+    --runner-only) COMPONENT="runner"; shift ;;
+    --component)   COMPONENT="${2:-}"; shift 2 ;;
+    --component=*) COMPONENT="${1#--component=}"; shift ;;
     *) err "unknown argument: $1" ;;
   esac
 done
+
+case "$COMPONENT" in
+  cli|runner) ;;
+  *) err "unsupported component '$COMPONENT' (expected 'cli' or 'runner')" ;;
+esac
 
 # --- downloader (curl or wget) ---
 if command -v curl >/dev/null 2>&1; then
@@ -53,21 +64,32 @@ esac
 TARGET="${arch_part}-${os_part}"
 
 # --- resolve release tag/version ---
+case "$COMPONENT" in
+  cli)
+    prefix="cli-v"
+    archive_name="stoffel"
+    ;;
+  runner)
+    prefix="stoffel-run-v"
+    archive_name="$RUNNER"
+    ;;
+esac
+
 if [ -n "$VERSION" ]; then
-  TAG="cli-v${VERSION}"
+  TAG="${prefix}${VERSION}"
 else
-  info "resolving latest CLI release..."
+  info "resolving latest ${COMPONENT} release..."
   TAG="$(dlout "https://api.github.com/repos/${REPO}/releases" 2>/dev/null \
     | grep '"tag_name"' \
     | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/' \
-    | grep '^cli-v' | head -n 1 || true)"
-  [ -n "$TAG" ] || err "no cli-v* release found for ${REPO} (has a CLI release been cut yet?)"
-  VERSION="${TAG#cli-v}"
+    | grep "^${prefix}" | head -n 1 || true)"
+  [ -n "$TAG" ] || err "no ${prefix}* release found for ${REPO} (has a release been cut yet?)"
+  VERSION="${TAG#$prefix}"
 fi
 
-TARBALL="stoffel-${VERSION}-${TARGET}.tar.gz"
+TARBALL="${archive_name}-${VERSION}-${TARGET}.tar.gz"
 BASE="https://github.com/${REPO}/releases/download/${TAG}"
-info "installing ${BIN} ${VERSION} (${TARGET})"
+info "installing ${COMPONENT} ${VERSION} (${TARGET})"
 
 # --- temp workspace ---
 tmp="$(mktemp -d)"
@@ -115,8 +137,15 @@ install_binary() {
 
 # The CLI is required; the runner powers local MPC execution (`stoffel run`,
 # `stoffel dev`). `stoffel` discovers `stoffel-run` as a sibling on disk.
-install_binary "$BIN" 1
-install_binary "$RUNNER" 0
+case "$COMPONENT" in
+  cli)
+    install_binary "$BIN" 1
+    install_binary "$RUNNER" 1
+    ;;
+  runner)
+    install_binary "$RUNNER" 1
+    ;;
+esac
 
 # --- PATH hint ---
 case ":${PATH}:" in
@@ -130,7 +159,17 @@ case ":${PATH}:" in
 esac
 
 # --- confirm ---
-if "$INSTALL_DIR/${BIN}" --version >/dev/null 2>&1; then
-  info "$("$INSTALL_DIR/${BIN}" --version)"
-fi
-info "done — run '${BIN} --help' to get started"
+case "$COMPONENT" in
+  cli)
+    if "$INSTALL_DIR/${BIN}" --version >/dev/null 2>&1; then
+      info "$("$INSTALL_DIR/${BIN}" --version)"
+    fi
+    info "done — run '${BIN} --help' to get started"
+    ;;
+  runner)
+    if "$INSTALL_DIR/${RUNNER}" --help >/dev/null 2>&1; then
+      info "${RUNNER} installed"
+    fi
+    info "done — run '${RUNNER} --help' to get started"
+    ;;
+esac
