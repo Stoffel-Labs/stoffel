@@ -114,7 +114,7 @@ info "checksum verified"
 
 # --- extract & install ---
 tar xzf "$TARBALL"
-stage="stoffel-${VERSION}-${TARGET}"
+stage="${archive_name}-${VERSION}-${TARGET}"
 
 mkdir -p "$INSTALL_DIR"
 
@@ -167,8 +167,17 @@ case "$COMPONENT" in
     info "done — run '${BIN} --help' to get started"
     ;;
   runner)
-    if "$INSTALL_DIR/${RUNNER}" --help >/dev/null 2>&1; then
+    if runner_check_output="$("$INSTALL_DIR/${RUNNER}" 2>&1)"; then
       info "${RUNNER} installed"
+    else
+      status=$?
+      # With no arguments, stoffel-run prints usage and exits 1. That still
+      # proves the installed binary starts without requiring a positional $1.
+      if [ "$status" -eq 1 ] && printf '%s\n' "$runner_check_output" | grep -q "Stoffel VM Runner"; then
+        info "${RUNNER} installed"
+      else
+        err "${RUNNER} failed to start after install (exit ${status})"
+      fi
     fi
     info "done — run '${RUNNER} --help' to get started"
     ;;
