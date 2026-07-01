@@ -71,6 +71,7 @@ impl Program {
             mpc_backend: MpcBackend::HoneyBadger,
             mpc_curve: MpcCurve::Bls12_381,
             entry_points: entry_points.into_iter().map(ToOwned::to_owned).collect(),
+            ..Default::default()
         };
         let compiled = stoffellang::compile_file(path, &source, &options)
             .map_err(|errors| Error::Compilation(format_compiler_errors(&errors)))?;

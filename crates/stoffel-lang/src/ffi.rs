@@ -24,6 +24,9 @@ impl From<CCompilerOptions> for CompilerOptions {
             mpc_backend: MpcBackend::default(),
             mpc_curve: MpcCurve::default(),
             entry_points: Vec::new(),
+            inline_budget: None,
+            unroll_budget: None,
+            unroll_max_expansion: None,
         }
     }
 }

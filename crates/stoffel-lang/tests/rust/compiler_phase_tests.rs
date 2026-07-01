@@ -29,7 +29,7 @@ fn default_options() -> CompilerOptions {
         print_ir: false,
         mpc_backend: MpcBackend::HoneyBadger,
         mpc_curve: MpcCurve::default(),
-        entry_points: Vec::new(),
+        ..Default::default()
     }
 }
 

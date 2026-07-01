@@ -165,6 +165,9 @@ fn main() {
         }
     };
 
+    // Optimizer budget knobs are honored here, at the binary boundary, rather
+    // than inside the optimizer — keeping the library compile path hermetic.
+    let env_budget = |name: &str| std::env::var(name).ok().and_then(|v| v.parse().ok());
     let options = compiler::CompilerOptions {
         optimize: args.optimize || args.opt_level > 0,
         optimization_level: if args.optimize { 2 } else { args.opt_level },
@@ -172,6 +175,9 @@ fn main() {
         mpc_backend,
         mpc_curve,
         entry_points: Vec::new(),
+        inline_budget: env_budget("STOFFEL_INLINE_BUDGET"),
+        unroll_budget: env_budget("STOFFEL_UNROLL_BUDGET"),
+        unroll_max_expansion: env_budget("STOFFEL_UNROLL_MAX_EXPANSION"),
     };
 
     println!("Compiling {}...", filename);

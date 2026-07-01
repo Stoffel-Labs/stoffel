@@ -1239,7 +1239,7 @@ mod tests {
                     print_ir: false,
                     mpc_backend: MpcBackend::HoneyBadger,
                     mpc_curve: Default::default(),
-                    entry_points: Vec::new(),
+                    ..Default::default()
                 };
                 let program = compile(&src, "t.stfl", &options).expect("compile should succeed");
                 program.client_io_manifest.preprocessing_demand

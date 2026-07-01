@@ -4,8 +4,56 @@
 
 use crate::ast::AstNode;
 use crate::errors::SourceLocation;
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Optimizer expansion budgets, threaded explicitly through `optimize_all` from
+/// `CompilerOptions`.
+///
+/// These were previously read from process-global environment variables
+/// (`STOFFEL_INLINE_BUDGET`, `STOFFEL_UNROLL_BUDGET`,
+/// `STOFFEL_UNROLL_MAX_EXPANSION`) directly inside the optimizer. That made
+/// compilation non-hermetic: in a process that compiles more than once (e.g. the
+/// parallel test runner), a budget set for one compile leaked into every other
+/// compile in the process — flipping unrelated programs into a full-unroll regime
+/// and producing wrong/crashing bytecode. Budgets now flow in via this struct so
+/// each compile is independent. `None` means "use the built-in default constant".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OptBudgets {
+    /// Override for `INLINE_BUDGET` (inliner blowup guard).
+    pub inline: Option<usize>,
+    /// Override for `UNROLL_BUDGET` (global unroll blowup guard).
+    pub unroll: Option<usize>,
+    /// Override for `UNROLL_MAX_EXPANSION` (per-loop unroll expansion cap).
+    pub unroll_max_expansion: Option<usize>,
+}
+
+thread_local! {
+    /// Per-thread, per-`optimize_all`-call snapshot of the active budgets. Set at
+    /// the start of `optimize_all` and cleared at the end, so the value is only
+    /// ever live for the duration of a single (synchronous) optimize pass on the
+    /// current thread. Thread-local + per-call scoping is what makes budget
+    /// selection hermetic across the parallel test runner.
+    static ACTIVE_BUDGETS: Cell<OptBudgets> = const { Cell::new(OptBudgets {
+        inline: None,
+        unroll: None,
+        unroll_max_expansion: None,
+    }) };
+}
+
+fn active_budgets() -> OptBudgets {
+    ACTIVE_BUDGETS.with(|c| c.get())
+}
+
+thread_local! {
+    /// Names of function definitions that are never called anywhere in the program
+    /// (dead after inlining), populated for the duration of a single
+    /// `unroll_literal_loops` call. Unrolling skips these so they don't consume the
+    /// shared global unroll budget that the live entry point needs.
+    static DEAD_FNS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
 
 /// Counter for generating unique temporary variable names
 static BATCH_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -76,6 +124,12 @@ struct MultiplyCandidate {
     is_mutable: bool,
     /// Whether the variable is secret.
     is_secret: bool,
+    /// Whether this candidate is a call-form `Share.batch_mul(L, R)` whose
+    /// operands and result are *lists* of shares (element-wise product), as
+    /// opposed to a scalar `and`/`or`/`xor` product. Batched candidates fuse by
+    /// concatenating operand lists and re-slicing the wide result, rather than
+    /// by building a list literal of scalar operands.
+    is_batched: bool,
 }
 
 /// Collects all variable names referenced in an expression
@@ -84,49 +138,11 @@ fn collect_referenced_vars(node: &AstNode, vars: &mut HashSet<String>) {
         AstNode::Identifier(name, _) => {
             vars.insert(name.clone());
         }
-        AstNode::BinaryOperation { left, right, .. } => {
-            collect_referenced_vars(left, vars);
-            collect_referenced_vars(right, vars);
-        }
-        AstNode::UnaryOperation { operand, .. } => {
-            collect_referenced_vars(operand, vars);
-        }
-        AstNode::FunctionCall {
-            function,
-            arguments,
-            ..
-        } => {
-            collect_referenced_vars(function, vars);
-            for arg in arguments {
-                collect_referenced_vars(arg, vars);
-            }
-        }
-        AstNode::FieldAccess { object, .. } => {
-            collect_referenced_vars(object, vars);
-        }
-        AstNode::IndexAccess { base, index, .. } => {
-            collect_referenced_vars(base, vars);
-            collect_referenced_vars(index, vars);
-        }
-        AstNode::ListLiteral { elements, .. } => {
-            for elem in elements {
-                collect_referenced_vars(elem, vars);
-            }
-        }
-        AstNode::IfExpression {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            collect_referenced_vars(condition, vars);
-            collect_referenced_vars(then_branch, vars);
-            if let Some(else_b) = else_branch {
-                collect_referenced_vars(else_b, vars);
-            }
-        }
-        // Any other node kind: still recurse so a variable buried in an
-        // unhandled node type is tracked (a miss here would skip invalidation in
-        // CSE/GVN and produce a stale alias).
+        // Any other node kind: recurse into every child so a variable buried in
+        // an unhandled node type is still tracked (a miss here would skip
+        // invalidation in CSE/GVN and produce a stale alias). The structural
+        // node kinds need no bespoke arm because `for_each_child` already visits
+        // exactly the same children.
         _ => for_each_child(node, &mut |c| collect_referenced_vars(c, vars)),
     }
 }
@@ -418,6 +434,28 @@ fn secret_multiply_operands(value: &AstNode) -> Option<(&str, &AstNode, &AstNode
     }
 }
 
+/// Detects a call-form `Share.batch_mul(L, R)` and returns its two list
+/// operands. This is the vectorized multiply form used throughout the AES/CTR/CBC
+/// circuits (operands and result are `list[secret bool]`, multiplied
+/// element-wise). Only recognizes the 2-argument form the batcher can fuse.
+fn batch_mul_call_operands(value: &AstNode) -> Option<(&AstNode, &AstNode)> {
+    if let AstNode::FunctionCall {
+        function,
+        arguments,
+        ..
+    } = value
+    {
+        if arguments.len() == 2 {
+            if let AstNode::Identifier(name, _) = function.as_ref() {
+                if builtin_base_name(name) == "batch_mul" {
+                    return Some((&arguments[0], &arguments[1]));
+                }
+            }
+        }
+    }
+    None
+}
+
 fn lvalue_key(node: &AstNode) -> Option<String> {
     match node {
         AstNode::Identifier(name, _) => Some(name.clone()),
@@ -465,6 +503,42 @@ fn collect_multiply_dependency_vars(node: &AstNode, vars: &mut HashSet<String>) 
     }
 }
 
+/// Conservatively decides whether an operand expression provably evaluates to a
+/// secret share, given the set of block-local lvalues already known to be secret.
+///
+/// This is what lets the batcher recognize the UNFLAGGED inner multiplies that
+/// function inlining synthesises. Inlining a nested gate such as
+/// `gate_xor(gate_xor(a, b), c)` emits the inner `xor` as a temporary
+/// `var __inl_arg = a__inl xor b__inl` with `is_secret: false` and no type
+/// annotation — even though `a__inl`/`b__inl` are themselves secret-typed inlined
+/// param bindings (so the result is secret and runs as a network round). The
+/// round-minimizing scheduler already treats such a scalar `xor` as a multiply and
+/// clusters it with its same-depth siblings; proving it secret here lets the
+/// batcher actually fuse that cluster instead of leaving each as a scalar
+/// singleton round.
+///
+/// Deliberately conservative: it only returns `true` when secrecy is provable from
+/// the tracked secret lvalues (or a call's resolved type), so a clear value is
+/// never misclassified as a secret share and pushed into a `Share.batch_mul`.
+fn expr_yields_secret(node: &AstNode, secret_lvalues: &HashSet<String>) -> bool {
+    match node {
+        AstNode::Identifier(name, _) => secret_lvalues.contains(name),
+        // A secret list/object, indexed or field-accessed, yields a secret element.
+        AstNode::IndexAccess { base, .. } => expr_yields_secret(base, secret_lvalues),
+        AstNode::FieldAccess { object, .. } => expr_yields_secret(object, secret_lvalues),
+        // Any arithmetic/logical combination is secret if either side is secret.
+        AstNode::BinaryOperation { left, right, .. } => {
+            expr_yields_secret(left, secret_lvalues) || expr_yields_secret(right, secret_lvalues)
+        }
+        AstNode::UnaryOperation { operand, .. } => expr_yields_secret(operand, secret_lvalues),
+        // Calls only count when semantic analysis attached a secret-carrying type.
+        AstNode::FunctionCall { .. } | AstNode::CommandCall { .. } => {
+            node_resolved_contains_secret(node).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 /// Extracts consecutive statement-level secret multiply candidates.
 fn extract_multiply_candidates(statements: &[AstNode]) -> Vec<MultiplyCandidate> {
     let mut candidates = Vec::new();
@@ -487,8 +561,24 @@ fn extract_multiply_candidates(statements: &[AstNode]) -> Vec<MultiplyCandidate>
                     secret_lvalues.insert(name.clone());
                 }
 
-                if declared_secret {
-                    if let Some((op, left, right)) = secret_multiply_operands(value) {
+                // A multiply binding is a secret round either when its binding is
+                // explicitly secret, or when it is unflagged but its operands are
+                // provably secret (the inliner's inner-gate temporaries — see
+                // `expr_yields_secret`). In the latter case register the result as a
+                // secret lvalue so a downstream multiply that consumes it is in turn
+                // recognized, flattening a whole nested gate tree.
+                let multiply = secret_multiply_operands(value);
+                let secret_multiply = multiply.is_some_and(|(_, left, right)| {
+                    declared_secret
+                        || expr_yields_secret(left, &secret_lvalues)
+                        || expr_yields_secret(right, &secret_lvalues)
+                });
+                if secret_multiply {
+                    secret_lvalues.insert(name.clone());
+                }
+
+                if secret_multiply {
+                    if let Some((op, left, right)) = multiply {
                         let mut referenced_vars = HashSet::new();
                         collect_multiply_dependency_vars(left, &mut referenced_vars);
                         collect_multiply_dependency_vars(right, &mut referenced_vars);
@@ -505,6 +595,33 @@ fn extract_multiply_candidates(statements: &[AstNode]) -> Vec<MultiplyCandidate>
                             type_annotation: type_annotation.clone(),
                             is_mutable: *is_mutable,
                             is_secret: *is_secret,
+                            is_batched: false,
+                        });
+                    }
+                } else if !declared_secret && batch_mul_call_operands(value).is_some() {
+                    let (left, right) = batch_mul_call_operands(value).unwrap();
+                    // Call-form `var m = Share.batch_mul(L, R)`: a list result, so
+                    // not flagged secret on the binding, but it carries secret
+                    // shares and is a network round. Confirm via the resolved type
+                    // (falling back to the name when none was attached).
+                    if node_resolved_contains_secret(value).unwrap_or(true) {
+                        let mut referenced_vars = HashSet::new();
+                        collect_multiply_dependency_vars(left, &mut referenced_vars);
+                        collect_multiply_dependency_vars(right, &mut referenced_vars);
+                        candidates.push(MultiplyCandidate {
+                            statement_index: idx,
+                            target_key: name.clone(),
+                            target_expr: AstNode::Identifier(name.clone(), location.clone()),
+                            left_expr: left.clone(),
+                            right_expr: right.clone(),
+                            op: "batch_mul".to_string(),
+                            referenced_vars,
+                            location: location.clone(),
+                            is_declaration: true,
+                            type_annotation: type_annotation.clone(),
+                            is_mutable: *is_mutable,
+                            is_secret: *is_secret,
+                            is_batched: true,
                         });
                     }
                 }
@@ -535,6 +652,7 @@ fn extract_multiply_candidates(statements: &[AstNode]) -> Vec<MultiplyCandidate>
                                 type_annotation: None,
                                 is_mutable: false,
                                 is_secret: true,
+                                is_batched: false,
                             });
                         }
                     }
@@ -561,6 +679,13 @@ fn key_set_contains_conflict(keys: &HashSet<String>, needle: &str) -> bool {
     keys.iter().any(|key| keys_conflict(key, needle))
 }
 
+// Reads/writes for the multiply batcher. This dep model is intentionally
+// specialized: it keys on *field-level* lvalue paths (`lvalue_key`, e.g. `a.b`
+// vs `a.c`) compared with `keys_conflict`, which the batcher needs to prove two
+// candidate multiplies touch disjoint object fields. It is deliberately NOT
+// shared with the scheduler's / reorderer's heap-level keying (`sched_info`,
+// `reveal_dep_keys`), which collapses a whole object to one `heap:` key —
+// merging them would drop this field precision.
 fn statement_reads_and_writes(statement: &AstNode) -> (HashSet<String>, HashSet<String>) {
     let mut reads = HashSet::new();
     let mut writes = HashSet::new();
@@ -576,6 +701,12 @@ fn statement_reads_and_writes(statement: &AstNode) -> (HashSet<String>, HashSet<
             if let Some(key) = lvalue_key(target) {
                 writes.insert(key);
             } else {
+                // In-place index/element store (e.g. `a[i] = x`): the base object
+                // is read-modify-written, so register a write of its root var so a
+                // candidate multiply referencing it cannot be hoisted past it.
+                if let Some(root) = root_var(target) {
+                    writes.insert(root);
+                }
                 collect_multiply_dependency_vars(target, &mut reads);
             }
             collect_multiply_dependency_vars(value, &mut reads);
@@ -584,9 +715,43 @@ fn statement_reads_and_writes(statement: &AstNode) -> (HashSet<String>, HashSet<
             value: Some(value), ..
         } => collect_multiply_dependency_vars(value, &mut reads),
         AstNode::DiscardStatement { expression, .. } => {
-            collect_multiply_dependency_vars(expression, &mut reads);
+            // Recurse so a statement-level in-place mutator wrapped in a discard
+            // (e.g. `lefts.append(x)`) is modeled as a write of its receiver,
+            // mirroring `reveal_dep_keys`'s discard handling.
+            return statement_reads_and_writes(expression);
         }
-        _ => collect_multiply_dependency_vars(statement, &mut reads),
+        // A recognized in-place mutator (`append`/`extend`/`insert`/`array_push`/
+        // `set_field`): its receiver (first argument) is read AND written, so a
+        // candidate `Share.batch_mul` referencing that receiver as an operand list
+        // must not be hoisted above this call. The remaining arguments are reads.
+        // Mirrors `reveal_dep_keys`'s mutator arm at this dep model's granularity;
+        // without it the batcher mis-hoists the fused multiply above the appends
+        // that populate its operands, leaving them empty at runtime.
+        AstNode::FunctionCall { arguments, .. }
+            if call_name(statement).is_some_and(is_mutator_call_name) =>
+        {
+            if let Some(receiver) = arguments.first() {
+                if let Some(root) = root_var(receiver) {
+                    writes.insert(root);
+                }
+                collect_multiply_dependency_vars(receiver, &mut reads);
+            }
+            for arg in arguments.iter().skip(1) {
+                collect_multiply_dependency_vars(arg, &mut reads);
+            }
+        }
+        // Compound statements (loops, branches, nested blocks) may contain
+        // in-place mutators that write a list (e.g. a kept-rolled combine loop
+        // `for i: out.append(...)` that populates a `Share.batch_mul` operand).
+        // Model BOTH their reads and those nested writes, so a candidate multiply
+        // referencing such a list is never hoisted above the loop that fills it.
+        // (The single-statement mutator arm above only covers a TOP-LEVEL append;
+        // without this, a fused depth-N multiply hoists above the depth-(N-1)
+        // combine loops, leaving its operands empty at runtime.)
+        _ => {
+            collect_multiply_dependency_vars(statement, &mut reads);
+            collect_written_vars(statement, &mut writes);
+        }
     }
 
     (reads, writes)
@@ -652,7 +817,7 @@ fn group_batchable_multiplies(
     }
 
     let mut groups = Vec::new();
-    let mut current_group = Vec::new();
+    let mut current_group: Vec<MultiplyCandidate> = Vec::new();
     let mut defined_vars: HashSet<String> = HashSet::new();
     let mut last_index = None;
 
@@ -660,7 +825,19 @@ fn group_batchable_multiplies(
         let can_batch = match last_index {
             None => true,
             Some(last_idx) => {
-                candidate.statement_index > last_idx
+                // Scalar (`and`/`or`/`xor`) and batched (`Share.batch_mul`)
+                // candidates fuse with different output shapes, so never mix them
+                // in one group.
+                current_group
+                    .first()
+                    .is_none_or(|g| g.is_batched == candidate.is_batched)
+                    // A candidate whose operands cannot be flattened in alignment
+                    // (a malformed/unprovable nested-list shape) must never be
+                    // concatenated into a fused accumulator — keep it (and anything
+                    // anchored on it) as its own singleton call.
+                    && candidate_is_fuse_safe(&candidate)
+                    && current_group.first().is_none_or(candidate_is_fuse_safe)
+                    && candidate.statement_index > last_idx
                     && !candidate.referenced_vars.iter().any(|var| {
                         defined_vars
                             .iter()
@@ -707,6 +884,9 @@ fn group_batchable_multiplies(
 ///   var a: secret bool = __batch_mul_results_K[0]
 ///   var b: secret bool = __batch_mul_results_K[1]
 fn create_batch_multiply_statements(group: &[MultiplyCandidate]) -> Vec<AstNode> {
+    if group.first().is_some_and(|c| c.is_batched) {
+        return create_batched_call_fusion(group);
+    }
     let lefts_name = generate_named_temp_name("batch_mul_lefts");
     let rights_name = generate_named_temp_name("batch_mul_rights");
     let results_name = generate_named_temp_name("batch_mul_results");
@@ -785,6 +965,418 @@ fn create_batch_multiply_statements(group: &[MultiplyCandidate]) -> Vec<AstNode>
                 location: candidate.location.clone(),
             });
         }
+    }
+
+    result
+}
+
+/// Builds a `Share.batch_mul(left, right)` call expression.
+fn make_batch_mul_call(left: AstNode, right: AstNode, location: &SourceLocation) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier(
+            "Share.batch_mul".to_string(),
+            location.clone(),
+        )),
+        arguments: vec![left, right],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+/// Builds a single-argument builtin call `name(arg)` (e.g. `len`, `copy`).
+fn make_unary_builtin_call(name: &str, arg: AstNode, location: &SourceLocation) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier(name.to_string(), location.clone())),
+        arguments: vec![arg],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+/// Builds an `extend(receiver, values)` mutator call statement.
+fn make_extend_call(receiver: &str, values: AstNode, location: &SourceLocation) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier("extend".to_string(), location.clone())),
+        arguments: vec![
+            AstNode::Identifier(receiver.to_string(), location.clone()),
+            values,
+        ],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+/// Builds a `slice(container, start, stop)` call expression.
+fn make_slice_call(
+    container: &str,
+    start: AstNode,
+    stop: AstNode,
+    location: &SourceLocation,
+) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier("slice".to_string(), location.clone())),
+        arguments: vec![
+            AstNode::Identifier(container.to_string(), location.clone()),
+            start,
+            stop,
+        ],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+fn make_int_literal(value: u128, location: &SourceLocation) -> AstNode {
+    AstNode::Literal {
+        value: crate::ast::Value::Int { value, kind: None },
+        location: location.clone(),
+    }
+}
+
+fn make_int_add(left: AstNode, right: AstNode, location: &SourceLocation) -> AstNode {
+    AstNode::BinaryOperation {
+        op: "+".to_string(),
+        left: Box::new(left),
+        right: Box::new(right),
+        location: location.clone(),
+    }
+}
+
+/// True iff `node` is a `ListLiteral` that *directly* contains a nested
+/// `ListLiteral` element (i.e. its leaves are not all scalars). This is the only
+/// operand shape that makes the gather concatenate whole sub-lists into the fused
+/// accumulator and therefore feed a nested `Array` element to `Share.batch_mul`.
+/// Flat literals and opaque (non-literal) operands return `false` and take the
+/// byte-identical legacy path.
+fn list_literal_is_nested(node: &AstNode) -> bool {
+    match node {
+        AstNode::ListLiteral { elements, .. } => elements
+            .iter()
+            .any(|e| matches!(e, AstNode::ListLiteral { .. })),
+        _ => false,
+    }
+}
+
+/// Recursively flattens a (possibly nested) `ListLiteral` to the ordered vector
+/// of its scalar leaf elements (a non-`ListLiteral` element is a leaf). Returns
+/// `None` for a non-`ListLiteral` (opaque) operand whose runtime shape is not
+/// statically visible. A flat literal `[a, b, c]` flattens to `[a, b, c]`
+/// unchanged. Leaf order is a stable left-to-right depth-first walk, the same
+/// walk `renest_results_like` uses, so flattened leaves stay positionally
+/// aligned with the re-nested result.
+fn flatten_list_literal_leaves(node: &AstNode) -> Option<Vec<AstNode>> {
+    match node {
+        AstNode::ListLiteral { elements, .. } => {
+            let mut leaves = Vec::new();
+            for element in elements {
+                match flatten_list_literal_leaves(element) {
+                    Some(inner) => leaves.extend(inner),
+                    None => leaves.push(element.clone()),
+                }
+            }
+            Some(leaves)
+        }
+        _ => None,
+    }
+}
+
+/// True iff two operand expressions share the same nesting *skeleton*: both
+/// `ListLiteral`s of equal length with element-wise matching skeletons, or both
+/// scalar leaves. A matching skeleton guarantees that flattening each side yields
+/// equal leaf counts in corresponding leaf order — the precondition for an
+/// aligned, element-wise-correct fused multiply. When skeletons differ the
+/// multiply is malformed (or unprovable) and the candidate must be kept out of a
+/// fused batch.
+fn operand_skeletons_match(left: &AstNode, right: &AstNode) -> bool {
+    match (left, right) {
+        (AstNode::ListLiteral { elements: el, .. }, AstNode::ListLiteral { elements: er, .. }) => {
+            el.len() == er.len()
+                && el
+                    .iter()
+                    .zip(er)
+                    .all(|(l, r)| operand_skeletons_match(l, r))
+        }
+        (AstNode::ListLiteral { .. }, _) | (_, AstNode::ListLiteral { .. }) => false,
+        _ => true,
+    }
+}
+
+/// Rebuilds `template`'s nesting skeleton as a value expression that reads the
+/// fused result array element-wise: each scalar leaf becomes
+/// `results_name[base_off + leaf_cursor]` and each sub-list becomes a
+/// `ListLiteral` of the same shape. Walking `template` in the same left-to-right
+/// depth-first order as `flatten_list_literal_leaves` re-nests each product into
+/// the position its operands came from, so the bound value is element-wise equal
+/// to the original (un-flattened) multiply result.
+fn renest_results_like(
+    template: &AstNode,
+    results_name: &str,
+    leaf_cursor: &mut usize,
+    base_off: &AstNode,
+    location: &SourceLocation,
+) -> AstNode {
+    match template {
+        AstNode::ListLiteral { elements, .. } => {
+            let rebuilt = elements
+                .iter()
+                .map(|element| {
+                    renest_results_like(element, results_name, leaf_cursor, base_off, location)
+                })
+                .collect();
+            AstNode::ListLiteral {
+                elements: rebuilt,
+                location: location.clone(),
+            }
+        }
+        _ => {
+            let index = make_int_add(
+                base_off.clone(),
+                make_int_literal(*leaf_cursor as u128, location),
+                location,
+            );
+            *leaf_cursor += 1;
+            AstNode::IndexAccess {
+                base: Box::new(AstNode::Identifier(
+                    results_name.to_string(),
+                    location.clone(),
+                )),
+                index: Box::new(index),
+                location: location.clone(),
+            }
+        }
+    }
+}
+
+/// Whether a batched candidate can be safely fused. A candidate whose operands
+/// are flat / opaque (the AES/CTR/CBC path) is always fuse-safe and takes the
+/// byte-identical legacy lowering. A candidate with a *nested* `ListLiteral`
+/// operand is fuse-safe only when both operands are `ListLiteral`s with matching
+/// nesting skeletons, so flattening produces aligned, equal-count leaves.
+/// Otherwise the multiply is malformed/unprovable and the candidate is kept out
+/// of any fused batch (emitted as its own call) rather than concatenated into a
+/// malformed accumulator.
+fn candidate_is_fuse_safe(candidate: &MultiplyCandidate) -> bool {
+    if !candidate.is_batched {
+        return true;
+    }
+    if !list_literal_is_nested(&candidate.left_expr)
+        && !list_literal_is_nested(&candidate.right_expr)
+    {
+        return true;
+    }
+    matches!(candidate.left_expr, AstNode::ListLiteral { .. })
+        && matches!(candidate.right_expr, AstNode::ListLiteral { .. })
+        && operand_skeletons_match(&candidate.left_expr, &candidate.right_expr)
+}
+
+/// Emits the target binding for a batched candidate from an already-built value
+/// expression (a `slice(...)` of the fused result, or the lone call itself).
+fn emit_batched_target(candidate: &MultiplyCandidate, value_expr: AstNode) -> AstNode {
+    if candidate.is_declaration {
+        AstNode::VariableDeclaration {
+            name: candidate.target_key.clone(),
+            type_annotation: candidate.type_annotation.clone(),
+            value: Some(Box::new(value_expr)),
+            is_mutable: candidate.is_mutable,
+            is_secret: candidate.is_secret,
+            location: candidate.location.clone(),
+        }
+    } else {
+        AstNode::Assignment {
+            target: Box::new(candidate.target_expr.clone()),
+            value: Box::new(value_expr),
+            location: candidate.location.clone(),
+        }
+    }
+}
+
+/// Fuses a group of independent call-form `Share.batch_mul(L, R)` candidates into
+/// a single wide `Share.batch_mul`. Each candidate's list operands are
+/// concatenated into one pair of accumulator lists, multiplied once, then the
+/// per-candidate products are recovered by slicing the wide result back at the
+/// cumulative operand-length offsets.
+///
+/// Transforms (operands/results are `list[secret bool]`, multiplied element-wise):
+///   var m1 = Share.batch_mul(a, b)
+///   var m2 = Share.batch_mul(c, d)
+/// Into:
+///   var __bm_lefts_N  = copy(a)
+///   var __bm_rights_M = copy(b)
+///   extend(__bm_lefts_N, c)
+///   extend(__bm_rights_M, d)
+///   var __bm_results_K = Share.batch_mul(__bm_lefts_N, __bm_rights_M)
+///   var m1 = slice(__bm_results_K, 0, len(a))
+///   var __bm_off_P = len(a) + len(c)
+///   var m2 = slice(__bm_results_K, len(a), __bm_off_P)
+///
+/// A lone candidate has nothing to fuse and is emitted back unchanged.
+fn create_batched_call_fusion(group: &[MultiplyCandidate]) -> Vec<AstNode> {
+    let location = group[0].location.clone();
+
+    if group.len() == 1 {
+        let c = &group[0];
+        // A lone candidate: if both operands are nested list literals that flatten
+        // in alignment, flatten them so a nested `Array` element never reaches
+        // `Share.batch_mul`, then re-nest the result to the original shape.
+        // Otherwise (flat/opaque operands, or a shape that cannot align) emit the
+        // call unchanged — byte-identical to the legacy lowering.
+        if (list_literal_is_nested(&c.left_expr) || list_literal_is_nested(&c.right_expr))
+            && candidate_is_fuse_safe(c)
+        {
+            let lefts = flatten_list_literal_leaves(&c.left_expr)
+                .expect("nested operand is a list literal");
+            let rights = flatten_list_literal_leaves(&c.right_expr)
+                .expect("nested operand is a list literal");
+            let results_name = generate_named_temp_name("bm_results");
+            let mut result = Vec::new();
+            result.push(AstNode::VariableDeclaration {
+                name: results_name.clone(),
+                type_annotation: None,
+                value: Some(Box::new(make_batch_mul_call(
+                    AstNode::ListLiteral {
+                        elements: lefts,
+                        location: location.clone(),
+                    },
+                    AstNode::ListLiteral {
+                        elements: rights,
+                        location: location.clone(),
+                    },
+                    &location,
+                ))),
+                is_mutable: false,
+                is_secret: false,
+                location: location.clone(),
+            });
+            let mut cursor = 0usize;
+            let base = make_int_literal(0, &location);
+            let value =
+                renest_results_like(&c.left_expr, &results_name, &mut cursor, &base, &location);
+            result.push(emit_batched_target(c, value));
+            return result;
+        }
+        let call = make_batch_mul_call(c.left_expr.clone(), c.right_expr.clone(), &location);
+        return vec![emit_batched_target(c, call)];
+    }
+
+    let lefts_name = generate_named_temp_name("bm_lefts");
+    let rights_name = generate_named_temp_name("bm_rights");
+    let results_name = generate_named_temp_name("bm_results");
+
+    // The accumulator contribution for an operand: a nested list literal is
+    // flattened to its scalar leaves (so `extend` never appends a whole sub-list,
+    // which would reach `Share.batch_mul` as a nested `Array` element); a flat or
+    // opaque operand is contributed verbatim — byte-identical to the legacy path
+    // for the AES/CTR/CBC operands, which are opaque identifiers.
+    let contribution = |operand: &AstNode| -> AstNode {
+        if list_literal_is_nested(operand) {
+            AstNode::ListLiteral {
+                elements: flatten_list_literal_leaves(operand)
+                    .expect("nested operand is a list literal"),
+                location: location.clone(),
+            }
+        } else {
+            operand.clone()
+        }
+    };
+
+    let mut result = Vec::new();
+
+    // Seed the accumulators with a *copy* of the first operands (copy yields a
+    // fresh, correctly-typed mutable list so `extend` can grow it without
+    // mutating the original operand lists).
+    result.push(AstNode::VariableDeclaration {
+        name: lefts_name.clone(),
+        type_annotation: None,
+        value: Some(Box::new(make_unary_builtin_call(
+            "copy",
+            contribution(&group[0].left_expr),
+            &location,
+        ))),
+        is_mutable: true,
+        is_secret: false,
+        location: location.clone(),
+    });
+    result.push(AstNode::VariableDeclaration {
+        name: rights_name.clone(),
+        type_annotation: None,
+        value: Some(Box::new(make_unary_builtin_call(
+            "copy",
+            contribution(&group[0].right_expr),
+            &location,
+        ))),
+        is_mutable: true,
+        is_secret: false,
+        location: location.clone(),
+    });
+    for candidate in &group[1..] {
+        result.push(make_extend_call(
+            &lefts_name,
+            contribution(&candidate.left_expr),
+            &location,
+        ));
+        result.push(make_extend_call(
+            &rights_name,
+            contribution(&candidate.right_expr),
+            &location,
+        ));
+    }
+
+    result.push(AstNode::VariableDeclaration {
+        name: results_name.clone(),
+        type_annotation: None,
+        value: Some(Box::new(make_batch_mul_call(
+            AstNode::Identifier(lefts_name.clone(), location.clone()),
+            AstNode::Identifier(rights_name.clone(), location.clone()),
+            &location,
+        ))),
+        is_mutable: false,
+        is_secret: false,
+        location: location.clone(),
+    });
+
+    // Recover each product at the cumulative leaf-count offsets. `cur_off` is the
+    // start offset expression for the current candidate; the end is
+    // `cur_off + <leaf count>`, bound to a temp so it is both this candidate's
+    // stop and the next candidate's start. A nested operand contributes a static
+    // leaf count and re-nests its slice back to the original shape; a flat/opaque
+    // operand uses `len(operand)` and a `slice` — byte-identical to the legacy
+    // recovery.
+    let mut cur_off = make_int_literal(0, &location);
+    for candidate in group {
+        let nested = list_literal_is_nested(&candidate.left_expr);
+        let len_expr = if nested {
+            make_int_literal(
+                flatten_list_literal_leaves(&candidate.left_expr)
+                    .expect("nested operand is a list literal")
+                    .len() as u128,
+                &location,
+            )
+        } else {
+            make_unary_builtin_call("len", candidate.left_expr.clone(), &location)
+        };
+        let end_name = generate_named_temp_name("bm_off");
+        result.push(AstNode::VariableDeclaration {
+            name: end_name.clone(),
+            type_annotation: None,
+            value: Some(Box::new(make_int_add(cur_off.clone(), len_expr, &location))),
+            is_mutable: false,
+            is_secret: false,
+            location: location.clone(),
+        });
+        let end_ident = AstNode::Identifier(end_name, location.clone());
+        let value = if nested {
+            let mut cursor = 0usize;
+            renest_results_like(
+                &candidate.left_expr,
+                &results_name,
+                &mut cursor,
+                &cur_off,
+                &location,
+            )
+        } else {
+            make_slice_call(&results_name, cur_off.clone(), end_ident.clone(), &location)
+        };
+        result.push(emit_batched_target(candidate, value));
+        cur_off = end_ident;
     }
 
     result
@@ -1411,6 +2003,7 @@ pub fn optimize_reveals(node: AstNode) -> AstNode {
 //   var y = b * 3            // uses b - already revealed
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Information about a statement for reordering purposes
 #[derive(Debug, Clone)]
@@ -1419,10 +2012,6 @@ struct StatementInfo {
     index: usize,
     /// The AST node
     node: AstNode,
-    /// Variables defined by this statement
-    defines: HashSet<String>,
-    /// Variables used/referenced by this statement
-    uses: HashSet<String>,
     /// Is this an implicit reveal? (clear var = secret expr)
     is_implicit_reveal: bool,
     /// Does this statement use a revealed variable in a computation (triggers flush)?
@@ -1444,6 +2033,100 @@ fn collect_defined_vars(node: &AstNode) -> HashSet<String> {
         _ => {}
     }
     defined
+}
+
+/// Read/write *location* keys for the reveal reorderer's dependency graph.
+///
+/// Keys mirror `sched_info`'s `var:`/`heap:`/`global:*` scheme (see the note
+/// there): a scalar reassignment keys on `var:name`, an in-place index/field
+/// store or a recognized mutator's receiver keys on `heap:root` (and reads it
+/// too — it is a read-modify-write), and an unknown store target falls back to
+/// the catch-all `global:*`. Reading a name yields *both* its `var:` and `heap:`
+/// key so the read is ordered against either flavor of write to that name.
+///
+/// This deliberately keeps the scheduler's heap-level (whole-object) precision
+/// rather than the multiply batcher's field-level `keys_conflict` precision: the
+/// reorderer only needs hazard-safety, and matching `sched_info` keeps the two
+/// dep models consistent. See also `statement_reads_and_writes` (field-level).
+fn reveal_dep_keys(node: &AstNode) -> (HashSet<String>, HashSet<String>) {
+    fn read_keys(node: &AstNode, out: &mut HashSet<String>) {
+        let mut vars = HashSet::new();
+        collect_referenced_vars(node, &mut vars);
+        for var in vars {
+            out.insert(scalar_key(&var));
+            out.insert(heap_key(&var));
+        }
+    }
+
+    let mut reads = HashSet::new();
+    let mut writes = HashSet::new();
+
+    match node {
+        AstNode::VariableDeclaration { name, value, .. } => {
+            writes.insert(scalar_key(name));
+            if let Some(value) = value {
+                read_keys(value, &mut reads);
+            }
+        }
+        AstNode::Assignment { target, value, .. } => {
+            read_keys(value, &mut reads);
+            match target.as_ref() {
+                AstNode::Identifier(name, _) => {
+                    writes.insert(scalar_key(name));
+                }
+                // In-place index/field store: reads and writes the base object.
+                other => {
+                    if let Some(root) = root_var(other) {
+                        let key = heap_key(&root);
+                        writes.insert(key.clone());
+                        reads.insert(key);
+                    } else {
+                        writes.insert(global_key());
+                    }
+                    read_keys(other, &mut reads);
+                }
+            }
+        }
+        AstNode::DiscardStatement { expression, .. } => {
+            return reveal_dep_keys(expression);
+        }
+        AstNode::Return {
+            value: Some(value), ..
+        } => {
+            read_keys(value, &mut reads);
+        }
+        // A recognized in-place mutator: the receiver (first argument) is read
+        // and written; the remaining arguments are read.
+        AstNode::FunctionCall { arguments, .. }
+            if call_name(node).is_some_and(is_mutator_call_name) =>
+        {
+            if let Some(receiver) = arguments.first() {
+                if let Some(root) = root_var(receiver) {
+                    let key = heap_key(&root);
+                    writes.insert(key.clone());
+                    reads.insert(key);
+                } else {
+                    writes.insert(global_key());
+                }
+                read_keys(receiver, &mut reads);
+            }
+            for arg in arguments.iter().skip(1) {
+                read_keys(arg, &mut reads);
+            }
+        }
+        _ => {
+            read_keys(node, &mut reads);
+        }
+    }
+
+    (reads, writes)
+}
+
+/// Two location keys (as produced by `reveal_dep_keys`) conflict when they name
+/// the same location, or when either is the catch-all `global:*` write target
+/// (`global_key()`), which aliases everything.
+fn reveal_keys_conflict(a: &str, b: &str) -> bool {
+    a == b || a == GLOBAL_KEY || b == GLOBAL_KEY
 }
 
 /// Checks if a statement is an implicit reveal (clear variable assigned from secret)
@@ -1553,24 +2236,6 @@ fn reorder_block_for_reveals(statements: Vec<AstNode>) -> Vec<AstNode> {
 
     for (index, node) in statements.into_iter().enumerate() {
         let defines = collect_defined_vars(&node);
-        let mut uses = HashSet::new();
-
-        // Collect uses based on node type
-        match &node {
-            AstNode::VariableDeclaration { value: Some(v), .. } => {
-                collect_referenced_vars(v, &mut uses);
-            }
-            AstNode::Assignment { value, .. } => {
-                collect_referenced_vars(value, &mut uses);
-            }
-            AstNode::DiscardStatement { expression, .. } => {
-                collect_referenced_vars(expression, &mut uses);
-            }
-            AstNode::Return { value: Some(v), .. } => {
-                collect_referenced_vars(v, &mut uses);
-            }
-            _ => {}
-        }
 
         let is_reveal = is_implicit_reveal(&node, &secret_vars);
 
@@ -1586,8 +2251,6 @@ fn reorder_block_for_reveals(statements: Vec<AstNode>) -> Vec<AstNode> {
         stmt_infos.push(StatementInfo {
             index,
             node,
-            defines,
-            uses,
             is_implicit_reveal: is_reveal,
             uses_revealed_var: uses_revealed,
         });
@@ -1601,25 +2264,65 @@ fn reorder_block_for_reveals(statements: Vec<AstNode>) -> Vec<AstNode> {
         return stmt_infos.into_iter().map(|s| s.node).collect();
     }
 
-    // Build dependency map: for each statement, which statements must come before it?
+    // Build the dependency map: for each statement, which statements must come
+    // before it? Edges use the same var:/heap:/global: location keys as
+    // `sched_info` (via `reveal_dep_keys`) and cover all three name hazards so
+    // the topological reorder below can never violate them:
+    //   * RAW — a read stays after the write it observes,
+    //   * WAR — a write stays after earlier reads of the same location,
+    //   * WAW — writes to the same location keep their original order.
+    // Adding edges only constrains the schedule (it is monotonically safe). The
+    // earlier RAW-only graph was a latent miscompile: a neutral reassignment
+    // (or an index/field/mutator write, which the old graph ignored entirely)
+    // could hoist ahead of a reveal that read the old value.
     let mut must_precede: HashMap<usize, HashSet<usize>> = HashMap::new();
-    let mut var_defined_at: HashMap<String, usize> = HashMap::new();
+    let mut last_writer: HashMap<String, usize> = HashMap::new();
+    let mut active_readers: HashMap<String, Vec<usize>> = HashMap::new();
 
     for info in &stmt_infos {
+        let (reads, writes) = reveal_dep_keys(&info.node);
         let mut predecessors = HashSet::new();
 
-        // Statement depends on all statements that define variables it uses
-        for used_var in &info.uses {
-            if let Some(&def_idx) = var_defined_at.get(used_var) {
-                predecessors.insert(def_idx);
+        // RAW: depend on the latest writer of any conflicting location.
+        for read in &reads {
+            for (key, &widx) in &last_writer {
+                if reveal_keys_conflict(key, read) {
+                    predecessors.insert(widx);
+                }
+            }
+        }
+        // WAR + WAW: a write stays after earlier reads and the latest writer of
+        // any conflicting location.
+        for write in &writes {
+            for (key, readers) in &active_readers {
+                if reveal_keys_conflict(key, write) {
+                    predecessors.extend(readers.iter().copied());
+                }
+            }
+            for (key, &widx) in &last_writer {
+                if reveal_keys_conflict(key, write) {
+                    predecessors.insert(widx);
+                }
             }
         }
 
+        // A read-modify-write statement may have keyed itself on both sides;
+        // it must never depend on itself.
+        predecessors.remove(&info.index);
         must_precede.insert(info.index, predecessors);
 
-        // Record where each variable is defined
-        for def_var in &info.defines {
-            var_defined_at.insert(def_var.clone(), info.index);
+        // Advance the live state. A write retires the reads it now orders ahead
+        // of itself (later statements reach them transitively through this
+        // write) and becomes the latest writer of its location.
+        for write in &writes {
+            active_readers.retain(|key, _| !reveal_keys_conflict(key, write));
+            last_writer.insert(write.clone(), info.index);
+        }
+        for read in &reads {
+            active_readers
+                .entry(read.clone())
+                .or_default()
+                .push(info.index);
         }
     }
 
@@ -1768,6 +2471,809 @@ pub fn reorder_for_reveal_batching(node: AstNode) -> AstNode {
 
 /// Combined optimization: applies both Share.open() batching and instruction reordering
 pub fn optimize_all(node: AstNode, optimization_level: u8) -> AstNode {
+    optimize_all_with_budgets(node, optimization_level, OptBudgets::default())
+}
+
+/// Like [`optimize_all`] but with explicit expansion budgets (instead of the
+/// built-in defaults). The budgets are installed in a thread-local for the
+/// duration of this call only, then cleared — keeping each compile hermetic.
+pub fn optimize_all_with_budgets(
+    node: AstNode,
+    optimization_level: u8,
+    budgets: OptBudgets,
+) -> AstNode {
+    let previous = ACTIVE_BUDGETS.with(|c| c.replace(budgets));
+    let result = optimize_all_inner(node, optimization_level);
+    ACTIVE_BUDGETS.with(|c| c.set(previous));
+    result
+}
+
+// ===========================================================================
+// Auto loop-vectorizer (MPC-multiply vectorization)
+//
+// Rewrites a kept-rolled "map loop" — `for I in 0..HI: <body>; OUT.append(elem)`
+// whose iterations each perform INDEPENDENT secret multiplies into an
+// append-only output — into transposed gather / `Share.batch_mul` / scatter
+// form. The per-iteration scalar multiplies are gathered across the whole loop
+// range so each multiply layer becomes ONE batched round instead of one round
+// per iteration (the compiler analogue of the hand-written `inv_affine_vec`).
+//
+// The loop body is REPLACED by a fixed number of vector statements (one gather +
+// one `Share.batch_mul` + one combine loop per multiply site, plus a scatter
+// loop), so code size stays O(1) in the iteration count — no unroll blow-up.
+//
+// Soundness is fail-closed: the loop is rewritten ONLY when every body statement
+// is a pure straight-line gate/decl plus a single append-only output commit, no
+// statement reads the output accumulator, every multiply operand is a pure
+// expression of the current index, and the result re-groups the SAME scalar
+// multiplies into wider batches (identical netlist, different round).
+// ===========================================================================
+
+/// -O3 entry point: structurally recurse, vectorizing eligible map-loops in place.
+pub fn vectorize_map_loops(node: AstNode) -> AstNode {
+    match node {
+        AstNode::Block(stmts) => {
+            let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
+            for stmt in stmts {
+                if matches!(stmt, AstNode::ForLoop { .. }) {
+                    if let Some(replacement) = try_vectorize_for(&stmt) {
+                        out.extend(replacement);
+                        continue;
+                    }
+                }
+                out.push(vectorize_map_loops(stmt));
+            }
+            AstNode::Block(out)
+        }
+        AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body,
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        } => AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body: Box::new(vectorize_map_loops(*body)),
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        },
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => AstNode::ForLoop {
+            variables,
+            iterable,
+            body: Box::new(vectorize_map_loops(*body)),
+            location,
+        },
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => AstNode::WhileLoop {
+            condition,
+            body: Box::new(vectorize_map_loops(*body)),
+            location,
+        },
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => AstNode::IfExpression {
+            condition,
+            then_branch: Box::new(vectorize_map_loops(*then_branch)),
+            else_branch: else_branch.map(|e| Box::new(vectorize_map_loops(*e))),
+        },
+        AstNode::TryCatch {
+            try_block,
+            catch_clauses,
+            finally_block,
+            location,
+        } => AstNode::TryCatch {
+            try_block: Box::new(vectorize_map_loops(*try_block)),
+            catch_clauses,
+            finally_block: finally_block.map(|b| Box::new(vectorize_map_loops(*b))),
+            location,
+        },
+        other => other,
+    }
+}
+
+/// True iff `expr` syntactically contains a secret-multiply operator (boolean
+/// `xor`/`and`/`or`, or a `Share.mul`/`Share.batch_mul` call). Clear `*` is NOT
+/// a secret multiply in this codebase, so it is excluded.
+fn vec_expr_contains_multiply(expr: &AstNode) -> bool {
+    match expr {
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => {
+            matches!(op.as_str(), "xor" | "and" | "or")
+                || vec_expr_contains_multiply(left)
+                || vec_expr_contains_multiply(right)
+        }
+        AstNode::UnaryOperation { operand, .. } => vec_expr_contains_multiply(operand),
+        AstNode::IndexAccess { base, index, .. } => {
+            vec_expr_contains_multiply(base) || vec_expr_contains_multiply(index)
+        }
+        AstNode::FieldAccess { object, .. } => vec_expr_contains_multiply(object),
+        AstNode::ListLiteral { elements, .. } | AstNode::TupleLiteral(elements) => {
+            elements.iter().any(vec_expr_contains_multiply)
+        }
+        AstNode::FunctionCall { arguments, .. } => {
+            matches!(
+                call_name(expr).map(builtin_base_name),
+                Some("mul") | Some("batch_mul")
+            ) || arguments.iter().any(vec_expr_contains_multiply)
+        }
+        _ => false,
+    }
+}
+
+/// True iff any statement in the (flattened) body performs a secret multiply.
+fn vec_stmt_contains_multiply(stmt: &AstNode) -> bool {
+    match stmt {
+        AstNode::VariableDeclaration { value: Some(v), .. } => vec_expr_contains_multiply(v),
+        AstNode::Assignment { value, .. } => vec_expr_contains_multiply(value),
+        AstNode::FunctionCall { arguments, .. } => arguments.iter().any(vec_expr_contains_multiply),
+        AstNode::DiscardStatement { expression, .. } => vec_stmt_contains_multiply(expression),
+        AstNode::Block(stmts) => stmts.iter().any(vec_stmt_contains_multiply),
+        _ => false,
+    }
+}
+
+fn is_int_literal_zero(node: &AstNode) -> bool {
+    matches!(
+        node,
+        AstNode::Literal {
+            value: crate::ast::Value::Int { value: 0, .. },
+            ..
+        }
+    )
+}
+
+/// Output reconstruction mode for the scatter step.
+enum VecCommit {
+    /// Output element is a list of per-lane scalar/list expressions.
+    List(Vec<AstNode>),
+    /// Output element is a single per-lane expression (flat output list).
+    Scalar(AstNode),
+}
+
+/// State for scalar-expanding one map-loop body into vectorized lane lists.
+struct VecCtx {
+    loop_var: String,
+    loc: SourceLocation,
+    /// Statements synthesized so far (gathers, batch_muls, combine loops).
+    emitted: Vec<AstNode>,
+    /// expr structural key -> lane-list variable holding that value per lane.
+    cache: HashMap<String, String>,
+    /// body temporary name -> lane-list variable.
+    map: HashMap<String, String>,
+    /// inner-accumulator list name -> ordered appended element expressions.
+    inner_accs: HashMap<String, Vec<AstNode>>,
+    /// alias name -> canonical inner-accumulator name.
+    acc_alias: HashMap<String, String>,
+    /// loop-length variable name (`var __veclen = HI`).
+    veclen: String,
+    /// (output accumulator name, committed value) — set by the single commit.
+    commit: Option<(String, AstNode)>,
+    empty_fns: HashSet<String>,
+    /// Names declared INSIDE the loop body (loop-local temps + the loop var).
+    /// Only these may be the target of an `Assignment` — writing any outer
+    /// variable across iterations is a loop-carried dependence (fail-closed).
+    locals: HashSet<String>,
+    /// Every name written anywhere in the flattened body (declarations + all
+    /// assignment targets). A bare identifier that is in this set but not yet
+    /// mapped to a per-lane list is provably NOT loop-invariant, so it must not
+    /// be broadcast.
+    writes: HashSet<String>,
+}
+
+impl VecCtx {
+    fn new(loop_var: String, loc: SourceLocation) -> Self {
+        let mut locals = HashSet::new();
+        locals.insert(loop_var.clone());
+        VecCtx {
+            loop_var,
+            loc,
+            emitted: Vec::new(),
+            cache: HashMap::new(),
+            map: HashMap::new(),
+            inner_accs: HashMap::new(),
+            acc_alias: HashMap::new(),
+            veclen: generate_named_temp_name("veclen"),
+            commit: None,
+            empty_fns: HashSet::new(),
+            locals,
+            writes: HashSet::new(),
+        }
+    }
+
+    fn id(&self, name: &str) -> AstNode {
+        AstNode::Identifier(name.to_string(), self.loc.clone())
+    }
+
+    /// `name[I]` — index a lane list by the loop variable.
+    fn index_lane(&self, list_name: &str) -> AstNode {
+        AstNode::IndexAccess {
+            base: Box::new(self.id(list_name)),
+            index: Box::new(self.id(&self.loop_var)),
+            location: self.loc.clone(),
+        }
+    }
+
+    fn empty_list_decl(&self, name: &str) -> AstNode {
+        AstNode::VariableDeclaration {
+            name: name.to_string(),
+            type_annotation: None,
+            value: Some(Box::new(AstNode::ListLiteral {
+                elements: vec![],
+                location: self.loc.clone(),
+            })),
+            is_mutable: true,
+            is_secret: false,
+            location: self.loc.clone(),
+        }
+    }
+
+    fn append_stmt(&self, receiver: &str, value: AstNode) -> AstNode {
+        AstNode::FunctionCall {
+            function: Box::new(self.id("append")),
+            arguments: vec![self.id(receiver), value],
+            location: self.loc.clone(),
+            resolved_return_type: None,
+        }
+    }
+
+    /// `for I in 0..__veclen: <body>` — a pure lane loop (adds no MPC rounds).
+    fn lane_loop(&self, body: Vec<AstNode>) -> AstNode {
+        AstNode::ForLoop {
+            variables: vec![self.loop_var.clone()],
+            iterable: Box::new(AstNode::BinaryOperation {
+                op: "..".to_string(),
+                left: Box::new(make_int_literal(0, &self.loc)),
+                right: Box::new(self.id(&self.veclen)),
+                location: self.loc.clone(),
+            }),
+            body: Box::new(AstNode::Block(body)),
+            location: self.loc.clone(),
+        }
+    }
+
+    fn is_inner_acc(&self, name: &str) -> bool {
+        self.inner_accs.contains_key(name) || self.acc_alias.contains_key(name)
+    }
+
+    fn resolve_alias(&self, name: &str) -> String {
+        self.acc_alias
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// Replace every body-temp identifier in `expr` with `temp_list[I]`, leaving
+    /// the loop variable, loop-invariants and literals untouched.
+    fn subst(&self, expr: &AstNode) -> AstNode {
+        match expr {
+            AstNode::Identifier(name, _) => {
+                if let Some(lv) = self.map.get(name) {
+                    self.index_lane(lv)
+                } else {
+                    expr.clone()
+                }
+            }
+            AstNode::BinaryOperation {
+                op,
+                left,
+                right,
+                location,
+            } => AstNode::BinaryOperation {
+                op: op.clone(),
+                left: Box::new(self.subst(left)),
+                right: Box::new(self.subst(right)),
+                location: location.clone(),
+            },
+            AstNode::UnaryOperation {
+                op,
+                operand,
+                location,
+            } => AstNode::UnaryOperation {
+                op: op.clone(),
+                operand: Box::new(self.subst(operand)),
+                location: location.clone(),
+            },
+            AstNode::IndexAccess {
+                base,
+                index,
+                location,
+            } => AstNode::IndexAccess {
+                base: Box::new(self.subst(base)),
+                index: Box::new(self.subst(index)),
+                location: location.clone(),
+            },
+            AstNode::FieldAccess {
+                object,
+                field_name,
+                location,
+            } => AstNode::FieldAccess {
+                object: Box::new(self.subst(object)),
+                field_name: field_name.clone(),
+                location: location.clone(),
+            },
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                location,
+                resolved_return_type,
+            } => AstNode::FunctionCall {
+                // Keep the callee (a builtin name) verbatim; only substitute args.
+                function: function.clone(),
+                arguments: arguments.iter().map(|a| self.subst(a)).collect(),
+                location: location.clone(),
+                resolved_return_type: resolved_return_type.clone(),
+            },
+            AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
+                elements: elements.iter().map(|e| self.subst(e)).collect(),
+                location: location.clone(),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// Emit a pure elementwise lane loop computing `expr` per lane; returns the
+    /// produced lane-list variable.
+    fn emit_elementwise(&mut self, expr: &AstNode) -> Option<String> {
+        if !expr_is_pure(expr, &self.empty_fns) {
+            return None;
+        }
+        let res = generate_named_temp_name("vlane");
+        self.emitted.push(self.empty_list_decl(&res));
+        let body_expr = self.subst(expr);
+        let append = self.append_stmt(&res, body_expr);
+        let loop_stmt = self.lane_loop(vec![append]);
+        self.emitted.push(loop_stmt);
+        Some(res)
+    }
+
+    /// Emit `var prod = Share.batch_mul(l, r)` plus the per-lane reconstruction of
+    /// the boolean `op` (xor/and/or). Returns the result lane-list variable.
+    fn emit_binmul(&mut self, op: &str, l: &str, r: &str) -> String {
+        let prod = generate_named_temp_name("vprod");
+        self.emitted.push(AstNode::VariableDeclaration {
+            name: prod.clone(),
+            type_annotation: None,
+            value: Some(Box::new(make_batch_mul_call(
+                self.id(l),
+                self.id(r),
+                &self.loc,
+            ))),
+            is_mutable: false,
+            is_secret: false,
+            location: self.loc.clone(),
+        });
+        // `and`/`mul`: the product itself is the result — no combine loop needed.
+        if op == "and" || op == "mul" {
+            return prod;
+        }
+        let res = generate_named_temp_name(if op == "or" { "vor" } else { "vxor" });
+        self.emitted.push(self.empty_list_decl(&res));
+        let li = self.index_lane(l);
+        let ri = self.index_lane(r);
+        let pi = self.index_lane(&prod);
+        let recon = if op == "or" {
+            // a + b - ab
+            let sum = make_share_binary_call("Share.add", li, ri, &self.loc);
+            make_share_binary_call("Share.sub", sum, pi, &self.loc)
+        } else {
+            // xor: a + b - 2ab
+            let sum = make_share_binary_call("Share.add", li, ri, &self.loc);
+            let doubled = make_share_mul_scalar_expr(pi, 2, &self.loc);
+            make_share_binary_call("Share.sub", sum, doubled, &self.loc)
+        };
+        let append = self.append_stmt(&res, recon);
+        let loop_stmt = self.lane_loop(vec![append]);
+        self.emitted.push(loop_stmt);
+        res
+    }
+
+    /// Emit a per-lane elementwise call `Share.<base>(a[I], b[I])`.
+    fn emit_share_binary(&mut self, base: &str, a: &str, b: &str) -> String {
+        let res = generate_named_temp_name("vlane");
+        self.emitted.push(self.empty_list_decl(&res));
+        let call = make_share_binary_call(
+            &format!("Share.{base}"),
+            self.index_lane(a),
+            self.index_lane(b),
+            &self.loc,
+        );
+        let append = self.append_stmt(&res, call);
+        let loop_stmt = self.lane_loop(vec![append]);
+        self.emitted.push(loop_stmt);
+        res
+    }
+
+    /// Recursively scalar-expand a per-lane scalar expression into a lane list.
+    fn vec_of(&mut self, expr: &AstNode) -> Option<String> {
+        // A bare reference to a body temp already has a lane list.
+        if let AstNode::Identifier(name, _) = expr {
+            if let Some(lv) = self.map.get(name) {
+                return Some(lv.clone());
+            }
+            // Soundness (fail-closed): an unmapped bare identifier may only be
+            // broadcast if it is a PROVEN loop-invariant. The loop variable is
+            // fine (`subst` rewrites it per lane). Any other name that is a
+            // loop-local temp (declared inside but not expanded to a lane list)
+            // or is written anywhere in the body is NOT invariant — broadcasting
+            // it would silently collapse a loop-carried value, so bail.
+            if name != &self.loop_var && (self.locals.contains(name) || self.writes.contains(name))
+            {
+                return None;
+            }
+        }
+        // Soundness: never gather/broadcast a value that READS an inner output
+        // accumulator (it is being built across the lanes, so reading it as a
+        // loop-invariant would be wrong). Bail so the loop is left unchanged.
+        {
+            let mut refs = HashSet::new();
+            collect_referenced_vars(expr, &mut refs);
+            if refs.iter().any(|r| self.is_inner_acc(r)) {
+                return None;
+            }
+        }
+        let mut key = String::new();
+        let keyed = expr_key(expr, &mut key);
+        if keyed {
+            if let Some(lv) = self.cache.get(&key) {
+                return Some(lv.clone());
+            }
+        }
+
+        let result = if let AstNode::BinaryOperation {
+            op, left, right, ..
+        } = expr
+        {
+            if matches!(op.as_str(), "xor" | "and" | "or") {
+                let l = self.vec_of(left)?;
+                let r = self.vec_of(right)?;
+                self.emit_binmul(op, &l, &r)
+            } else if !vec_expr_contains_multiply(expr) {
+                self.emit_elementwise(expr)?
+            } else {
+                return None;
+            }
+        } else if !vec_expr_contains_multiply(expr) {
+            if !keyed {
+                return None;
+            }
+            self.emit_elementwise(expr)?
+        } else if let AstNode::UnaryOperation { op, operand, .. } = expr {
+            if op != "not" {
+                return None;
+            }
+            // `not x` with a multiply inside x: vectorize x then negate per lane.
+            let x = self.vec_of(operand)?;
+            let res = generate_named_temp_name("vnot");
+            self.emitted.push(self.empty_list_decl(&res));
+            let neg = AstNode::UnaryOperation {
+                op: "not".to_string(),
+                operand: Box::new(self.index_lane(&x)),
+                location: self.loc.clone(),
+            };
+            let append = self.append_stmt(&res, neg);
+            let loop_stmt = self.lane_loop(vec![append]);
+            self.emitted.push(loop_stmt);
+            res
+        } else if let AstNode::FunctionCall { arguments, .. } = expr {
+            let base = builtin_base_name(call_name(expr)?);
+            match base {
+                "add" | "sub" if arguments.len() == 2 => {
+                    let a = self.vec_of(&arguments[0])?;
+                    let b = self.vec_of(&arguments[1])?;
+                    self.emit_share_binary(base, &a, &b)
+                }
+                "mul" if arguments.len() == 2 => {
+                    let a = self.vec_of(&arguments[0])?;
+                    let b = self.vec_of(&arguments[1])?;
+                    self.emit_binmul("mul", &a, &b)
+                }
+                "mul_scalar" if arguments.len() == 2 => {
+                    let a = self.vec_of(&arguments[0])?;
+                    let res = generate_named_temp_name("vlane");
+                    self.emitted.push(self.empty_list_decl(&res));
+                    let call = AstNode::FunctionCall {
+                        function: Box::new(self.id("Share.mul_scalar")),
+                        arguments: vec![self.index_lane(&a), arguments[1].clone()],
+                        location: self.loc.clone(),
+                        resolved_return_type: None,
+                    };
+                    let append = self.append_stmt(&res, call);
+                    let loop_stmt = self.lane_loop(vec![append]);
+                    self.emitted.push(loop_stmt);
+                    res
+                }
+                _ => return None,
+            }
+        } else {
+            return None;
+        };
+
+        if keyed {
+            self.cache.insert(key, result.clone());
+        }
+        Some(result)
+    }
+
+    /// Process one (flattened) body statement, recording lane lists / accumulators
+    /// / the single output commit. Returns `None` (bail) on any unhandled shape.
+    fn process_stmt(&mut self, stmt: &AstNode) -> Option<()> {
+        // The commit must be the last statement.
+        if self.commit.is_some() {
+            return None;
+        }
+        match stmt {
+            AstNode::VariableDeclaration {
+                name,
+                value: Some(v),
+                ..
+            } => {
+                // Every binding introduced inside the body is loop-local.
+                self.locals.insert(name.clone());
+                match v.as_ref() {
+                    AstNode::ListLiteral { elements, .. } if elements.is_empty() => {
+                        self.inner_accs.insert(name.clone(), Vec::new());
+                        Some(())
+                    }
+                    AstNode::Identifier(s, _) if self.is_inner_acc(s) => {
+                        let canon = self.resolve_alias(s);
+                        self.acc_alias.insert(name.clone(), canon);
+                        Some(())
+                    }
+                    _ => {
+                        let lv = self.vec_of(v)?;
+                        self.map.insert(name.clone(), lv);
+                        Some(())
+                    }
+                }
+            }
+            AstNode::Assignment { target, value, .. } => {
+                let AstNode::Identifier(name, _) = target.as_ref() else {
+                    return None;
+                };
+                // Fail-closed: the target must be a loop-LOCAL temp. Mutating an
+                // outer variable across iterations is a loop-carried dependence
+                // (e.g. `acc = acc + x[i]`), which the gather/batch_mul/scatter
+                // rewrite cannot represent — leave the loop unvectorized.
+                if !self.locals.contains(name) {
+                    return None;
+                }
+                if self.is_inner_acc(name) {
+                    return None;
+                }
+                let lv = self.vec_of(value)?;
+                self.map.insert(name.clone(), lv);
+                Some(())
+            }
+            AstNode::FunctionCall { .. } => self.process_call_stmt(stmt),
+            AstNode::DiscardStatement { expression, .. } => self.process_call_stmt(expression),
+            _ => None,
+        }
+    }
+
+    fn process_call_stmt(&mut self, call: &AstNode) -> Option<()> {
+        let AstNode::FunctionCall { arguments, .. } = call else {
+            return None;
+        };
+        let base = builtin_base_name(call_name(call)?);
+        if !matches!(base, "append" | "array_push") || arguments.len() != 2 {
+            return None;
+        }
+        let AstNode::Identifier(rname, _) = &arguments[0] else {
+            return None;
+        };
+        let val = arguments[1].clone();
+        if self.is_inner_acc(rname) {
+            let canon = self.resolve_alias(rname);
+            self.inner_accs.get_mut(&canon)?.push(val);
+            Some(())
+        } else {
+            // The single output commit.
+            self.commit = Some((rname.clone(), val));
+            Some(())
+        }
+    }
+
+    /// Run the recognition+expansion over `flat` (the locally-flattened body),
+    /// returning the replacement statement list or `None` if ineligible.
+    fn run(mut self, flat: &[AstNode], hi: &AstNode) -> Option<Vec<AstNode>> {
+        if flat.is_empty() {
+            return None;
+        }
+        // Precompute every name written in the body (declarations + assignment
+        // targets). `vec_of` uses this to refuse to broadcast a bare identifier
+        // that is provably not loop-invariant.
+        for s in flat {
+            collect_written_names(s, &mut self.writes);
+        }
+        // `var __veclen = HI`.
+        self.emitted.push(AstNode::VariableDeclaration {
+            name: self.veclen.clone(),
+            type_annotation: None,
+            value: Some(Box::new(hi.clone())),
+            is_mutable: false,
+            is_secret: false,
+            location: self.loc.clone(),
+        });
+
+        for stmt in flat {
+            self.process_stmt(stmt)?;
+        }
+
+        let (out_name, commit_val) = self.commit.take()?;
+        if self.is_inner_acc(&out_name) || self.map.contains_key(&out_name) {
+            return None;
+        }
+        // Soundness: the output accumulator must not be READ anywhere in the body
+        // except as the receiver of the final commit (no loop-carried dependence
+        // through OUT). The commit statement itself is skipped below because its
+        // first argument is OUT (the receiver), but its VALUE expression is still
+        // checked — an iteration reading OUT[j] / a prior result there would be
+        // loop-carried, so bail.
+        {
+            let mut refs = HashSet::new();
+            collect_referenced_vars(&commit_val, &mut refs);
+            if refs.contains(&out_name) {
+                return None;
+            }
+        }
+        let last = flat.len() - 1;
+        for (i, s) in flat.iter().enumerate() {
+            if i == last {
+                continue;
+            }
+            let mut refs = HashSet::new();
+            collect_referenced_vars(s, &mut refs);
+            if refs.contains(&out_name) {
+                return None;
+            }
+        }
+
+        // Resolve the committed value into a scatter reconstruction.
+        let commit = match &commit_val {
+            AstNode::Identifier(s, _) => {
+                let canon = self.resolve_alias(s);
+                if let Some(elems) = self.inner_accs.get(&canon) {
+                    VecCommit::List(elems.clone())
+                } else if self.map.contains_key(s) {
+                    VecCommit::Scalar(commit_val.clone())
+                } else {
+                    return None;
+                }
+            }
+            AstNode::ListLiteral { elements, .. } => VecCommit::List(elements.clone()),
+            other => VecCommit::Scalar(other.clone()),
+        };
+
+        let scatter_value = match commit {
+            VecCommit::List(exprs) => {
+                let mut lane_lists = Vec::with_capacity(exprs.len());
+                for e in &exprs {
+                    lane_lists.push(self.vec_of(e)?);
+                }
+                let elements = lane_lists.iter().map(|ll| self.index_lane(ll)).collect();
+                AstNode::ListLiteral {
+                    elements,
+                    location: self.loc.clone(),
+                }
+            }
+            VecCommit::Scalar(e) => {
+                let ll = self.vec_of(&e)?;
+                self.index_lane(&ll)
+            }
+        };
+
+        let append = self.append_stmt(&out_name, scatter_value);
+        let scatter = self.lane_loop(vec![append]);
+        self.emitted.push(scatter);
+        Some(self.emitted)
+    }
+}
+
+/// Attempt to vectorize a single `ForLoop`. Returns the replacement statements
+/// on success, or `None` to leave the loop unchanged.
+fn try_vectorize_for(stmt: &AstNode) -> Option<Vec<AstNode>> {
+    let AstNode::ForLoop {
+        variables,
+        iterable,
+        body,
+        location,
+    } = stmt
+    else {
+        return None;
+    };
+    if variables.len() != 1 {
+        return None;
+    }
+    let loop_var = variables[0].clone();
+
+    // Iterable must be `0 .. HI`.
+    let AstNode::BinaryOperation {
+        op, left, right, ..
+    } = iterable.as_ref()
+    else {
+        return None;
+    };
+    if op != ".." || !is_int_literal_zero(left) {
+        return None;
+    }
+    let hi = right.as_ref();
+    // HI must be loop-invariant.
+    if references_var(hi, &loop_var) {
+        return None;
+    }
+    // Only act on loops the unroller deliberately KEPT rolled (symbolic bound):
+    // static-bound loops are already flattened+scheduled, and rewriting them
+    // risks regressing the already-optimal AES/CTR paths.
+    if range_bounds(iterable, &LenEnv::default()).is_some() {
+        return None;
+    }
+    if body_assigns_var(body, &loop_var) {
+        return None;
+    }
+
+    // Locally flatten the body (unroll inner static loops + fold constant
+    // branches) with a fresh budget, so a per-iteration gate DAG that the global
+    // unroller left rolled (budget spent) becomes straight-line here.
+    let body_stmts: Vec<AstNode> = match body.as_ref() {
+        AstNode::Block(s) => s.clone(),
+        single => vec![single.clone()],
+    };
+    let mut fenv = LenEnv::default();
+    bind_loop_var(&mut fenv, variables, iterable);
+    let mut budget = UNROLL_BUDGET;
+    let flat = unroll_stmt_list(body_stmts, &mut fenv, &mut budget);
+    let flat = match fold_constant_branches(AstNode::Block(flat)) {
+        AstNode::Block(s) => s,
+        x => vec![x],
+    };
+
+    // Nothing to gain (and nothing to risk) unless the body actually multiplies.
+    if !flat.iter().any(vec_stmt_contains_multiply) {
+        return None;
+    }
+    // The flattened body must be straight-line: any residual loop/branch means
+    // recognition cannot prove independence, so bail.
+    if flat.iter().any(|s| {
+        matches!(
+            s,
+            AstNode::ForLoop { .. } | AstNode::WhileLoop { .. } | AstNode::IfExpression { .. }
+        )
+    }) {
+        return None;
+    }
+
+    let ctx = VecCtx::new(loop_var, location.clone());
+    ctx.run(&flat, hi)
+}
+
+/// Does `node` reference identifier `name` anywhere?
+fn references_var(node: &AstNode, name: &str) -> bool {
+    let mut refs = HashSet::new();
+    collect_referenced_vars(node, &mut refs);
+    refs.contains(name)
+}
+
+fn optimize_all_inner(node: AstNode, optimization_level: u8) -> AstNode {
     // Passes compose forward: each one runs on the previous pass's output, so the
     // pipeline refines the program incrementally rather than each pass re-reading
     // the original AST. Order is deliberate — general function inlining runs first so
@@ -1792,6 +3298,48 @@ pub fn optimize_all(node: AstNode, optimization_level: u8) -> AstNode {
     // which is why it is gated to -O3.
     let node = if optimization_level >= 3 {
         unroll_literal_loops(node)
+    } else {
+        node
+    };
+    // Fold `if`/`else` whose condition is a compile-time constant (-O3 only).
+    // Unrolling substitutes the loop index with a literal, turning index guards
+    // such as `if i == 0:` into `if 0 == 0:` / `if 1 == 0:`. Left in place these
+    // residual constant branches are dead-but-present `IfExpression` nodes, and
+    // `stmt_is_schedulable` treats ANY `if` as a barrier — so they fragment the
+    // straight-line region the round-minimizing scheduler needs to cluster
+    // independent same-depth multiplies. Pruning each constant branch to its taken
+    // side (splicing a taken block into its parent statement list so no residual
+    // `Block` barrier remains) lets the scheduler see across them. This is what
+    // unblocks AES *decrypt*: its per-byte `inv_affine` is a `for i in 0..8` of
+    // scalar `xor` multiplies guarded by `if i == 0 / if i == 2`, so without this
+    // every one of those secret-bool xors runs as its own unbatched round.
+    let node = if optimization_level >= 3 {
+        fold_constant_branches(node)
+    } else {
+        node
+    };
+    // Fold provably-public boolean gates (e.g. the CTR counter ripple over the
+    // compile-time-public `ctr0`) to local `Share.from_clear_int` shares so they
+    // stop becoming MPC multiplies. Runs after unrolling + constant-branch
+    // folding (so the counter increment is straight-line) and before the
+    // multiply batchers (so folded gates never reach `Share.batch_mul`). -O3 only.
+    let node = if optimization_level >= 3 {
+        fold_public_gates(node)
+    } else {
+        node
+    };
+    // Auto loop-vectorizer (-O3): rewrite kept-rolled map-loops whose iterations
+    // each perform independent secret multiplies into transposed
+    // gather / Share.batch_mul / scatter form, so the per-iteration multiplies
+    // batch across the whole loop range (one round per multiply layer instead of
+    // one per iteration). Runs after inlining/unrolling/branch-folding (so the
+    // map-loop body, after local flattening, is a straight-line gate DAG) and
+    // before the multiply batchers (so the synthesized batch_muls are then fused
+    // and scheduled like any hand-vectorized form). It REPLACES the loop body
+    // with a fixed number of vector statements, so code size stays O(1) in the
+    // iteration count (no unroll blow-up).
+    let node = if optimization_level >= 3 {
+        vectorize_map_loops(node)
     } else {
         node
     };
@@ -1853,18 +3401,53 @@ fn root_var(node: &AstNode) -> Option<String> {
     }
 }
 
+/// The semantic secret/clear ground truth for a node, when semantic analysis
+/// attached it (the resolved return type of a call). Uses `contains_secret` so a
+/// call returning a *list/collection of* secret (e.g. `Share.batch_mul` →
+/// `list[secret bool]`) is recognized as carrying secret data — and therefore as
+/// a network round. Returns `None` when no type was attached (e.g. nodes the
+/// optimizer synthesised itself), in which case callers fall back to the name
+/// heuristic.
+fn node_resolved_contains_secret(node: &AstNode) -> Option<bool> {
+    match node {
+        AstNode::FunctionCall {
+            resolved_return_type,
+            ..
+        }
+        | AstNode::CommandCall {
+            resolved_return_type,
+            ..
+        } => resolved_return_type.as_ref().map(|ty| ty.contains_secret()),
+        _ => None,
+    }
+}
+
 /// Whether a statement's value is an operation the batcher treats as a secret
 /// multiply round (boolean `and`/`or`/`xor`, or an explicit `Share.mul` /
 /// `Share.batch_mul`). `*` is intentionally excluded: in this codebase it is
 /// clear index arithmetic, not a secret product.
+///
+/// For call forms we PREFER the semantic ground truth (`node_resolved_contains_secret`):
+/// a `mul`/`batch_mul` is only a network round if it actually yields a secret.
+/// When the analyzer left no type on the node we fall back to the historical
+/// name-only guess. On the current corpus every batched multiply returns a
+/// secret, so the two agree and behavior is unchanged.
 fn value_is_multiply(value: &AstNode) -> bool {
     match value {
         AstNode::BinaryOperation { op, .. } => matches!(op.as_str(), "and" | "or" | "xor"),
         AstNode::FunctionCall { .. } => {
-            matches!(
+            let name_is_multiply = matches!(
                 call_name(value).map(builtin_base_name),
                 Some("mul") | Some("batch_mul")
-            )
+            );
+            // Use `contains_secret` so a batched multiply yielding a
+            // `list[secret bool]` (not a scalar secret) still counts as a round.
+            match node_resolved_contains_secret(value) {
+                // Real type known: a clear `mul`/`batch_mul` result is not a round.
+                Some(carries_secret) => name_is_multiply && carries_secret,
+                // No attached type: fall back to the name heuristic.
+                None => name_is_multiply,
+            }
         }
         _ => false,
     }
@@ -1887,8 +3470,12 @@ fn heap_key(name: &str) -> String {
     format!("heap:{name}")
 }
 
+/// The catch-all dependency key that aliases every location (used when a write
+/// target cannot be resolved to a specific scalar/heap location).
+const GLOBAL_KEY: &str = "global:*";
+
 fn global_key() -> String {
-    "global:*".to_string()
+    GLOBAL_KEY.to_string()
 }
 
 fn collect_direct_read_keys(node: &AstNode, out: &mut HashSet<String>) {
@@ -1900,18 +3487,157 @@ fn collect_direct_read_keys(node: &AstNode, out: &mut HashSet<String>) {
     }
 }
 
-fn expr_logical_reads(node: &AstNode, env: &HashMap<String, HashSet<String>>) -> HashSet<String> {
+/// The scheduling environment: each in-scope binding maps to the *lazy* closure
+/// of logical-dependency keys its initializer reaches.
+///
+/// Historically this stored a fully-materialized `HashSet<String>` per binding,
+/// i.e. the flat transitive closure of every read. On a long straight-line
+/// dependency chain (e.g. fully inlined+unrolled CBC `main`) building binding
+/// `t_i`'s closure cloned binding `t_{i-1}`'s closure, so the closures grew
+/// `O(i)` and constructing the whole environment was `O(N^2)` time and memory —
+/// the dominant cost of `schedule_run` and the reason CBC `-O3` took tens of
+/// minutes / 3GB+ RSS. We now store each binding as a `DepNode` that references
+/// its predecessors by `Rc` (O(1) to build) and only flatten to a concrete key
+/// set where a statement actually *consumes* logical reads (the `FunctionCall`
+/// arm of `sched_info` and the loop-commit case of `update_sched_env`). The
+/// flattened set is membership-identical to the old materialized one, so the
+/// dependency DAG — and therefore the emitted schedule and round counts — is
+/// byte-for-byte unchanged.
+type SchedEnv = HashMap<String, Rc<DepNode>>;
+
+/// A lazily-evaluated set of logical-dependency keys (see [`SchedEnv`]).
+#[derive(Default)]
+struct DepNode {
+    /// Keys contributed directly by this binding: the `var:`/`heap:` keys of the
+    /// variables its initializer references (plus, for loop commits, the concrete
+    /// aggregate keys computed by `loop_sched_info`).
+    own: HashSet<String>,
+    /// Predecessor closures included transitively — the `env` entries of the
+    /// referenced variables, captured by value (`Rc` snapshot) at build time so
+    /// a later reassignment of one of those variables cannot retroactively change
+    /// this binding's closure.
+    parents: Vec<Rc<DepNode>>,
+}
+
+/// Build the lazy dependency node for `node`'s logical reads against `env`,
+/// without flattening the transitive closure (O(referenced vars), not O(N)).
+fn logical_reads_node(node: &AstNode, env: &SchedEnv) -> Rc<DepNode> {
     let mut vars = HashSet::new();
     collect_referenced_vars(node, &mut vars);
-    let mut out = HashSet::new();
+    let mut own = HashSet::new();
+    let mut parents = Vec::new();
     for var in vars {
-        out.insert(scalar_key(&var));
-        out.insert(heap_key(&var));
-        if let Some(deps) = env.get(&var) {
-            out.extend(deps.iter().cloned());
+        own.insert(scalar_key(&var));
+        own.insert(heap_key(&var));
+        if let Some(dep) = env.get(&var) {
+            parents.push(Rc::clone(dep));
         }
     }
+    Rc::new(DepNode { own, parents })
+}
+
+/// Flatten a `DepNode` closure into a concrete key set. The `Rc`-identity
+/// `visited` set both dedups shared sub-closures and guarantees termination;
+/// the result is exactly the transitive union of `own` over the node and all its
+/// (transitive) parents — i.e. the set the old materialized `env` stored.
+fn flatten_dep_node(
+    node: &Rc<DepNode>,
+    out: &mut HashSet<String>,
+    visited: &mut HashSet<*const DepNode>,
+) {
+    if !visited.insert(Rc::as_ptr(node)) {
+        return;
+    }
+    out.extend(node.own.iter().cloned());
+    for parent in &node.parents {
+        flatten_dep_node(parent, out, visited);
+    }
+}
+
+/// The flat set of logical-read keys for `node` against `env`. Membership is
+/// identical to the historical materialized computation; only the intermediate
+/// `env` storage is now lazy (see [`SchedEnv`]).
+fn expr_logical_reads(node: &AstNode, env: &SchedEnv) -> HashSet<String> {
+    let depnode = logical_reads_node(node, env);
+    let mut out = HashSet::new();
+    let mut visited = HashSet::new();
+    flatten_dep_node(&depnode, &mut out, &mut visited);
     out
+}
+
+/// The body statements of a loop, viewed as a slice (a body is normally a
+/// `Block`, but a single-statement body is handled too).
+fn loop_body_statements(body: &AstNode) -> &[AstNode] {
+    match body {
+        AstNode::Block(stmts) => stmts,
+        other => std::slice::from_ref(other),
+    }
+}
+
+/// Whether every statement in a loop body is schedulable (so the loop has no
+/// internal barrier and can be reordered as an atomic unit).
+fn loop_body_is_schedulable(body: &AstNode, pure_fns: &HashSet<String>) -> bool {
+    loop_body_statements(body)
+        .iter()
+        .all(|s| stmt_is_schedulable(s, pure_fns))
+}
+
+/// Aggregate the scheduling facts of a schedulable `for` loop into a single
+/// `SchedInfo`, treating the loop as one atomic node. Reads/writes/effects are
+/// the union over the iterable and every body statement (computed in body order
+/// so logical-dep tracking inside the loop is faithful), minus the loop-local
+/// induction variables. The over-approximation only ever ADDS dependency edges,
+/// so the resulting schedule preserves every observed value; `is_multiply` is
+/// false because a loop is not a single fusable multiply.
+fn loop_sched_info(
+    variables: &[String],
+    iterable: &AstNode,
+    body: &AstNode,
+    env: &SchedEnv,
+) -> SchedInfo {
+    let mut direct_reads = HashSet::new();
+    let mut logical_reads = HashSet::new();
+    let mut writes = HashSet::new();
+    let mut effects = HashSet::new();
+
+    collect_direct_read_keys(iterable, &mut direct_reads);
+
+    // Walk the body with a private env seeded from the outer one so each
+    // statement's logical reads resolve against bindings created earlier in the
+    // loop body (mirroring `schedule_run`'s per-statement env threading).
+    let mut body_env = env.clone();
+    for stmt in loop_body_statements(body) {
+        let info = sched_info(stmt, &body_env);
+        direct_reads.extend(info.direct_reads);
+        logical_reads.extend(info.logical_reads);
+        writes.extend(info.writes);
+        effects.extend(info.effects);
+        update_sched_env(stmt, &mut body_env);
+    }
+
+    // The induction variables are loop-local: drop their keys so they neither
+    // create false hazards with outer bindings nor leak as loop writes.
+    for var in variables {
+        let sk = scalar_key(var);
+        let hk = heap_key(var);
+        for set in [
+            &mut direct_reads,
+            &mut logical_reads,
+            &mut writes,
+            &mut effects,
+        ] {
+            set.remove(&sk);
+            set.remove(&hk);
+        }
+    }
+
+    SchedInfo {
+        direct_reads,
+        logical_reads,
+        writes,
+        effects,
+        is_multiply: false,
+    }
 }
 
 /// Whether a statement can participate in reordering. Anything else is a barrier
@@ -1933,12 +3659,33 @@ fn stmt_is_schedulable(stmt: &AstNode, pure_fns: &HashSet<String>) -> bool {
             AstNode::FunctionCall { .. } => stmt_is_schedulable(expression, pure_fns),
             _ => false,
         },
+        // A `for` loop is schedulable as one atomic unit iff its iterable is pure
+        // and EVERY body statement is itself schedulable — i.e. the loop contains
+        // no barrier (no reveal, return, control-flow exit, or unknown/user call),
+        // only pure reads and root-level mutations the dep model (`sched_info`'s
+        // ForLoop arm) can over-approximate exactly. This lets the list scheduler
+        // reorder a pure reconstruction loop (e.g. CTR's per-block bit-XOR rebuild)
+        // as a unit, so two INDEPENDENT keystream blocks that were separated only by
+        // such loops can be interleaved and their same-depth `Share.batch_mul`s
+        // co-scheduled into one round. Loops with real data deps between iterations'
+        // sources (e.g. CBC's block N -> block N-1 ciphertext) are NOT affected:
+        // the DAG still serializes them, so the reorder cannot break CBC.
+        AstNode::ForLoop { iterable, body, .. } => {
+            expr_is_pure(iterable, pure_fns) && loop_body_is_schedulable(body, pure_fns)
+        }
         _ => false,
     }
 }
 
 /// Compute reads/writes/effect facts for a schedulable statement.
-fn sched_info(stmt: &AstNode, env: &HashMap<String, HashSet<String>>) -> SchedInfo {
+///
+/// Keying is intentionally *heap-level* (`var:`/`heap:`/`global:*`): a whole
+/// object collapses to one `heap:` key. The reveal reorderer's `reveal_dep_keys`
+/// shares this exact scheme so the two reordering passes agree on hazards. This
+/// is deliberately coarser than the multiply batcher's field-level keying
+/// (`statement_reads_and_writes` / `keys_conflict`) and must not be merged with
+/// it — see the note on `statement_reads_and_writes`.
+fn sched_info(stmt: &AstNode, env: &SchedEnv) -> SchedInfo {
     let mut direct_reads = HashSet::new();
     let mut logical_reads = HashSet::new();
     let mut writes = HashSet::new();
@@ -1978,6 +3725,14 @@ fn sched_info(stmt: &AstNode, env: &HashMap<String, HashSet<String>>) -> SchedIn
         AstNode::DiscardStatement { expression, .. } => {
             return sched_info(expression, env);
         }
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            ..
+        } => {
+            return loop_sched_info(variables, iterable, body, env);
+        }
         AstNode::FunctionCall { arguments, .. } => {
             // A recognized mutator: first argument is the receiver (read+written),
             // the rest are read.
@@ -2012,18 +3767,18 @@ fn sched_info(stmt: &AstNode, env: &HashMap<String, HashSet<String>>) -> SchedIn
     }
 }
 
-fn update_sched_env(stmt: &AstNode, env: &mut HashMap<String, HashSet<String>>) {
+fn update_sched_env(stmt: &AstNode, env: &mut SchedEnv) {
     match stmt {
         AstNode::VariableDeclaration { name, value, .. } => {
             let deps = value
                 .as_deref()
-                .map(|v| expr_logical_reads(v, env))
+                .map(|v| logical_reads_node(v, env))
                 .unwrap_or_default();
             env.insert(name.clone(), deps);
         }
         AstNode::Assignment { target, value, .. } => {
             if let AstNode::Identifier(name, _) = target.as_ref() {
-                let deps = expr_logical_reads(value, env);
+                let deps = logical_reads_node(value, env);
                 env.insert(name.clone(), deps);
             } else if let Some(root) = root_var(target) {
                 env.remove(&root);
@@ -2032,6 +3787,40 @@ fn update_sched_env(stmt: &AstNode, env: &mut HashMap<String, HashSet<String>>) 
             }
         }
         AstNode::DiscardStatement { expression, .. } => update_sched_env(expression, env),
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            ..
+        } => {
+            // After the loop, every root it wrote logically depends on everything
+            // the loop read (its inputs). Record that so a later effectful commit
+            // that consumes a loop-written value still cannot move before a write
+            // to one of those inputs.
+            let info = loop_sched_info(variables, iterable, body, env);
+            let deps: HashSet<String> = info
+                .direct_reads
+                .iter()
+                .chain(info.logical_reads.iter())
+                .cloned()
+                .collect();
+            // One shared leaf node holding the concrete aggregate set; every
+            // root the loop wrote points at it (flattens to `deps`, exactly as
+            // the old per-root `deps.clone()` did).
+            let dep_node = Rc::new(DepNode {
+                own: deps,
+                parents: Vec::new(),
+            });
+            for w in &info.writes {
+                let root = w.strip_prefix("var:").or_else(|| w.strip_prefix("heap:"));
+                if let Some(root) = root {
+                    env.insert(root.to_string(), Rc::clone(&dep_node));
+                }
+            }
+            for var in variables {
+                env.remove(var);
+            }
+        }
         AstNode::FunctionCall { arguments, .. } => {
             if let Some(receiver) = arguments.first().and_then(root_var) {
                 env.remove(&receiver);
@@ -2180,7 +3969,7 @@ fn schedule_run(stmts: Vec<AstNode>) -> Vec<AstNode> {
         return stmts;
     }
 
-    let mut env: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut env: SchedEnv = HashMap::new();
     let infos: Vec<SchedInfo> = stmts
         .iter()
         .map(|stmt| {
@@ -2483,6 +4272,24 @@ fn node_size(node: &AstNode) -> usize {
     n
 }
 
+/// Total AST node count of the whole program, descending into nested function
+/// definition bodies (which `node_size`/`for_each_child` deliberately do not).
+/// This is the scale on which the post-inline unroll expansion grows, so it gates
+/// the aggressive multi-return inlining (see `MULTI_RETURN_PROGRAM_MAX`).
+fn program_code_size(node: &AstNode) -> usize {
+    let mut n = 1usize;
+    match node {
+        AstNode::FunctionDefinition { body, .. } => n += program_code_size(body),
+        AstNode::Block(stmts) => {
+            for s in stmts {
+                n += program_code_size(s);
+            }
+        }
+        _ => for_each_child(node, &mut |c| n += program_code_size(c)),
+    }
+    n
+}
+
 fn count_returns(node: &AstNode) -> usize {
     let mut n = usize::from(matches!(node, AstNode::Return { .. }));
     for_each_child(node, &mut |c| n += count_returns(c));
@@ -2505,6 +4312,31 @@ fn collect_declared_names(node: &AstNode, out: &mut HashSet<String>) {
         _ => {}
     }
     for_each_child(node, &mut |c| collect_declared_names(c, out));
+}
+
+/// Collect every name WRITTEN in `node`: variable declarations, loop variables,
+/// and assignment targets. Used by the loop vectorizer to decide whether a bare
+/// identifier is provably loop-invariant (and therefore safe to broadcast).
+/// Does not descend into nested function definitions (a different scope).
+fn collect_written_names(node: &AstNode, out: &mut HashSet<String>) {
+    match node {
+        AstNode::VariableDeclaration { name, .. } => {
+            out.insert(name.clone());
+        }
+        AstNode::ForLoop { variables, .. } => {
+            for v in variables {
+                out.insert(v.clone());
+            }
+        }
+        AstNode::Assignment { target, .. } => {
+            if let AstNode::Identifier(name, _) = target.as_ref() {
+                out.insert(name.clone());
+            }
+        }
+        AstNode::FunctionDefinition { .. } => return,
+        _ => {}
+    }
+    for_each_child(node, &mut |c| collect_written_names(c, out));
 }
 
 /// Apply a name-substitution to identifier uses and binding sites. Type
@@ -2530,73 +4362,6 @@ fn rename_in(node: AstNode, map: &HashMap<String, String>) -> AstNode {
             is_secret,
             location,
         },
-        AstNode::Assignment {
-            target,
-            value,
-            location,
-        } => AstNode::Assignment {
-            target: rb(target),
-            value: rb(value),
-            location,
-        },
-        AstNode::BinaryOperation {
-            op,
-            left,
-            right,
-            location,
-        } => AstNode::BinaryOperation {
-            op,
-            left: rb(left),
-            right: rb(right),
-            location,
-        },
-        AstNode::UnaryOperation {
-            op,
-            operand,
-            location,
-        } => AstNode::UnaryOperation {
-            op,
-            operand: rb(operand),
-            location,
-        },
-        AstNode::FunctionCall {
-            function,
-            arguments,
-            location,
-            resolved_return_type,
-        } => AstNode::FunctionCall {
-            function: rb(function),
-            arguments: arguments.into_iter().map(|a| rename_in(a, map)).collect(),
-            location,
-            resolved_return_type,
-        },
-        AstNode::NamedArgument {
-            name,
-            value,
-            location,
-        } => AstNode::NamedArgument {
-            name,
-            value: rb(value),
-            location,
-        },
-        AstNode::IfExpression {
-            condition,
-            then_branch,
-            else_branch,
-        } => AstNode::IfExpression {
-            condition: rb(condition),
-            then_branch: rb(then_branch),
-            else_branch: else_branch.map(rb),
-        },
-        AstNode::WhileLoop {
-            condition,
-            body,
-            location,
-        } => AstNode::WhileLoop {
-            condition: rb(condition),
-            body: rb(body),
-            location,
-        },
         AstNode::ForLoop {
             variables,
             iterable,
@@ -2611,57 +4376,28 @@ fn rename_in(node: AstNode, map: &HashMap<String, String>) -> AstNode {
             body: rb(body),
             location,
         },
-        AstNode::Block(stmts) => {
-            AstNode::Block(stmts.into_iter().map(|s| rename_in(s, map)).collect())
-        }
-        AstNode::Return { value, location } => AstNode::Return {
-            value: value.map(rb),
-            location,
-        },
-        AstNode::Yield(v) => AstNode::Yield(v.map(rb)),
-        AstNode::FieldAccess {
-            object,
-            field_name,
-            location,
-        } => AstNode::FieldAccess {
-            object: rb(object),
-            field_name,
-            location,
-        },
-        AstNode::IndexAccess {
-            base,
-            index,
-            location,
-        } => AstNode::IndexAccess {
-            base: rb(base),
-            index: rb(index),
-            location,
-        },
-        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
-            elements: elements.into_iter().map(|e| rename_in(e, map)).collect(),
-            location,
-        },
-        AstNode::TupleLiteral(e) => {
-            AstNode::TupleLiteral(e.into_iter().map(|x| rename_in(x, map)).collect())
-        }
-        AstNode::SetLiteral(e) => {
-            AstNode::SetLiteral(e.into_iter().map(|x| rename_in(x, map)).collect())
-        }
-        AstNode::DictLiteral { pairs, location } => AstNode::DictLiteral {
-            pairs: pairs
-                .into_iter()
-                .map(|(k, v)| (rename_in(k, map), rename_in(v, map)))
-                .collect(),
-            location,
-        },
-        AstNode::DiscardStatement {
-            expression,
-            location,
-        } => AstNode::DiscardStatement {
-            expression: rb(expression),
-            location,
-        },
-        // Literals, Break/Continue, type nodes, nested definitions: pass through.
+        // Every other node with runtime children is a uniform alpha-rename of
+        // each child — delegate the rebuild to `map_children`.
+        AstNode::Assignment { .. }
+        | AstNode::BinaryOperation { .. }
+        | AstNode::UnaryOperation { .. }
+        | AstNode::FunctionCall { .. }
+        | AstNode::NamedArgument { .. }
+        | AstNode::IfExpression { .. }
+        | AstNode::WhileLoop { .. }
+        | AstNode::Block(_)
+        | AstNode::Return { .. }
+        | AstNode::Yield(_)
+        | AstNode::FieldAccess { .. }
+        | AstNode::IndexAccess { .. }
+        | AstNode::ListLiteral { .. }
+        | AstNode::TupleLiteral(_)
+        | AstNode::SetLiteral(_)
+        | AstNode::DictLiteral { .. }
+        | AstNode::DiscardStatement { .. } => map_children(node, &mut |c| rename_in(c, map)),
+        // Literals, Break/Continue, type nodes, nested definitions, Import, and
+        // TryCatch/CommandCall: pass through unchanged. (rename_in only performs
+        // inline alpha-renaming, which never needs to descend into these.)
         other => other,
     }
 }
@@ -3062,18 +4798,34 @@ fn collect_called_names(node: &AstNode, out: &mut HashSet<String>) {
 /// Build the set of inlinable functions: a block body with exactly one tail
 /// `return <expr>`, only plain positional parameters, and not (transitively)
 /// recursive.
-fn gather_inline_infos(root: &AstNode) -> HashMap<String, InlineInfo> {
-    // Collect every named function definition.
-    let mut defs: Vec<(String, Vec<crate::ast::Parameter>, AstNode)> = Vec::new();
-    fn gather(node: &AstNode, out: &mut Vec<(String, Vec<crate::ast::Parameter>, AstNode)>) {
+fn gather_inline_infos(root: &AstNode, allow_multi_return: bool) -> HashMap<String, InlineInfo> {
+    // Collect every named function definition (with its return type + location, so
+    // a multi-return body can be normalized to a single tail return below).
+    type Def = (
+        String,
+        Vec<crate::ast::Parameter>,
+        AstNode,
+        Option<Box<AstNode>>,
+        SourceLocation,
+    );
+    let mut defs: Vec<Def> = Vec::new();
+    fn gather(node: &AstNode, out: &mut Vec<Def>) {
         if let AstNode::FunctionDefinition {
             name: Some(n),
             parameters,
             body,
+            return_type,
+            location,
             ..
         } = node
         {
-            out.push((n.clone(), parameters.clone(), (**body).clone()));
+            out.push((
+                n.clone(),
+                parameters.clone(),
+                (**body).clone(),
+                return_type.clone(),
+                location.clone(),
+            ));
         }
         for_each_child_def(node, &mut |c| gather(c, out));
     }
@@ -3081,7 +4833,7 @@ fn gather_inline_infos(root: &AstNode) -> HashMap<String, InlineInfo> {
 
     // Direct-call graph for recursion detection.
     let mut callees: HashMap<String, HashSet<String>> = HashMap::new();
-    for (name, _, body) in &defs {
+    for (name, _, body, _, _) in &defs {
         let mut c = HashSet::new();
         collect_called_names(body, &mut c);
         callees.insert(name.clone(), c);
@@ -3103,14 +4855,37 @@ fn gather_inline_infos(root: &AstNode) -> HashMap<String, InlineInfo> {
     };
 
     let mut infos = HashMap::new();
-    for (name, params, body) in defs {
+    for (name, params, body, return_type, location) in defs {
         if is_recursive(&name) {
             continue;
         }
-        if !function_is_inlinable(&params, &body) {
+        // Never inline functions with variadic / defaulted parameters (the binding
+        // prelude assumes one ordered argument per parameter).
+        if params
+            .iter()
+            .any(|p| p.is_variadic || p.default_value.is_some())
+        {
             continue;
         }
-        let size = node_size(&body);
+        // Single-return functions splice directly. Multi-return functions are first
+        // normalized to an equivalent single-tail-return body (structured
+        // early-return elimination); the normalized body is only accepted when it
+        // stays under a per-function size cap. That cap is the selectivity that
+        // keeps relaxing the single-return restriction bounded: a small hot helper
+        // (e.g. `aes_sbox_vec`) inlines and its same-depth multiplies fuse, while a
+        // large early-returning helper stays an opaque call rather than being
+        // spliced at every site and exploding the post-inline unroll.
+        let prepared = if function_is_inlinable(&params, &body) {
+            body
+        } else if !allow_multi_return {
+            continue;
+        } else {
+            match normalize_function_returns(&body, &return_type, &location) {
+                Some(normalized) if node_size(&normalized) <= MULTI_RETURN_INLINE_MAX => normalized,
+                _ => continue,
+            }
+        };
+        let size = node_size(&prepared);
         infos.insert(
             name,
             InlineInfo {
@@ -3122,12 +4897,205 @@ fn gather_inline_infos(root: &AstNode) -> HashMap<String, InlineInfo> {
                         type_annotation: p.type_annotation,
                     })
                     .collect(),
-                body,
+                body: prepared,
                 size,
             },
         );
     }
     infos
+}
+
+/// Largest (post-normalization) body a *multi-return* function may have and still
+/// be inlined. Single-return functions are bounded only by the global inline
+/// budget; multi-return inlining additionally requires the normalized body stay
+/// under this per-function cap. A naive relaxation that inlined every multi-return
+/// function spliced large early-returning helpers at many call sites and exploded
+/// the post-inline unroll; the cap restricts the relaxation to small helpers whose
+/// expansion is bounded.
+const MULTI_RETURN_INLINE_MAX: usize = 6_000;
+
+/// Whole-program AST size (descending into function bodies, see `program_code_size`)
+/// above which multi-return normalization+inlining is disabled entirely. This is
+/// the hard scale guard: multi-return inlining enlarges hot helpers, and stacked on
+/// the existing -O3 inline+unroll a large program can exceed the unroll budget and
+/// fall into the partially-unrolled / heavy-spill regime the large-scale codegen
+/// mishandles (manifesting as IR blowup and a runtime crash). The AES-family
+/// single-block ciphers (CTR ~4.9k) sit well inside the reliable regime and gain
+/// the S-box fusion; the larger encrypt+decrypt programs (CBC ~5.4k) stay on the
+/// conservative single-return-only path, exactly as before this change.
+const MULTI_RETURN_PROGRAM_MAX: usize = 5_120;
+
+/// True when every control-flow path through `node` ends in a `return`.
+fn block_always_returns(node: &AstNode) -> bool {
+    match node {
+        AstNode::Return { .. } => true,
+        AstNode::Block(stmts) => stmts.last().is_some_and(block_always_returns),
+        AstNode::IfExpression {
+            then_branch,
+            else_branch: Some(e),
+            ..
+        } => block_always_returns(then_branch) && block_always_returns(e),
+        _ => false,
+    }
+}
+
+/// An expression the unroller's int env can evaluate (literals, locals, `.len()`,
+/// arithmetic). Used to require that every hoisted early-return guard is a public,
+/// env-foldable condition: only then does the env-aware branch fold delete it
+/// after inlining, so normalization never leaves a residual `if` barrier (a secret
+/// guard would be an illegal secret branch the source could not have contained).
+fn is_int_shape_expr(node: &AstNode) -> bool {
+    match node {
+        AstNode::Literal {
+            value: crate::ast::Value::Int { .. },
+            ..
+        } => true,
+        AstNode::Identifier(..) => true,
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            ..
+        } => {
+            matches!(function.as_ref(), AstNode::Identifier(n, _) if is_len_builtin(n))
+                && arguments.iter().all(is_int_shape_expr)
+        }
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => {
+            matches!(op.as_str(), "+" | "-" | "*" | "/" | "%")
+                && is_int_shape_expr(left)
+                && is_int_shape_expr(right)
+        }
+        _ => false,
+    }
+}
+
+/// A guard condition that the env-aware branch fold can prove constant: an integer
+/// comparison whose operands are both env-evaluable integer shapes.
+fn is_foldable_guard(cond: &AstNode) -> bool {
+    matches!(cond,
+        AstNode::BinaryOperation { op, left, right, .. }
+            if matches!(op.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=")
+                && is_int_shape_expr(left)
+                && is_int_shape_expr(right))
+}
+
+/// Rewrite a statement list so control falls off its end (no `return`), assigning
+/// each return's value to `ret` instead. Trailing statements following a guard
+/// `if cond: <always returns>` are moved into a synthesized `else` (structured
+/// early-return elimination), so the only remaining control merge is the single
+/// tail `return ret` added by [`normalize_function_returns`]. Returns `None` for
+/// any return shape it cannot prove sound to hoist — a return nested in a loop, an
+/// `if` with only some paths returning, or a guard whose condition is not a
+/// foldable integer comparison — leaving the function un-inlined (no miscompile,
+/// only a missed optimization).
+fn rewrite_returns(stmts: &[AstNode], ret: &str) -> Option<Vec<AstNode>> {
+    let mut out: Vec<AstNode> = Vec::new();
+    for (i, s) in stmts.iter().enumerate() {
+        match s {
+            AstNode::Return { value, location } => {
+                if let Some(v) = value {
+                    out.push(AstNode::Assignment {
+                        target: Box::new(AstNode::Identifier(ret.to_string(), location.clone())),
+                        value: v.clone(),
+                        location: location.clone(),
+                    });
+                }
+                // Anything after a return is unreachable; drop it.
+                return Some(out);
+            }
+            AstNode::IfExpression {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let then_terminates = block_always_returns(then_branch);
+                let else_terminates = else_branch
+                    .as_ref()
+                    .is_some_and(|e| block_always_returns(e));
+                if then_terminates && else_branch.is_none() {
+                    // Top-level guard: hoist the trailing statements into a new else.
+                    if !is_foldable_guard(condition) {
+                        return None;
+                    }
+                    let then_rw =
+                        rewrite_returns(&branch_into_stmts((**then_branch).clone()), ret)?;
+                    let else_rw = rewrite_returns(&stmts[i + 1..], ret)?;
+                    out.push(AstNode::IfExpression {
+                        condition: condition.clone(),
+                        then_branch: Box::new(AstNode::Block(then_rw)),
+                        else_branch: Some(Box::new(AstNode::Block(else_rw))),
+                    });
+                    return Some(out);
+                } else if then_terminates && else_terminates {
+                    if !is_foldable_guard(condition) {
+                        return None;
+                    }
+                    let then_rw =
+                        rewrite_returns(&branch_into_stmts((**then_branch).clone()), ret)?;
+                    let else_rw = rewrite_returns(
+                        &branch_into_stmts((**else_branch.as_ref().unwrap()).clone()),
+                        ret,
+                    )?;
+                    out.push(AstNode::IfExpression {
+                        condition: condition.clone(),
+                        then_branch: Box::new(AstNode::Block(then_rw)),
+                        else_branch: Some(Box::new(AstNode::Block(else_rw))),
+                    });
+                    // Both branches return: the rest is unreachable.
+                    return Some(out);
+                } else if count_returns(s) == 0 {
+                    out.push(s.clone());
+                } else {
+                    // Partial returns inside an `if`: not safe to hoist structurally.
+                    return None;
+                }
+            }
+            other => {
+                if count_returns(other) > 0 {
+                    // A return nested in a loop or other construct we don't restructure.
+                    return None;
+                }
+                out.push(other.clone());
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Convert a multi-return function body into an equivalent single-tail-return body
+/// via a synthetic result variable. Returns `None` if the returns cannot be
+/// hoisted soundly. The resulting body is what the inliner splices; its hoisted
+/// guards (e.g. `if n == 0`) are deleted later by the env-aware branch fold once
+/// the call site's lengths are known, restoring a barrier-free straight-line body.
+fn normalize_function_returns(
+    body: &AstNode,
+    return_type: &Option<Box<AstNode>>,
+    location: &SourceLocation,
+) -> Option<AstNode> {
+    let AstNode::Block(stmts) = body else {
+        return None;
+    };
+    let ret = generate_named_temp_name("inlret");
+    let rewritten = rewrite_returns(stmts, &ret)?;
+    let mut out: Vec<AstNode> = Vec::with_capacity(rewritten.len() + 2);
+    // Declare the result with the function's return type so codegen gives it the
+    // right (possibly secret) register; every rewritten path assigns it before the
+    // single tail return below.
+    out.push(AstNode::VariableDeclaration {
+        name: ret.clone(),
+        type_annotation: return_type.clone(),
+        value: None,
+        is_mutable: true,
+        is_secret: type_annotation_is_secret(return_type.as_deref()),
+        location: location.clone(),
+    });
+    out.extend(rewritten);
+    out.push(AstNode::Return {
+        value: Some(Box::new(AstNode::Identifier(ret, location.clone()))),
+        location: location.clone(),
+    });
+    Some(AstNode::Block(out))
 }
 
 /// Like `for_each_child` but also descends into nested function-definition bodies
@@ -3163,15 +5131,21 @@ fn function_is_inlinable(params: &[crate::ast::Parameter], body: &AstNode) -> bo
 /// Entry point: inline non-recursive, single-return functions to a fixpoint
 /// (bounded by `INLINE_BUDGET`), so that nested calls are also inlined.
 pub fn inline_functions(node: AstNode) -> AstNode {
-    let infos = gather_inline_infos(&node);
+    // Multi-return normalization+inlining is an aggressive transform: it enlarges
+    // the functions it touches, which (stacked on the existing -O3 inline+unroll)
+    // can push the post-inline program past the unroll budget into a partially
+    // unrolled, un-foldable, register-spilling regime that the large-scale codegen
+    // does not handle reliably. Restrict it to programs small enough that the
+    // post-inline expansion stays within that reliable regime; larger programs keep
+    // the conservative single-return-only inliner (their multi-return helpers stay
+    // opaque calls, exactly as before this change). See `MULTI_RETURN_PROGRAM_MAX`.
+    let allow_multi_return = program_code_size(&node) <= MULTI_RETURN_PROGRAM_MAX;
+    let infos = gather_inline_infos(&node, allow_multi_return);
     if infos.is_empty() {
         return node;
     }
     let mut node = node;
-    let mut budget = std::env::var("STOFFEL_INLINE_BUDGET")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(INLINE_BUDGET);
+    let mut budget = active_budgets().inline.unwrap_or(INLINE_BUDGET);
     for _ in 0..12 {
         let before = budget;
         node = inline_in_node(node, &infos, &mut budget);
@@ -3202,7 +5176,7 @@ pub fn inline_functions(node: AstNode) -> AstNode {
 
 /// Total number of AST nodes unrolling may add across the whole pass before it
 /// stops flattening further loops (blowup guard, mirrors `INLINE_BUDGET`).
-const UNROLL_BUDGET: usize = 200_000;
+const UNROLL_BUDGET: usize = 3_000_000;
 
 /// A single loop is never unrolled past this many iterations, regardless of
 /// remaining budget (guards against a huge literal range producing one enormous
@@ -3214,20 +5188,24 @@ const UNROLL_MAX_ITERATIONS: u128 = 1024;
 /// would otherwise allow it.
 const UNROLL_MAX_EXPANSION: usize = 50_000;
 
-/// Global blowup budget, overridable via `STOFFEL_UNROLL_BUDGET` for measuring
-/// the unrolling ceiling without recompiling.
+/// A loop with at most this many iterations is allowed to unroll even when its
+/// inner-unrolled estimate exceeds `UNROLL_MAX_EXPANSION`, provided the *raw*
+/// duplication cost (iterations * raw body) still fits the global budget. This
+/// exposes the statically-known per-iteration shape of low-trip outer loops over
+/// heavy bodies (the CTR/CBC per-block loop) to the inner-loop batcher. See the
+/// LEVER 1 note in `try_unroll_for`.
+const SMALL_TRIP_UNROLL: usize = 10;
+
+/// Global blowup budget, overridable via the `unroll` budget (threaded from
+/// `CompilerOptions`) for measuring the unrolling ceiling without recompiling.
 fn unroll_budget() -> usize {
-    std::env::var("STOFFEL_UNROLL_BUDGET")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(UNROLL_BUDGET)
+    active_budgets().unroll.unwrap_or(UNROLL_BUDGET)
 }
 
-/// Per-loop expansion cap, overridable via `STOFFEL_UNROLL_MAX_EXPANSION`.
+/// Per-loop expansion cap, overridable via the `unroll_max_expansion` budget.
 fn unroll_max_expansion() -> usize {
-    std::env::var("STOFFEL_UNROLL_MAX_EXPANSION")
-        .ok()
-        .and_then(|v| v.parse().ok())
+    active_budgets()
+        .unroll_max_expansion
         .unwrap_or(UNROLL_MAX_EXPANSION)
 }
 
@@ -3384,6 +5362,71 @@ fn builtin_base_name(name: &str) -> &str {
     canon.rsplit('.').next().unwrap_or(canon)
 }
 
+/// Single source of truth for the purity/effect/length facts of the modeled
+/// builtins, keyed by canonical VM base name (`builtin_base_name`). These facts
+/// were previously spread across four hand-maintained `matches!` lists that had
+/// to be kept in sync by hand (a dropped `insert` once caused a stale-alias
+/// miscompile). Each axis is an INDEPENDENT boolean so the deliberate overlaps
+/// and asymmetries are preserved exactly:
+///   - `pure`: effect-free, deterministic value computation.
+///   - `mutates_receiver`: in-place mutator (the is_mutator set, incl. `set_field`).
+///   - `grows_list`: length-growing list mutator (append/array_push/insert/extend).
+///   - `len_safe`: does not invalidate a tracked list passed as an argument.
+///   - `is_len_builtin`: queries a list's length (len/array_length/length).
+#[derive(Clone, Copy, Default)]
+struct BuiltinEffect {
+    pure: bool,
+    mutates_receiver: bool,
+    grows_list: bool,
+    len_safe: bool,
+    is_len_builtin: bool,
+}
+
+/// Look up the effect descriptor for a call's base name. A name absent from the
+/// table gets the all-false default, which is the safe-by-default polarity at
+/// every call site (impure / mutates-unknown / not-len-safe), matching the old
+/// `matches!`-returns-false behavior exactly.
+fn builtin_effect(name: &str) -> BuiltinEffect {
+    // `e(pure, mutates_receiver, grows_list, len_safe, is_len_builtin)`.
+    const fn e(
+        pure: bool,
+        mutates_receiver: bool,
+        grows_list: bool,
+        len_safe: bool,
+        is_len_builtin: bool,
+    ) -> BuiltinEffect {
+        BuiltinEffect {
+            pure,
+            mutates_receiver,
+            grows_list,
+            len_safe,
+            is_len_builtin,
+        }
+    }
+    match builtin_base_name(name) {
+        // Length queries: pure, len-safe, and the len builtins themselves.
+        "len" | "array_length" | "length" => e(true, false, false, true, true),
+        // Growth mutators: mutate AND grow their receiver, yet len-safe (the
+        // receiver is updated precisely beforehand and the element isn't
+        // aliased by the growth). `insert`/`extend` MUST stay mutators: omitting
+        // them once corrupted block-1's keystream under -O3 (stale `out` alias).
+        "append" | "array_push" | "insert" | "extend" => e(false, true, true, true, false),
+        // Non-growing in-place mutator.
+        "set_field" => e(false, true, false, false, false),
+        // Pure, len-safe value computations (`mul_scalar` is a local secret×public
+        // multiply — no communication — so it is pure too).
+        "add" | "sub" | "mul" | "mul_scalar" | "add_constant" | "add_scalar" | "batch_mul"
+        | "from_clear" | "from_clear_int" | "from_clear_uint" | "from_clear_fixed" | "slice"
+        | "contains" | "to_string" | "type" => e(true, false, false, true, false),
+        // Pure value read, but deliberately NOT len-safe (audit-flagged asymmetry).
+        "get_field" => e(true, false, false, false, false),
+        // Effectful, but len-safe (they don't invalidate a tracked list argument).
+        "open" | "reveal" | "print" | "assert" => e(false, false, false, true, false),
+        // Unknown: safe-by-default (impure / mutates-unknown / not-len-safe).
+        _ => BuiltinEffect::default(),
+    }
+}
+
 /// Calls that neither mutate the length of a list argument nor store an alias of
 /// it that could be mutated later. Passing a tracked list to anything *not* on
 /// this list conservatively invalidates it. (The modeled mutators
@@ -3391,39 +5434,11 @@ fn builtin_base_name(name: &str) -> &str {
 /// receiver is updated precisely beforehand and their element argument is not
 /// aliased by the growth.)
 fn is_len_safe_call(name: &str) -> bool {
-    matches!(
-        builtin_base_name(name),
-        "len"
-            | "array_length"
-            | "length"
-            | "append"
-            | "array_push"
-            | "insert"
-            | "extend"
-            | "add"
-            | "sub"
-            | "mul"
-            | "mul_scalar"
-            | "add_constant"
-            | "add_scalar"
-            | "batch_mul"
-            | "open"
-            | "reveal"
-            | "from_clear"
-            | "from_clear_int"
-            | "from_clear_uint"
-            | "from_clear_fixed"
-            | "to_string"
-            | "type"
-            | "contains"
-            | "slice"
-            | "print"
-            | "assert"
-    )
+    builtin_effect(name).len_safe
 }
 
 fn is_len_builtin(name: &str) -> bool {
-    matches!(builtin_base_name(name), "len" | "array_length" | "length")
+    builtin_effect(name).is_len_builtin
 }
 
 /// Best-effort static shape of an expression in `env`.
@@ -3709,7 +5724,7 @@ fn collect_mutated_vars(node: &AstNode, out: &mut HashSet<String>) {
         } => {
             let safe = match function.as_ref() {
                 AstNode::Identifier(name, _) => {
-                    if matches!(name.as_str(), "append" | "array_push" | "insert" | "extend") {
+                    if builtin_effect(name).grows_list {
                         if let Some(AstNode::Identifier(recv, _)) = arguments.first() {
                             out.insert(recv.clone());
                         }
@@ -3750,12 +5765,988 @@ fn bind_loop_var(env: &mut LenEnv, variables: &[String], iterable: &AstNode) {
     }
 }
 
+// ===========================================================================
+// Constant-branch folding
+//
+// After unrolling substitutes a loop index with a literal, branch conditions that
+// were `i == 0` / `i % 4 == 0` become fully constant (`0 == 0`, `5 % 4 == 0`).
+// Such residual `if`s are dead control flow, but the scheduler treats every `if`
+// as a barrier, so they block same-depth multiply clustering. This pass evaluates
+// constant conditions and replaces the branch with its taken side, splicing taken
+// blocks into their parent statement list so no barrier `Block`/`if` remains.
+// ===========================================================================
+
+/// Statically evaluate a constant integer expression (literals + `+ - * / %` and
+/// unary `-`). Returns `None` for anything not provably constant.
+fn const_eval_int(node: &AstNode) -> Option<i128> {
+    match node {
+        AstNode::Literal {
+            value: crate::ast::Value::Int { value, .. },
+            ..
+        } => i128::try_from(*value).ok(),
+        AstNode::UnaryOperation { op, operand, .. } if op == "-" => {
+            const_eval_int(operand).map(|v| -v)
+        }
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => {
+            let l = const_eval_int(left)?;
+            let r = const_eval_int(right)?;
+            match op.as_str() {
+                "+" => l.checked_add(r),
+                "-" => l.checked_sub(r),
+                "*" => l.checked_mul(r),
+                "/" => (r != 0).then(|| l / r),
+                "%" => (r != 0).then(|| l % r),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Statically evaluate a constant boolean condition (literal bools, integer
+/// comparisons over constant ints, and `and`/`or`/`not` of constant bools).
+/// Returns `None` unless the value is provably constant.
+fn const_eval_bool(node: &AstNode) -> Option<bool> {
+    match node {
+        AstNode::Literal {
+            value: crate::ast::Value::Bool(b),
+            ..
+        } => Some(*b),
+        AstNode::UnaryOperation { op, operand, .. } if op == "not" => {
+            const_eval_bool(operand).map(|b| !b)
+        }
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => {
+            if let (Some(l), Some(r)) = (const_eval_int(left), const_eval_int(right)) {
+                return match op.as_str() {
+                    "==" => Some(l == r),
+                    "!=" => Some(l != r),
+                    "<" => Some(l < r),
+                    ">" => Some(l > r),
+                    "<=" => Some(l <= r),
+                    ">=" => Some(l >= r),
+                    _ => None,
+                };
+            }
+            match op.as_str() {
+                // Short-circuiting constant truth: a constant-false `and` operand or
+                // constant-true `or` operand fixes the result regardless of the
+                // other (possibly non-constant) side.
+                "and" => match (const_eval_bool(left), const_eval_bool(right)) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (Some(true), Some(true)) => Some(true),
+                    _ => None,
+                },
+                "or" => match (const_eval_bool(left), const_eval_bool(right)) {
+                    (Some(true), _) | (_, Some(true)) => Some(true),
+                    (Some(false), Some(false)) => Some(false),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Like [`const_eval_bool`] but resolves integer operands through the unroller's
+/// length/int environment, so a comparison over a `.len()`-tracked local (e.g. an
+/// inlined `if n == 0` guard, `n = a.len()`) folds at the call site where the
+/// literal-only [`const_eval_bool`] cannot. Sound: `eval_int` only reports a value
+/// it can statically prove (it already drives loop-bound resolution).
+fn const_eval_bool_env(node: &AstNode, env: &LenEnv) -> Option<bool> {
+    match node {
+        AstNode::Literal {
+            value: crate::ast::Value::Bool(b),
+            ..
+        } => Some(*b),
+        AstNode::UnaryOperation { op, operand, .. } if op == "not" => {
+            const_eval_bool_env(operand, env).map(|b| !b)
+        }
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => {
+            if let (Some(l), Some(r)) = (eval_int(left, env), eval_int(right, env)) {
+                return match op.as_str() {
+                    "==" => Some(l == r),
+                    "!=" => Some(l != r),
+                    "<" => Some(l < r),
+                    ">" => Some(l > r),
+                    "<=" => Some(l <= r),
+                    ">=" => Some(l >= r),
+                    _ => None,
+                };
+            }
+            match op.as_str() {
+                "and" => match (
+                    const_eval_bool_env(left, env),
+                    const_eval_bool_env(right, env),
+                ) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (Some(true), Some(true)) => Some(true),
+                    _ => None,
+                },
+                "or" => match (
+                    const_eval_bool_env(left, env),
+                    const_eval_bool_env(right, env),
+                ) {
+                    (Some(true), _) | (_, Some(true)) => Some(true),
+                    (Some(false), Some(false)) => Some(false),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The statements a (taken) branch contributes to its parent statement list:
+/// a `Block`'s own statements (spliced flat, so no residual `Block` barrier), or
+/// the single node otherwise.
+fn branch_into_stmts(branch: AstNode) -> Vec<AstNode> {
+    match branch {
+        AstNode::Block(stmts) => stmts,
+        single => vec![single],
+    }
+}
+
+/// Fold constant-condition `if`s throughout the program. Entry point.
+pub fn fold_constant_branches(node: AstNode) -> AstNode {
+    fold_branches_in_node(node)
+}
+
+/// Recurse, folding constant `if`s. Statement lists are processed specially so a
+/// taken branch is spliced flat into the enclosing list.
+fn fold_branches_in_node(node: AstNode) -> AstNode {
+    match node {
+        AstNode::Block(stmts) => AstNode::Block(fold_branches_in_stmts(stmts)),
+        AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body,
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        } => AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body: Box::new(fold_branches_in_node(*body)),
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        },
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => AstNode::WhileLoop {
+            condition,
+            body: Box::new(fold_branches_in_node(*body)),
+            location,
+        },
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => AstNode::ForLoop {
+            variables,
+            iterable,
+            body: Box::new(fold_branches_in_node(*body)),
+            location,
+        },
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            // Fold children first.
+            let then_branch = Box::new(fold_branches_in_node(*then_branch));
+            let else_branch = else_branch.map(|e| Box::new(fold_branches_in_node(*e)));
+            match const_eval_bool(&condition) {
+                Some(true) => *then_branch,
+                Some(false) => else_branch
+                    .map(|e| *e)
+                    .unwrap_or_else(|| AstNode::Block(Vec::new())),
+                None => AstNode::IfExpression {
+                    condition,
+                    then_branch,
+                    else_branch,
+                },
+            }
+        }
+        other => other,
+    }
+}
+
+/// Fold constant `if`s appearing as statements, splicing a taken branch's
+/// statements directly into the list (no residual `Block`/`if` barrier).
+fn fold_branches_in_stmts(stmts: Vec<AstNode>) -> Vec<AstNode> {
+    let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        match stmt {
+            AstNode::IfExpression {
+                condition,
+                then_branch,
+                else_branch,
+            } => match const_eval_bool(&condition) {
+                Some(true) => {
+                    out.extend(fold_branches_in_stmts(branch_into_stmts(*then_branch)));
+                }
+                Some(false) => {
+                    if let Some(e) = else_branch {
+                        out.extend(fold_branches_in_stmts(branch_into_stmts(*e)));
+                    }
+                }
+                None => {
+                    let then_branch = Box::new(fold_branches_in_node(*then_branch));
+                    let else_branch = else_branch.map(|e| Box::new(fold_branches_in_node(*e)));
+                    out.push(AstNode::IfExpression {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    });
+                }
+            },
+            other => out.push(fold_branches_in_node(other)),
+        }
+    }
+    out
+}
+
+// ===========================================================================
+// Public-gate folding (`fold_public_gates`)
+//
+// In the CTR example the 128-bit counter `ctr0` is a *publicly known* constant
+// (`public_block([240..255])`), and `increment_counter_block` ripples a serial
+// `gate_and`/`gate_xor` carry across its bits. Those bits are typed `secret
+// bool`, so the type-driven recognizers treat each gate as an MPC multiply — but
+// every operand's clear VALUE is compile-time public. This pass proves, with a
+// strict flow-sensitive provenance analysis, that BOTH operands of an
+// `and`/`or`/`xor` are public bits *read out of a tracked public list*, and only
+// then rewrites that single gate node to `Share.from_clear_int(bit, 1)` (a local,
+// communication-free share of the computed bit).
+//
+// CRYPTO SAFETY (the analysis is conservative-by-default — `Top` = leave alone):
+//   * A `Bit`/`Int`/`List` value originates ONLY from integer/bool literals and
+//     `Share.from_clear_int(<public int>, 1)`. EVERY other expression (a
+//     `take_client_byte`/`take_share_bool` input, a `Share.mul`/`batch_mul`
+//     result, a `reveal`, an unknown call, an untracked variable) evaluates to
+//     `Top`, so a genuinely-secret operand can never be proven public.
+//   * The ONLY AST rewrite performed is replacing a scalar `and`/`or`/`xor`
+//     BinaryOperation with a scalar `Share.from_clear_int` — list values are
+//     never materialized back into the tree, so no list can ever be substituted
+//     where a scalar share is read (e.g. by a later `Share.batch_mul`).
+//   * A gate folds only if at least one operand was read from a public list
+//     (`from_list`). This is what distinguishes the CTR counter (bits live in the
+//     `counter`/`out` byte lists) from two directly-`from_clear_int` scalars
+//     and-ed together, which must stay a real multiply.
+// ===========================================================================
+
+/// A flow-sensitive provenance fact for a value. `Top` is the conservative
+/// unknown (possibly secret) default.
+#[derive(Clone)]
+enum ConstVal {
+    Top,
+    Int(i128),
+    /// A public single bit. `from_list` records that the value was read out of a
+    /// tracked public list (directly or via pure propagation) — the signal that
+    /// gates the rewrite.
+    Bit {
+        val: u8,
+        from_list: bool,
+    },
+    /// A list whose elements are themselves tracked (public) facts.
+    List(Vec<ConstVal>),
+}
+
+type GateEnv = std::collections::HashMap<String, ConstVal>;
+
+/// Fold provably-public boolean gates throughout the program. Entry point.
+pub fn fold_public_gates(node: AstNode) -> AstNode {
+    match node {
+        AstNode::Block(stmts) => AstNode::Block(stmts.into_iter().map(fold_public_gates).collect()),
+        AstNode::FunctionDefinition {
+            name,
+            type_params,
+            parameters,
+            return_type,
+            body,
+            is_secret,
+            pragmas,
+            location,
+            node_id,
+        } => {
+            // Parameters are unknown at the definition site → `Top`, so a
+            // standalone (uninlined) `gate_and` body never folds.
+            let mut env = GateEnv::new();
+            let body = Box::new(gate_process_node(*body, &mut env));
+            AstNode::FunctionDefinition {
+                name,
+                type_params,
+                parameters,
+                return_type,
+                body,
+                is_secret,
+                pragmas,
+                location,
+                node_id,
+            }
+        }
+        other => other,
+    }
+}
+
+/// Process a single (statement-position) node, threading `env` for the
+/// straight-line flow that follows it.
+fn gate_process_node(node: AstNode, env: &mut GateEnv) -> AstNode {
+    match node {
+        AstNode::Block(stmts) => AstNode::Block(gate_process_stmts(stmts, env)),
+        // A nested function definition (closure) starts a fresh scope.
+        def @ AstNode::FunctionDefinition { .. } => fold_public_gates(def),
+        other => gate_process_stmt(other, env),
+    }
+}
+
+/// Process a list of statements in order, updating `env` as facts are learned.
+fn gate_process_stmts(stmts: Vec<AstNode>, env: &mut GateEnv) -> Vec<AstNode> {
+    stmts
+        .into_iter()
+        .map(|s| gate_process_stmt(s, env))
+        .collect()
+}
+
+/// Process one statement: rewrite its expressions (folding gates) and update the
+/// environment to reflect any binding/mutation/control-flow effect.
+fn gate_process_stmt(stmt: AstNode, env: &mut GateEnv) -> AstNode {
+    match stmt {
+        // A nested statement block shares the surrounding straight-line flow
+        // (inlining/unrolling wrap their output in blocks), so thread `env`
+        // through it rather than leaving it unprocessed.
+        AstNode::Block(stmts) => AstNode::Block(gate_process_stmts(stmts, env)),
+        AstNode::FunctionDefinition { .. } => fold_public_gates(stmt),
+        AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value,
+            is_mutable,
+            is_secret,
+            location,
+        } => {
+            let value = value.map(|v| Box::new(gate_rewrite_expr(*v, env)));
+            // Lower a `Share.batch_mul` with a provably-public operand to local
+            // element-wise `Share.mul_scalar` (secret*public, 0 rounds) before the
+            // batcher can gather it. This both saves the multiply rounds and closes
+            // the only path that would feed a fully-folded public counter byte (a
+            // nested `Array`) into `Share.batch_mul`.
+            let value = value.map(|v| match try_localize_public_batch_mul(&v, env) {
+                Some(localized) => Box::new(localized),
+                None => v,
+            });
+            let cv = match &value {
+                Some(v) => gate_eval(v, env),
+                None => ConstVal::Top,
+            };
+            env.insert(name.clone(), cv);
+            AstNode::VariableDeclaration {
+                name,
+                type_annotation,
+                value,
+                is_mutable,
+                is_secret,
+                location,
+            }
+        }
+        AstNode::Assignment {
+            target,
+            value,
+            location,
+        } => {
+            let value = Box::new(gate_rewrite_expr(*value, env));
+            match target.as_ref() {
+                AstNode::Identifier(name, _) => {
+                    let cv = gate_eval(&value, env);
+                    env.insert(name.clone(), cv);
+                }
+                other => {
+                    // Element/field store: we can't precisely model it, so drop
+                    // any tracked fact for the root variable.
+                    if let Some(root) = base_var_of(other) {
+                        env.insert(root, ConstVal::Top);
+                    }
+                }
+            }
+            AstNode::Assignment {
+                target,
+                value,
+                location,
+            }
+        }
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            resolved_return_type,
+        } => {
+            let call = call_name_of(&function);
+            let base = call.as_deref().map(builtin_base_name);
+            let arguments: Vec<AstNode> = arguments
+                .into_iter()
+                .map(|a| gate_rewrite_expr(a, env))
+                .collect();
+            gate_apply_call_effect(call.as_deref(), base, &arguments, env);
+            AstNode::FunctionCall {
+                function,
+                arguments,
+                location,
+                resolved_return_type,
+            }
+        }
+        AstNode::Return { value, location } => {
+            let value = value.map(|v| Box::new(gate_rewrite_expr(*v, env)));
+            AstNode::Return { value, location }
+        }
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let condition = Box::new(gate_rewrite_expr(*condition, env));
+            // Fold inside each branch using current knowledge (a clone, since the
+            // taken side is unknown), then forget anything either branch wrote.
+            let mut then_env = env.clone();
+            let then_branch = Box::new(gate_process_node(*then_branch, &mut then_env));
+            let else_branch = else_branch.map(|e| {
+                let mut else_env = env.clone();
+                Box::new(gate_process_node(*e, &mut else_env))
+            });
+            let mut written = HashSet::new();
+            collect_written_vars(&then_branch, &mut written);
+            if let Some(e) = &else_branch {
+                collect_written_vars(e, &mut written);
+            }
+            for v in written {
+                env.insert(v, ConstVal::Top);
+            }
+            AstNode::IfExpression {
+                condition,
+                then_branch,
+                else_branch,
+            }
+        }
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => gate_process_loop_body(
+            |body| AstNode::WhileLoop {
+                condition,
+                body,
+                location,
+            },
+            *body,
+            env,
+        ),
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => gate_process_loop_body(
+            |body| AstNode::ForLoop {
+                variables,
+                iterable,
+                body,
+                location,
+            },
+            *body,
+            env,
+        ),
+        other => other,
+    }
+}
+
+/// Process a loop body conservatively: any variable the body writes is unknown
+/// across iterations, so forget those facts before AND after processing, and
+/// process the body with that pessimistic environment (so no stale fact leaks a
+/// fold into the loop). Counter code is unrolled before this pass, so this only
+/// guards the unusual residual-loop case.
+fn gate_process_loop_body(
+    rebuild: impl FnOnce(Box<AstNode>) -> AstNode,
+    body: AstNode,
+    env: &mut GateEnv,
+) -> AstNode {
+    let mut written = HashSet::new();
+    collect_written_vars(&body, &mut written);
+    for v in &written {
+        env.insert(v.clone(), ConstVal::Top);
+    }
+    let mut body_env = env.clone();
+    let body = Box::new(gate_process_node(body, &mut body_env));
+    for v in written {
+        env.insert(v, ConstVal::Top);
+    }
+    rebuild(body)
+}
+
+/// Update `env` for the side effects of a call statement. Handles the tracked
+/// list mutators precisely and conservatively invalidates anything else that
+/// could mutate a tracked variable.
+fn gate_apply_call_effect(
+    call: Option<&str>,
+    base: Option<&str>,
+    args: &[AstNode],
+    env: &mut GateEnv,
+) {
+    let list_var = match args.first() {
+        Some(AstNode::Identifier(name, _)) => Some(name.clone()),
+        _ => None,
+    };
+    match base {
+        Some("append") | Some("array_push") => {
+            if let (Some(var), Some(elem_node)) = (&list_var, args.get(1)) {
+                let elem = gate_eval(elem_node, env);
+                if let Some(ConstVal::List(v)) = env.get_mut(var) {
+                    v.push(elem);
+                }
+            }
+        }
+        Some("insert") => {
+            if let (Some(var), Some(idx_node), Some(elem_node)) =
+                (&list_var, args.get(1), args.get(2))
+            {
+                let idx = gate_eval(idx_node, env);
+                let elem = gate_eval(elem_node, env);
+                match (idx, env.get_mut(var)) {
+                    (ConstVal::Int(i), Some(ConstVal::List(v))) if i >= 0 => {
+                        let i = (i as usize).min(v.len());
+                        v.insert(i, elem);
+                    }
+                    (_, slot @ Some(_)) => {
+                        *slot.unwrap() = ConstVal::Top;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Some("extend") => {
+            if let (Some(var), Some(other_node)) = (&list_var, args.get(1)) {
+                let other = gate_eval(other_node, env);
+                match (other, env.get_mut(var)) {
+                    (ConstVal::List(o), Some(ConstVal::List(v))) => v.extend(o),
+                    (_, Some(slot)) => *slot = ConstVal::Top,
+                    _ => {}
+                }
+            }
+        }
+        Some("set_field") => {
+            if let Some(var) = list_var {
+                env.insert(var, ConstVal::Top);
+            }
+        }
+        _ => {
+            // Known read/pure builtins (recognized by the registry) cannot mutate
+            // a tracked list, so leave facts intact. An UNKNOWN call (a user
+            // function the inliner left in place) might mutate any list argument
+            // by reference, so forget every tracked argument's root variable.
+            let is_known_builtin = call
+                .map(|c| {
+                    crate::builtin_registry::builtin_registry()
+                        .vm_symbol_for_call(c)
+                        .is_some()
+                })
+                .unwrap_or(false);
+            if !is_known_builtin {
+                for a in args {
+                    if let Some(root) = base_var_of(a) {
+                        env.insert(root, ConstVal::Top);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Rewrite an expression bottom-up, folding any provably-public gate to a
+/// `Share.from_clear_int(bit, 1)`. Pure: never mutates `env`.
+fn gate_rewrite_expr(node: AstNode, env: &GateEnv) -> AstNode {
+    match node {
+        AstNode::BinaryOperation {
+            op,
+            left,
+            right,
+            location,
+        } => {
+            let left = Box::new(gate_rewrite_expr(*left, env));
+            let right = Box::new(gate_rewrite_expr(*right, env));
+            // Fold a provably-public boolean gate — `and`, `or`, or `xor` — whose
+            // operands are public bits read out of a tracked public list. The CTR
+            // counter ripple is a serial `gate_and` carry chain plus a parallel
+            // `gate_xor` output per bit; folding BOTH empties the counter of every
+            // gate (it becomes a fully-public list of `Share.from_clear_int` bits),
+            // which removes the serial carry-chain rounds AND the parallel xor-bit
+            // multiplies. Folding the `xor` outputs used to be unsafe because a
+            // fully-constant counter byte is then a nested `Array` that the
+            // cross-block batcher mis-fed into `Share.batch_mul`; that path is now
+            // closed by `try_localize_public_batch_mul`, which lowers any
+            // `Share.batch_mul` with a provably-public operand to local
+            // `Share.mul_scalar` BEFORE the batcher runs, so no public list (and no
+            // nested `Array`) ever reaches `batch_mul`.
+            if op == "and" || op == "or" || op == "xor" {
+                if let (
+                    ConstVal::Bit {
+                        val: a,
+                        from_list: fa,
+                    },
+                    ConstVal::Bit {
+                        val: b,
+                        from_list: fb,
+                    },
+                ) = (gate_eval(&left, env), gate_eval(&right, env))
+                {
+                    // Only fold a gate that consumes at least one public-list bit
+                    // (the counter-table idiom); two free scalar shares stay a
+                    // real multiply (see `inlining_preserves_secret_multiplication`).
+                    if fa || fb {
+                        let bit = match op.as_str() {
+                            "or" => a | b,
+                            "xor" => a ^ b,
+                            _ => a & b,
+                        } & 1;
+                        return make_from_clear_int_bit(bit, &location);
+                    }
+                }
+            }
+            AstNode::BinaryOperation {
+                op,
+                left,
+                right,
+                location,
+            }
+        }
+        AstNode::UnaryOperation {
+            op,
+            operand,
+            location,
+        } => AstNode::UnaryOperation {
+            op,
+            operand: Box::new(gate_rewrite_expr(*operand, env)),
+            location,
+        },
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            resolved_return_type,
+        } => AstNode::FunctionCall {
+            function,
+            arguments: arguments
+                .into_iter()
+                .map(|a| gate_rewrite_expr(a, env))
+                .collect(),
+            location,
+            resolved_return_type,
+        },
+        AstNode::IndexAccess {
+            base,
+            index,
+            location,
+        } => AstNode::IndexAccess {
+            base: Box::new(gate_rewrite_expr(*base, env)),
+            index: Box::new(gate_rewrite_expr(*index, env)),
+            location,
+        },
+        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
+            elements: elements
+                .into_iter()
+                .map(|e| gate_rewrite_expr(e, env))
+                .collect(),
+            location,
+        },
+        other => other,
+    }
+}
+
+/// Build a `Share.from_clear_int(bit, 1)` call — a local share of a public bit.
+fn make_from_clear_int_bit(bit: u8, location: &SourceLocation) -> AstNode {
+    AstNode::FunctionCall {
+        function: Box::new(AstNode::Identifier(
+            "Share.from_clear_int".to_string(),
+            location.clone(),
+        )),
+        arguments: vec![
+            make_int_literal(bit as u128, location),
+            make_int_literal(1, location),
+        ],
+        location: location.clone(),
+        resolved_return_type: None,
+    }
+}
+
+/// If `cv` is a non-empty list whose every element is a public bit, return those
+/// bit values; otherwise `None`. This is the "fully-public list operand" test.
+fn all_public_bits(cv: &ConstVal) -> Option<Vec<u8>> {
+    if let ConstVal::List(elems) = cv {
+        if elems.is_empty() {
+            return None;
+        }
+        let mut vals = Vec::with_capacity(elems.len());
+        for e in elems {
+            match e {
+                ConstVal::Bit { val, .. } => vals.push(*val),
+                _ => return None,
+            }
+        }
+        Some(vals)
+    } else {
+        None
+    }
+}
+
+/// Lower a `Share.batch_mul(L, R)` whose ONE operand is a provably-public bit list
+/// to a local element-wise scaling `[Share.mul_scalar(other[i], pub_i), ...]`.
+///
+/// `secret * public` is value-identical to the secret*secret protocol run on a
+/// public-valued share, but costs 0 communication, so this is exact. Critically,
+/// it also removes the only path that can feed a public list (a nested `Array` of
+/// `from_clear_int` bits, once the counter is fully folded) into `Share.batch_mul`
+/// — the batcher never gathers a localized call, so the runtime `extract_share_*`
+/// Array panic cannot occur. Only fires when the public operand is fully public
+/// (every element a tracked public bit) and the OTHER operand is a plain
+/// identifier we can cheaply index without duplicating a large expression.
+fn try_localize_public_batch_mul(value: &AstNode, env: &GateEnv) -> Option<AstNode> {
+    let (function, arguments, location) = match value {
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            ..
+        } => (function, arguments, location),
+        _ => return None,
+    };
+    if arguments.len() != 2 {
+        return None;
+    }
+    match function.as_ref() {
+        AstNode::Identifier(name, _) if builtin_base_name(name) == "batch_mul" => {}
+        _ => return None,
+    }
+    // Pick the provably-public operand; the OTHER (kept) operand is scaled
+    // element-wise by the known public bit values.
+    let (scalars, share_operand) = if let Some(v) = all_public_bits(&gate_eval(&arguments[0], env))
+    {
+        (v, &arguments[1])
+    } else {
+        let v = all_public_bits(&gate_eval(&arguments[1], env))?;
+        (v, &arguments[0])
+    };
+    let share_id = match share_operand {
+        id @ AstNode::Identifier(..) => id.clone(),
+        _ => return None,
+    };
+    let elements = scalars
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let elem = AstNode::IndexAccess {
+                base: Box::new(share_id.clone()),
+                index: Box::new(make_int_literal(i as u128, location)),
+                location: location.clone(),
+            };
+            make_share_mul_scalar_expr(elem, v as u128, location)
+        })
+        .collect();
+    Some(AstNode::ListLiteral {
+        elements,
+        location: location.clone(),
+    })
+}
+
+/// Purely evaluate an expression to a provenance fact. Returns `Top` for
+/// anything not provably public — this is the crypto-safety backstop.
+fn gate_eval(node: &AstNode, env: &GateEnv) -> ConstVal {
+    match node {
+        AstNode::Literal {
+            value: crate::ast::Value::Int { value, .. },
+            ..
+        } => i128::try_from(*value)
+            .map(ConstVal::Int)
+            .unwrap_or(ConstVal::Top),
+        AstNode::Literal {
+            value: crate::ast::Value::Bool(b),
+            ..
+        } => ConstVal::Bit {
+            val: *b as u8,
+            from_list: false,
+        },
+        AstNode::Identifier(name, _) => env.get(name).cloned().unwrap_or(ConstVal::Top),
+        AstNode::UnaryOperation { op, operand, .. } => match (op.as_str(), gate_eval(operand, env))
+        {
+            ("-", ConstVal::Int(v)) => ConstVal::Int(-v),
+            ("not", ConstVal::Bit { val, from_list }) => ConstVal::Bit {
+                val: (val ^ 1) & 1,
+                from_list,
+            },
+            _ => ConstVal::Top,
+        },
+        AstNode::BinaryOperation {
+            op, left, right, ..
+        } => gate_eval_binop(op, left, right, env),
+        AstNode::IndexAccess { base, index, .. } => {
+            match (gate_eval(base, env), gate_eval(index, env)) {
+                (ConstVal::List(elems), ConstVal::Int(i))
+                    if i >= 0 && (i as usize) < elems.len() =>
+                {
+                    // Reading an element out of a tracked public list marks it as
+                    // list-sourced (a foldable counter-table bit).
+                    match elems[i as usize].clone() {
+                        ConstVal::Bit { val, .. } => ConstVal::Bit {
+                            val,
+                            from_list: true,
+                        },
+                        other => other,
+                    }
+                }
+                _ => ConstVal::Top,
+            }
+        }
+        AstNode::ListLiteral { elements, .. } => {
+            ConstVal::List(elements.iter().map(|e| gate_eval(e, env)).collect())
+        }
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            ..
+        } => {
+            let call = call_name_of(function);
+            let base = call.as_deref().map(builtin_base_name);
+            if matches!(base, Some("from_clear_int") | Some("from_clear_uint"))
+                && arguments.len() >= 2
+            {
+                let v = match gate_eval(&arguments[0], env) {
+                    ConstVal::Int(v) => Some(v),
+                    ConstVal::Bit { val, .. } => Some(val as i128),
+                    _ => None,
+                };
+                let width_one = matches!(gate_eval(&arguments[1], env), ConstVal::Int(1));
+                if let (Some(v), true) = (v, width_one) {
+                    if v == 0 || v == 1 {
+                        return ConstVal::Bit {
+                            val: v as u8,
+                            from_list: false,
+                        };
+                    }
+                }
+            }
+            ConstVal::Top
+        }
+        _ => ConstVal::Top,
+    }
+}
+
+/// Evaluate a binary operation over provenance facts. Arithmetic folds over
+/// `Int`; `and`/`or`/`xor` fold ONLY when BOTH sides are public bits (no
+/// short-circuit — that keeps the reasoning trivially sound).
+fn gate_eval_binop(op: &str, left: &AstNode, right: &AstNode, env: &GateEnv) -> ConstVal {
+    let l = gate_eval(left, env);
+    let r = gate_eval(right, env);
+    match op {
+        "+" | "-" | "*" | "/" | "%" => {
+            if let (ConstVal::Int(a), ConstVal::Int(b)) = (&l, &r) {
+                let (a, b) = (*a, *b);
+                let res = match op {
+                    "+" => a.checked_add(b),
+                    "-" => a.checked_sub(b),
+                    "*" => a.checked_mul(b),
+                    "/" => (b != 0).then(|| a / b),
+                    _ => (b != 0).then(|| a % b),
+                };
+                return res.map(ConstVal::Int).unwrap_or(ConstVal::Top);
+            }
+            ConstVal::Top
+        }
+        "and" | "or" | "xor" => {
+            if let (
+                ConstVal::Bit {
+                    val: a,
+                    from_list: fa,
+                },
+                ConstVal::Bit {
+                    val: b,
+                    from_list: fb,
+                },
+            ) = (&l, &r)
+            {
+                let bit = match op {
+                    "and" => a & b,
+                    "or" => a | b,
+                    _ => a ^ b,
+                } & 1;
+                return ConstVal::Bit {
+                    val: bit,
+                    from_list: *fa || *fb,
+                };
+            }
+            ConstVal::Top
+        }
+        _ => ConstVal::Top,
+    }
+}
+
+/// The called identifier's name, owned (for both `Identifier` and the rare
+/// boxed-identifier callee forms).
+fn call_name_of(function: &AstNode) -> Option<String> {
+    match function {
+        AstNode::Identifier(name, _) => Some(name.clone()),
+        _ => None,
+    }
+}
+
 /// Flatten `for` loops with statically-known trip counts throughout the program.
 /// Entry point.
 pub fn unroll_literal_loops(node: AstNode) -> AstNode {
     let mut budget = unroll_budget();
     let mut env = LenEnv::default();
-    unroll_in_node(node, &mut env, &mut budget)
+    // Identify dead functions (defined but never called) so their loops don't
+    // consume the shared budget. `main` is always treated as live (it is the
+    // entry point and typically has no call site).
+    let dead = dead_function_names(&node);
+    DEAD_FNS.with(|d| *d.borrow_mut() = dead);
+    let result = unroll_in_node(node, &mut env, &mut budget);
+    DEAD_FNS.with(|d| d.borrow_mut().clear());
+    result
+}
+
+/// Names of top-level/nested function definitions that have no call site anywhere
+/// in the program. `main` (the entry point) is never reported dead even though it
+/// has no caller.
+fn dead_function_names(root: &AstNode) -> HashSet<String> {
+    let mut defined: HashSet<String> = HashSet::new();
+    fn gather_defs(node: &AstNode, out: &mut HashSet<String>) {
+        if let AstNode::FunctionDefinition { name: Some(n), .. } = node {
+            out.insert(n.clone());
+        }
+        for_each_child_def(node, &mut |c| gather_defs(c, out));
+    }
+    gather_defs(root, &mut defined);
+
+    let mut called: HashSet<String> = HashSet::new();
+    collect_called_names(root, &mut called);
+
+    defined
+        .into_iter()
+        .filter(|n| n != "main" && !called.contains(n))
+        .collect()
 }
 
 /// Recurse into a node, unrolling resolvable loops in any statement list it owns
@@ -3778,12 +6769,29 @@ fn unroll_in_node(node: AstNode, env: &mut LenEnv, budget: &mut usize) -> AstNod
             // A function body is a fresh scope; its parameters' lengths are not
             // known intraprocedurally.
             let mut fenv = LenEnv::default();
+            // Do not spend unroll budget inside a function that is never called
+            // from anywhere in the program. After -O3 inlining, helpers that were
+            // fully inlined into their callers (e.g. `aes128_encrypt`, inlined into
+            // `main`) survive as dead definitions. Unrolling them is pure waste:
+            // it bloats compile time AND — because the budget is a single global
+            // pool threaded in source order — starves the live entry point that
+            // appears later in the file. Recurse so the dead body stays valid, but
+            // with a spent (zero) budget so no loop in it is flattened. This frees
+            // the whole budget for live code without changing the budget policy for
+            // live functions.
+            let body = if DEAD_FNS.with(|d| name.as_deref().is_some_and(|n| d.borrow().contains(n)))
+            {
+                let mut spent = 0usize;
+                Box::new(unroll_in_node(*body, &mut fenv, &mut spent))
+            } else {
+                Box::new(unroll_in_node(*body, &mut fenv, budget))
+            };
             AstNode::FunctionDefinition {
                 name,
                 type_params,
                 parameters,
                 return_type,
-                body: Box::new(unroll_in_node(*body, &mut fenv, budget)),
+                body,
                 is_secret,
                 pragmas,
                 location,
@@ -3871,6 +6879,33 @@ fn unroll_stmt_list(stmts: Vec<AstNode>, env: &mut LenEnv, budget: &mut usize) -
     let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
     let mut pending: std::collections::VecDeque<AstNode> = stmts.into_iter().collect();
     while let Some(stmt) = pending.pop_front() {
+        // Env-aware constant-branch folding (generalizes `fold_constant_branches`
+        // to conditions over `.len()`/int-tracked locals): when the current env
+        // proves an `if` condition constant, splice the taken branch flat into the
+        // work-list and drop the dead branch. This deletes the public guards left
+        // by multi-return normalization (e.g. an inlined `if n == 0`, n = a.len()),
+        // restoring the barrier-free straight-line region the multiply scheduler
+        // needs. Sound because `const_eval_bool_env` only reports a provable value.
+        if let AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } = &stmt
+        {
+            if let Some(taken) = const_eval_bool_env(condition, env) {
+                let branch = if taken {
+                    Some((**then_branch).clone())
+                } else {
+                    else_branch.as_deref().cloned()
+                };
+                if let Some(b) = branch {
+                    for (offset, produced) in branch_into_stmts(b).into_iter().enumerate() {
+                        pending.insert(offset, produced);
+                    }
+                }
+                continue;
+            }
+        }
         match try_unroll_for(stmt, env, budget) {
             UnrollOutcome::Flattened(iterations) => {
                 // Re-queue the produced statements (preserving order); their env
@@ -3911,6 +6946,121 @@ enum UnrollOutcome {
     Flattened(Vec<AstNode>),
     /// The statement was left as-is (still needs recursive processing).
     Kept(AstNode),
+}
+
+/// Read-only estimate of how many AST nodes a statement list expands to *after
+/// its inner loops are unrolled*, threading `env` so inner `.len()` bounds
+/// resolve exactly as the real unroller would. This lets the outer flatten/keep
+/// decision account for inner-loop blow-up that the raw `node_size` misses.
+///
+/// Why this matters: a data-dependent outer loop (the AES `for round`, CTR's
+/// per-block loop) has a *raw* body that looks small — its heavy work is hidden
+/// inside inner `for i in 0..state.len()` loops. The old estimate (raw
+/// `node_size × iterations`) therefore judged it cheap and flattened it, which
+/// then forced every one of its copies to unroll those inner loops separately,
+/// exhausting the budget after a few rounds. Estimating the *inner-unrolled* size
+/// instead keeps such a loop rolled (one copy) while the kept-loop path still
+/// unrolls its inner element loops once — clustering each layer's independent
+/// multiplies into a single batched round. Rounds are inherently sequential
+/// (round N depends on N-1), so keeping the outer loop rolled costs almost no
+/// extra rounds while using a fraction of the budget.
+///
+/// `limit` early-saturates the walk: this estimate only ever drives a monotone
+/// threshold decision (`<= unroll_max_expansion()` / `<= budget`), so once the
+/// partial sum reaches `limit` the exact value is irrelevant and we stop
+/// recursing. This bounds each estimate at O(limit) instead of O(exact-unrolled
+/// -subtree-size), which on deeply-nested inlined bodies (round ⊃ sbox ⊃ affine
+/// loops) is otherwise astronomically large and super-linear to compute. The
+/// returned value equals the exact sum when below `limit` and is `>= limit`
+/// otherwise, so the flatten/keep decision is identical to an unbounded walk.
+fn estimate_unrolled_size(stmts: &[AstNode], env: &LenEnv, limit: usize) -> usize {
+    let mut env = env.clone();
+    let mut total = 0usize;
+    for stmt in stmts {
+        total = total.saturating_add(estimate_stmt_size(stmt, &mut env, limit));
+        if total >= limit {
+            return total;
+        }
+    }
+    total
+}
+
+/// Estimate one statement's unrolled node count, advancing `env` with its effect
+/// (mirroring `apply_statement_to_env` / the unroller's control-flow handling).
+fn estimate_stmt_size(stmt: &AstNode, env: &mut LenEnv, limit: usize) -> usize {
+    match stmt {
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            ..
+        } => {
+            let body_stmts: Vec<AstNode> = match body.as_ref() {
+                AstNode::Block(s) => s.clone(),
+                single => vec![single.clone()],
+            };
+            // Estimate one iteration's inner-unrolled size in a child env.
+            let mut benv = env.clone();
+            bind_loop_var(&mut benv, variables, iterable);
+            let inner = estimate_unrolled_size(&body_stmts, &benv, limit).max(1);
+            // Would this loop itself unroll? (Same predicate as `try_unroll_for`.)
+            let unrolls = matches!(variables.as_slice(), [v] if !body_assigns_var(body, v))
+                && range_bounds(iterable, env)
+                    .is_some_and(|(lo, hi)| hi > lo && (hi - lo) <= UNROLL_MAX_ITERATIONS);
+            let size = if unrolls {
+                let (lo, hi) = range_bounds(iterable, env).unwrap();
+                // Clamp at `limit`: the product can overflow/explode on nested
+                // loops, and any value `>= limit` drives the same keep decision.
+                ((hi - lo) as usize).saturating_mul(inner).min(limit)
+            } else {
+                inner
+            };
+            // The loop's net effect on the outer env: conservatively invalidate
+            // everything its body could mutate (matches the kept-loop path).
+            let mut mutated = HashSet::new();
+            collect_mutated_vars(body, &mut mutated);
+            for m in mutated {
+                env.invalidate(&m);
+            }
+            size
+        }
+        AstNode::IfExpression {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let mut tenv = env.clone();
+            let mut size = 1 + estimate_stmt_size(then_branch, &mut tenv, limit);
+            if let Some(e) = else_branch {
+                let mut eenv = env.clone();
+                size += estimate_stmt_size(e, &mut eenv, limit);
+            }
+            let mut mutated = HashSet::new();
+            collect_mutated_vars(then_branch, &mut mutated);
+            if let Some(e) = else_branch {
+                collect_mutated_vars(e, &mut mutated);
+            }
+            for m in mutated {
+                env.invalidate(&m);
+            }
+            size
+        }
+        AstNode::WhileLoop { body, .. } => {
+            let mut benv = env.clone();
+            let inner = estimate_stmt_size(body, &mut benv, limit);
+            let mut mutated = HashSet::new();
+            collect_mutated_vars(body, &mut mutated);
+            for m in mutated {
+                env.invalidate(&m);
+            }
+            inner
+        }
+        AstNode::Block(s) => estimate_unrolled_size(s, env, limit),
+        other => {
+            apply_statement_to_env(other, env);
+            node_size(other)
+        }
+    }
 }
 
 /// Attempt to flatten a single statement if it is a `for` loop whose trip count
@@ -3981,11 +7131,47 @@ fn try_unroll_for(stmt: AstNode, env: &LenEnv, budget: &mut usize) -> UnrollOutc
         AstNode::Block(stmts) => stmts.clone(),
         single => vec![single.clone()],
     };
-    let body_node_count: usize = body_stmts.iter().map(node_size).sum();
+    // Decide flatten-vs-keep on the per-iteration size *after inner loops are
+    // unrolled*, not the raw body size: flattening this loop would replicate that
+    // inner-unrolled work `iterations` times. A loop whose body hides heavy inner
+    // element loops (the AES `for round`, CTR's per-block loop) is therefore kept
+    // rolled — the kept-loop path still unrolls its inner loops once, which is
+    // what clusters a layer's independent multiplies into one batched round
+    // without paying to duplicate the whole round body. See
+    // `estimate_unrolled_size`.
+    let mut benv = env.clone();
+    bind_loop_var(&mut benv, &variables, &iterable);
+    // The estimate only gates a monotone threshold (`fits` below): both consumers
+    // compare against `unroll_max_expansion()` and `*budget`, so capping the walk
+    // at the larger of the two is decision-equivalent while bounding cost on
+    // deeply-nested inlined bodies. See `estimate_unrolled_size`.
+    let estimate_limit = unroll_max_expansion().max(*budget);
+    let inner_unrolled_estimate: usize = estimate_unrolled_size(&body_stmts, &benv, estimate_limit);
+    let decision_expansion = (iterations as usize).saturating_mul(inner_unrolled_estimate.max(1));
+    // Raw (un-inner-unrolled) duplication cost of flattening this loop. The
+    // flattened copies are re-queued and their inner loops draw from the same
+    // budget when *they* unroll, so this — not `decision_expansion` — is the code
+    // actually materialized at this level.
+    let raw_body_count: usize = body_stmts.iter().map(node_size).sum();
+    let raw_duplication = (iterations as usize).saturating_mul(raw_body_count.max(1));
 
-    // Per-loop expansion estimate and global budget guard.
-    let expansion = (iterations as usize).saturating_mul(body_node_count.max(1));
-    if expansion > unroll_max_expansion() || expansion > *budget {
+    // LEVER 1 — small-trip heavy-body unroll. A low-trip outer loop over a heavy
+    // body (the CTR/CBC per-block loop: `for i in 0..blocks.len()` with the whole
+    // inlined AES inside) MUST be unrolled to expose each block's statically-known
+    // state shape to the inner-loop batcher. Kept rolled, the per-block state
+    // shape is unknown, so the inner SubBytes `.len()`-bound loops never unroll and
+    // every S-box multiply degrades to an unbatched scalar round (the CBC 10k
+    // singletons). The inner-unrolled estimate is pessimistic here: the re-queued
+    // copies keep their own round loops rolled by their own decision, so the real
+    // materialized cost is only `raw_duplication`. Gate small-trip unrolls on that
+    // realistic cost (still bounded by the global budget) instead of the cap.
+    let small_trip = (iterations as usize) <= SMALL_TRIP_UNROLL;
+    let fits = if small_trip {
+        raw_duplication <= *budget
+    } else {
+        decision_expansion <= unroll_max_expansion() && decision_expansion <= *budget
+    };
+    if !fits {
         return UnrollOutcome::Kept(AstNode::ForLoop {
             variables,
             iterable,
@@ -3993,7 +7179,10 @@ fn try_unroll_for(stmt: AstNode, env: &LenEnv, budget: &mut usize) -> UnrollOutc
             location,
         });
     }
-    *budget = budget.saturating_sub(expansion);
+    // Charge only the *raw* duplication here; the flattened copies are re-queued
+    // and their inner loops draw from the same budget when they unroll, so
+    // charging the inner-unrolled estimate too would double-count.
+    *budget = budget.saturating_sub(raw_duplication);
 
     // Names declared inside the body (locals + nested loop variables) get a
     // fresh per-iteration suffix so the unrolled copies cannot collide or
@@ -4003,7 +7192,8 @@ fn try_unroll_for(stmt: AstNode, env: &LenEnv, budget: &mut usize) -> UnrollOutc
         collect_declared_names(stmt, &mut body_declared);
     }
 
-    let mut flattened: Vec<AstNode> = Vec::with_capacity(expansion);
+    let mut flattened: Vec<AstNode> =
+        Vec::with_capacity((iterations as usize).saturating_mul(body_stmts.len()));
     for k in lo..hi {
         let suffix = INLINE_SUFFIX.fetch_add(1, Ordering::Relaxed);
         let rename: HashMap<String, String> = body_declared
@@ -4071,97 +7261,6 @@ fn substitute_ident_with_int(node: AstNode, var_name: &str, value: u128) -> AstN
                 AstNode::Identifier(name, loc)
             }
         }
-        AstNode::VariableDeclaration {
-            name,
-            type_annotation,
-            value: decl_value,
-            is_mutable,
-            is_secret,
-            location,
-        } => {
-            // The initializer is still in the outer scope, so substitute there;
-            // but if this declaration shadows the loop variable, later siblings
-            // are handled at the statement-list level (this node only owns its
-            // initializer).
-            AstNode::VariableDeclaration {
-                name,
-                type_annotation,
-                value: decl_value.map(sb),
-                is_mutable,
-                is_secret,
-                location,
-            }
-        }
-        AstNode::Assignment {
-            target,
-            value: assign_value,
-            location,
-        } => AstNode::Assignment {
-            target: sb(target),
-            value: sb(assign_value),
-            location,
-        },
-        AstNode::BinaryOperation {
-            op,
-            left,
-            right,
-            location,
-        } => AstNode::BinaryOperation {
-            op,
-            left: sb(left),
-            right: sb(right),
-            location,
-        },
-        AstNode::UnaryOperation {
-            op,
-            operand,
-            location,
-        } => AstNode::UnaryOperation {
-            op,
-            operand: sb(operand),
-            location,
-        },
-        AstNode::FunctionCall {
-            function,
-            arguments,
-            location,
-            resolved_return_type,
-        } => AstNode::FunctionCall {
-            function: sb(function),
-            arguments: arguments
-                .into_iter()
-                .map(|a| substitute_ident_with_int(a, var_name, value))
-                .collect(),
-            location,
-            resolved_return_type,
-        },
-        AstNode::NamedArgument {
-            name,
-            value: arg_value,
-            location,
-        } => AstNode::NamedArgument {
-            name,
-            value: sb(arg_value),
-            location,
-        },
-        AstNode::IfExpression {
-            condition,
-            then_branch,
-            else_branch,
-        } => AstNode::IfExpression {
-            condition: sb(condition),
-            then_branch: sb(then_branch),
-            else_branch: else_branch.map(sb),
-        },
-        AstNode::WhileLoop {
-            condition,
-            body,
-            location,
-        } => AstNode::WhileLoop {
-            condition: sb(condition),
-            body: sb(body),
-            location,
-        },
         AstNode::ForLoop {
             variables,
             iterable,
@@ -4207,70 +7306,33 @@ fn substitute_ident_with_int(node: AstNode, var_name: &str, value: u128) -> AstN
             }
             AstNode::Block(out)
         }
-        AstNode::Return {
-            value: ret_value,
-            location,
-        } => AstNode::Return {
-            value: ret_value.map(sb),
-            location,
-        },
-        AstNode::Yield(v) => AstNode::Yield(v.map(sb)),
-        AstNode::FieldAccess {
-            object,
-            field_name,
-            location,
-        } => AstNode::FieldAccess {
-            object: sb(object),
-            field_name,
-            location,
-        },
-        AstNode::IndexAccess {
-            base,
-            index,
-            location,
-        } => AstNode::IndexAccess {
-            base: sb(base),
-            index: sb(index),
-            location,
-        },
-        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
-            elements: elements
-                .into_iter()
-                .map(|e| substitute_ident_with_int(e, var_name, value))
-                .collect(),
-            location,
-        },
-        AstNode::TupleLiteral(e) => AstNode::TupleLiteral(
-            e.into_iter()
-                .map(|x| substitute_ident_with_int(x, var_name, value))
-                .collect(),
-        ),
-        AstNode::SetLiteral(e) => AstNode::SetLiteral(
-            e.into_iter()
-                .map(|x| substitute_ident_with_int(x, var_name, value))
-                .collect(),
-        ),
-        AstNode::DictLiteral { pairs, location } => AstNode::DictLiteral {
-            pairs: pairs
-                .into_iter()
-                .map(|(k, v)| {
-                    (
-                        substitute_ident_with_int(k, var_name, value),
-                        substitute_ident_with_int(v, var_name, value),
-                    )
-                })
-                .collect(),
-            location,
-        },
-        AstNode::DiscardStatement {
-            expression,
-            location,
-        } => AstNode::DiscardStatement {
-            expression: sb(expression),
-            location,
-        },
+        // Every other node with runtime children substitutes uniformly into each
+        // child (the declaration's initializer is the only child of a
+        // `VariableDeclaration`; shadowing for later siblings is handled at the
+        // `Block` level above). Delegate the rebuild to `map_children`.
+        AstNode::VariableDeclaration { .. }
+        | AstNode::Assignment { .. }
+        | AstNode::BinaryOperation { .. }
+        | AstNode::UnaryOperation { .. }
+        | AstNode::FunctionCall { .. }
+        | AstNode::NamedArgument { .. }
+        | AstNode::IfExpression { .. }
+        | AstNode::WhileLoop { .. }
+        | AstNode::Return { .. }
+        | AstNode::Yield(_)
+        | AstNode::FieldAccess { .. }
+        | AstNode::IndexAccess { .. }
+        | AstNode::ListLiteral { .. }
+        | AstNode::TupleLiteral(_)
+        | AstNode::SetLiteral(_)
+        | AstNode::DictLiteral { .. }
+        | AstNode::DiscardStatement { .. } => {
+            map_children(node, &mut |c| substitute_ident_with_int(c, var_name, value))
+        }
         // Literals, Break/Continue, nested function definitions (own scope),
-        // type nodes: leave unchanged.
+        // type nodes, Import, and TryCatch/CommandCall: leave unchanged. (The
+        // substituter never descends into these — preserving the previous
+        // `other => other` behavior, not broadening recursion.)
         other => other,
     }
 }
@@ -4323,10 +7385,7 @@ fn is_effectful_call_name(name: &str) -> bool {
 /// built with `out.insert(0, ...)`, and an available `out`-reading expression was
 /// never invalidated across the insert, corrupting block-1's keystream under -O3.)
 fn is_mutator_call_name(name: &str) -> bool {
-    matches!(
-        builtin_base_name(name),
-        "append" | "array_push" | "set_field" | "insert" | "extend"
-    )
+    builtin_effect(name).mutates_receiver
 }
 
 /// Builtins known to be pure value computations (no effects, deterministic).
@@ -4337,28 +7396,7 @@ fn is_mutator_call_name(name: &str) -> bool {
 /// spelling are recognized. (`mul_scalar` is a local secret×public multiply — no
 /// communication — so it is pure too.)
 fn is_pure_builtin(name: &str) -> bool {
-    matches!(
-        builtin_base_name(name),
-        "add"
-            | "sub"
-            | "mul"
-            | "mul_scalar"
-            | "add_constant"
-            | "add_scalar"
-            | "batch_mul"
-            | "from_clear"
-            | "from_clear_int"
-            | "from_clear_uint"
-            | "from_clear_fixed"
-            | "get_field"
-            | "array_length"
-            | "length"
-            | "len"
-            | "slice"
-            | "contains"
-            | "to_string"
-            | "type"
-    )
+    builtin_effect(name).pure
 }
 
 fn call_name(node: &AstNode) -> Option<&str> {
@@ -4565,12 +7603,12 @@ fn expr_is_pure(node: &AstNode, pure_fns: &HashSet<String>) -> bool {
     }
 }
 
-/// Append a canonical, location-insensitive structural key for `expr` to `out`,
-/// mirroring [`expr_equiv`] exactly: two expressions are `expr_equiv` iff they
-/// produce the same key. Returns `false` for any node kind `expr_equiv` does not
-/// compare structurally (CSE then declines to dedup it). This lets CSE look up
-/// an equivalent earlier computation by hash in O(1) instead of scanning every
-/// available expression with `expr_equiv` (which is O(n²) over a large block).
+/// Append a canonical, location-insensitive structural key for `expr` to `out`.
+/// Two expressions produce the same key iff they are structurally equivalent
+/// (ignoring source locations). Returns `false` for any node kind this function
+/// does not compare structurally (CSE then declines to dedup it). This lets CSE
+/// look up an equivalent earlier computation by hash in O(1) instead of scanning
+/// every available expression structurally (which is O(n²) over a large block).
 fn expr_key(expr: &AstNode, out: &mut String) -> bool {
     match expr {
         AstNode::Literal { value, .. } => {
@@ -4693,13 +7731,24 @@ fn stmt_has_effect(node: &AstNode, pure_fns: &HashSet<String>) -> bool {
 }
 
 /// Visit the immediate child nodes of `node`.
+///
+/// This is intentionally exhaustive (no `_` wildcard) so that adding a new
+/// `AstNode` variant forces a compile error here instead of silently dropping
+/// its children — a missed child would skip invalidation/collection in the many
+/// callers that build on this walker. It deliberately does NOT descend into
+/// `FunctionDefinition` bodies: that is a scope boundary, and the scope-crossing
+/// walker `for_each_child_def` handles it separately.
 fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
     match node {
         AstNode::Assignment { target, value, .. } => {
             f(target);
             f(value);
         }
-        AstNode::VariableDeclaration { value: Some(v), .. } => f(v),
+        AstNode::VariableDeclaration { value, .. } => {
+            if let Some(v) = value {
+                f(v);
+            }
+        }
         AstNode::BinaryOperation { left, right, .. } => {
             f(left);
             f(right);
@@ -4715,6 +7764,15 @@ fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
                 f(a);
             }
         }
+        AstNode::CommandCall {
+            command, arguments, ..
+        } => {
+            f(command);
+            for a in arguments {
+                f(a);
+            }
+        }
+        AstNode::NamedArgument { value, .. } => f(value),
         AstNode::IndexAccess { base, index, .. } => {
             f(base);
             f(index);
@@ -4725,6 +7783,12 @@ fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
         | AstNode::SetLiteral(elements) => {
             for e in elements {
                 f(e);
+            }
+        }
+        AstNode::DictLiteral { pairs, .. } => {
+            for (k, v) in pairs {
+                f(k);
+                f(v);
             }
         }
         AstNode::Block(stmts) => {
@@ -4753,9 +7817,255 @@ fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
             f(iterable);
             f(body);
         }
-        AstNode::Return { value: Some(v), .. } | AstNode::Yield(Some(v)) => f(v),
+        AstNode::TryCatch {
+            try_block,
+            catch_clauses,
+            finally_block,
+            ..
+        } => {
+            f(try_block);
+            for clause in catch_clauses {
+                f(&clause.body);
+            }
+            if let Some(fin) = finally_block {
+                f(fin);
+            }
+        }
+        AstNode::Return { value, .. } => {
+            if let Some(v) = value {
+                f(v);
+            }
+        }
+        AstNode::Yield(value) => {
+            if let Some(v) = value {
+                f(v);
+            }
+        }
         AstNode::DiscardStatement { expression, .. } => f(expression),
-        _ => {}
+        // Genuinely childless, or scope/type boundaries with no runtime children
+        // to visit. `FunctionDefinition` stops here on purpose (see doc comment);
+        // type-carrying nodes, definitions, and `Import` carry only type/metadata
+        // children, matching the previous behavior of the dropped `_` wildcard.
+        AstNode::Literal { .. }
+        | AstNode::Identifier(_, _)
+        | AstNode::Break
+        | AstNode::Continue
+        | AstNode::FunctionDefinition { .. }
+        | AstNode::TypeAlias { .. }
+        | AstNode::BuiltinTypeDefinition { .. }
+        | AstNode::BuiltinObjectDefinition { .. }
+        | AstNode::ObjectDefinition { .. }
+        | AstNode::EnumDefinition { .. }
+        | AstNode::SecretType(_)
+        | AstNode::FunctionType { .. }
+        | AstNode::TupleType(_)
+        | AstNode::ListType(_)
+        | AstNode::DictType { .. }
+        | AstNode::GenericType { .. }
+        | AstNode::Import { .. } => {}
+    }
+}
+
+/// Owned mirror of [`for_each_child`]: rebuild `node`, applying `f` to each of
+/// its immediate owned children. The structural (non-special) arms of the
+/// by-value transformers (`rename_in`, `substitute_ident_with_int`) delegate
+/// here so the near-identical rebuild boilerplate lives in exactly one place.
+///
+/// Like `for_each_child` this is exhaustive and visits the SAME children; it
+/// does NOT descend into `FunctionDefinition` bodies (a scope boundary) and
+/// returns childless / type / definition nodes unchanged.
+fn map_children(node: AstNode, f: &mut dyn FnMut(AstNode) -> AstNode) -> AstNode {
+    // Apply `f` through an owned `Box` child, re-boxing the result.
+    let fb = |b: Box<AstNode>, f: &mut dyn FnMut(AstNode) -> AstNode| Box::new(f(*b));
+    match node {
+        AstNode::Assignment {
+            target,
+            value,
+            location,
+        } => AstNode::Assignment {
+            target: fb(target, f),
+            value: fb(value, f),
+            location,
+        },
+        AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value,
+            is_mutable,
+            is_secret,
+            location,
+        } => AstNode::VariableDeclaration {
+            name,
+            type_annotation,
+            value: value.map(|v| fb(v, f)),
+            is_mutable,
+            is_secret,
+            location,
+        },
+        AstNode::BinaryOperation {
+            op,
+            left,
+            right,
+            location,
+        } => AstNode::BinaryOperation {
+            op,
+            left: fb(left, f),
+            right: fb(right, f),
+            location,
+        },
+        AstNode::UnaryOperation {
+            op,
+            operand,
+            location,
+        } => AstNode::UnaryOperation {
+            op,
+            operand: fb(operand, f),
+            location,
+        },
+        AstNode::FunctionCall {
+            function,
+            arguments,
+            location,
+            resolved_return_type,
+        } => AstNode::FunctionCall {
+            function: fb(function, f),
+            arguments: arguments.into_iter().map(&mut *f).collect(),
+            location,
+            resolved_return_type,
+        },
+        AstNode::CommandCall {
+            command,
+            arguments,
+            location,
+            resolved_return_type,
+        } => AstNode::CommandCall {
+            command: fb(command, f),
+            arguments: arguments.into_iter().map(&mut *f).collect(),
+            location,
+            resolved_return_type,
+        },
+        AstNode::NamedArgument {
+            name,
+            value,
+            location,
+        } => AstNode::NamedArgument {
+            name,
+            value: fb(value, f),
+            location,
+        },
+        AstNode::IndexAccess {
+            base,
+            index,
+            location,
+        } => AstNode::IndexAccess {
+            base: fb(base, f),
+            index: fb(index, f),
+            location,
+        },
+        AstNode::FieldAccess {
+            object,
+            field_name,
+            location,
+        } => AstNode::FieldAccess {
+            object: fb(object, f),
+            field_name,
+            location,
+        },
+        AstNode::ListLiteral { elements, location } => AstNode::ListLiteral {
+            elements: elements.into_iter().map(&mut *f).collect(),
+            location,
+        },
+        AstNode::TupleLiteral(elements) => {
+            AstNode::TupleLiteral(elements.into_iter().map(&mut *f).collect())
+        }
+        AstNode::SetLiteral(elements) => {
+            AstNode::SetLiteral(elements.into_iter().map(&mut *f).collect())
+        }
+        AstNode::DictLiteral { pairs, location } => AstNode::DictLiteral {
+            pairs: pairs.into_iter().map(|(k, v)| (f(k), f(v))).collect(),
+            location,
+        },
+        AstNode::Block(stmts) => AstNode::Block(stmts.into_iter().map(&mut *f).collect()),
+        AstNode::IfExpression {
+            condition,
+            then_branch,
+            else_branch,
+        } => AstNode::IfExpression {
+            condition: fb(condition, f),
+            then_branch: fb(then_branch, f),
+            else_branch: else_branch.map(|e| fb(e, f)),
+        },
+        AstNode::WhileLoop {
+            condition,
+            body,
+            location,
+        } => AstNode::WhileLoop {
+            condition: fb(condition, f),
+            body: fb(body, f),
+            location,
+        },
+        AstNode::ForLoop {
+            variables,
+            iterable,
+            body,
+            location,
+        } => AstNode::ForLoop {
+            variables,
+            iterable: fb(iterable, f),
+            body: fb(body, f),
+            location,
+        },
+        AstNode::TryCatch {
+            try_block,
+            catch_clauses,
+            finally_block,
+            location,
+        } => AstNode::TryCatch {
+            try_block: fb(try_block, f),
+            catch_clauses: catch_clauses
+                .into_iter()
+                .map(|c| crate::ast::CatchClause {
+                    exception_type: c.exception_type,
+                    variable_name: c.variable_name,
+                    body: fb(c.body, f),
+                    location: c.location,
+                })
+                .collect(),
+            finally_block: finally_block.map(|b| fb(b, f)),
+            location,
+        },
+        AstNode::Return { value, location } => AstNode::Return {
+            value: value.map(|v| fb(v, f)),
+            location,
+        },
+        AstNode::Yield(value) => AstNode::Yield(value.map(|v| fb(v, f))),
+        AstNode::DiscardStatement {
+            expression,
+            location,
+        } => AstNode::DiscardStatement {
+            expression: fb(expression, f),
+            location,
+        },
+        // Childless / scope / type / definition nodes: no runtime children to
+        // rebuild, returned unchanged. `FunctionDefinition` stops here on
+        // purpose (scope boundary), mirroring `for_each_child`.
+        node @ (AstNode::Literal { .. }
+        | AstNode::Identifier(_, _)
+        | AstNode::Break
+        | AstNode::Continue
+        | AstNode::FunctionDefinition { .. }
+        | AstNode::TypeAlias { .. }
+        | AstNode::BuiltinTypeDefinition { .. }
+        | AstNode::BuiltinObjectDefinition { .. }
+        | AstNode::ObjectDefinition { .. }
+        | AstNode::EnumDefinition { .. }
+        | AstNode::SecretType(_)
+        | AstNode::FunctionType { .. }
+        | AstNode::TupleType(_)
+        | AstNode::ListType(_)
+        | AstNode::DictType { .. }
+        | AstNode::GenericType { .. }
+        | AstNode::Import { .. }) => node,
     }
 }
 
@@ -5057,13 +8367,14 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
         collect_block_mutated_names(stmt, &mut mutated);
     }
 
-    // Hash-keyed availability (O(1) lookup instead of an O(n) `expr_equiv` scan):
+    // Hash-keyed availability (O(1) lookup by structural expr key, no linear
+    // equality scan), using the same value-numbering core as GVN (`AvailEnv`):
     //   key_to_src : structural expr key → the variable already holding that value
     //   src_key    : that source variable → its key (to evict it on invalidation)
     //   ref_index  : referenced variable → source variables whose value depends on it
-    let mut key_to_src: HashMap<String, String> = HashMap::new();
-    let mut src_key: HashMap<String, String> = HashMap::new();
-    let mut ref_index: HashMap<String, Vec<String>> = HashMap::new();
+    // block_cse never joins envs, so it leaves the env's GVN-only `src_refs` map
+    // empty; `invalidate`/`clear`'s upkeep of that map is then a no-op here.
+    let mut env = AvailEnv::new();
     let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
 
     for stmt in stmts {
@@ -5082,7 +8393,7 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
             if expr_is_pure(value, pure_fns) && !mutated.contains(name) {
                 let mut key = String::new();
                 if expr_key(value, &mut key) {
-                    if let Some(src) = key_to_src.get(&key) {
+                    if let Some(src) = env.key_to_src.get(&key) {
                         // Replace the redundant computation with an alias to the earlier result.
                         if let AstNode::VariableDeclaration {
                             name,
@@ -5118,37 +8429,24 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
         // mutation of a tracked var, or of a value an available entry depends on).
         let mut writes = HashSet::new();
         collect_written_vars(&stmt, &mut writes);
-        for w in &writes {
-            // Entries whose value reads `w` are now stale.
-            if let Some(srcs) = ref_index.remove(w) {
-                for s in srcs {
-                    if let Some(k) = src_key.remove(&s) {
-                        if key_to_src.get(&k).map(String::as_str) == Some(s.as_str()) {
-                            key_to_src.remove(&k);
-                        }
-                    }
-                }
-            }
-            // `w` itself, if it is a source variable, is overwritten.
-            if let Some(k) = src_key.remove(w) {
-                if key_to_src.get(&k).map(String::as_str) == Some(w.as_str()) {
-                    key_to_src.remove(&k);
-                }
-            }
-        }
+        env.invalidate(&writes);
 
         if stmt_has_effect(&stmt, pure_fns) {
             // An effect may change get_field reads etc.; drop everything conservatively.
-            key_to_src.clear();
-            src_key.clear();
-            ref_index.clear();
+            env.clear();
         } else if let Some((key, name, refs)) = staged {
             // Commit the freshly-computed expression as available for later reuse.
+            // This is block_cse's own (non-GVN) commit: it intentionally omits the
+            // defensive eviction `AvailEnv::commit` does, preserving the exact set
+            // of expressions eliminated; it also skips `src_refs` (GVN-join-only).
             for r in &refs {
-                ref_index.entry(r.clone()).or_default().push(name.clone());
+                env.ref_index
+                    .entry(r.clone())
+                    .or_default()
+                    .push(name.clone());
             }
-            src_key.insert(name.clone(), key.clone());
-            key_to_src.insert(key, name);
+            env.src_key.insert(name.clone(), key.clone());
+            env.key_to_src.insert(key, name);
         }
 
         out.push(new_stmt);
@@ -5258,7 +8556,7 @@ pub fn optimize_licm_cse(node: AstNode) -> AstNode {
 // redundancy such as `(x+y)*(x+y)`, which would require introducing temporaries
 // and would break the no-fresh-names convergence guarantee).
 //
-// Soundness rests on threading a value-availability environment (`GvnEnv`)
+// Soundness rests on threading a value-availability environment (`AvailEnv`)
 // through the AST and joining/invalidating it at control-flow boundaries:
 //   * `if`: fork the env into both branches; at the merge keep an entry only
 //     when the SAME binding holds the value on both paths AND that binding
@@ -5277,22 +8575,32 @@ pub fn optimize_licm_cse(node: AstNode) -> AstNode {
 // index, conservative clear on effect).
 // ===========================================================================
 
+/// Value-availability environment shared by `block_cse` (local CSE) and GVN.
+///
+/// Both passes track the same core: a structural-expr key (value number) and
+/// the binding currently holding it, plus a reverse index for precise
+/// write-invalidation. The `new`/`invalidate`/`clear` plumbing is identical
+/// across both passes and lives here once; each pass keeps its own commit step
+/// (GVN's adds defensive eviction + `src_refs` upkeep needed by its joins, which
+/// `block_cse` deliberately omits — see the note on `src_refs`).
 #[derive(Clone)]
-struct GvnEnv {
+struct AvailEnv {
     /// Canonical expr key (value number) -> source binding currently holding it.
     key_to_src: HashMap<String, String>,
     /// Source binding -> its value number (inverse, for eviction by name).
     src_key: HashMap<String, String>,
-    /// Source binding -> vars its value reads (kept to rebuild the ref index
-    /// after a join, which `block_cse`'s local maps don't need).
+    /// Source binding -> vars its value reads. Only GVN's join logic needs this
+    /// (to rebuild the ref index after an intersect/restrict); `block_cse` never
+    /// joins envs, so it leaves this map empty (the `invalidate`/`clear` upkeep
+    /// of it is then a harmless no-op).
     src_refs: HashMap<String, HashSet<String>>,
     /// Referenced var -> source bindings whose value reads it (fast invalidation).
     ref_index: HashMap<String, Vec<String>>,
 }
 
-impl GvnEnv {
+impl AvailEnv {
     fn new() -> Self {
-        GvnEnv {
+        AvailEnv {
             key_to_src: HashMap::new(),
             src_key: HashMap::new(),
             src_refs: HashMap::new(),
@@ -5366,8 +8674,8 @@ impl GvnEnv {
     /// both branches map that key to the same name AND `name` dominated the
     /// branch entry (`dominate`), so a branch-local binding is never referenced
     /// past the merge.
-    fn intersect_dominating(&self, other: &GvnEnv, dominate: &HashSet<String>) -> GvnEnv {
-        let mut out = GvnEnv::new();
+    fn intersect_dominating(&self, other: &AvailEnv, dominate: &HashSet<String>) -> AvailEnv {
+        let mut out = AvailEnv::new();
         for (k, n) in &self.key_to_src {
             if other.key_to_src.get(k).map(String::as_str) == Some(n.as_str())
                 && dominate.contains(n)
@@ -5384,8 +8692,8 @@ impl GvnEnv {
     /// `key -> name` iff `name` and none of its referenced vars are in `touched`
     /// (written by the loop body/condition). The body runs 0+ times, so only
     /// genuinely invariant values may be reused inside it.
-    fn restrict_to_invariants(&self, touched: &HashSet<String>) -> GvnEnv {
-        let mut out = GvnEnv::new();
+    fn restrict_to_invariants(&self, touched: &HashSet<String>) -> AvailEnv {
+        let mut out = AvailEnv::new();
         for (k, n) in &self.key_to_src {
             if touched.contains(n) {
                 continue;
@@ -5404,8 +8712,8 @@ impl GvnEnv {
     /// View containing only entries whose source binding already dominated this
     /// point (was available on entry). Used at a nested-block exit so a binding
     /// introduced inside the block can't be aliased once it is out of scope.
-    fn restrict_to_dominators(&self, dominate: &HashSet<String>) -> GvnEnv {
-        let mut out = GvnEnv::new();
+    fn restrict_to_dominators(&self, dominate: &HashSet<String>) -> AvailEnv {
+        let mut out = AvailEnv::new();
         for (k, n) in &self.key_to_src {
             if dominate.contains(n) {
                 if let Some(refs) = self.src_refs.get(n) {
@@ -5419,7 +8727,11 @@ impl GvnEnv {
 
 /// Recursively apply GVN, threading availability `env` through control flow.
 /// Returns the transformed node and the env flowing out of it.
-fn transform_gvn(node: AstNode, mut env: GvnEnv, pure_fns: &HashSet<String>) -> (AstNode, GvnEnv) {
+fn transform_gvn(
+    node: AstNode,
+    mut env: AvailEnv,
+    pure_fns: &HashSet<String>,
+) -> (AstNode, AvailEnv) {
     match node {
         AstNode::Block(stmts) => {
             // A binding introduced inside this block does not dominate its exit,
@@ -5477,7 +8789,7 @@ fn transform_gvn(node: AstNode, mut env: GvnEnv, pure_fns: &HashSet<String>) -> 
             let effect = stmt_has_effect(&condition, pure_fns) || stmt_has_effect(&body, pure_fns);
             // Only genuinely loop-invariant values may be reused inside the body.
             let body_env = if effect {
-                GvnEnv::new()
+                AvailEnv::new()
             } else {
                 env.restrict_to_invariants(&touched)
             };
@@ -5508,7 +8820,7 @@ fn transform_gvn(node: AstNode, mut env: GvnEnv, pure_fns: &HashSet<String>) -> 
             collect_written_vars(&body, &mut touched);
             let effect = stmt_has_effect(&iterable, pure_fns) || stmt_has_effect(&body, pure_fns);
             let body_env = if effect {
-                GvnEnv::new()
+                AvailEnv::new()
             } else {
                 env.restrict_to_invariants(&touched)
             };
@@ -5540,7 +8852,7 @@ fn transform_gvn(node: AstNode, mut env: GvnEnv, pure_fns: &HashSet<String>) -> 
         } => {
             // A function body is a fresh scope; the caller's availability is
             // unaffected (matches `block_cse`, which is local per function).
-            let (body_b, _) = transform_gvn(*body, GvnEnv::new(), pure_fns);
+            let (body_b, _) = transform_gvn(*body, AvailEnv::new(), pure_fns);
             (
                 AstNode::FunctionDefinition {
                     name,
@@ -5604,9 +8916,9 @@ fn transform_gvn(node: AstNode, mut env: GvnEnv, pure_fns: &HashSet<String>) -> 
 /// the same staged-commit CSE step as `block_cse`.
 fn block_gvn(
     stmts: Vec<AstNode>,
-    mut env: GvnEnv,
+    mut env: AvailEnv,
     pure_fns: &HashSet<String>,
-) -> (Vec<AstNode>, GvnEnv) {
+) -> (Vec<AstNode>, AvailEnv) {
     // Names mutated anywhere in this block (computed once, as in `block_cse`),
     // so single-assignment is testable in O(1) per statement.
     let mut mutated: HashSet<String> = HashSet::new();
@@ -5704,7 +9016,7 @@ pub fn optimize_gvn(node: AstNode) -> AstNode {
     // which re-cloned and re-walked the whole AST each iteration (superlinear on a
     // huge flattened function).
     for _ in 0..2 {
-        let (next, _) = transform_gvn(node.clone(), GvnEnv::new(), &pure_fns);
+        let (next, _) = transform_gvn(node.clone(), AvailEnv::new(), &pure_fns);
         if next == node {
             break;
         }
@@ -6744,6 +10056,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reorder_keeps_neutral_write_after_reveal_that_reads_it() {
+        // WAR hazard: the reveal `var r = s + a` reads the *old* value of `a`;
+        // a later neutral `a = 7` must not be hoisted ahead of it. Before the
+        // WAR/WAW edges were added, the reorderer's RAW-only graph left `a = 7`
+        // dependency-free, so its "neutral" priority floated it before the
+        // reveal — a silent miscompile.
+        let secret_decl = AstNode::VariableDeclaration {
+            name: "s".into(),
+            type_annotation: None,
+            value: Some(Box::new(make_int_literal(1))),
+            is_mutable: false,
+            is_secret: true,
+            location: make_loc(),
+        };
+        let a_decl = make_var_decl("a", make_int_literal(5));
+        // Reveal: clear var built from the secret `s` and the clear `a`.
+        let reveal = make_var_decl(
+            "r",
+            AstNode::BinaryOperation {
+                op: "add".into(),
+                left: Box::new(make_identifier("s")),
+                right: Box::new(make_identifier("a")),
+                location: make_loc(),
+            },
+        );
+        // Flush trigger: uses the revealed `r` in a computation.
+        let flush = make_var_decl(
+            "f",
+            AstNode::BinaryOperation {
+                op: "add".into(),
+                left: Box::new(make_identifier("r")),
+                right: Box::new(make_int_literal(1)),
+                location: make_loc(),
+            },
+        );
+        // The neutral reassignment that must stay after the reveal.
+        let write = make_assignment("a", make_int_literal(7));
+
+        let out = reorder_block_for_reveals(vec![secret_decl, a_decl, reveal, flush, write]);
+
+        let reveal_pos = out
+            .iter()
+            .position(|s| matches!(s, AstNode::VariableDeclaration { name, .. } if name == "r"))
+            .expect("reveal statement present");
+        let write_pos = out
+            .iter()
+            .position(|s| {
+                matches!(
+                    s,
+                    AstNode::Assignment { target, .. }
+                        if matches!(target.as_ref(), AstNode::Identifier(n, _) if n == "a")
+                )
+            })
+            .expect("write statement present");
+        assert!(
+            reveal_pos < write_pos,
+            "WAR hazard: `a = 7` (idx {write_pos}) was hoisted ahead of the reveal \
+             reading old `a` (idx {reveal_pos})"
+        );
+    }
+
     fn make_insert(list: &str, index: AstNode, value: AstNode) -> AstNode {
         AstNode::FunctionCall {
             function: Box::new(make_identifier("insert")),
@@ -7389,5 +10763,522 @@ mod tests {
         )]);
         let out = eliminate_dead_bindings(block);
         assert_eq!(count_decls(&out), 0, "dead multiply eliminated");
+    }
+
+    // ----- Batched `Share.batch_mul` call coalescing ---------------------------
+
+    /// `Share.batch_mul(L, R)` whose resolved return type is `list[Share]` (the
+    /// real type of a vectorized secret product in the AES/CTR/CBC circuits).
+    fn make_typed_batch_mul(left: &str, right: &str) -> AstNode {
+        use crate::symbol_table::SymbolType;
+        AstNode::FunctionCall {
+            function: Box::new(make_identifier("Share.batch_mul")),
+            arguments: vec![make_identifier(left), make_identifier(right)],
+            location: make_loc(),
+            resolved_return_type: Some(SymbolType::List(Box::new(SymbolType::Object(
+                "Share".to_string(),
+            )))),
+        }
+    }
+
+    fn count_calls_named(node: &AstNode, target: &str) -> usize {
+        let mut n = 0;
+        if let AstNode::FunctionCall { function, .. } = node {
+            if let AstNode::Identifier(name, _) = function.as_ref() {
+                if name == target {
+                    n += 1;
+                }
+            }
+        }
+        for_each_child(node, &mut |c| n += count_calls_named(c, target));
+        n
+    }
+
+    #[test]
+    fn test_contains_secret_recognizes_share_collections() {
+        use crate::symbol_table::SymbolType;
+        let share = SymbolType::Object("Share".to_string());
+        assert!(
+            share.contains_secret(),
+            "Share object carries secret shares"
+        );
+        assert!(
+            SymbolType::List(Box::new(share.clone())).contains_secret(),
+            "list[Share] carries secret shares"
+        );
+        assert!(
+            !SymbolType::List(Box::new(SymbolType::Bool)).contains_secret(),
+            "list[bool] is clear"
+        );
+        // The scalar-only predicate must stay narrow.
+        assert!(!share.is_secret(), "Share object is not a scalar Secret(_)");
+    }
+
+    #[test]
+    fn test_value_is_multiply_recognizes_batched_share_mul() {
+        assert!(
+            value_is_multiply(&make_typed_batch_mul("a", "b")),
+            "batch_mul yielding list[Share] is a multiply round"
+        );
+    }
+
+    #[test]
+    fn test_independent_batch_muls_fused_into_one_wide_call() {
+        // var m1 = Share.batch_mul(a, b)
+        // var m2 = Share.batch_mul(c, d)   -- independent -> one fused round.
+        let block = AstNode::Block(vec![
+            make_var_decl("m1", make_typed_batch_mul("a", "b")),
+            make_var_decl("m2", make_typed_batch_mul("c", "d")),
+        ]);
+        let out = optimize_multiplies(block);
+        assert_eq!(
+            count_calls_named(&out, "Share.batch_mul"),
+            1,
+            "two independent batched multiplies collapse to one wide batch_mul"
+        );
+        // The fusion uses concat (extend) + re-slice to recover each product.
+        assert_eq!(
+            count_calls_named(&out, "extend"),
+            2,
+            "lefts+rights extended"
+        );
+        assert_eq!(
+            count_calls_named(&out, "slice"),
+            2,
+            "each product recovered by a slice of the wide result"
+        );
+    }
+
+    #[test]
+    fn test_dependent_batch_muls_not_fused() {
+        // var m1 = Share.batch_mul(a, b)
+        // var m2 = Share.batch_mul(m1, d)  -- m2 depends on m1 -> stays separate.
+        let block = AstNode::Block(vec![
+            make_var_decl("m1", make_typed_batch_mul("a", "b")),
+            make_var_decl("m2", make_typed_batch_mul("m1", "d")),
+        ]);
+        let out = optimize_multiplies(block);
+        assert_eq!(
+            count_calls_named(&out, "Share.batch_mul"),
+            2,
+            "a dependent batched multiply cannot share a round"
+        );
+        assert_eq!(
+            count_calls_named(&out, "extend"),
+            0,
+            "no fusion, so no concatenation"
+        );
+    }
+
+    #[test]
+    fn test_single_batch_mul_left_unfused() {
+        let block = AstNode::Block(vec![make_var_decl("m1", make_typed_batch_mul("a", "b"))]);
+        let out = optimize_multiplies(block);
+        assert_eq!(
+            count_calls_named(&out, "Share.batch_mul"),
+            1,
+            "a lone batched multiply is unchanged"
+        );
+        assert_eq!(
+            count_calls_named(&out, "extend"),
+            0,
+            "a lone batched multiply needs no concatenation"
+        );
+    }
+
+    // ---- nested-operand flatten-on-gather regression tests ----
+    //
+    // `Share.batch_mul` requires every operand-array element to be a SCALAR share;
+    // a nested `Array` element panics the VM with "Expected Share object or Share
+    // value, got Array(..)". Before the fix, the gather concatenated whole operand
+    // sub-lists, so a nested-list operand reached `batch_mul` as a nested element.
+    // These tests drive a synthetic nested-list operand through the gather and
+    // assert (a) NO nested element is ever fed into the fused accumulator (the
+    // exact property whose violation is the runtime panic), and (b) the per-leaf
+    // products are re-nested back to the operand's original shape in sequential
+    // leaf order (correct, element-wise-equal result).
+
+    fn make_list_lit(elements: Vec<AstNode>) -> AstNode {
+        AstNode::ListLiteral {
+            elements,
+            location: make_loc(),
+        }
+    }
+
+    fn batched_candidate(
+        idx: usize,
+        target: &str,
+        left: AstNode,
+        right: AstNode,
+    ) -> MultiplyCandidate {
+        MultiplyCandidate {
+            statement_index: idx,
+            target_key: target.to_string(),
+            target_expr: make_identifier(target),
+            left_expr: left,
+            right_expr: right,
+            op: "batch_mul".to_string(),
+            referenced_vars: std::collections::HashSet::new(),
+            location: make_loc(),
+            is_declaration: true,
+            type_annotation: None,
+            is_mutable: false,
+            is_secret: false,
+            is_batched: true,
+        }
+    }
+
+    /// Collects every expression fed into a fused accumulator: the argument of
+    /// each `copy(arg)` seed and the second argument of each `extend(acc, arg)`.
+    fn accumulator_contributions(stmts: &[AstNode]) -> Vec<AstNode> {
+        let mut out = Vec::new();
+        fn walk(node: &AstNode, out: &mut Vec<AstNode>) {
+            if let AstNode::FunctionCall {
+                function,
+                arguments,
+                ..
+            } = node
+            {
+                if let AstNode::Identifier(name, _) = function.as_ref() {
+                    if name == "copy" && arguments.len() == 1 {
+                        out.push(arguments[0].clone());
+                    } else if name == "extend" && arguments.len() == 2 {
+                        out.push(arguments[1].clone());
+                    }
+                }
+            }
+            for_each_child(node, &mut |c| walk(c, out));
+        }
+        for s in stmts {
+            walk(s, &mut out);
+        }
+        out
+    }
+
+    /// Operands passed to every `Share.batch_mul(L, R)` call in `stmts`.
+    fn batch_mul_operands(stmts: &[AstNode]) -> Vec<(AstNode, AstNode)> {
+        let mut out = Vec::new();
+        fn walk(node: &AstNode, out: &mut Vec<(AstNode, AstNode)>) {
+            if let AstNode::FunctionCall {
+                function,
+                arguments,
+                ..
+            } = node
+            {
+                if let AstNode::Identifier(name, _) = function.as_ref() {
+                    if name == "Share.batch_mul" && arguments.len() == 2 {
+                        out.push((arguments[0].clone(), arguments[1].clone()));
+                    }
+                }
+            }
+            for_each_child(node, &mut |c| walk(c, out));
+        }
+        for s in stmts {
+            walk(s, &mut out);
+        }
+        out
+    }
+
+    /// The bound value of the first `var <name> = <value>` declaration in `stmts`.
+    fn decl_value<'a>(stmts: &'a [AstNode], name: &str) -> &'a AstNode {
+        stmts
+            .iter()
+            .find_map(|s| match s {
+                AstNode::VariableDeclaration {
+                    name: n,
+                    value: Some(v),
+                    ..
+                } if n == name => Some(v.as_ref()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no decl for {name}"))
+    }
+
+    /// Walks a re-nested result value (a `ListLiteral` skeleton of
+    /// `results[base + k]` index accesses) and collects the leaf addends `k` in
+    /// depth-first order. Panics if any leaf is not a `results[base + literal]`.
+    fn renest_leaf_addends(node: &AstNode) -> Vec<u128> {
+        let mut out = Vec::new();
+        fn walk(node: &AstNode, out: &mut Vec<u128>) {
+            match node {
+                AstNode::ListLiteral { elements, .. } => {
+                    for e in elements {
+                        walk(e, out);
+                    }
+                }
+                AstNode::IndexAccess { index, .. } => match index.as_ref() {
+                    AstNode::BinaryOperation { op, right, .. } if op == "+" => {
+                        match right.as_ref() {
+                            AstNode::Literal {
+                                value: crate::ast::Value::Int { value, .. },
+                                ..
+                            } => out.push(*value),
+                            other => panic!("index addend not a literal: {other:?}"),
+                        }
+                    }
+                    other => panic!("renest leaf index not `base + k`: {other:?}"),
+                },
+                other => panic!("renest leaf not an IndexAccess: {other:?}"),
+            }
+        }
+        walk(node, &mut out);
+        out
+    }
+
+    #[test]
+    fn batcher_flattens_nested_operand_no_nested_accumulator() {
+        // A flat batched multiply followed by a nested one (a list-of-2-pairs on
+        // both sides) fused into one wide call. Before the fix the nested operand's
+        // whole pairs were concatenated, producing nested `Array` elements that
+        // panic `Share.batch_mul`.
+        let flat = batched_candidate(
+            0,
+            "m_flat",
+            make_list_lit(vec![make_identifier("a0"), make_identifier("a1")]),
+            make_list_lit(vec![make_identifier("b0"), make_identifier("b1")]),
+        );
+        let nested = batched_candidate(
+            1,
+            "m_nested",
+            make_list_lit(vec![
+                make_list_lit(vec![make_identifier("c0"), make_identifier("c1")]),
+                make_list_lit(vec![make_identifier("c2"), make_identifier("c3")]),
+            ]),
+            make_list_lit(vec![
+                make_list_lit(vec![make_identifier("d0"), make_identifier("d1")]),
+                make_list_lit(vec![make_identifier("d2"), make_identifier("d3")]),
+            ]),
+        );
+        let out = create_batched_call_fusion(&[flat, nested]);
+
+        // (a) NO nested element ever reaches the fused accumulator.
+        for contrib in accumulator_contributions(&out) {
+            assert!(
+                !list_literal_is_nested(&contrib),
+                "a nested-list element was concatenated into the batch_mul accumulator: {contrib:?}"
+            );
+        }
+        // The single fused `Share.batch_mul` operands are flat lists.
+        let operands = batch_mul_operands(&out);
+        assert_eq!(operands.len(), 1, "the group fuses into one wide batch_mul");
+        let (lefts, rights) = &operands[0];
+        // Operands are identifiers to the accumulators, not literals here.
+        assert!(
+            matches!(lefts, AstNode::Identifier(..)) && matches!(rights, AstNode::Identifier(..)),
+            "fused operands are the accumulator identifiers"
+        );
+
+        // (b) the flat candidate still recovers via a `slice(...)` (no regression).
+        let flat_val = decl_value(&out, "m_flat");
+        assert!(
+            matches!(flat_val, AstNode::FunctionCall { function, .. }
+                if matches!(function.as_ref(), AstNode::Identifier(n, _) if n == "slice")),
+            "flat candidate must recover via slice, got {flat_val:?}"
+        );
+
+        // (b) the nested candidate re-nests to the original [[_,_],[_,_]] shape
+        // with sequential leaf indices, starting AFTER the flat candidate's leaves.
+        let nested_val = decl_value(&out, "m_nested");
+        match nested_val {
+            AstNode::ListLiteral { elements, .. } => {
+                assert_eq!(elements.len(), 2, "outer shape preserved (2 pairs)");
+                for inner in elements {
+                    match inner {
+                        AstNode::ListLiteral { elements: e, .. } => {
+                            assert_eq!(e.len(), 2, "inner pair shape preserved")
+                        }
+                        other => panic!("inner element not re-nested: {other:?}"),
+                    }
+                }
+            }
+            other => panic!("nested candidate not re-nested to a list literal: {other:?}"),
+        }
+        assert_eq!(
+            renest_leaf_addends(nested_val),
+            vec![0, 1, 2, 3],
+            "re-nested leaves read the wide result in sequential, aligned order"
+        );
+    }
+
+    #[test]
+    fn batcher_lone_nested_operand_is_flattened() {
+        // Even un-fused, a lone batched multiply with a nested operand must be
+        // flattened so a nested `Array` never reaches `Share.batch_mul`.
+        let nested = batched_candidate(
+            0,
+            "m",
+            make_list_lit(vec![
+                make_list_lit(vec![make_identifier("c0"), make_identifier("c1")]),
+                make_list_lit(vec![make_identifier("c2"), make_identifier("c3")]),
+            ]),
+            make_list_lit(vec![
+                make_list_lit(vec![make_identifier("d0"), make_identifier("d1")]),
+                make_list_lit(vec![make_identifier("d2"), make_identifier("d3")]),
+            ]),
+        );
+        let out = create_batched_call_fusion(&[nested]);
+        let operands = batch_mul_operands(&out);
+        assert_eq!(operands.len(), 1, "still a single batch_mul");
+        let (lefts, rights) = &operands[0];
+        assert!(
+            !list_literal_is_nested(lefts) && !list_literal_is_nested(rights),
+            "lone nested operands must be flattened before batch_mul: {lefts:?} / {rights:?}"
+        );
+        // Flattened to 4 scalar leaves each.
+        for op in [lefts, rights] {
+            match op {
+                AstNode::ListLiteral { elements, .. } => assert_eq!(elements.len(), 4),
+                other => panic!("flattened operand not a list literal: {other:?}"),
+            }
+        }
+        assert_eq!(
+            renest_leaf_addends(decl_value(&out, "m")),
+            vec![0, 1, 2, 3],
+            "lone nested result re-nested in sequential leaf order"
+        );
+    }
+
+    #[test]
+    fn candidate_is_fuse_safe_classification() {
+        let pair = |l: AstNode, r: AstNode| batched_candidate(0, "m", l, r);
+        // Flat literals: fuse-safe (legacy path).
+        assert!(candidate_is_fuse_safe(&pair(
+            make_list_lit(vec![make_identifier("a")]),
+            make_list_lit(vec![make_identifier("b")]),
+        )));
+        // Opaque identifiers (AES/CTR/CBC): fuse-safe (legacy path).
+        assert!(candidate_is_fuse_safe(&pair(
+            make_identifier("xs"),
+            make_identifier("ys"),
+        )));
+        // Both nested with matching skeleton: fuse-safe (will be flattened).
+        assert!(candidate_is_fuse_safe(&pair(
+            make_list_lit(vec![make_list_lit(vec![make_identifier("a")])]),
+            make_list_lit(vec![make_list_lit(vec![make_identifier("b")])]),
+        )));
+        // Nested vs flat (skeleton mismatch): NOT fuse-safe (kept out).
+        assert!(!candidate_is_fuse_safe(&pair(
+            make_list_lit(vec![make_list_lit(vec![make_identifier("a")])]),
+            make_list_lit(vec![make_identifier("b")]),
+        )));
+        // Nested vs opaque (cannot prove alignment): NOT fuse-safe (kept out).
+        assert!(!candidate_is_fuse_safe(&pair(
+            make_list_lit(vec![make_list_lit(vec![make_identifier("a")])]),
+            make_identifier("ys"),
+        )));
+    }
+
+    #[test]
+    fn grouping_keeps_malformed_nested_candidate_out_of_batch() {
+        // Three independent batched candidates; the middle one is malformed
+        // (nested-vs-flat skeleton mismatch) and must land in its OWN singleton
+        // group so it is never concatenated into a fused accumulator.
+        let safe_a = batched_candidate(0, "a", make_identifier("la"), make_identifier("ra"));
+        let bad = batched_candidate(
+            1,
+            "b",
+            make_list_lit(vec![make_list_lit(vec![make_identifier("p")])]),
+            make_list_lit(vec![make_identifier("q")]),
+        );
+        let safe_c = batched_candidate(2, "c", make_identifier("lc"), make_identifier("rc"));
+        let statements = vec![
+            make_var_decl("a", make_typed_batch_mul("la", "ra")),
+            make_var_decl("b", make_typed_batch_mul("lb", "rb")),
+            make_var_decl("c", make_typed_batch_mul("lc", "rc")),
+        ];
+        let groups = group_batchable_multiplies(&statements, vec![safe_a, bad, safe_c]);
+        let bad_group = groups
+            .iter()
+            .find(|g| g.iter().any(|c| c.target_key == "b"))
+            .expect("malformed candidate must appear in some group");
+        assert_eq!(
+            bad_group.len(),
+            1,
+            "malformed nested candidate must be isolated as its own singleton group, \
+             got group of {}",
+            bad_group.len()
+        );
+    }
+
+    // ---- loop-vectorizer fail-closed regression ----
+
+    fn vec_index(base: &str, idx: &str) -> AstNode {
+        AstNode::IndexAccess {
+            base: Box::new(make_identifier(base)),
+            index: Box::new(make_identifier(idx)),
+            location: make_loc(),
+        }
+    }
+
+    fn vec_share_mul(a: AstNode, b: AstNode) -> AstNode {
+        AstNode::FunctionCall {
+            function: Box::new(make_identifier("Share.mul")),
+            arguments: vec![a, b],
+            location: make_loc(),
+            resolved_return_type: None,
+        }
+    }
+
+    fn vec_append(receiver: &str, value: AstNode) -> AstNode {
+        AstNode::FunctionCall {
+            function: Box::new(make_identifier("append")),
+            arguments: vec![make_identifier(receiver), value],
+            location: make_loc(),
+            resolved_return_type: None,
+        }
+    }
+
+    /// `for i in 0..n: <body>` over a symbolic (non-literal) upper bound, the
+    /// exact shape the auto-vectorizer is allowed to consider (kept-rolled,
+    /// straight-line, contains a multiply).
+    fn vec_for(body: Vec<AstNode>) -> AstNode {
+        AstNode::ForLoop {
+            variables: vec!["i".to_string()],
+            iterable: Box::new(AstNode::BinaryOperation {
+                op: "..".to_string(),
+                left: Box::new(make_int_literal(0)),
+                right: Box::new(make_identifier("n")),
+                location: make_loc(),
+            }),
+            body: Box::new(AstNode::Block(body)),
+            location: make_loc(),
+        }
+    }
+
+    #[test]
+    fn vectorizer_declines_loop_carried_reduction() {
+        // Control: an INDEPENDENT map-loop with a loop-local temp must vectorize.
+        //   for i in 0..n:
+        //     var t = Share.mul(x[i], x[i])
+        //     append(out, t)
+        let independent = vec_for(vec![
+            make_var_decl("t", vec_share_mul(vec_index("x", "i"), vec_index("x", "i"))),
+            vec_append("out", make_identifier("t")),
+        ]);
+        assert!(
+            try_vectorize_for(&independent).is_some(),
+            "an independent per-lane map-loop must still vectorize (control)"
+        );
+
+        // Loop-carried reduction: `acc` is an OUTER variable read+written across
+        // iterations. Structurally identical to the control (same bound, same
+        // multiply, same output commit) so the ONLY reason to decline is the
+        // loop-carried write. The pass MUST fail closed (return None) rather than
+        // silently broadcast `acc` as a loop-invariant.
+        //   for i in 0..n:
+        //     acc = Share.mul(acc, x[i])
+        //     append(out, acc)
+        let reduction = vec_for(vec![
+            AstNode::Assignment {
+                target: Box::new(make_identifier("acc")),
+                value: Box::new(vec_share_mul(make_identifier("acc"), vec_index("x", "i"))),
+                location: make_loc(),
+            },
+            vec_append("out", make_identifier("acc")),
+        ]);
+        assert!(
+            try_vectorize_for(&reduction).is_none(),
+            "a loop-carried reduction must NOT be vectorized (fail-closed)"
+        );
     }
 }
