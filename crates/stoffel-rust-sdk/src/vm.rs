@@ -236,6 +236,10 @@ pub(crate) async fn execute_local_capturing_with_options(
             .as_deref()
             .or_else(|| runtime.local_runner_binary_path()),
     )?;
+    eprintln!(
+        "[stoffel] using stoffel-run binary: {}",
+        runner_path.display()
+    );
 
     let mut runner = stoffel_vm_runner::LocalCoordinatorRunner::builder(
         runner_path,

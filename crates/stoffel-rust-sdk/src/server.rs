@@ -699,6 +699,10 @@ impl StoffelServer {
         }
 
         let runner_path = resolve_stoffel_run_binary(self.runner_path.as_deref())?;
+        eprintln!(
+            "[stoffel] using stoffel-run binary: {}",
+            runner_path.display()
+        );
         let tempdir = tempfile::tempdir()?;
         let program_path = tempdir.path().join("program.stflb");
         program.save_bytecode(&program_path)?;
