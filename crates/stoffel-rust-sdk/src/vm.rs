@@ -432,7 +432,7 @@ fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
         return Ok(path);
     }
 
-    if let Some(path) = cargo_bin_runner() {
+    if let Some(path) = path_runner() {
         return Ok(path);
     }
 
@@ -447,7 +447,7 @@ fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
     }
 
     Err(Error::Unsupported(
-        "SDK local coordinator execution requires a stoffel-run binary; install it with `cargo install --path crates/stoffel-vm-runner` (or `cargo install stoffel-vm-runner`) so it lands on your Cargo bin path, set STOFFEL_RUN_BIN, call `local_runner_path`, or build `cargo build -p stoffel-vm-runner --bin stoffel-run`"
+        "SDK local coordinator execution requires a stoffel-run binary; install it with `cargo install --path crates/stoffel-vm-runner` (or `cargo install stoffel-vm-runner`) so it lands on your PATH, set STOFFEL_RUN_BIN, call `local_runner_path`, or build `cargo build -p stoffel-vm-runner --bin stoffel-run`"
             .to_owned(),
     ))
 }
@@ -461,14 +461,39 @@ fn sibling_runner() -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-/// Look for a `stoffel-run` binary installed on the user's Cargo bin path
-/// (`$CARGO_HOME/bin` or `~/.cargo/bin`), e.g. via `cargo install`.
-fn cargo_bin_runner() -> Option<PathBuf> {
-    let cargo_home = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))?;
-    let candidate = cargo_home.join("bin").join("stoffel-run");
-    candidate.exists().then_some(candidate)
+/// Look for a `stoffel-run` binary anywhere on the user's PATH.
+fn path_runner() -> Option<PathBuf> {
+    find_binary_on_path("stoffel-run")
+}
+
+fn find_binary_on_path(binary_name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+
+    find_binary_in_path(binary_name, &path)
+}
+
+fn find_binary_in_path(binary_name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    let binary_name = format!("{binary_name}{}", std::env::consts::EXE_SUFFIX);
+
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(&binary_name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn resolve_existing_runner_path(path: &Path) -> Option<PathBuf> {
@@ -650,7 +675,7 @@ fn sdk_value_from_vm_value(
 
 #[cfg(test)]
 mod tests {
-    use super::local_program_output_without_return_markers;
+    use super::{find_binary_in_path, local_program_output_without_return_markers};
 
     #[test]
     fn local_program_output_filter_removes_runner_return_markers() {
@@ -660,5 +685,28 @@ mod tests {
             local_program_output_without_return_markers(stdout),
             "polynomial p\n"
         );
+    }
+
+    #[test]
+    fn find_binary_in_path_finds_executable_file() {
+        let missing_dir = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let binary = bin_dir
+            .path()
+            .join(format!("stoffel-run{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&binary, permissions).unwrap();
+        }
+
+        let path = std::env::join_paths([missing_dir.path(), bin_dir.path()]).unwrap();
+
+        assert_eq!(find_binary_in_path("stoffel-run", &path), Some(binary));
     }
 }
