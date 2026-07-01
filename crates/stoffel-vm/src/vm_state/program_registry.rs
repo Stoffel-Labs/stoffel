@@ -2,6 +2,8 @@ use super::VMState;
 use crate::error::VmResult;
 use crate::foreign_functions::{ForeignFunction, Function};
 use std::sync::Arc;
+use stoffel_vm_types::functions::ResolvedFunctionHeader;
+use stoffel_vm_types::instructions::ResolvedInstructionInput;
 
 impl VMState {
     pub(crate) fn try_insert_function(&mut self, function: Function) -> VmResult<()> {
@@ -15,6 +17,17 @@ impl VMState {
         function: Function,
     ) -> VmResult<()> {
         self.program.try_insert_without_vm_source(function)?;
+        self.last_call_target = None;
+        Ok(())
+    }
+
+    pub(crate) fn try_insert_resolved_function_without_vm_source(
+        &mut self,
+        header: ResolvedFunctionHeader,
+        next_instruction: impl FnMut() -> Option<ResolvedInstructionInput>,
+    ) -> VmResult<()> {
+        self.program
+            .try_insert_resolved_without_vm_source(header, next_instruction)?;
         self.last_call_target = None;
         Ok(())
     }

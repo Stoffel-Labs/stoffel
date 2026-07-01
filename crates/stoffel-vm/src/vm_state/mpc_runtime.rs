@@ -73,6 +73,9 @@ impl MpcRuntimeState {
             .client_store
             .replace_client_shares(self.client_store.snapshot_client_shares());
         cloned
+            .client_store
+            .set_client_roster(self.client_store.snapshot_client_roster());
+        cloned
     }
 
     pub(super) fn runtime_info(&self) -> Option<MpcRuntimeInfo> {

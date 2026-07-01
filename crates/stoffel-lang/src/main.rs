@@ -174,6 +174,7 @@ fn main() {
         print_ir: args.print_ir,
         mpc_backend,
         mpc_curve,
+        entry_points: Vec::new(),
         inline_budget: env_budget("STOFFEL_INLINE_BUDGET"),
         unroll_budget: env_budget("STOFFEL_UNROLL_BUDGET"),
         unroll_max_expansion: env_budget("STOFFEL_UNROLL_MAX_EXPANSION"),

@@ -36,7 +36,7 @@ def combine_bits(bits: list[Share], n: int64) -> Share:
 
 # Secret-shared [a < b] for a, b in [0, 2^l): masked reveal + carry chain.
 def less_than(a: Share, b: Share, l: int64, kappa: int64) -> Share:
-  var z = Share.add_scalar(Share.sub(a, b), pow2(l))
+  var z = Share.add_constant(Share.sub(a, b), pow2(l))
   var rbits: list[Share] = []
   var i = 0
   while i < (l + 1):
@@ -76,7 +76,7 @@ def select(cond: Share, a: Share, b: Share) -> Share:
 # x < 0 for signed x in (-2^(l-1), 2^(l-1)): map to u = x + 2^(l-1) in (0, 2^l),
 # then x < 0 iff u < 2^(l-1).
 def is_negative(x: Share, l: int64, kappa: int64) -> Share:
-  var u = Share.add_scalar(x, pow2(l - 1))
+  var u = Share.add_constant(x, pow2(l - 1))
   var c = Share.from_clear_int(pow2(l - 1), l)
   return less_than(u, c, l, kappa)
 

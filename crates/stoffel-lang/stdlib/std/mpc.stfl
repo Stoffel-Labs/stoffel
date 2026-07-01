@@ -19,7 +19,8 @@ builtin object Share:
   def add(share1: Share, share2: Share) -> Share {.builtin.}:
   def sub(share1: Share, share2: Share) -> Share {.builtin.}:
   def neg(share: Share) -> Share {.builtin.}:
-  def add_scalar(share: Share, scalar: int64) -> Share {.builtin.}:
+  def add_constant[T](share: Share, value: T) -> Share {.builtin.}:
+  def add_scalar[T](share: Share, value: T) -> Share {.builtin: "Share.add_constant".}:
   def mul_scalar[T](share: Share, scalar: T) -> Share {.builtin.}:
   def mul(share1: Share, share2: Share) -> Share {.builtin.}:
   def batch_mul(lefts: list[Share], rights: list[Share]) -> list[Share] {.builtin.}:

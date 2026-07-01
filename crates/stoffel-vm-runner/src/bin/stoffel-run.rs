@@ -3248,18 +3248,6 @@ where
         .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
         .collect();
 
-    if input_ids.is_empty() {
-        eprintln!(
-            "[party {}] AVSS coordinator mode has no client inputs; executing '{}' without preprocessing",
-            my_id, agreed_entry
-        );
-        let result = vm
-            .execute(agreed_entry)
-            .map_err(|err| format!("Execution error in '{}': {}", agreed_entry, err))?;
-        print_vm_result(vm, result);
-        return Ok(());
-    }
-
     let coord: AvssOffChainCoordinator<F, G> = AvssOffChainCoordinator::<F, G>::start_rpc_client(
         &coord_addr.0,
         coord_addr.1,
@@ -3307,85 +3295,94 @@ where
     .await?;
     engine.enable_client_output_capture().await;
 
-    let mut mask_shares = Vec::with_capacity(input_ids.len());
-    {
-        let node = engine.node_handle().lock().await;
-        for idx in 0..input_ids.len() {
-            let local_shares = node
-                .preprocessing_material
-                .lock()
-                .await
-                .take_v_random_shares(1)
-                .map_err(|e| format!("Not enough AVSS random shares for client {idx}: {:?}", e))?;
-            let share = local_shares
-                .into_iter()
-                .next()
-                .ok_or_else(|| format!("AVSS random share batch for client {idx} was empty"))?;
-            node_rpc
-                .add_mask_share(idx as u64, &share)
-                .await
-                .map_err(|e| format!("add_mask_share: {:?}", e))?;
-            mask_shares.push(share);
+    if input_ids.is_empty() {
+        eprintln!(
+            "[party {}] AVSS coordinator mode has no client inputs; preprocessing complete, skipping input collection",
+            my_id
+        );
+    } else {
+        let mut mask_shares = Vec::with_capacity(input_ids.len());
+        {
+            let node = engine.node_handle().lock().await;
+            for idx in 0..input_ids.len() {
+                let local_shares = node
+                    .preprocessing_material
+                    .lock()
+                    .await
+                    .take_v_random_shares(1)
+                    .map_err(|e| {
+                        format!("Not enough AVSS random shares for client {idx}: {:?}", e)
+                    })?;
+                let share = local_shares
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| format!("AVSS random share batch for client {idx} was empty"))?;
+                node_rpc
+                    .add_mask_share(idx as u64, &share)
+                    .await
+                    .map_err(|e| format!("add_mask_share: {:?}", e))?;
+                mask_shares.push(share);
+            }
         }
-    }
 
-    if as_leader {
+        if as_leader {
+            coord
+                .reserve_input_masks()
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         coord
-            .reserve_input_masks()
+            .wait_for_round(Round::InputMaskReservation)
             .await
             .map_err(|e| e.to_string())?;
-    }
-    coord
-        .wait_for_round(Round::InputMaskReservation)
-        .await
-        .map_err(|e| e.to_string())?;
 
-    let client_to_indices = normalize_client_to_indices(
-        coord
-            .wait_for_indices(input_ids.len() as u64)
-            .await
-            .map_err(|e| e.to_string())?,
-    );
-
-    for (cid, indices) in &client_to_indices {
-        for idx in indices {
-            node_rpc
-                .add_reserved_index(cid.clone(), *idx)
+        let client_to_indices = normalize_client_to_indices(
+            coord
+                .wait_for_indices(input_ids.len() as u64)
                 .await
-                .or_else(|e| match e {
-                    NodeRPCError::JSONError => {
-                        eprintln!(
-                            "[party {}] add_reserved_index observed a stale client sink for index {}; continuing",
-                            my_id, idx
-                        );
-                        Ok(())
-                    }
-                    other => Err(format!("add_reserved_index: {:?}", other)),
-                })?;
+                .map_err(|e| e.to_string())?,
+        );
+
+        for (cid, indices) in &client_to_indices {
+            for idx in indices {
+                node_rpc
+                    .add_reserved_index(cid.clone(), *idx)
+                    .await
+                    .or_else(|e| match e {
+                        NodeRPCError::JSONError => {
+                            eprintln!(
+                                "[party {}] add_reserved_index observed a stale client sink for index {}; continuing",
+                                my_id, idx
+                            );
+                            Ok(())
+                        }
+                        other => Err(format!("add_reserved_index: {:?}", other)),
+                    })?;
+            }
         }
-    }
 
-    if as_leader {
-        coord.collect_inputs().await.map_err(|e| e.to_string())?;
-    }
-    coord
-        .wait_for_round(Round::InputCollection)
-        .await
-        .map_err(|e| e.to_string())?;
+        if as_leader {
+            coord.collect_inputs().await.map_err(|e| e.to_string())?;
+        }
+        coord
+            .wait_for_round(Round::InputCollection)
+            .await
+            .map_err(|e| e.to_string())?;
 
-    let client_inputs = coord
-        .wait_for_inputs(input_ids.len() as u64, mask_shares)
-        .await
-        .map_err(|e| e.to_string())?;
-    let client_input_types = std::collections::BTreeMap::new();
-    store_reserved_client_inputs_feldman::<F, G, _>(
-        vm,
-        &client_to_indices,
-        client_inputs,
-        1,
-        &[],
-        &client_input_types,
-    );
+        let client_inputs = coord
+            .wait_for_inputs(input_ids.len() as u64, mask_shares)
+            .await
+            .map_err(|e| e.to_string())?;
+        let client_input_types = std::collections::BTreeMap::new();
+        store_reserved_client_inputs_feldman::<F, G, _>(
+            vm,
+            &client_to_indices,
+            client_inputs,
+            1,
+            &[],
+            &client_input_types,
+        );
+    }
 
     if as_leader {
         coord.start_mpc().await.map_err(|e| e.to_string())?;
@@ -4451,13 +4448,30 @@ async fn main() {
         (function_count, bytecode_version, client_io_manifest)
     } else {
         // Register all functions as they are read and lowered to avoid retaining
-        // the compiled function table beside the runtime program.
+        // the compiled or resolved function table beside the runtime program.
         let f = File::open(&load_path).expect("open binary file");
-        match CompiledBinary::try_for_each_vm_function_from_reader(&mut BufReader::new(f), |f| {
-            vm.try_register_function_without_source(f)
-                .map_err(|err| BinaryError::InvalidData(format!("invalid VM function: {err}")))?;
-            Ok(())
-        }) {
+        match CompiledBinary::try_for_each_resolved_vm_function_from_reader(
+            &mut BufReader::new(f),
+            |header, stream| {
+                let mut stream_error = None;
+                let result = vm.try_register_resolved_function_without_source(header, || {
+                    match stream.next_instruction() {
+                        Ok(instruction) => instruction,
+                        Err(err) => {
+                            stream_error = Some(err);
+                            None
+                        }
+                    }
+                });
+                if let Some(err) = stream_error {
+                    return Err(err);
+                }
+                result.map_err(|err| {
+                    BinaryError::InvalidData(format!("invalid VM function: {err}"))
+                })?;
+                Ok(())
+            },
+        ) {
             Ok(result) => result,
             Err(err) => {
                 eprintln!("Error: invalid compiled program: {:?}", err);

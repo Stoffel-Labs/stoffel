@@ -1031,7 +1031,9 @@ def main() -> fix64:
   return fixed_value
 "#;
 
-    let program = compile(source, "test.stfl", &default_options())
+    let mut options = default_options();
+    options.entry_points = vec!["negate_int".to_owned()];
+    let program = compile(source, "test.stfl", &options)
         .expect("unary minus should compile for signed integer, float64, and fix64");
 
     assert_eq!(program.main_chunk.return_type, FunctionType::fix64());
@@ -2811,7 +2813,9 @@ def main() -> int64:
   var counter = create_counter(10)
   return call_closure_with_arg(counter, 5)
 "#;
-    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+    let mut options = default_options();
+    options.entry_points = vec!["increment_counter".to_owned()];
+    let program = compile(source, "test.stfl", &options).expect("program compiles");
     let binary = convert_to_binary(&program);
 
     let create_counter = binary
@@ -2850,6 +2854,73 @@ def main() -> int64:
         !program.function_chunks.contains_key("main"),
         "entry def main should not also be emitted as a normal function"
     );
+}
+
+#[test]
+fn test_def_main_prunes_unreachable_function_chunks() {
+    let source = r#"
+def live() -> int64:
+  return 7
+
+def dead() -> int64:
+  return 9
+
+def main() -> int64:
+  return live()
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+
+    assert!(
+        program.function_chunks.contains_key("live"),
+        "reachable callees should remain callable"
+    );
+    assert!(
+        !program.function_chunks.contains_key("dead"),
+        "unreachable sibling functions should be pruned from executable output"
+    );
+}
+
+#[test]
+fn test_dce_preserves_explicit_extra_entrypoint() {
+    let source = r#"
+def encrypt() -> int64:
+  return 1
+
+def decrypt() -> int64:
+  return 2
+
+def dead() -> int64:
+  return 3
+
+def main() -> int64:
+  return encrypt()
+"#;
+    let mut options = default_options();
+    options.entry_points = vec!["decrypt".to_owned()];
+    let program = compile(source, "test.stfl", &options).expect("program compiles");
+
+    assert!(program.function_chunks.contains_key("encrypt"));
+    assert!(program.function_chunks.contains_key("decrypt"));
+    assert!(!program.function_chunks.contains_key("dead"));
+}
+
+#[test]
+fn test_no_entry_library_style_compile_keeps_function_chunks() {
+    let source = r#"
+def first() -> int64:
+  return 1
+
+def second() -> int64:
+  return 2
+"#;
+    let program = compile(source, "test.stfl", &default_options()).expect("program compiles");
+
+    assert!(
+        program.main_chunk.instructions.is_empty(),
+        "source has no executable entry chunk"
+    );
+    assert!(program.function_chunks.contains_key("first"));
+    assert!(program.function_chunks.contains_key("second"));
 }
 
 #[test]

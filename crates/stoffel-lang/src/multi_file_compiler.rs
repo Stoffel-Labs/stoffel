@@ -86,8 +86,13 @@ impl MultiFileCompiler {
             self.compile_module(module_key)?;
         }
 
-        // Phase 4: Link all modules into a single program
-        self.link_modules(&entry_module)
+        // Phase 4: Link all modules into a single program, then remove any
+        // functions that are not reachable from the entry chunk.
+        let mut program = self.link_modules(&entry_module)?;
+        program.prune_unreachable_functions_with_roots(
+            self.options.entry_points.iter().map(String::as_str),
+        );
+        Ok(program)
     }
 
     /// Compiles a single module, using exports from already-compiled dependencies.

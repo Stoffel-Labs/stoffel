@@ -151,37 +151,77 @@ pub enum ResolvedInstruction {
     // No operation
     NOP,
     // Load value from stack to register
-    LD(usize, i32), // LD r1, [sp+0]
+    LD(u32, i32), // LD r1, [sp+0]
     // Load immediate value to register
-    LDI(usize, usize), // LDI r1, const_idx (register, constant index)
+    LDI(u32, u32), // LDI r1, const_idx (register, constant index)
     // Move value from one register to another
-    MOV(usize, usize), // MOV r1, r2
+    MOV(u32, u32), // MOV r1, r2
     // Arithmetic operations
-    ADD(usize, usize, usize), // ADD r1, r2, r3
-    SUB(usize, usize, usize), // SUB r1, r2, r3
-    MUL(usize, usize, usize), // MUL r1, r2, r3
-    DIV(usize, usize, usize), // DIV r1, r2, r3
-    MOD(usize, usize, usize), // MOD r1, r2, r3
+    ADD(u32, u32, u32), // ADD r1, r2, r3
+    SUB(u32, u32, u32), // SUB r1, r2, r3
+    MUL(u32, u32, u32), // MUL r1, r2, r3
+    DIV(u32, u32, u32), // DIV r1, r2, r3
+    MOD(u32, u32, u32), // MOD r1, r2, r3
     // Bitwise operations
-    AND(usize, usize, usize), // AND r1, r2, r3
-    OR(usize, usize, usize),  // OR r1, r2, r3
-    XOR(usize, usize, usize), // XOR r1, r2, r3
-    NOT(usize, usize),        // NOT r1, r2
-    SHL(usize, usize, usize), // SHL r1, r2, r3
-    SHR(usize, usize, usize), // SHR r1, r2, r3
+    AND(u32, u32, u32), // AND r1, r2, r3
+    OR(u32, u32, u32),  // OR r1, r2, r3
+    XOR(u32, u32, u32), // XOR r1, r2, r3
+    NOT(u32, u32),      // NOT r1, r2
+    SHL(u32, u32, u32), // SHL r1, r2, r3
+    SHR(u32, u32, u32), // SHR r1, r2, r3
     // Control flow
-    JMP(usize),    // JMP to instruction index
-    JMPEQ(usize),  // JMPEQ to instruction index
-    JMPNEQ(usize), // JMPNEQ to instruction index
-    JMPLT(usize),  // JMPLT to instruction index
-    JMPGT(usize),  // JMPGT to instruction index
+    JMP(u32),    // JMP to instruction index
+    JMPEQ(u32),  // JMPEQ to instruction index
+    JMPNEQ(u32), // JMPNEQ to instruction index
+    JMPLT(u32),  // JMPLT to instruction index
+    JMPGT(u32),  // JMPGT to instruction index
     // Function handling
-    CALL(usize),    // CALL function index
-    RET(usize),     // RET r1
-    PUSHARG(usize), // PUSHARG r1
+    CALL(u32),    // CALL function index
+    RET(u32),     // RET r1
+    PUSHARG(u32), // PUSHARG r1
     // Comparison
-    CMP(usize, usize), // CMP r1, r2
+    CMP(u32, u32), // CMP r1, r2
     // Spill-slot access (see symbolic form above).
-    LDS(usize, usize), // LDS r1, slot
-    STS(usize, usize), // STS slot, r1
+    LDS(u32, u32), // LDS r1, slot
+    STS(u32, u32), // STS slot, r1
+}
+
+#[derive(Debug, Clone)]
+pub enum ResolvedInstructionInput {
+    NOP,
+    LD(u32, i32),
+    LDI(u32, Value),
+    MOV(u32, u32),
+    ADD(u32, u32, u32),
+    SUB(u32, u32, u32),
+    MUL(u32, u32, u32),
+    DIV(u32, u32, u32),
+    MOD(u32, u32, u32),
+    AND(u32, u32, u32),
+    OR(u32, u32, u32),
+    XOR(u32, u32, u32),
+    NOT(u32, u32),
+    SHL(u32, u32, u32),
+    SHR(u32, u32, u32),
+    JMP(u32),
+    JMPEQ(u32),
+    JMPNEQ(u32),
+    JMPLT(u32),
+    JMPGT(u32),
+    CALL(String),
+    RET(u32),
+    PUSHARG(u32),
+    CMP(u32, u32),
+    LDS(u32, u32),
+    STS(u32, u32),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResolvedInstruction;
+
+    #[test]
+    fn resolved_instruction_is_compact() {
+        assert_eq!(std::mem::size_of::<ResolvedInstruction>(), 16);
+    }
 }

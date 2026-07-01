@@ -42,7 +42,7 @@ def combine_bits(bits: list[Share], n: int64) -> Share:
 
 # Secret-shared [a < b] for a, b in [0, 2^l): masked reveal + carry chain.
 def less_than(a: Share, b: Share, l: int64, kappa: int64) -> Share:
-  var z = Share.add_scalar(Share.sub(a, b), pow2(l))
+  var z = Share.add_constant(Share.sub(a, b), pow2(l))
   var rbits: list[Share] = []
   var i = 0
   while i < (l + 1):
@@ -117,7 +117,7 @@ def main() -> int64:
   for zi in 0..32:
     z = Share.add(z, Share.mul(Share.retag(w[zi], 64), Share.retag(x[zi], 64)))
 
-  var v = Share.add_scalar(z, 2)                       # 2 + z
+  var v = Share.add_constant(z, 2)                       # 2 + z
   var lo = Share.from_clear_int(0, 64)
   var hi = Share.from_clear_int(4, 64)
   var pred = minimum(maximum(v, lo, l, kappa), hi, l, kappa)   # clamp to [0,4]

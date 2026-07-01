@@ -5415,10 +5415,9 @@ fn builtin_effect(name: &str) -> BuiltinEffect {
         "set_field" => e(false, true, false, false, false),
         // Pure, len-safe value computations (`mul_scalar` is a local secret×public
         // multiply — no communication — so it is pure too).
-        "add" | "sub" | "mul" | "mul_scalar" | "batch_mul" | "from_clear" | "from_clear_int"
-        | "from_clear_uint" | "from_clear_fixed" | "slice" | "contains" | "to_string" | "type" => {
-            e(true, false, false, true, false)
-        }
+        "add" | "sub" | "mul" | "mul_scalar" | "add_constant" | "add_scalar" | "batch_mul"
+        | "from_clear" | "from_clear_int" | "from_clear_uint" | "from_clear_fixed" | "slice"
+        | "contains" | "to_string" | "type" => e(true, false, false, true, false),
         // Pure value read, but deliberately NOT len-safe (audit-flagged asymmetry).
         "get_field" => e(true, false, false, false, false),
         // Effectful, but len-safe (they don't invalidate a tracked list argument).
