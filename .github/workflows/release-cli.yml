@@ -158,7 +158,7 @@ jobs:
             echo
             echo "Install:  curl -fsSL https://get.stoffelmpc.com | sh"
             echo
-            echo "Prebuilt targets: linux x86_64/aarch64, macOS x86_64/aarch64."
+            echo "Prebuilt targets: linux x86_64/aarch64, macOS arm64."
             echo "commit: https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
             echo "Checksums are attached as the SHA256SUMS asset."
           } > "$notes_file"
