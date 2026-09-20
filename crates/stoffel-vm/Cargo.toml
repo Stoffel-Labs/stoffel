@@ -27,9 +27,12 @@ x509-parser = "=0.18.1"
 async-trait = "=0.1.89"
 redb = "=2.6.3"
 tokio = { version = "=1.52.3", features = ["full"] }
-quinn = { version = "=0.11.11", features = ["default", "rustls", "ring"] }
 # Keep quinn-proto's alloc-only build away from tinyvec 1.13.0, which
-# fails to import the `vec!` macro in generated-project builds.
+# fails to import the `vec!` macro in generated-project builds. quinn itself is
+# no longer a direct dependency -- Stage 10 of
+# `docs/design/bootnode-elimination.md` deleted `net::p2p`, the only module that
+# drove quinn directly -- but quinn-proto still arrives through stoffelnet, so
+# the pin stays.
 tinyvec = "=1.11.0"
 rustls = "=0.23.41"
 rustls-pemfile = "=2.2.0"
@@ -44,7 +47,6 @@ serde = { version = "=1.0.228", features = ["derive", "default"] }
 ark-ff = "=0.5.0"
 ark-ec = "=0.5.0"
 ark-poly = "=0.5.0"
-uuid = { version = "=1.23.4", features = ["v4", "serde"] }
 futures = "=0.3.32"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
@@ -73,10 +75,14 @@ curve25519-dalek = { version = "=4.1.3", features = ["alloc"] }
 default = []
 hb_itest = []
 avss_itest = []
-nat = []
 
 [dev-dependencies]
 criterion = { version = "=0.6.0", features = ["html_reports"] }
+# The mesh join harness obtains every roster the way a node does: from an
+# in-process coordinator, over a pinned link (docs/design/bootnode-elimination.md
+# §9.D.1). `stoffel-vm` itself never depends on the coordinator crates.
+stoffel-mpc-coordinator-shared = "=0.3.0"
+stoffel-mpc-coordinator-off-chain = "=0.3.0"
 k256 = { version = "=0.13.4", features = ["ecdsa"] }
 p256 = { version = "=0.13.2", features = ["ecdsa"] }
 stoffellang = { version = "=0.1.2", path = "../stoffel-lang" }

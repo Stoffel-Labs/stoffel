@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::net::{SocketAddr, TcpListener};
+use std::net::TcpListener;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -23,6 +23,15 @@ def main(a: int64, b: int64) -> int64:
 
 mod federated_average_bindings {
     include!("fixtures/mpc_client_federated_average_bindings.rs");
+}
+
+/// The invocation these cases configure.
+///
+/// Coordinator `0.2.0` keys every RPC on an `ExecutionId` and has no `reset`, so
+/// both off-chain configs require one. It is non-zero because the coordinator
+/// reserves the all-zero value and rejects it everywhere.
+fn test_execution_id() -> ExecutionId {
+    ExecutionId::from_bytes([0xab; 32])
 }
 
 #[test]
@@ -315,8 +324,6 @@ fn generated_bindings_type_check_federated_average_example() -> stoffel::Result<
 
     use federated_average_bindings::{Client0Inputs, Client0Outputs, ProgramManifest};
     let typed_client = StoffelClient::builder()
-        .server("127.0.0.1:1")
-        .client_id(0)
         .with_program(runtime.program().clone())
         .build()?;
     let typed_call = typed_client
@@ -381,11 +388,7 @@ def main() -> int64:
     .build()?
     .program()
     .clone();
-    let client = StoffelClient::builder()
-        .server("127.0.0.1:1")
-        .client_id(0)
-        .with_program(program)
-        .build()?;
+    let client = StoffelClient::builder().with_program(program).build()?;
 
     let mismatch = client.run_typed::<i64, bool>(55_i64).await.unwrap_err();
     assert!(matches!(
@@ -709,17 +712,12 @@ random_shares = 2
     assert!(message.contains("network config party_id 2"));
     assert!(message.contains("requested server party_id 1"));
 
+    // A network config describes the servers' deployment. A client dials no
+    // node of it (docs/design/bootnode-elimination.md §9.E.3): it carries the
+    // program, and learns its nodes from the coordinator's roster.
     let client = runtime.client().build()?;
-    assert_eq!(
-        client.servers(),
-        &[
-            "127.0.0.1:19600".to_owned(),
-            "127.0.0.1:19601".to_owned(),
-            "127.0.0.1:19602".to_owned(),
-            "127.0.0.1:19603".to_owned(),
-            "127.0.0.1:19604".to_owned(),
-        ]
-    );
+    assert!(client.has_program());
+    assert_eq!(client.summary().node_count, None);
     Ok(())
 }
 
@@ -1120,18 +1118,6 @@ fn network_deployment_builds_one_valid_config_per_party() -> stoffel::Result<()>
         "node-2.toml"
     );
 
-    let client = StoffelClient::builder()
-        .network_config(party_two)
-        .client_id(7)
-        .build()?;
-    assert_eq!(client.servers(), &deployment.server_addresses());
-
-    let deployment_client = StoffelClient::builder()
-        .network_deployment(&deployment)
-        .client_id(8)
-        .build()?;
-    assert_eq!(deployment_client.servers(), &deployment.server_addresses());
-
     let server = StoffelServer::builder(2)
         .network_config(party_two)
         .build()?;
@@ -1150,9 +1136,10 @@ fn network_deployment_builds_one_valid_config_per_party() -> stoffel::Result<()>
         .parties(5)
         .threshold(1)
         .build()?;
-    let runtime_client = runtime.client_for_deployment(&deployment).build()?;
+    // A deployment describes servers only: a client carries the program and
+    // reaches the execution through the coordinator (§9.E.3).
+    let runtime_client = runtime.client().build()?;
     assert!(runtime_client.has_program());
-    assert_eq!(runtime_client.servers(), &deployment.server_addresses());
 
     let runtime_servers = runtime.servers_for_deployment(&deployment);
     assert_eq!(runtime_servers.len(), 5);
@@ -2233,24 +2220,502 @@ fn network_config_server_addresses_require_all_parties() -> stoffel::Result<()> 
     Ok(())
 }
 
+/// A fake `stoffel-run` that records its argv, and a party identity plus a
+/// coordinator certificate beside it. Only the paths matter: the fake runner
+/// never reads the files.
+#[cfg(unix)]
+struct RecordingRunner {
+    dir: tempfile::TempDir,
+    argv_path: std::path::PathBuf,
+    runner_path: std::path::PathBuf,
+    cert_path: std::path::PathBuf,
+    key_path: std::path::PathBuf,
+    coordinator_cert: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl RecordingRunner {
+    fn new(party: usize) -> stoffel::Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir()?;
+        let argv_path = dir.path().join("argv.txt");
+        let runner_path = dir.path().join("fake-stoffel-run");
+        std::fs::write(
+            &runner_path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 30\n",
+                argv_path.display()
+            ),
+        )?;
+        std::fs::set_permissions(&runner_path, std::fs::Permissions::from_mode(0o755))?;
+        let cert_path = dir.path().join(format!("party{party}.crt"));
+        let key_path = dir.path().join(format!("party{party}.key"));
+        std::fs::write(&cert_path, "party cert")?;
+        std::fs::write(&key_path, "party key")?;
+        let coordinator_cert = dir.path().join("coordinator.crt");
+        std::fs::write(&coordinator_cert, "coordinator cert")?;
+        Ok(Self {
+            dir,
+            argv_path,
+            runner_path,
+            cert_path,
+            key_path,
+            coordinator_cert,
+        })
+    }
+
+    fn offchain_coordinator(&self, rpc_bind: &str) -> stoffel::Result<OffChainServerConfig> {
+        OffChainServerConfig::builder()
+            .execution_id(test_execution_id())
+            .coordinator("127.0.0.1:19300")
+            .coordinator_cert(&self.coordinator_cert)
+            .rpc_bind(rpc_bind)
+            .identity_files(&self.cert_path, &self.key_path)
+            .build()
+    }
+
+    fn epoch_store(&self, name: &str) -> std::path::PathBuf {
+        self.dir.path().join(name)
+    }
+}
+
+/// `true` when `argv` carries `flag` followed by `value`.
+#[cfg(unix)]
+fn argv_has(argv: &[String], flag: &str, value: &str) -> bool {
+    argv.windows(2)
+        .any(|pair| pair[0] == flag && pair[1] == value)
+}
+
+/// Flags `stoffel-run` refuses by name (docs/design/bootnode-elimination.md
+/// §9.D.3), none of which an SDK server may emit.
+#[cfg(unix)]
+const REMOVED_PARTY_FLAGS: [&str; 7] = [
+    "--roster",
+    "--n-parties",
+    "--threshold",
+    "--expected-clients",
+    "--timestamp",
+    "--wait-for-clients",
+    "--client-input-count",
+];
+
+#[cfg(unix)]
+fn assert_no_removed_party_flag(argv: &[String]) {
+    for removed in REMOVED_PARTY_FLAGS {
+        assert!(
+            !argv.iter().any(|arg| arg == removed),
+            "{removed} is refused by stoffel-run and must not be emitted: {argv:?}"
+        );
+    }
+}
+
+/// Retargets `an_sdk_server_presents_its_identity_and_roster_without_a_coordinator`
+/// (docs/design/bootnode-elimination.md §9.H). The identity is still emitted
+/// from the server's own configuration (§7), but membership is no longer a
+/// certificate list the server carries: it is the coordinator's node roster,
+/// fetched over a link pinned to `--coord-cert`, and the configured `parties`
+/// and `threshold` become refusals of any other roster.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_sdk_server_presents_its_identity_and_coordinator_pin() -> stoffel::Result<()> {
+    let runner = RecordingRunner::new(0)?;
+    let runtime = Stoffel::compile(ADD_SOURCE)?.parties(5).build()?;
+    let server = runtime
+        .server(0)
+        .bind("127.0.0.1:19400")
+        .peers([
+            (1, "127.0.0.1:19401"),
+            (2, "127.0.0.1:19402"),
+            (3, "127.0.0.1:19403"),
+            (4, "127.0.0.1:19404"),
+        ])
+        .runner_path(&runner.runner_path)
+        .identity_files(&runner.cert_path, &runner.key_path)
+        .offchain_coordinator(runner.offchain_coordinator("127.0.0.1:19405")?)
+        .epoch_store(runner.epoch_store("epochs-party-0"))
+        .build()?;
+
+    assert_eq!(
+        server.identity(),
+        Some(&ServerIdentity::new(&runner.cert_path, &runner.key_path))
+    );
+
+    server.start().await?;
+    let argv = read_recorded_argv(&runner.argv_path).await;
+    server.shutdown().await?;
+
+    assert!(
+        argv_has(&argv, "--cert", &runner.cert_path.display().to_string()),
+        "a server presents its certificate: {argv:?}"
+    );
+    assert!(
+        argv_has(&argv, "--key", &runner.key_path.display().to_string()),
+        "a server presents its key: {argv:?}"
+    );
+    assert!(
+        argv_has(
+            &argv,
+            "--coord-cert",
+            &runner.coordinator_cert.display().to_string()
+        ),
+        "membership is the node roster of the coordinator this pin names: {argv:?}"
+    );
+    let mpc = runtime
+        .mpc_config()
+        .expect("a compiled runtime has an MPC config");
+    assert!(
+        argv_has(&argv, "--expect-n-parties", &mpc.parties.to_string()),
+        "the configured party count refuses a roster of another size: {argv:?}"
+    );
+    assert!(
+        argv_has(&argv, "--expect-threshold", &mpc.threshold.to_string()),
+        "the configured threshold refuses a roster of another size: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|arg| arg == "--expect-roster-digest"),
+        "no digest was configured: {argv:?}"
+    );
+    assert_no_removed_party_flag(&argv);
+    Ok(())
+}
+
+/// `--leader` meant two unrelated things (`docs/design/bootnode-elimination.md`
+/// §5, row 6): "run an in-process bootnode and register with it", and "advance
+/// the off-chain coordinator's rounds". Stage 6 split the second out as
+/// `--coord-driver`, Stage 8 deleted the bootnode and `--leader` with it, and
+/// Stage 9 deleted `--coord-driver` too: coordinator `0.2.0` applies a round
+/// once `transition_quorum()` roster members have proposed it, so no party is
+/// designated.
+///
+/// What survived is what this case asserts: a coordinator-bearing party names
+/// the invocation it serves with `--execution-id` and pins the coordinator it
+/// takes its roster from, and emits no flag naming either deleted role, a
+/// roster, a party count, a threshold, a timestamp or a client — `stoffel-run`
+/// refuses all of them by name (§9.D.3). Retargeted by §9.H: `parties` and
+/// `threshold` reach the party as `--expect-n-parties` / `--expect-threshold`,
+/// and a configured roster digest as `--expect-roster-digest`.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_sdk_coordinator_party_names_its_execution_and_drives_nothing() -> stoffel::Result<()> {
+    let runner = RecordingRunner::new(0)?;
+    let digest: RosterDigest = "cd".repeat(32).parse().expect("64 hexadecimal characters");
+    let runtime = Stoffel::compile(ADD_SOURCE)?.parties(5).build()?;
+    let server = runtime
+        .server(0)
+        .bind("127.0.0.1:19410")
+        .peers([
+            (1, "127.0.0.1:19411"),
+            (2, "127.0.0.1:19412"),
+            (3, "127.0.0.1:19413"),
+            (4, "127.0.0.1:19414"),
+        ])
+        .runner_path(&runner.runner_path)
+        .identity_files(&runner.cert_path, &runner.key_path)
+        .epoch_store(runner.epoch_store("epochs-party-0"))
+        .offchain_coordinator(
+            OffChainServerConfig::builder()
+                .execution_id(test_execution_id())
+                .coordinator("127.0.0.1:19300")
+                .coordinator_cert(&runner.coordinator_cert)
+                .rpc_bind("127.0.0.1:19310")
+                .identity_files(&runner.cert_path, &runner.key_path)
+                .expected_roster_digest(digest)
+                .build()?,
+        )
+        .build()?;
+
+    server.start().await?;
+    let argv = read_recorded_argv(&runner.argv_path).await;
+    server.shutdown().await?;
+
+    assert!(
+        argv_has(&argv, "--execution-id", &test_execution_id().to_string()),
+        "a coordinator-bearing party must name the invocation it serves: {argv:?}"
+    );
+    // Coordinator `0.3.0` has no unpinned connection: the party is handed the
+    // coordinator certificate to pin (docs/design/bootnode-elimination.md §9.A).
+    assert!(
+        argv_has(
+            &argv,
+            "--coord-cert",
+            &runner.coordinator_cert.display().to_string()
+        ),
+        "a coordinator-bearing party must pin the coordinator's certificate: {argv:?}"
+    );
+    assert!(
+        argv_has(&argv, "--expect-roster-digest", &digest.to_string()),
+        "a configured roster digest refuses any other roster: {argv:?}"
+    );
+    assert!(
+        argv_has(&argv, "--expect-n-parties", "5"),
+        "the configured parties refuse a roster of another size: {argv:?}"
+    );
+    for deleted in ["--coord-driver", "--leader", "--bootstrap"] {
+        assert!(
+            !argv.iter().any(|arg| arg == deleted),
+            "{deleted} was removed and stoffel-run refuses it: {argv:?}"
+        );
+    }
+    // Decision 3 of docs/design/bootnode-elimination.md §9: a coordinated party
+    // is given no client certificate, and no roster of its own (decision 1).
+    assert_no_removed_party_flag(&argv);
+    Ok(())
+}
+
+/// Stage 7 of `docs/design/bootnode-elimination.md`: an SDK server forms its
+/// session with no bootnode at all. What is asserted is that
+/// `ServerTopology::CoordinatorRosterMesh` turns the peers this builder accepts
+/// into `--peers`, that the bootnode flags disappear with the bootnode, and —
+/// retargeted by §9.H — that the membership the peers are dialed against is the
+/// pinned coordinator's node roster, never a list the server carries.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_sdk_mesh_server_dials_its_peers_instead_of_a_bootnode() -> stoffel::Result<()> {
+    let runner = RecordingRunner::new(1)?;
+    let epochs = runner.epoch_store("epochs-party-1");
+    let runtime = Stoffel::compile(ADD_SOURCE)?.parties(5).build()?;
+    let server = runtime
+        .server(1)
+        .bind("127.0.0.1:19421")
+        .peers([
+            (0, "127.0.0.1:19420"),
+            (2, "127.0.0.1:19422"),
+            (3, "127.0.0.1:19423"),
+            (4, "127.0.0.1:19424"),
+        ])
+        .runner_path(&runner.runner_path)
+        .identity_files(&runner.cert_path, &runner.key_path)
+        .offchain_coordinator(runner.offchain_coordinator("127.0.0.1:19425")?)
+        .epoch_store(&epochs)
+        .topology(ServerTopology::CoordinatorRosterMesh)
+        .build()?;
+
+    assert_eq!(server.topology(), ServerTopology::CoordinatorRosterMesh);
+    assert_eq!(server.epoch_store(), Some(epochs.as_path()));
+
+    server.start().await?;
+    let argv = read_recorded_argv(&runner.argv_path).await;
+    server.shutdown().await?;
+
+    assert!(
+        argv_has(
+            &argv,
+            "--peers",
+            "127.0.0.1:19420,127.0.0.1:19422,127.0.0.1:19423,127.0.0.1:19424"
+        ),
+        "the configured peers are the mesh's seed addresses: {argv:?}"
+    );
+    assert!(
+        argv_has(&argv, "--epoch-store", &epochs.display().to_string()),
+        "instance_id freshness needs the epoch store (blocker B5): {argv:?}"
+    );
+    assert!(
+        argv_has(
+            &argv,
+            "--coord-cert",
+            &runner.coordinator_cert.display().to_string()
+        ),
+        "the peers are dialed against the pinned coordinator's node roster: {argv:?}"
+    );
+    assert!(
+        argv_has(&argv, "--expect-n-parties", "5")
+            && argv.iter().any(|arg| arg == "--expect-threshold"),
+        "the configured parties and threshold refuse a roster of another size: {argv:?}"
+    );
+    for deleted in ["--bootstrap", "--leader", "--coord-driver"] {
+        assert!(
+            !argv.iter().any(|arg| arg == deleted),
+            "{deleted} belongs to a deleted role and stoffel-run refuses it: {argv:?}"
+        );
+    }
+    assert_no_removed_party_flag(&argv);
+    Ok(())
+}
+
+/// Retargets `an_sdk_mesh_server_without_seeds_a_roster_or_an_epoch_store_is_refused`
+/// (docs/design/bootnode-elimination.md §9.H): a server that cannot name the
+/// coordinator its membership comes from, or where its epoch counter lives, is
+/// refused by name rather than spawned as a process that exits 2.
+///
+/// The third precondition `start` checks — that there is anything to dial — has
+/// no case here because it cannot be reached through this builder: `build`
+/// already refuses a server missing a peer address for any configured party.
+/// The guard stays because `start` is what the spawned command line depends on.
+///
+/// Checked at `start` rather than at `build`: `build` captures configuration and
+/// plenty of callers never spawn anything, while these three are exactly what
+/// the spawned process cannot do without. Stage 8 of
+/// `docs/design/bootnode-elimination.md` also dropped the fourth case this test
+/// used to carry — "seeds and a bootstrap address are mutually exclusive" —
+/// because there is no bootstrap process left for an address to be one of. The
+/// `bootstrap()` shim now contributes a seed hint like any other.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_sdk_mesh_server_without_seeds_a_coordinator_pin_or_an_epoch_store_is_refused(
+) -> stoffel::Result<()> {
+    let runner = RecordingRunner::new(1)?;
+    let runtime = Stoffel::compile(ADD_SOURCE)?.parties(5).build()?;
+
+    let peers = [
+        (0, "127.0.0.1:19430"),
+        (2, "127.0.0.1:19432"),
+        (3, "127.0.0.1:19433"),
+        (4, "127.0.0.1:19434"),
+    ];
+
+    let coordinatorless = runtime
+        .server(1)
+        .bind("127.0.0.1:19431")
+        .peers(peers)
+        .runner_path(&runner.runner_path)
+        .identity_files(&runner.cert_path, &runner.key_path)
+        .epoch_store(runner.epoch_store("epochs-coordinatorless"))
+        .build()?
+        .start()
+        .await
+        .expect_err("a mesh whose membership nobody serves cannot start");
+    assert!(
+        coordinatorless
+            .to_string()
+            .contains("offchain_coordinator()"),
+        "expected the missing-coordinator error, got: {coordinatorless}"
+    );
+
+    // Blocker B5. With no path the node falls back to `$HOME/.stoffel/epochs`,
+    // which every co-located party shares, and the epoch record inside is keyed
+    // by roster digest — so one roster's parties race a single monotone
+    // counter and every one but the first aborts its join with `NotMonotone`.
+    // Every other surface hands each node its own directory; refusing here is
+    // how the SDK does.
+    let storeless = runtime
+        .server(1)
+        .bind("127.0.0.1:19431")
+        .peers(peers)
+        .runner_path(&runner.runner_path)
+        .identity_files(&runner.cert_path, &runner.key_path)
+        .offchain_coordinator(runner.offchain_coordinator("127.0.0.1:19435")?)
+        .build()?
+        .start()
+        .await
+        .expect_err("a mesh without a per-node epoch store cannot start");
+    assert!(
+        storeless.to_string().contains("epoch_store()"),
+        "expected the missing-epoch-store error, got: {storeless}"
+    );
+    Ok(())
+}
+
+/// The `bootstrap()` shim is a seed hint, not a removal.
+///
+/// Stage 8 of `docs/design/bootnode-elimination.md` chose a deprecation shim
+/// over a hard break for this one method (§8, "SDK: hard break or deprecation
+/// shim?"). What it has to keep doing is reach `--peers`: an address that were
+/// silently dropped would leave a deployment one seed short of the coverage the
+/// mesh needs, which shows up as a 90-second timeout rather than an error.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_deprecated_bootstrap_shim_becomes_a_peer_seed() -> stoffel::Result<()> {
+    let runner = RecordingRunner::new(1)?;
+    let runtime = Stoffel::compile(ADD_SOURCE)?.parties(5).build()?;
+    #[allow(deprecated)]
+    let server = runtime
+        .server(1)
+        .bind("127.0.0.1:19441")
+        .peer(0, "127.0.0.1:19440")
+        .peer(2, "127.0.0.1:19442")
+        .peer(3, "127.0.0.1:19443")
+        .peer(4, "127.0.0.1:19444")
+        .bootstrap("127.0.0.1:19449")
+        .runner_path(&runner.runner_path)
+        .identity_files(&runner.cert_path, &runner.key_path)
+        .offchain_coordinator(runner.offchain_coordinator("127.0.0.1:19445")?)
+        .epoch_store(runner.epoch_store("epochs-shim"))
+        .build()?;
+
+    server.start().await?;
+    let argv = read_recorded_argv(&runner.argv_path).await;
+    server.shutdown().await?;
+
+    assert!(
+        argv_has(
+            &argv,
+            "--peers",
+            "127.0.0.1:19440,127.0.0.1:19442,127.0.0.1:19443,127.0.0.1:19444,127.0.0.1:19449"
+        ),
+        "the shimmed address must reach the mesh as one more seed hint: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|arg| arg == "--bootstrap"),
+        "--bootstrap was removed from stoffel-run and must not be emitted: {argv:?}"
+    );
+    Ok(())
+}
+
+/// Retargets `an_sdk_roster_without_an_identity_is_refused`
+/// (docs/design/bootnode-elimination.md §9.H): the coordinator's roster names
+/// certificates this server has to be one of, and it proves that with its key,
+/// so a coordinator pin without an identity is a configuration error rather
+/// than a spawned process that exits 2.
+#[test]
+fn an_sdk_coordinator_pin_without_an_identity_is_refused() -> stoffel::Result<()> {
+    let dir = tempdir()?;
+    let coordinator_cert = dir.path().join("coordinator.crt");
+    std::fs::write(&coordinator_cert, "coordinator cert")?;
+
+    let error = OffChainServerConfig::builder()
+        .execution_id(test_execution_id())
+        .coordinator("127.0.0.1:19300")
+        .coordinator_cert(&coordinator_cert)
+        .rpc_bind("127.0.0.1:19310")
+        .build()
+        .expect_err("a coordinator pin without an identity cannot be built");
+
+    assert!(
+        matches!(
+            &error,
+            stoffel::Error::Configuration(message)
+                if message.contains("off-chain server certificate path is required")
+        ),
+        "expected the missing-identity configuration error, got: {error}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn read_recorded_argv(argv_path: &Path) -> Vec<String> {
+    for _ in 0..100 {
+        if let Ok(recorded) = std::fs::read_to_string(argv_path) {
+            if !recorded.is_empty() {
+                return recorded.lines().map(|line| line.to_owned()).collect();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the spawned runner never recorded its arguments");
+}
+
+// `bootstrap()` / `configured_bootstrap()` / `bootstrap_addr()` are the
+// deprecation shim Stage 8 of `docs/design/bootnode-elimination.md` chose over a
+// hard break. Exercising them here is the point: a shim nothing calls is a shim
+// nothing checks.
+#[allow(deprecated)]
 #[test]
 fn server_builder_captures_operational_configuration() -> stoffel::Result<()> {
     let dir = tempdir()?;
     let runner_path = dir.path().join("stoffel-run");
     let party_cert = dir.path().join("party.pem");
     let party_key = dir.path().join("party.key");
-    let client_zero_cert = dir.path().join("client-0.pem");
-    let client_one_cert = dir.path().join("client-1.pem");
     std::fs::write(&party_cert, "party cert")?;
     std::fs::write(&party_key, "party key")?;
-    std::fs::write(&client_zero_cert, "client zero cert")?;
-    std::fs::write(&client_one_cert, "client one cert")?;
+    let coordinator_cert = dir.path().join("coordinator.crt");
+    std::fs::write(&coordinator_cert, "coordinator cert")?;
     let offchain_coordinator = OffChainServerConfig::builder()
+        .execution_id(test_execution_id())
         .coordinator("127.0.0.1:19300")
+        .coordinator_cert(&coordinator_cert)
         .rpc_bind("127.0.0.1:19310")
         .identity_files(&party_cert, &party_key)
-        .timestamp(42)
-        .expected_client_certs([&client_zero_cert, &client_one_cert])
         .build()?;
     let runtime = Stoffel::compile(ADD_SOURCE)?
         .parties(5)
@@ -2273,6 +2738,9 @@ fn server_builder_captures_operational_configuration() -> stoffel::Result<()> {
         .consensus_timeout(Duration::from_secs(5))
         .runner_path(&runner_path)
         .entry("main")
+        // The deprecated shim, still captured: Stage 8 of
+        // `docs/design/bootnode-elimination.md` kept `bootstrap()` compiling
+        // rather than breaking callers, and it now means "one more seed hint".
         .bootstrap("127.0.0.1:19000")
         .offchain_coordinator(offchain_coordinator.clone());
 
@@ -2299,6 +2767,11 @@ fn server_builder_captures_operational_configuration() -> stoffel::Result<()> {
     );
     assert_eq!(builder.configured_entry(), "main");
     assert_eq!(builder.configured_bootstrap(), Some("127.0.0.1:19000"));
+    assert_eq!(
+        builder.configured_peers().len(),
+        4,
+        "the shim is a seed hint, not a peer: it names no party id"
+    );
     assert_eq!(
         builder.configured_offchain_coordinator(),
         Some(&offchain_coordinator)
@@ -2430,23 +2903,18 @@ fn stoffel_direct_participant_builders_do_not_require_compilation() -> stoffel::
     assert_eq!(server.backend(), MpcBackend::HoneyBadger);
     assert!(server.program().is_none());
 
-    let client_builder = Stoffel::client()
-        .server("127.0.0.1:19199")
-        .with_servers(&["127.0.0.1:19200"])
-        .client_id(7);
-    assert_eq!(client_builder.configured_client_id(), 7);
-    assert_eq!(
-        client_builder.configured_servers(),
-        &["127.0.0.1:19200".to_owned()]
-    );
+    // A client names no server and no slot of its own: its nodes are the
+    // coordinator's roster and its slot is the coordinator's admission
+    // (docs/design/bootnode-elimination.md §9.E.2).
+    let client_builder = Stoffel::client();
     assert!(!client_builder.has_configured_program());
+    assert!(!client_builder.has_configured_offchain_io());
     let client = client_builder.build()?;
-    assert_eq!(client.client_id(), 7);
-    assert_eq!(client.servers(), &["127.0.0.1:19200".to_owned()]);
     assert!(!client.has_program());
+    assert!(client.node_roster().is_none());
+    assert!(client.admission().is_none());
     let summary = client.summary();
-    assert_eq!(summary.client_id, 7);
-    assert_eq!(summary.server_count, 1);
+    assert_eq!(summary.node_count, None);
     assert!(!summary.has_program);
     assert!(!summary.has_verified_ordering);
     assert!(!summary.has_offchain_io);
@@ -2455,52 +2923,192 @@ fn stoffel_direct_participant_builders_do_not_require_compilation() -> stoffel::
     Ok(())
 }
 
-#[test]
-fn offchain_client_config_defaults_to_five_party_topology() -> stoffel::Result<()> {
-    let config = OffChainClientConfig::builder()
-        .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
-        .node_rpc_addresses(["127.0.0.1:19100"])
-        .identity_der(vec![1], vec![2])
+/// Retargets `offchain_client_config_defaults_to_five_party_topology`: a client
+/// configures no topology (docs/design/bootnode-elimination.md §9.E.2). `n` and
+/// `t` are the node roster the pinned coordinator serves, and a roster the
+/// client's backend cannot reconstruct at — HoneyBadger below `3t + 1` — is
+/// refused as `Error::Unsupported` before the client associates, so the slot
+/// stays free for a client that can use it.
+#[tokio::test]
+async fn offchain_client_config_takes_its_topology_from_the_coordinator() -> stoffel::Result<()> {
+    let coordinator = TestCoordinator::start(
+        3,
+        1,
+        vec![stoffel_mpc_coordinator_shared::ClientSlotSpec {
+            input_count: 1,
+            output_count: 0,
+        }],
+    )
+    .await;
+    let config = coordinator
+        .client_config()
+        .input_types([ShareType::SecretInt { bit_length: 64 }])
         .build()?;
-    assert_eq!(config.parties, 5);
-    assert_eq!(config.threshold, 1);
     assert_eq!(config.backend, MpcBackend::HoneyBadger);
+    assert_eq!(config.client_slot, None);
 
-    let invalid_topology = OffChainClientConfig::builder()
-        .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
-        .parties(4)
-        .threshold(1)
-        .node_rpc_addresses(["127.0.0.1:19100"])
-        .identity_der(vec![1], vec![2])
-        .build()
-        .unwrap_err();
-    assert!(matches!(
-        invalid_topology,
-        stoffel::Error::Configuration(message) if message.contains("at least 5")
-    ));
+    let client = StoffelClient::builder().offchain_io(config).build()?;
+    let undersized = client.run(&[1_i64]).await.unwrap_err();
+    assert!(
+        matches!(
+            &undersized,
+            stoffel::Error::Unsupported(message)
+                if message.contains("needs at least 4 nodes for threshold 1")
+                    && message.contains("roster has 3")
+        ),
+        "{undersized}"
+    );
+    assert!(client.admission().is_none());
 
-    let zero_threshold = OffChainClientConfig::builder()
-        .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
-        .threshold(0)
-        .node_rpc_addresses(["127.0.0.1:19100"])
-        .identity_der(vec![1], vec![2])
-        .build()
-        .unwrap_err();
-    assert!(matches!(
-        zero_threshold,
-        stoffel::Error::Configuration(message)
-            if message.contains("threshold must be greater than zero")
-    ));
+    // Nothing was bound: an AVSS client, which reconstructs at 2t + 1, takes
+    // the one slot on the same roster.
+    let identity = stoffel_mpc_coordinator_shared::self_signed_certs::client_cert();
+    let mut avss = stoffel_mpc_coordinator_off_chain::OffChainCoordinatorClient::<
+        ark_bls12_381::Fr,
+        stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare<
+            ark_bls12_381::Fr,
+            ark_bls12_381::G1Projective,
+        >,
+    >::start_rpc_client_for_execution(
+        "127.0.0.1",
+        coordinator.port,
+        &stoffel_mpc_coordinator_shared::SpkiDer::from_certificate_der(&coordinator.cert_der)
+            .expect("the coordinator pin"),
+        None,
+        coordinator.execution_id,
+        identity.cert.der().to_vec(),
+        identity.signing_key.serialize_der(),
+    )
+    .await?;
+    let admission = avss
+        .associate_client(stoffel_mpc_coordinator_shared::AssociationRequest {
+            slot: None,
+            invitation: None,
+        })
+        .await?;
+    assert_eq!(admission.client_index, ClientIndex(0));
     Ok(())
+}
+
+/// Stage 9 of `docs/design/bootnode-elimination.md`: both off-chain configs must
+/// name the invocation they belong to.
+///
+/// Coordinator `0.2.0` keys every RPC on an `ExecutionId` and dropped `0.1.0`'s
+/// `reset_coord`, so the id is what separates one run from the next. Neither
+/// config defaults it, and neither accepts the reserved all-zero value: a
+/// defaulted or zero id would attach a client's secret input, or a party's
+/// output shares, to whatever execution happened to carry it.
+#[test]
+fn offchain_configs_require_a_nonzero_execution_id() -> stoffel::Result<()> {
+    let missing_client_id = OffChainClientConfig::builder()
+        .coordinator("127.0.0.1", 19000)
+        .node_rpc_address("127.0.0.1:19100")
+        .identity_der(vec![1], vec![2])
+        .build()
+        .unwrap_err();
+    assert!(matches!(
+        missing_client_id,
+        stoffel::Error::Configuration(message) if message.contains("execution ID is required")
+    ));
+
+    let zero_client_id = OffChainClientConfig::builder()
+        .execution_id(ExecutionId::from_bytes([0; 32]))
+        .coordinator("127.0.0.1", 19000)
+        .node_rpc_address("127.0.0.1:19100")
+        .identity_der(vec![1], vec![2])
+        .build()
+        .unwrap_err();
+    assert!(matches!(
+        zero_client_id,
+        stoffel::Error::Configuration(message) if message.contains("all zeros")
+    ));
+
+    let bad_hex = OffChainClientConfig::builder()
+        .execution_id_hex("not-hexadecimal")
+        .coordinator("127.0.0.1", 19000)
+        .node_rpc_address("127.0.0.1:19100")
+        .identity_der(vec![1], vec![2])
+        .build()
+        .unwrap_err();
+    assert!(bad_hex.to_string().contains("execution ID"), "{bad_hex}");
+
+    let dir = tempdir()?;
+    let cert = dir.path().join("party.pem");
+    let key = dir.path().join("party.key");
+    std::fs::write(&cert, "party cert")?;
+    std::fs::write(&key, "party key")?;
+    let missing_server_id = OffChainServerConfig::builder()
+        .coordinator("127.0.0.1:19300")
+        .rpc_bind("127.0.0.1:19310")
+        .identity_files(&cert, &key)
+        .build()
+        .unwrap_err();
+    assert!(matches!(
+        missing_server_id,
+        stoffel::Error::Configuration(message) if message.contains("execution ID is required")
+    ));
+
+    // The hexadecimal spelling is the one the `--execution-id` flag carries, so
+    // it round-trips through the builder that emits that flag.
+    let id = test_execution_id();
+    let coordinator_cert = dir.path().join("coordinator.crt");
+    std::fs::write(&coordinator_cert, "coordinator cert")?;
+    let via_hex = OffChainServerConfig::builder()
+        .execution_id_hex(&id.to_string())
+        .coordinator("127.0.0.1:19300")
+        .coordinator_cert(&coordinator_cert)
+        .rpc_bind("127.0.0.1:19310")
+        .identity_files(&cert, &key)
+        .build()?;
+    assert_eq!(via_hex.execution_id, id);
+    Ok(())
+}
+
+/// A real coordinator certificate: `OffChainClientConfig::validate` derives the
+/// pinned key from it, so placeholder bytes are refused.
+fn test_coordinator_cert_der() -> Vec<u8> {
+    stoffel_mpc_coordinator_shared::self_signed_certs::server_cert()
+        .cert
+        .der()
+        .to_vec()
+}
+
+/// Coordinator `0.3.0` has no unpinned connection
+/// (docs/design/bootnode-elimination.md §9.A), so an off-chain client config
+/// without a usable coordinator certificate is refused, naming the field.
+#[test]
+fn offchain_client_config_requires_a_usable_coordinator_certificate() {
+    let missing = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
+        .coordinator("127.0.0.1", 19000)
+        .node_rpc_address("127.0.0.1:19100")
+        .identity_der(vec![1], vec![2])
+        .build()
+        .unwrap_err();
+    assert!(matches!(
+        missing,
+        stoffel::Error::Configuration(message) if message.contains("coordinator_cert_der")
+    ));
+
+    let unusable = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
+        .coordinator("127.0.0.1", 19000)
+        .coordinator_cert_der(vec![1, 2, 3])
+        .node_rpc_address("127.0.0.1:19100")
+        .identity_der(vec![1], vec![2])
+        .build()
+        .unwrap_err();
+    assert!(matches!(
+        unusable,
+        stoffel::Error::Configuration(message)
+            if message.contains("not a usable DER X.509 certificate")
+    ));
 }
 
 #[test]
 fn offchain_client_config_reports_actionable_validation_errors() {
     let missing_port = OffChainClientConfig::builder()
-        .timestamp(1)
+        .execution_id(test_execution_id())
         .node_rpc_address("127.0.0.1:19100")
         .identity_der(vec![1], vec![2])
         .build()
@@ -2510,20 +3118,37 @@ fn offchain_client_config_reports_actionable_validation_errors() {
         stoffel::Error::Configuration(message) if message.contains("coordinator port")
     ));
 
-    let missing_timestamp = OffChainClientConfig::builder()
+    // Retargeted: the timestamp and topology cases went with those fields
+    // (`offchain_client_config_takes_its_topology_from_the_coordinator`); a
+    // missing or unusable coordinator certificate is what a config can lack now.
+    let missing_coordinator_cert = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
         .coordinator("127.0.0.1", 19000)
         .node_rpc_address("127.0.0.1:19100")
         .identity_der(vec![1], vec![2])
         .build()
         .unwrap_err();
     assert!(matches!(
-        missing_timestamp,
-        stoffel::Error::Configuration(message) if message.contains("timestamp")
+        missing_coordinator_cert,
+        stoffel::Error::Configuration(message) if message.contains("coordinator_cert_der")
+    ));
+    let unusable_coordinator_cert = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
+        .coordinator("127.0.0.1", 19000)
+        .coordinator_cert_der(vec![0x30, 0x00])
+        .node_rpc_address("127.0.0.1:19100")
+        .identity_der(vec![1], vec![2])
+        .build()
+        .unwrap_err();
+    assert!(matches!(
+        unusable_coordinator_cert,
+        stoffel::Error::Configuration(message)
+            if message.contains("not a usable DER X.509 certificate")
     ));
 
     let missing_cert = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
         .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
         .node_rpc_address("127.0.0.1:19100")
         .build()
         .unwrap_err();
@@ -2533,8 +3158,8 @@ fn offchain_client_config_reports_actionable_validation_errors() {
     ));
 
     let empty_host = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
         .coordinator(" ", 19000)
-        .timestamp(1)
         .node_rpc_address("127.0.0.1:19100")
         .identity_der(vec![1], vec![2])
         .build()
@@ -2545,8 +3170,8 @@ fn offchain_client_config_reports_actionable_validation_errors() {
     ));
 
     let unsupported_curve = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
         .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
         .avss(Curve::Bn254)
         .node_rpc_address("127.0.0.1:19100")
         .identity_der(vec![1], vec![2])
@@ -2554,21 +3179,9 @@ fn offchain_client_config_reports_actionable_validation_errors() {
         .unwrap_err();
     assert!(matches!(unsupported_curve, stoffel::Error::Unsupported(_)));
 
-    let invalid_threshold = OffChainClientConfig::builder()
-        .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
-        .parties(5)
-        .threshold(2)
-        .honeybadger()
-        .node_rpc_address("127.0.0.1:19100")
-        .identity_der(vec![1], vec![2])
-        .build()
-        .unwrap_err();
-    assert!(matches!(invalid_threshold, stoffel::Error::Unsupported(_)));
-
     let missing_rpc = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
         .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
         .identity_der(vec![1], vec![2])
         .build()
         .unwrap_err();
@@ -2578,8 +3191,8 @@ fn offchain_client_config_reports_actionable_validation_errors() {
     ));
 
     let invalid_rpc = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
         .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
         .node_rpc_address("not-a-socket")
         .identity_der(vec![1], vec![2])
         .build()
@@ -2587,8 +3200,8 @@ fn offchain_client_config_reports_actionable_validation_errors() {
     assert!(matches!(invalid_rpc, stoffel::Error::Configuration(_)));
 
     let zero_timeout = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
         .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
         .node_rpc_address("127.0.0.1:19100")
         .identity_der(vec![1], vec![2])
         .timeout(Duration::ZERO)
@@ -2609,14 +3222,13 @@ fn offchain_client_config_round_trips_toml_and_identity_files() -> stoffel::Resu
     std::fs::write(&key_path, [4_u8, 5, 6])?;
 
     let config = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
         .coordinator("localhost", 19000)
-        .timestamp(42)
-        .parties(5)
-        .threshold(1)
+        .coordinator_cert_der(test_coordinator_cert_der())
         .backend(MpcBackend::HoneyBadger)
         .node_rpc_addresses(["127.0.0.1:19100", "127.0.0.1:19101"])
         .identity_files(&cert_path, &key_path)
-        .output_count(2)
+        .output_types([ShareType::SecretInt { bit_length: 64 }; 2])
         .timeout(Duration::from_millis(1_250))
         .build()?;
     assert_eq!(config.cert_der, vec![1, 2, 3]);
@@ -2628,10 +3240,27 @@ fn offchain_client_config_round_trips_toml_and_identity_files() -> stoffel::Resu
     let reparsed: OffChainClientConfig = toml::from_str(&serialized)?;
     reparsed.validate()?;
     assert_eq!(reparsed, config);
+    // No requested slot is the default, and serializes as an absent key:
+    // the coordinator assigns one.
+    assert_eq!(config.client_slot, None);
+    assert!(!serialized.contains("client_slot"), "{serialized}");
+
+    let with_slot = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
+        .coordinator("localhost", 19000)
+        .coordinator_cert_der(test_coordinator_cert_der())
+        .node_rpc_address("127.0.0.1:19100")
+        .identity_files(&cert_path, &key_path)
+        .client_slot(ClientIndex(3))
+        .build()?;
+    let serialized = toml::to_string(&with_slot)?;
+    assert!(serialized.contains("client_slot = 3"), "{serialized}");
+    let reparsed: OffChainClientConfig = toml::from_str(&serialized)?;
+    assert_eq!(reparsed.client_slot, Some(ClientIndex(3)));
 
     let missing_identity = OffChainClientConfig::builder()
+        .execution_id(test_execution_id())
         .coordinator("localhost", 19000)
-        .timestamp(42)
         .node_rpc_address("127.0.0.1:19100")
         .identity_files(dir.path().join("missing.cert.der"), &key_path)
         .build()
@@ -2710,24 +3339,401 @@ def main() -> int64:
     .build()?;
     let config = runtime
         .offchain_client_config(0)?
+        .execution_id(test_execution_id())
         .coordinator("127.0.0.1", 9)
-        .timestamp(1)
+        .coordinator_cert_der(test_coordinator_cert_der())
         .node_rpc_addresses(["127.0.0.1:19100"])
         .identity_der(vec![1], vec![2])
         .timeout(Duration::from_millis(1))
         .build()?;
-    let client = runtime
-        .client()
-        .client_id(0)
-        .server("127.0.0.1:19500")
-        .offchain_io(config)
-        .build()?;
+    let client = runtime.client().offchain_io(config).build()?;
 
     let handle = client.submit(&[42_i64]).await?;
     assert_eq!(handle.status(), ComputationStatus::Pending);
     assert!(handle.is_pending());
     handle.cancel();
     assert!(handle.is_cancelled());
+    Ok(())
+}
+
+/// Retargets `client_builder_refuses_a_client_id_other_than_the_requested_slot`:
+/// `ClientBuilder::client_id` is gone (docs/design/bootnode-elimination.md
+/// §9.E.2), so the slot the SDK checks inputs against before it submits is,
+/// structurally, the slot the config asks the coordinator for. The two can no
+/// longer validate one layout and bind another.
+#[tokio::test]
+async fn a_client_validates_inputs_against_the_slot_it_requests() -> stoffel::Result<()> {
+    let runtime = Stoffel::compile(
+        r#"
+def main() -> int64:
+  var first = ClientStore.take_share(0, 0)
+  var second = ClientStore.take_share(1, 0)
+  var third = ClientStore.take_share(1, 1)
+  var difference = first - second - third
+  return difference.open()
+"#,
+    )?
+    .parties(5)
+    .threshold(1)
+    .build()?;
+    let config = runtime
+        .offchain_client_config(1)?
+        .execution_id(test_execution_id())
+        .coordinator("127.0.0.1", 9)
+        .coordinator_cert_der(test_coordinator_cert_der())
+        .node_rpc_addresses(["127.0.0.1:19100"])
+        .identity_der(vec![1], vec![2])
+        .build()?;
+    assert_eq!(config.client_slot, Some(ClientIndex(1)));
+
+    let client = runtime.client().offchain_io(config).build()?;
+    // Slot 0 takes one input, slot 1 two: one value is slot 0's layout, and is
+    // refused for the slot this client asks for, before anything is sent.
+    let mismatched = client.run(&[1_i64]).await.unwrap_err();
+    assert!(
+        matches!(
+            &mismatched,
+            stoffel::Error::InvalidInput(message)
+                if message.contains("client slot 1 expects 2 inputs, got 1")
+        ),
+        "{mismatched}"
+    );
+    Ok(())
+}
+
+/// A program whose client slots differ in shape: slot 0 takes one input, slot 1
+/// two.
+fn two_shaped_slot_runtime() -> stoffel::Result<StoffelRuntime> {
+    Stoffel::compile(
+        r#"
+def main() -> int64:
+  var first = ClientStore.take_share(0, 0)
+  var second = ClientStore.take_share(1, 0)
+  var third = ClientStore.take_share(1, 1)
+  var difference = first - second - third
+  return difference.open()
+"#,
+    )?
+    .parties(5)
+    .threshold(1)
+    .build()
+}
+
+/// An off-chain config for slot 1's types that asks for no slot, against a
+/// coordinator nothing listens for: a run that gets past the SDK's own slot
+/// checks fails reaching the coordinator, never as `InvalidInput`.
+fn unrequested_slot_config(runtime: &StoffelRuntime) -> stoffel::Result<OffChainClientConfig> {
+    let mut config = runtime
+        .offchain_client_config(1)?
+        .execution_id(test_execution_id())
+        .coordinator("127.0.0.1", 9)
+        .coordinator_cert_der(test_coordinator_cert_der())
+        .node_rpc_addresses(["127.0.0.1:19100"])
+        .identity_der(vec![1], vec![2])
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    config.client_slot = None;
+    Ok(config)
+}
+
+/// An invitation to `client_index`. The SDK never verifies an invitation — the
+/// coordinator does — so its signature is left empty.
+fn invitation_to(client_index: ClientIndex) -> SignedInvitation {
+    SignedInvitation {
+        invitation: stoffel_mpc_coordinator_shared::Invitation {
+            execution_id: test_execution_id(),
+            registration_nonce: stoffel_mpc_coordinator_shared::RegistrationNonce::from_bytes(
+                [7; 32],
+            ),
+            program_hash: [0; 32],
+            roster_digest: RosterDigest::from_bytes([0; 32]),
+            not_after: stoffel_mpc_coordinator_shared::UnixSeconds(u64::MAX),
+            invitee: vec![1],
+            client_index,
+        },
+        signature: Vec::new(),
+    }
+}
+
+/// Under invitation admission the invitation names the slot the association
+/// binds (docs/design/bootnode-elimination.md §9.E.1 step 2), so a client that
+/// asks for no slot is checked against the invitation's slot, not slot 0.
+#[tokio::test]
+async fn a_client_validates_inputs_against_the_slot_its_invitation_names() -> stoffel::Result<()> {
+    let runtime = two_shaped_slot_runtime()?;
+    let mut config = unrequested_slot_config(&runtime)?;
+    config.invitation = Some(invitation_to(ClientIndex(1)));
+    assert_eq!(config.settled_slot(), Some(ClientIndex(1)));
+    let client = runtime.client().offchain_io(config).build()?;
+
+    // Slot 1's two inputs are what the invitation's slot takes: not refused as
+    // slot 0's layout, so the run goes on to the (absent) coordinator.
+    let admitted_shape = client.run(&[1_i64, 2_i64]).await.unwrap_err();
+    assert!(
+        !matches!(admitted_shape, stoffel::Error::InvalidInput(_)),
+        "{admitted_shape}"
+    );
+    // One value is slot 0's layout, refused for the invitation's slot before
+    // anything is sent.
+    let slot_zero_shape = client.run(&[1_i64]).await.unwrap_err();
+    assert!(
+        matches!(
+            &slot_zero_shape,
+            stoffel::Error::InvalidInput(message)
+                if message.contains("client slot 1 expects 2 inputs, got 1")
+        ),
+        "{slot_zero_shape}"
+    );
+    Ok(())
+}
+
+/// With neither a requested slot nor an invitation, the coordinator binds the
+/// slot at association — the lowest free one under open admission, the one
+/// registered to this client under pre-registration — so the SDK assumes no
+/// slot before it associates. It refuses only a submission no slot of the
+/// program takes, and checks the bound slot right after association.
+#[tokio::test]
+async fn a_client_without_a_settled_slot_is_refused_only_what_no_slot_takes() -> stoffel::Result<()>
+{
+    let runtime = two_shaped_slot_runtime()?;
+    let config = unrequested_slot_config(&runtime)?;
+    assert_eq!(config.settled_slot(), None);
+    let client = runtime.client().offchain_io(config).build()?;
+
+    // Slot 1's shape, as a client pre-registered at slot 1 submits it.
+    let a_declared_shape = client.run(&[1_i64, 2_i64]).await.unwrap_err();
+    assert!(
+        !matches!(a_declared_shape, stoffel::Error::InvalidInput(_)),
+        "{a_declared_shape}"
+    );
+    let no_declared_shape = client.run(&[1_i64, 2_i64, 3_i64]).await.unwrap_err();
+    assert!(
+        matches!(
+            &no_declared_shape,
+            stoffel::Error::InvalidInput(message)
+                if message.contains("no client slot of this program accepts")
+                    && message.contains("client slot 0 expects 1 inputs, got 3")
+                    && message.contains("client slot 1 expects 2 inputs, got 3")
+        ),
+        "{no_declared_shape}"
+    );
+    Ok(())
+}
+
+/// `stoffel-run` for the SDK's end-to-end client tests: `STOFFEL_RUN_BIN`, or
+/// the workspace's debug build.
+fn workspace_stoffel_run() -> std::path::PathBuf {
+    std::env::var_os("STOFFEL_RUN_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/debug")
+                .join(format!("stoffel-run{}", std::env::consts::EXE_SUFFIX))
+        })
+}
+
+/// Unknown clients join through the SDK under open admission, each bound to the
+/// slot it asks for (`docs/design/bootnode-elimination.md` §9.C.2, §9.E.2).
+///
+/// The client configured for slot 1 associates first, while slot 0 is still
+/// free. Were the requested slot not forwarded, it would bind slot 0 — the
+/// lowest free one — and the parties would reveal `15 - 25` instead of
+/// `25 - 15`. The second client asks for no slot and takes the free one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "starts a real localhost coordinator, MPC party mesh, and two SDK clients; requires target/debug/stoffel-run"]
+async fn sdk_clients_bind_the_open_slots_they_ask_for() -> stoffel::Result<()> {
+    let runtime = Stoffel::compile(
+        r#"
+def main() -> int64:
+  var first = ClientStore.take_share(0, 0)
+  var second = ClientStore.take_share(1, 0)
+  var difference = first - second
+  var opened: int64 = difference.open()
+  return opened
+"#,
+    )?
+    .parties(5)
+    .threshold(1)
+    .build()?;
+    let timeout = Duration::from_secs(180);
+    let running = stoffel_vm_runner::LocalCoordinatorRunner::builder(
+        workspace_stoffel_run(),
+        runtime.program().binary().clone(),
+    )
+    .parties(5)
+    .threshold(1)
+    .timeout(timeout)
+    .admission(stoffel_vm_runner::LocalAdmission::Open)
+    .build()
+    .map_err(|error| stoffel::Error::Configuration(error.to_string()))?
+    .start()
+    .await
+    .map_err(|error| stoffel::Error::Computation(error.to_string()))?;
+    let endpoint = running.client_endpoint().clone();
+
+    // Identities minted after the execution was registered: nothing names them.
+    // `requested_slot` is the slot the client asks the coordinator for; every
+    // slot of this program takes one int64, so slot 0's types describe
+    // whichever slot a client without a request is admitted to.
+    let client = |requested_slot: Option<u64>| -> stoffel::Result<StoffelClient> {
+        let certified = stoffel_mpc_coordinator_shared::self_signed_certs::client_cert();
+        let mut config = runtime
+            .offchain_client_config(requested_slot.unwrap_or(0))?
+            .execution_id(endpoint.execution_id)
+            .coordinator(
+                endpoint.coordinator.ip().to_string(),
+                endpoint.coordinator.port(),
+            )
+            .coordinator_cert_der(endpoint.coordinator_cert_der.clone())
+            .node_rpc_addresses(endpoint.node_rpc_addresses.iter().map(ToString::to_string))
+            .identity_der(
+                certified.cert.der().to_vec(),
+                certified.signing_key.serialize_der(),
+            )
+            .timeout(timeout)
+            .build()?;
+        if requested_slot.is_none() {
+            config.client_slot = None;
+        }
+        runtime.client().offchain_io(config).build()
+    };
+    let slot_one = client(Some(1))?;
+    let first_free = client(None)?;
+
+    let clients = async {
+        let slot_one_run = slot_one.run(&[15_i64]);
+        let first_free_run = async {
+            // Give the slot-1 client time to associate while slot 0 is free.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            first_free.run(&[25_i64]).await
+        };
+        tokio::join!(slot_one_run, first_free_run)
+    };
+    let (output, (slot_one_outputs, first_free_outputs)) = tokio::join!(running.finish(), clients);
+    // The clients' own errors first: a client that failed is why a run aborts.
+    assert!(slot_one_outputs?.is_empty());
+    assert!(first_free_outputs?.is_empty());
+    let output = output.map_err(|error| stoffel::Error::Computation(error.to_string()))?;
+    // client[0] - client[1], by the slot each client bound: 25 - 15.
+    assert_eq!(
+        output.consistent_returned_values(),
+        Ok(vec!["10".to_owned()])
+    );
+    // A party's allowlist is the coordinator's node roster and nothing else
+    // (docs/design/bootnode-elimination.md §9.D.4), so no party can carry a
+    // client identity: every party installed exactly the five-node roster.
+    assert!(
+        output
+            .combined_output
+            .contains("serves 5 nodes (n=5, t=1, digest="),
+        "every party's allowlist is the coordinator's five-node roster under open admission; \
+         output:\n{}",
+        output.combined_output
+    );
+    Ok(())
+}
+
+/// Under open admission a client that asks for no slot is bound to the lowest
+/// free one, and an association cannot be taken back
+/// (`docs/design/bootnode-elimination.md` §9.E.1 step 2). Slot 0 takes a
+/// boolean and slot 1 an integer — one input each — so an integer client
+/// without a request fits slot 1 but would be bound to slot 0.
+///
+/// It is refused after reading the execution's summary and before
+/// associating. Had it associated and then refused slot 0, it would hold slot
+/// 0 until the association deadline aborted the execution: the client that
+/// then asks for slot 0 would be refused as `SlotTaken`, and no party would
+/// reveal anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "starts a real localhost coordinator, MPC party mesh, and three SDK clients; requires target/debug/stoffel-run"]
+async fn an_open_client_refuses_before_associating_a_slot_that_might_not_take_it(
+) -> stoffel::Result<()> {
+    let runtime = Stoffel::compile(
+        r#"
+def main() -> int64:
+  var flag = ClientStore.take_share_bool(0, 0)
+  var amount = ClientStore.take_share(1, 0)
+  var opened_flag = flag.open()
+  var opened: int64 = amount.open()
+  return opened
+"#,
+    )?
+    .parties(5)
+    .threshold(1)
+    .build()?;
+    let timeout = Duration::from_secs(180);
+    let running = stoffel_vm_runner::LocalCoordinatorRunner::builder(
+        workspace_stoffel_run(),
+        runtime.program().binary().clone(),
+    )
+    .parties(5)
+    .threshold(1)
+    .timeout(timeout)
+    .admission(stoffel_vm_runner::LocalAdmission::Open)
+    .build()
+    .map_err(|error| stoffel::Error::Configuration(error.to_string()))?
+    .start()
+    .await
+    .map_err(|error| stoffel::Error::Computation(error.to_string()))?;
+    let endpoint = running.client_endpoint().clone();
+
+    // `types_of` is the slot whose types the client submits; `requested_slot`
+    // the slot it asks the coordinator for.
+    let client = |types_of: u64, requested_slot: Option<ClientIndex>| {
+        let certified = stoffel_mpc_coordinator_shared::self_signed_certs::client_cert();
+        let mut config = runtime
+            .offchain_client_config(types_of)?
+            .execution_id(endpoint.execution_id)
+            .coordinator(
+                endpoint.coordinator.ip().to_string(),
+                endpoint.coordinator.port(),
+            )
+            .coordinator_cert_der(endpoint.coordinator_cert_der.clone())
+            .node_rpc_addresses(endpoint.node_rpc_addresses.iter().map(ToString::to_string))
+            .identity_der(
+                certified.cert.der().to_vec(),
+                certified.signing_key.serialize_der(),
+            )
+            .timeout(timeout)
+            .build()?;
+        config.client_slot = requested_slot;
+        runtime.client().offchain_io(config).build()
+    };
+
+    let unrequested = client(1, None)?;
+    let refused = unrequested.run_typed::<i64, ()>(25_i64).await.unwrap_err();
+    assert!(
+        matches!(
+            &refused,
+            stoffel::Error::InvalidInput(message)
+                if message.contains("lowest free of client slots 0, 1")
+                    && message.contains("client slot 0 input 0 expects")
+        ),
+        "{refused}"
+    );
+    assert_eq!(unrequested.admission(), None);
+
+    // Slot 0 is still free: the clients that ask for their slots both bind.
+    let flag = client(0, Some(ClientIndex(0)))?;
+    let amount = client(1, Some(ClientIndex(1)))?;
+    let clients = async {
+        tokio::join!(
+            flag.run_typed::<bool, ()>(true),
+            amount.run_typed::<i64, ()>(25_i64)
+        )
+    };
+    let (output, (flag_run, amount_run)) = tokio::join!(running.finish(), clients);
+    flag_run?;
+    amount_run?;
+    let output = output.map_err(|error| stoffel::Error::Computation(error.to_string()))?;
+    assert_eq!(
+        output.consistent_returned_values(),
+        Ok(vec!["25".to_owned()])
+    );
+    assert_eq!(
+        flag.admission().map(|admission| admission.client_index),
+        Some(ClientIndex(0))
+    );
     Ok(())
 }
 
@@ -2747,20 +3753,29 @@ def main() -> int64:
 
     let config = runtime
         .offchain_client_config(0)?
+        .execution_id(test_execution_id())
         .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
+        .coordinator_cert_der(test_coordinator_cert_der())
         .node_rpc_addresses(["127.0.0.1:19100"])
         .identity_der(vec![1], vec![2])
         .build()?;
-    assert_eq!(config.parties, 5);
-    assert_eq!(config.threshold, 1);
+    // No topology: `n` and `t` are the coordinator's node roster
+    // (docs/design/bootnode-elimination.md §9.E.2).
     assert_eq!(
         config.backend,
         MpcBackend::Avss {
             curve: Curve::Bls12_381
         }
     );
-    assert_eq!(config.output_count, 0);
+    assert_eq!(
+        config.input_types,
+        vec![ShareType::SecretInt { bit_length: 64 }]
+    );
+    assert!(config.output_types.is_empty());
+    // The runtime asks the coordinator for the slot it was derived from; the
+    // input window is the coordinator's to assign (docs/design/bootnode-elimination.md
+    // §9.E.2), so nothing here carries one.
+    assert_eq!(config.client_slot, Some(ClientIndex(0)));
 
     let missing_slot = runtime.offchain_client_config(1).unwrap_err();
     assert!(matches!(missing_slot, stoffel::Error::Configuration(_)));
@@ -3242,20 +4257,9 @@ random_shares = 6
 "#,
     )?;
 
-    let client = StoffelClient::builder()
-        .network_config_file(&config_path)
-        .build()?;
-    assert_eq!(
-        client.servers(),
-        &[
-            "127.0.0.1:19900".to_owned(),
-            "127.0.0.1:19901".to_owned(),
-            "127.0.0.1:19902".to_owned(),
-            "127.0.0.1:19903".to_owned(),
-            "127.0.0.1:19904".to_owned(),
-        ]
-    );
-
+    // A network config is a server's deployment description. Clients no longer
+    // load one: they never dial the node mesh (docs/design/bootnode-elimination.md
+    // §9.E.3), and reach an execution through an `OffChainClientConfig`.
     let server = StoffelServer::builder(1)
         .network_config_file(&config_path)
         .build()?;
@@ -3661,10 +4665,7 @@ async fn participants_can_carry_verified_ordering_from_networking() -> stoffel::
     assert!(server_summary.has_verified_ordering);
     assert!(toml::to_string(&server_summary)?.contains("has_verified_ordering = true"));
 
-    let client_builder = StoffelClient::builder()
-        .server("127.0.0.1:20500")
-        .server("127.0.0.1:20501")
-        .with_verified_ordering(ordering.clone());
+    let client_builder = StoffelClient::builder().with_verified_ordering(ordering.clone());
     assert!(client_builder.has_configured_verified_ordering());
     assert_eq!(
         client_builder.configured_verified_ordering().unwrap(),
@@ -4021,58 +5022,65 @@ async fn client_and_server_lifecycle_validate_real_network_configuration() -> st
         Err(stoffel::Error::Configuration(_))
     ));
 
-    let empty_servers = StoffelClient::builder().build().unwrap_err();
+    // Retargeted (docs/design/bootnode-elimination.md §9.E.3): a client names no
+    // server and never dials the node mesh. Its node addresses are the
+    // off-chain config's node RPC addresses, validated there, and it connects
+    // through the pinned coordinator only.
+    let rpc_config = |addresses: &[&str]| {
+        OffChainClientConfig::builder()
+            .execution_id(test_execution_id())
+            .coordinator("127.0.0.1", 9)
+            .coordinator_cert_der(test_coordinator_cert_der())
+            .node_rpc_addresses(addresses.iter().copied())
+            .identity_der(vec![1], vec![2])
+            .build()
+    };
     assert!(matches!(
-        empty_servers,
-        stoffel::Error::Configuration(message) if message.contains("at least one server")
+        rpc_config(&[]),
+        Err(stoffel::Error::Configuration(message)) if message.contains("node RPC")
+    ));
+    assert!(matches!(
+        rpc_config(&[" "]),
+        Err(stoffel::Error::Configuration(_))
+    ));
+    assert!(matches!(
+        rpc_config(&["not a socket address"]),
+        Err(stoffel::Error::Configuration(_))
     ));
 
-    let builder_err = StoffelClient::builder().servers([" "]).build().unwrap_err();
-    assert!(matches!(builder_err, stoffel::Error::Configuration(_)));
-
-    let invalid_server_err = StoffelClient::builder()
-        .servers(["not a socket address"])
-        .build()
-        .unwrap_err();
+    let connect_err = StoffelClient::builder().connect().await.unwrap_err();
     assert!(matches!(
-        invalid_server_err,
-        stoffel::Error::Configuration(_)
+        connect_err,
+        stoffel::Error::Configuration(message)
+            if message.contains("a client connects through the coordinator")
+                && message.contains("offchain_io")
     ));
-
-    let duplicate_server_err = StoffelClient::builder()
-        .server("127.0.0.1:19500")
-        .server("127.0.0.1:19500")
-        .build()
-        .unwrap_err();
-    assert!(matches!(
-        duplicate_server_err,
-        stoffel::Error::Configuration(_)
-    ));
-
-    let connect_err = StoffelClient::connect(&[" "]).await.unwrap_err();
-    assert!(matches!(connect_err, stoffel::Error::Configuration(_)));
 
     let zero_timeout_err = StoffelClient::builder()
-        .server("127.0.0.1:19500")
+        .offchain_io(rpc_config(&["127.0.0.1:19500"])?)
         .connection_timeout(Duration::ZERO)
         .connect()
         .await
         .unwrap_err();
     assert!(matches!(zero_timeout_err, stoffel::Error::Configuration(_)));
 
+    // Nothing listens on the coordinator's port.
     let client_err = StoffelClient::builder()
-        .server("127.0.0.1:19500")
-        .connection_timeout(Duration::from_millis(50))
+        .offchain_io(rpc_config(&["127.0.0.1:19500"])?)
+        .connection_timeout(Duration::from_millis(500))
         .connect()
         .await
         .unwrap_err();
-    assert!(matches!(client_err, stoffel::Error::NetworkConnection(_)));
+    assert!(
+        matches!(
+            client_err,
+            stoffel::Error::NetworkConnection(_) | stoffel::Error::Coordinator(_)
+        ),
+        "{client_err}"
+    );
 
     let runtime = Stoffel::compile(CLEAR_ADD_SOURCE)?.build()?;
-    let client_builder = runtime
-        .client()
-        .servers(["127.0.0.1:19500"])
-        .connection_timeout(Duration::from_secs(3));
+    let client_builder = runtime.client().connection_timeout(Duration::from_secs(3));
     assert!(client_builder.configured_program().is_some());
     assert_eq!(
         client_builder.configured_connection_timeout(),
@@ -4085,9 +5093,7 @@ async fn client_and_server_lifecycle_validate_real_network_configuration() -> st
     assert_eq!(client.program().unwrap().function_count(), 1);
     assert_eq!(client.state().to_string(), "disconnected");
 
-    let plain_client = StoffelClient::builder()
-        .servers(["127.0.0.1:19500"])
-        .build()?;
+    let plain_client = StoffelClient::builder().build()?;
     assert!(!plain_client.has_program());
     assert!(plain_client.program().is_none());
     assert_eq!(plain_client.offchain_io(), None);
@@ -4148,6 +5154,16 @@ async fn client_and_server_lifecycle_validate_real_network_configuration() -> st
         .unwrap()
         .contains("not started by a live networking backend"));
 
+    // The mesh inputs are supplied so that the *runner* is the only thing
+    // missing: `start` checks what a mesh member needs before it resolves the
+    // binary, so a server short of a coordinator would fail with that instead.
+    let runner_dir = tempdir()?;
+    let mesh_cert = runner_dir.path().join("party0.crt");
+    let mesh_key = runner_dir.path().join("party0.key");
+    std::fs::write(&mesh_cert, "party cert")?;
+    std::fs::write(&mesh_key, "party key")?;
+    let mesh_coordinator_cert = runner_dir.path().join("coordinator.crt");
+    std::fs::write(&mesh_coordinator_cert, "coordinator cert")?;
     let missing_runner = runtime
         .server(0)
         .bind("127.0.0.1:19500")
@@ -4155,7 +5171,18 @@ async fn client_and_server_lifecycle_validate_real_network_configuration() -> st
         .peer(2, "127.0.0.1:19502")
         .peer(3, "127.0.0.1:19503")
         .peer(4, "127.0.0.1:19504")
-        .runner_path(tempdir()?.path().join("missing-stoffel-run"))
+        .identity_files(&mesh_cert, &mesh_key)
+        .offchain_coordinator(
+            OffChainServerConfig::builder()
+                .execution_id(test_execution_id())
+                .coordinator("127.0.0.1:19740")
+                .coordinator_cert(&mesh_coordinator_cert)
+                .rpc_bind("127.0.0.1:19741")
+                .identity_files(&mesh_cert, &mesh_key)
+                .build()?,
+        )
+        .epoch_store(runner_dir.path().join("epochs-party-0"))
+        .runner_path(runner_dir.path().join("missing-stoffel-run"))
         .build()?;
     let start_err = missing_runner.start().await.unwrap_err();
     assert!(matches!(
@@ -4191,16 +5218,16 @@ def main() -> int64:
     let identity_dir = tempdir()?;
     let party_cert = identity_dir.path().join("party.pem");
     let party_key = identity_dir.path().join("party.key");
-    let client_cert = identity_dir.path().join("client.pem");
     std::fs::write(&party_cert, "party cert")?;
     std::fs::write(&party_key, "party key")?;
-    std::fs::write(&client_cert, "client cert")?;
+    let coordinator_cert = identity_dir.path().join("coordinator.crt");
+    std::fs::write(&coordinator_cert, "coordinator cert")?;
     let offchain_server = OffChainServerConfig::builder()
+        .execution_id(test_execution_id())
         .coordinator("127.0.0.1:19700")
+        .coordinator_cert(&coordinator_cert)
         .rpc_bind("127.0.0.1:19710")
         .identity_files(&party_cert, &party_key)
-        .timestamp(7)
-        .expected_client_cert(&client_cert)
         .build()?;
     let client_io_with_coordinator = client_io_runtime
         .server(0)
@@ -4210,6 +5237,7 @@ def main() -> int64:
         .peer(3, "127.0.0.1:19613")
         .peer(4, "127.0.0.1:19614")
         .expected_clients(1)
+        .epoch_store(identity_dir.path().join("epochs-party-0"))
         .runner_path(identity_dir.path().join("missing-stoffel-run"))
         .offchain_coordinator(offchain_server)
         .build()?;
@@ -4219,7 +5247,14 @@ def main() -> int64:
         stoffel::Error::Unsupported(message) if message.contains("stoffel-run")
     ));
 
-    let mismatch = client_io_runtime
+    // This case used to assert that `expected_clients(2)` with one expected
+    // client certificate was refused. A coordinated party no longer takes client
+    // certificates at all (decision 3 of docs/design/bootnode-elimination.md §9;
+    // §9.E.2), so there is no count to disagree with: `expected_clients(n)` means
+    // only that the program's client slots fit within `n`, and more slots than
+    // the program declares is a configuration the coordinator's registration
+    // decides. What is still refused is the program's own bound.
+    let more_clients_than_slots = client_io_runtime
         .server(0)
         .bind("127.0.0.1:19620")
         .peer(1, "127.0.0.1:19621")
@@ -4229,21 +5264,44 @@ def main() -> int64:
         .expected_clients(2)
         .offchain_coordinator(
             OffChainServerConfig::builder()
+                .execution_id(test_execution_id())
                 .coordinator("127.0.0.1:19720")
+                .coordinator_cert(&coordinator_cert)
                 .rpc_bind("127.0.0.1:19721")
                 .identity_files(&party_cert, &party_key)
-                .timestamp(8)
-                .expected_client_cert(&client_cert)
                 .build()?,
         )
-        .build()
-        .unwrap_err();
+        .build()?;
+    assert_eq!(more_clients_than_slots.expected_clients(), 2);
+    let below_program_slots = client_io_runtime
+        .server(0)
+        .bind("127.0.0.1:19630")
+        .peer(1, "127.0.0.1:19631")
+        .peer(2, "127.0.0.1:19632")
+        .peer(3, "127.0.0.1:19633")
+        .peer(4, "127.0.0.1:19634")
+        .expected_clients(0)
+        .offchain_coordinator(
+            OffChainServerConfig::builder()
+                .execution_id(test_execution_id())
+                .coordinator("127.0.0.1:19730")
+                .coordinator_cert(&coordinator_cert)
+                .rpc_bind("127.0.0.1:19731")
+                .identity_files(&party_cert, &party_key)
+                .build()?,
+        )
+        .build();
     assert!(matches!(
-        mismatch,
-        stoffel::Error::Configuration(message) if message.contains("expected_clients")
+        below_program_slots,
+        Err(stoffel::Error::Configuration(message)) if message.contains("expected_clients >= 1")
     ));
 
-    let follower_without_bootstrap = runtime
+    // This case used to assert "non-leader server start requires a bootstrap
+    // address". Stage 8 of `docs/design/bootnode-elimination.md` deleted that
+    // guard along with the bootnode; what a non-party-0 server now needs in its
+    // place is the membership it is pinned to — since §9.D, the coordinator's
+    // node roster, so it is refused naming `offchain_coordinator()`.
+    let follower_without_a_roster = runtime
         .server(1)
         .bind("127.0.0.1:19501")
         .peer(0, "127.0.0.1:19500")
@@ -4251,10 +5309,10 @@ def main() -> int64:
         .peer(3, "127.0.0.1:19503")
         .peer(4, "127.0.0.1:19504")
         .build()?;
-    let start_err = follower_without_bootstrap.start().await.unwrap_err();
+    let start_err = follower_without_a_roster.start().await.unwrap_err();
     assert!(matches!(
         start_err,
-        stoffel::Error::Configuration(message) if message.contains("bootstrap")
+        stoffel::Error::Configuration(message) if message.contains("offchain_coordinator()")
     ));
 
     let health = HealthStatus::Unhealthy {
@@ -4279,43 +5337,147 @@ def main() -> int64:
     Ok(())
 }
 
+/// Retargets `client_connect_uses_real_quic_transport`: a client no longer dials
+/// node QUIC listeners, which refuse every non-node key
+/// (docs/design/bootnode-elimination.md §9.E.2). `connect` opens the pinned
+/// coordinator link and keeps the node roster it served; a coordinator
+/// presenting a key the config does not pin is refused.
 #[tokio::test]
-async fn client_connect_uses_real_quic_transport() -> stoffel::Result<()> {
-    // The server-side QUIC listener runs before StoffelClient::connect (which
-    // installs the ring provider); under --all-features both rustls providers
-    // are compiled in, so rustls cannot auto-select one and panics without an
-    // explicit install.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let address: SocketAddr = listener.local_addr()?;
-    drop(listener);
-
-    let mut server_network = QuicNetworkManager::new();
-    server_network
-        .listen(address)
-        .await
-        .map_err(stoffel::Error::NetworkConnection)?;
-    let accept_task = tokio::spawn(async move {
-        server_network
-            .accept()
-            .await
-            .map(|_| ())
-            .map_err(stoffel::Error::NetworkConnection)
-    });
-
-    let address = address.to_string();
-    let client = StoffelClient::connect(&[address.as_str()]).await?;
+async fn client_connect_opens_a_pinned_coordinator_link() -> stoffel::Result<()> {
+    let coordinator = TestCoordinator::start(
+        5,
+        1,
+        vec![stoffel_mpc_coordinator_shared::ClientSlotSpec {
+            input_count: 1,
+            output_count: 0,
+        }],
+    )
+    .await;
+    let client = StoffelClient::builder()
+        .offchain_io(coordinator.client_config().build()?)
+        .connect()
+        .await?;
     assert_eq!(client.state(), ClientState::Connected);
     assert!(client.is_connected());
-    assert!(client.network_manager().is_some());
-    assert!(client.transport_client_id().is_some());
-    assert_eq!(client.summary().server_count, 1);
+    assert_eq!(client.node_roster().map(NodeRoster::n), Some(5));
+    assert_eq!(client.node_roster().map(NodeRoster::t), Some(1));
+    assert_eq!(client.summary().node_count, Some(5));
     assert!(client.summary().connected);
+    assert!(client.admission().is_none());
 
-    accept_task
+    let impostor = coordinator
+        .client_config()
+        .coordinator_cert_der(test_coordinator_cert_der())
+        .build()?;
+    let refused = StoffelClient::builder()
+        .offchain_io(impostor)
+        .connect()
         .await
-        .map_err(|error| stoffel::Error::NetworkConnection(error.to_string()))??;
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            stoffel::Error::Coordinator(CoordinatorError::ServerPinMismatch { .. })
+        ),
+        "{refused}"
+    );
     Ok(())
+}
+
+/// An in-process coordinator whose node roster and registration are minted in
+/// the test, for the client cases that need a coordinator but no node: under
+/// `Open` admission, so any certificate may associate, with deadlines far
+/// enough out that nothing aborts during a test.
+struct TestCoordinator {
+    _server: stoffel_mpc_coordinator_off_chain::OffChainCoordinatorServer<
+        stoffel_mpc_coordinator_off_chain::OffChainCoordinatorConnection,
+    >,
+    port: u16,
+    cert_der: Vec<u8>,
+    execution_id: ExecutionId,
+}
+
+impl TestCoordinator {
+    async fn start(
+        n: usize,
+        t: u64,
+        slots: Vec<stoffel_mpc_coordinator_shared::ClientSlotSpec>,
+    ) -> Self {
+        use stoffel_mpc_coordinator_shared::{
+            self_signed_certs, AdmissionPolicy, ClientSlotTable, ExecutionDeadlines,
+            NodeCertificateDer, SpkiDer, UnixSeconds,
+        };
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let roster = NodeRoster::new(
+            t,
+            (0..n)
+                .map(|_| {
+                    NodeCertificateDer::from_der(
+                        self_signed_certs::client_cert().cert.der().to_vec(),
+                    )
+                })
+                .collect(),
+        )
+        .expect("a minted node roster");
+        let certified = self_signed_certs::server_cert();
+        let cert_der = certified.cert.der().to_vec();
+        let spki = SpkiDer::from_certificate_der(&cert_der).expect("the coordinator pin");
+        let execution_id = test_execution_id();
+        let deadline = UnixSeconds(UnixSeconds::now().0 + 600);
+        let state =
+            stoffel_mpc_coordinator_off_chain::CoordinatorRPCServerSharedBase::new_for_execution(
+                roster,
+                spki,
+                stoffel_mpc_coordinator_off_chain::ExecutionRegistration {
+                    execution_id,
+                    program_hash: [0x5a; 32],
+                    client_slots: ClientSlotTable::new(slots),
+                    admission: AdmissionPolicy::Open,
+                    deadlines: Some(ExecutionDeadlines {
+                        association: deadline,
+                        input: deadline,
+                    }),
+                },
+            )
+            .expect("a valid registration");
+        let port = {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+            listener.local_addr().expect("local address").port()
+        };
+        let server = stoffel_mpc_coordinator_off_chain::OffChainCoordinatorServer::<
+            stoffel_mpc_coordinator_off_chain::OffChainCoordinatorConnection,
+        >::start_coord(
+            state,
+            "127.0.0.1",
+            port,
+            cert_der.clone(),
+            certified.signing_key.serialize_der(),
+            stoffel_mpc_coordinator_shared::rpc::RpcServerLimits::default(),
+        )
+        .await
+        .expect("start the coordinator");
+        Self {
+            _server: server,
+            port,
+            cert_der,
+            execution_id,
+        }
+    }
+
+    /// A client of this coordinator with an identity minted now, which no
+    /// registration names.
+    fn client_config(&self) -> OffChainClientConfigBuilder {
+        let identity = stoffel_mpc_coordinator_shared::self_signed_certs::client_cert();
+        OffChainClientConfig::builder()
+            .execution_id(self.execution_id)
+            .coordinator("127.0.0.1", self.port)
+            .coordinator_cert_der(self.cert_der.clone())
+            .node_rpc_addresses(["127.0.0.1:9"])
+            .identity_der(
+                identity.cert.der().to_vec(),
+                identity.signing_key.serialize_der(),
+            )
+    }
 }
 
 #[test]

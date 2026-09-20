@@ -5,11 +5,19 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLES_DIR="${ROOT_DIR}/examples"
 WORKSPACE_DIR="$(cd "${ROOT_DIR}/../.." && pwd)"
 VM_DIR="${STOFFEL_VM_DIR:-${WORKSPACE_DIR}}"
-COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#feature/no-feature-gates-and-multi-type-awareness}}"
-NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://github.com/Stoffel-Labs/stoffel-networking.git#feature/robust-identity-based-on-cert}}"
+# TEMPORARY — docs/design/bootnode-elimination.md §9.F.5: the images build against the
+# unpublished stoffel-mpc-coordinator 0.3.0, so the checkout must be named explicitly.
+COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:?set STOFFEL_COORDINATOR_CONTEXT (or STOFFEL_COORDINATOR_DIR) to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}}"
 OUT_DIR="${STOFFEL_EXAMPLES_OUT:-${EXAMPLES_DIR}/dist}"
 COMPOSE_FILE="${EXAMPLES_DIR}/docker-compose.coordinator.yml"
-AUTH_TOKEN="${STOFFEL_AUTH_TOKEN:-stoffel-examples-coord-token}"
+# An optional second -f layered on top, for local variations of the stack. Its
+# STOFFEL_PEERS values are written out literally (Compose does not nest
+# substitutions), so anything that needs to change them has to be an override
+# file rather than an environment variable:
+#
+#   STOFFEL_COMPOSE_OVERRIDE=path/to/override.yml \
+#     examples/run_coordinator_compose.sh
+COMPOSE_OVERRIDE="${STOFFEL_COMPOSE_OVERRIDE:-}"
 WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-300}"
 EXPECTED_OUTPUT="${EXPECTED_OUTPUT:-315}"
 
@@ -24,12 +32,14 @@ WORKLOAD_CONTAINERS=(
 )
 
 compose() {
-  STOFFEL_AUTH_TOKEN="$AUTH_TOKEN" \
+  local files=(-f "$COMPOSE_FILE")
+  if [ -n "$COMPOSE_OVERRIDE" ]; then
+    files+=(-f "$COMPOSE_OVERRIDE")
+  fi
   STOFFEL_VM_DIR="$VM_DIR" \
   STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
-  STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
   STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
-    docker compose -f "$COMPOSE_FILE" "$@"
+    docker compose "${files[@]}" "$@"
 }
 
 cleanup() {
@@ -100,6 +110,31 @@ fi
 if ! assert_zero_exit_codes; then
   compose ps -a >&2 || true
   capture_logs >&2 || true
+  exit 1
+fi
+
+# No party is told a client certificate (decision 3 of
+# docs/design/bootnode-elimination.md §9): each party container holds the
+# coordinator's certificate, its own certificate and its own key, and nothing
+# else under /app/ids or /run/secrets (§9.F.0).
+assert_party_identity_mounts() {
+  local index
+  for index in 0 1 2 3 4; do
+    local container="stoffel-examples-coord-party${index}"
+    local destination
+    while IFS= read -r destination; do
+      case "$destination" in
+        /app/ids/server_cert.crt|"/app/ids/nodes/cert${index}.crt"|"/run/secrets/node${index}_key") ;;
+        /app/ids/*|/run/secrets/*)
+          echo "${container} holds identity material it must not: ${destination}" >&2
+          return 1
+          ;;
+      esac
+    done < <(docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$container")
+  done
+}
+
+if ! assert_party_identity_mounts; then
   exit 1
 fi
 

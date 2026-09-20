@@ -5,22 +5,22 @@ edition = "2021"
 
 [workspace]
 
+# Coordinator `0.3.0` ships the connection type this binary serves
+# (`OffChainCoordinatorConnection`), so the wrapper no longer implements the RPC
+# traits itself, and it takes node and client certificates as DER rather than
+# deriving key bytes with x509-parser. Shares cross this process as opaque bytes,
+# so no field, curve or share type is named here either.
 [dependencies]
-ark-bn254 = "=0.5.0"
-ark-bls12-381 = "=0.5.0"
-ark-curve25519 = "=0.5.0"
-ark-ec = "=0.5.0"
-ark-ed25519 = "=0.5.0"
-ark-ff = "=0.5.0"
-ark-secp256k1 = "=0.5.0"
-ark-secp256r1 = "=0.5.0"
-async-trait = "=0.1.89"
 clap = { version = "=4.6.1", features = ["derive"] }
 hex = "=0.4.3"
-jsonrpsee = { version = "=0.26.0", features = ["full"] }
 rustls = "=0.23.41"
-stoffel-mpc-coordinator-off-chain = "=0.1.0"
-stoffel-mpc-coordinator-shared = "=0.1.0"
-stoffelmpc-mpc = { package = "stoffelcrypto", version = "=0.1.1" }
+stoffel-mpc-coordinator-off-chain = "=0.3.0"
+stoffel-mpc-coordinator-shared = "=0.3.0"
+thiserror = "=2.0.18"
 tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread", "time"] }
-x509-parser = "=0.18.1"
+
+# TEMPORARY — docs/design/bootnode-elimination.md §9.F.5. stoffel-mpc-coordinator 0.3.0 is
+# not published yet. Delete this table, and re-lock, as soon as it is.
+[patch.crates-io]
+stoffel-mpc-coordinator-shared = { git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "feature/no-bootnode" }
+stoffel-mpc-coordinator-off-chain = { git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "feature/no-bootnode" }

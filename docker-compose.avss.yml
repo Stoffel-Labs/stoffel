@@ -5,54 +5,265 @@
 # commitment[0]. All parties should output the same public key.
 #
 # This stack is also the local-store persistence testbed: each party mounts a
-# named /app/data volume and passes STOFFEL_LOCAL_STORE to stoffel-run. The
-# API/coordinator compose path is separate and currently uses the
-# HoneyBadger/BLS12-381 coordinator flow.
+# named /app/data volume and passes STOFFEL_LOCAL_STORE to stoffel-run.
+#
+# Every party is coordinated (docs/design/bootnode-elimination.md §9.F.1): the
+# coordinator service below registers the execution — the program the parties
+# run, the node roster and any client slots — and no party is given a client
+# identity. Clients are admitted by the coordinator and reach the parties'
+# RPC listeners, never the mesh, so a client nobody named when the parties
+# started can still take part (§9, decision 3). The default programs have no
+# client IO, so by default no client slot is registered.
 #
 # Usage:
-#   STOFFEL_AUTH_TOKEN=<token> docker-compose -f docker-compose.avss.yml up
+#   docker-compose -f docker-compose.avss.yml up
 #
-# To run a different compiled Stoffel program:
-#   STOFFEL_AUTH_TOKEN=<token> STOFFEL_PROGRAM=/app/programs/threshold_bls_bls12381.stflb docker-compose -f docker-compose.avss.yml up
+# To run a different compiled Stoffel program (the coordinator registers the
+# same STOFFEL_PROGRAM the parties load):
+#   STOFFEL_PROGRAM=/app/programs/threshold_bls_bls12381.stflb docker-compose -f docker-compose.avss.yml up
 #
 # Threshold ECDSA fixtures:
-#   STOFFEL_AUTH_TOKEN=<token> STOFFEL_PROGRAM=/app/programs/threshold_ecdsa_secp256k1.stflb STOFFEL_MPC_CURVE=secp256k1 docker-compose -f docker-compose.avss.yml up
-#   STOFFEL_AUTH_TOKEN=<token> STOFFEL_PROGRAM=/app/programs/threshold_ecdsa_p256.stflb STOFFEL_MPC_CURVE=p-256 docker-compose -f docker-compose.avss.yml up
+#   STOFFEL_PROGRAM=/app/programs/threshold_ecdsa_secp256k1.stflb STOFFEL_MPC_CURVE=secp256k1 docker-compose -f docker-compose.avss.yml up
+#   STOFFEL_PROGRAM=/app/programs/threshold_ecdsa_p256.stflb STOFFEL_MPC_CURVE=p-256 docker-compose -f docker-compose.avss.yml up
 #
 # AVSS certificate fixture path:
 #   1. Run /app/programs/avss_certificate_keygen.stflb with STOFFEL_MPC_CURVE=secp256k1 or p-256.
 #      It loads an existing CA key share and only generates on first use.
-#   2. Run /app/programs/avss_certificate_sign.stflb with STOFFEL_WAIT_FOR_CLIENTS=1.
-#      The AVSS output client submits the real TBS digest and reconstructs r(32) || s(32).
+#   2. Run /app/programs/avss_certificate_sign.stflb with one client slot
+#      registered to client 0 — one input (the TBS digest) and two outputs
+#      (r and s) — and the client0 service, which starts only with
+#      `--profile clients`:
+#        STOFFEL_PROGRAM=/app/programs/avss_certificate_sign.stflb STOFFEL_MPC_CURVE=secp256k1 \
+#        STOFFEL_CLIENT_IO=1:2 STOFFEL_CLIENT_CERTS=/app/ids/clients/cert0.crt \
+#        STOFFEL_CLIENT0_INPUT=0x<tbs-digest> \
+#          docker compose -f docker-compose.avss.yml --profile clients up
+#      The AVSS output client submits the real TBS digest through the
+#      coordinator and reconstructs r(32) || s(32) from the sealed output
+#      shares. It pins the coordinator's certificate, and its node legs are
+#      pinned to the roster the coordinator serves. With STOFFEL_ADMISSION=open
+#      (and both deadline variables, and no STOFFEL_CLIENT_CERTS) the slot goes
+#      to whichever client binds it first instead.
 #
 # To use a different elliptic curve (default: bls12-381):
-#   STOFFEL_AUTH_TOKEN=<token> STOFFEL_MPC_CURVE=bn254 docker-compose -f docker-compose.avss.yml up
+#   STOFFEL_MPC_CURVE=bn254 docker-compose -f docker-compose.avss.yml up
 #
 # Supported curves: bls12-381, bn254, curve25519, ed25519, secp256k1, p-256 (alias: secp256r1)
 #
 # To view logs from a specific party:
 #   docker-compose -f docker-compose.avss.yml logs -f party0
 
+# Certificates are public, and each is mounted read-only as its own file, only
+# into the services that read it (docs/design/bootnode-elimination.md §9.F.0): the
+# coordinator gets the node certificates (the roster it serves) and the
+# client certificates a pre-registered run names; a party gets the
+# coordinator's certificate, which it pins, and its own; a client the same.
+# No party holds another node's certificate or any client's: membership is the
+# roster the coordinator serves, and clients are admitted by the coordinator,
+# never listed on a node. Private keys are never baked into an image or mounted
+# as a directory: each service receives exactly its own key as a compose
+# secret. The keys under ids/ are committed development fixtures, which is why
+# every published port is bound to 127.0.0.1 only.
+x-coordinator-pin: &coordinator-pin
+  source: coordinator_cert
+  target: /app/ids/server_cert.crt
+
+x-coordinator-certificates: &coordinator-certificates
+  - *coordinator-pin
+  - source: node0_cert
+    target: /app/ids/nodes/cert0.crt
+  - source: node1_cert
+    target: /app/ids/nodes/cert1.crt
+  - source: node2_cert
+    target: /app/ids/nodes/cert2.crt
+  - source: node3_cert
+    target: /app/ids/nodes/cert3.crt
+  - source: node4_cert
+    target: /app/ids/nodes/cert4.crt
+  - source: client0_cert
+    target: /app/ids/clients/cert0.crt
+  - source: client1_cert
+    target: /app/ids/clients/cert1.crt
+
+x-client-common: &client-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+    # TEMPORARY (§9.F.5): the unpublished coordinator 0.3.0, copied to the
+    # [patch.crates-io] path. Delete with the patch.
+    additional_contexts:
+      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
+  networks:
+    stoffel-avss-net:
+  environment: &client-env
+    STOFFEL_ROLE: client
+    # The parties' node RPC listeners (their STOFFEL_RPC_ADDR). The client
+    # reaches them, never the mesh, and pins every leg to the node roster the
+    # coordinator serves (docs/design/bootnode-elimination.md §9.E.1).
+    STOFFEL_SERVERS: 172.29.0.10:16180,172.29.0.11:16181,172.29.0.12:16182,172.29.0.13:16183,172.29.0.14:16184
+    STOFFEL_MPC_BACKEND: avss
+    STOFFEL_MPC_CURVE: ${STOFFEL_MPC_CURVE:-}
+    STOFFEL_COORD_ADDR: 172.29.0.5:31415
+    STOFFEL_COORD_CERT: /app/ids/server_cert.crt
+    STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}"
+    # Optional refusals: another roster, or an execution of another program.
+    STOFFEL_EXPECT_ROSTER_DIGEST: ${STOFFEL_EXPECT_ROSTER_DIGEST-}
+    STOFFEL_EXPECT_PROGRAM_HASH: ${STOFFEL_EXPECT_PROGRAM_HASH-}
+    STOFFEL_CLIENT_DELAY: ${STOFFEL_CLIENT_DELAY:-20}
+    RUST_LOG: ${RUST_LOG:-info}
+    RUST_BACKTRACE: "1"
+
 services:
-  # Party 0 - Leader node (runs bootnode + party 0)
-  party0:
+  # The packaged programs exist only in the party image, and the coordinator
+  # registers the hash of the program the parties run (§9.F.1), so this
+  # one-shot service copies them onto a volume the coordinator mounts read-only.
+  programs:
     build:
       context: .
       dockerfile: Dockerfile
+      # TEMPORARY (§9.F.5): see the party build.
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
+    entrypoint: ["/bin/sh", "-c", "cp -R /app/programs/. /programs/"]
+    volumes:
+      - stoffel-programs:/programs
+
+  # The roster authority and the only place a client is admitted
+  # (docs/design/bootnode-elimination.md §9.F.1).
+  coordinator:
+    configs: *coordinator-certificates
+    secrets:
+      - coordinator_key
+    build:
+      context: .
+      dockerfile: docker/coordinator.Dockerfile
+      # TEMPORARY (§9.F.5): the unpublished coordinator 0.3.0, copied to the
+      # [patch.crates-io] path. Delete with the patch.
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
+    container_name: stoffel-avss-coordinator
+    hostname: coordinator
+    depends_on:
+      programs:
+        condition: service_completed_successfully
+    volumes:
+      - stoffel-programs:/app/programs:ro
+    command:
+      - --bind-addr
+      - 0.0.0.0
+      - --port
+      - "31415"
+      # The program this execution is registered for: the wrapper hashes these
+      # bytes, and every party refuses a summary naming another program than
+      # the one it loaded (§9.D.7 step 1). Must be the parties' STOFFEL_PROGRAM.
+      - --program
+      - "${STOFFEL_PROGRAM:-/app/programs/avss_keygen.stflb}"
+      # The invocation every party and client of this stack joins. The
+      # coordinator is a fresh process per `docker compose up`, so a constant
+      # is fine; a standing coordinator needs a new value per run.
+      - --execution-id
+      - "${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}"
+      - --server-cert
+      - /app/ids/server_cert.crt
+      - --server-key
+      - /run/secrets/coordinator_key
+      # The node roster is these certificates and n is their number. Client
+      # slots are one `<inputs>:<outputs>` entry each and, under pre-registered
+      # admission, in the same order, the certificate bound to it; both are
+      # empty by default, since the default programs have no client IO. The
+      # certificate-signing fixture registers `1:2` for client 0 (see the
+      # header).
+      - --node-certs
+      - /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
+      - --t
+      - "${STOFFEL_THRESHOLD:-1}"
+      - --client-io
+      - "${STOFFEL_CLIENT_IO-}"
+      - --client-certs
+      - "${STOFFEL_CLIENT_CERTS-}"
+      # How clients are admitted to the slots (§9.C.2, §9.F.3): pre-registered
+      # (the default) binds STOFFEL_CLIENT_CERTS to the slots in order; open
+      # names no client, so any certificate holder that pins this coordinator
+      # may bind a free slot; invitation admits holders of an invitation that
+      # STOFFEL_INVITATION_ISSUER_CERT's key signed (mount that certificate
+      # into this service). Open and invitation need both deadlines, in seconds
+      # after the coordinator starts. An empty value is an absent flag, and a
+      # flag the chosen admission does not read makes the coordinator exit 2.
+      - --admission
+      - "${STOFFEL_ADMISSION:-pre-registered}"
+      - --invitation-issuer-cert
+      - "${STOFFEL_INVITATION_ISSUER_CERT-}"
+      - --association-deadline-secs
+      - "${STOFFEL_ASSOCIATION_DEADLINE_SECS-}"
+      - --input-deadline-secs
+      - "${STOFFEL_INPUT_DEADLINE_SECS-}"
+    networks:
+      stoffel-avss-net:
+        ipv4_address: 172.29.0.5
+    ports:
+      - "127.0.0.1:31415:31415/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -tuln | grep -q ':31415' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  # Party 0 - also the STOFFEL_ROLE=leader service, which on this stack means
+  # nothing beyond a name: no party drives the coordinator's rounds.
+  party0:
+    configs:
+      - *coordinator-pin
+      - source: node0_cert
+        target: /app/ids/nodes/cert0.crt
+    secrets:
+      - node0_key
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # TEMPORARY (§9.F.5): the unpublished coordinator 0.3.0, copied to the
+      # [patch.crates-io] path. Delete with the patch.
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
     container_name: stoffel-avss-party0
     hostname: party0
     environment:
       - STOFFEL_ROLE=leader
-      - STOFFEL_AUTH_TOKEN=${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
       - STOFFEL_PARTY_ID=0
       - STOFFEL_BIND_ADDR=172.29.0.10:9000
-      - STOFFEL_N_PARTIES=5
-      - STOFFEL_THRESHOLD=1
       - STOFFEL_PROGRAM=${STOFFEL_PROGRAM:-/app/programs/avss_keygen.stflb}
       - STOFFEL_ENTRY=main
       - STOFFEL_MPC_BACKEND=avss
       - STOFFEL_MPC_CURVE=${STOFFEL_MPC_CURVE:-}
       - STOFFEL_LOCAL_STORE=/app/data/local.redb
+      # Node identity, and the roster it is pinned to
+      # (docs/design/bootnode-elimination.md §9.D): the node roster the
+      # coordinator serves — the five certificates of its --node-certs — which
+      # this party fetches once over the connection STOFFEL_COORD_CERT pins and
+      # installs as the transport's peer-certificate allowlist, so membership
+      # is enforced per connection by mTLS. No client certificate joins them:
+      # this stack's clients are admitted by the coordinator and reach the
+      # party's RPC listener (STOFFEL_RPC_ADDR). No party carries a roster, a
+      # party count or a threshold of its own; the entrypoint refuses
+      # STOFFEL_NODE_ROSTER, STOFFEL_N_PARTIES and STOFFEL_THRESHOLD by name.
+      # STOFFEL_PEERS is every other party's address: each node dials these
+      # seeds and pins them to the coordinator's roster. Every party, party0
+      # included, binds and advertises 9000. STOFFEL_EPOCH_STORE is the monotone
+      # session epoch that makes instance_id fresh across runs of this fixed
+      # roster
+      # (blocker B5); it lives on this party's own named volume, one directory
+      # per node, and a `docker compose down -v` that wipes it resets the epoch
+      # to 0.
+      - STOFFEL_PEERS=${STOFFEL_PEERS-172.29.0.11:9001,172.29.0.12:9002,172.29.0.13:9003,172.29.0.14:9004}
+      - STOFFEL_EPOCH_STORE=/app/data/epochs
+      - STOFFEL_CERT=/app/ids/nodes/cert0.crt
+      - STOFFEL_KEY=/run/secrets/node0_key
+      # The coordinator this party pins (--coord-cert), the invocation it
+      # serves, and the RPC listener its clients' node legs reach.
+      - STOFFEL_COORD_ADDR=172.29.0.5:31415
+      - STOFFEL_COORD_CERT=/app/ids/server_cert.crt
+      - STOFFEL_EXPECT_ROSTER_DIGEST=${STOFFEL_EXPECT_ROSTER_DIGEST-}
+      - STOFFEL_EXECUTION_ID=${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}
+      - STOFFEL_RPC_ADDR=172.29.0.10:16180
       - RUST_LOG=info
       - RUST_BACKTRACE=1
     volumes:
@@ -60,9 +271,12 @@ services:
     networks:
       stoffel-avss-net:
         ipv4_address: 172.29.0.10
+    depends_on:
+      coordinator:
+        condition: service_healthy
     ports:
-      - "19000:9000/tcp"
-      - "19000:9000/udp"
+      - "127.0.0.1:19000:9000/tcp"
+      - "127.0.0.1:19000:9000/udp"
     healthcheck:
       test: ["CMD-SHELL", "netstat -tuln | grep -q ':9000' || exit 1"]
       interval: 5s
@@ -72,24 +286,52 @@ services:
 
   # Party 1
   party1:
+    configs:
+      - *coordinator-pin
+      - source: node1_cert
+        target: /app/ids/nodes/cert1.crt
+    secrets:
+      - node1_key
     build:
       context: .
       dockerfile: Dockerfile
+      # TEMPORARY (§9.F.5): the unpublished coordinator 0.3.0, copied to the
+      # [patch.crates-io] path. Delete with the patch.
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
     container_name: stoffel-avss-party1
     hostname: party1
     environment:
       - STOFFEL_ROLE=party
-      - STOFFEL_AUTH_TOKEN=${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
       - STOFFEL_PARTY_ID=1
       - STOFFEL_BIND_ADDR=172.29.0.11:9001
-      - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
-      - STOFFEL_N_PARTIES=5
-      - STOFFEL_THRESHOLD=1
       - STOFFEL_PROGRAM=${STOFFEL_PROGRAM:-/app/programs/avss_keygen.stflb}
       - STOFFEL_ENTRY=main
       - STOFFEL_MPC_BACKEND=avss
       - STOFFEL_MPC_CURVE=${STOFFEL_MPC_CURVE:-}
       - STOFFEL_LOCAL_STORE=/app/data/local.redb
+      # Node identity, and the roster it is pinned to
+      # (docs/design/bootnode-elimination.md §9.D): the node roster the
+      # coordinator serves — the five certificates of its --node-certs — which
+      # this party fetches once over the connection STOFFEL_COORD_CERT pins and
+      # installs as the transport's peer-certificate allowlist, so membership
+      # is enforced per connection by mTLS. No client certificate joins them:
+      # this stack's clients are admitted by the coordinator and reach the
+      # party's RPC listener (STOFFEL_RPC_ADDR). No party carries a roster, a
+      # party count or a threshold of its own; the entrypoint refuses
+      # STOFFEL_NODE_ROSTER, STOFFEL_N_PARTIES and STOFFEL_THRESHOLD by name.
+      # Mesh seeds and epoch store; see party0 for what they are.
+      - STOFFEL_PEERS=${STOFFEL_PEERS-172.29.0.10:9000,172.29.0.12:9002,172.29.0.13:9003,172.29.0.14:9004}
+      - STOFFEL_EPOCH_STORE=/app/data/epochs
+      - STOFFEL_CERT=/app/ids/nodes/cert1.crt
+      - STOFFEL_KEY=/run/secrets/node1_key
+      # The coordinator this party pins (--coord-cert), the invocation it
+      # serves, and the RPC listener its clients' node legs reach.
+      - STOFFEL_COORD_ADDR=172.29.0.5:31415
+      - STOFFEL_COORD_CERT=/app/ids/server_cert.crt
+      - STOFFEL_EXPECT_ROSTER_DIGEST=${STOFFEL_EXPECT_ROSTER_DIGEST-}
+      - STOFFEL_EXECUTION_ID=${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}
+      - STOFFEL_RPC_ADDR=172.29.0.11:16181
       - RUST_LOG=info
       - RUST_BACKTRACE=1
     volumes:
@@ -98,32 +340,62 @@ services:
       stoffel-avss-net:
         ipv4_address: 172.29.0.11
     depends_on:
+      coordinator:
+        condition: service_healthy
       party0:
         condition: service_healthy
     ports:
-      - "19001:9001/tcp"
-      - "19001:9001/udp"
+      - "127.0.0.1:19001:9001/tcp"
+      - "127.0.0.1:19001:9001/udp"
 
   # Party 2
   party2:
+    configs:
+      - *coordinator-pin
+      - source: node2_cert
+        target: /app/ids/nodes/cert2.crt
+    secrets:
+      - node2_key
     build:
       context: .
       dockerfile: Dockerfile
+      # TEMPORARY (§9.F.5): the unpublished coordinator 0.3.0, copied to the
+      # [patch.crates-io] path. Delete with the patch.
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
     container_name: stoffel-avss-party2
     hostname: party2
     environment:
       - STOFFEL_ROLE=party
-      - STOFFEL_AUTH_TOKEN=${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
       - STOFFEL_PARTY_ID=2
       - STOFFEL_BIND_ADDR=172.29.0.12:9002
-      - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
-      - STOFFEL_N_PARTIES=5
-      - STOFFEL_THRESHOLD=1
       - STOFFEL_PROGRAM=${STOFFEL_PROGRAM:-/app/programs/avss_keygen.stflb}
       - STOFFEL_ENTRY=main
       - STOFFEL_MPC_BACKEND=avss
       - STOFFEL_MPC_CURVE=${STOFFEL_MPC_CURVE:-}
       - STOFFEL_LOCAL_STORE=/app/data/local.redb
+      # Node identity, and the roster it is pinned to
+      # (docs/design/bootnode-elimination.md §9.D): the node roster the
+      # coordinator serves — the five certificates of its --node-certs — which
+      # this party fetches once over the connection STOFFEL_COORD_CERT pins and
+      # installs as the transport's peer-certificate allowlist, so membership
+      # is enforced per connection by mTLS. No client certificate joins them:
+      # this stack's clients are admitted by the coordinator and reach the
+      # party's RPC listener (STOFFEL_RPC_ADDR). No party carries a roster, a
+      # party count or a threshold of its own; the entrypoint refuses
+      # STOFFEL_NODE_ROSTER, STOFFEL_N_PARTIES and STOFFEL_THRESHOLD by name.
+      # Mesh seeds and epoch store; see party0 for what they are.
+      - STOFFEL_PEERS=${STOFFEL_PEERS-172.29.0.10:9000,172.29.0.11:9001,172.29.0.13:9003,172.29.0.14:9004}
+      - STOFFEL_EPOCH_STORE=/app/data/epochs
+      - STOFFEL_CERT=/app/ids/nodes/cert2.crt
+      - STOFFEL_KEY=/run/secrets/node2_key
+      # The coordinator this party pins (--coord-cert), the invocation it
+      # serves, and the RPC listener its clients' node legs reach.
+      - STOFFEL_COORD_ADDR=172.29.0.5:31415
+      - STOFFEL_COORD_CERT=/app/ids/server_cert.crt
+      - STOFFEL_EXPECT_ROSTER_DIGEST=${STOFFEL_EXPECT_ROSTER_DIGEST-}
+      - STOFFEL_EXECUTION_ID=${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}
+      - STOFFEL_RPC_ADDR=172.29.0.12:16182
       - RUST_LOG=info
       - RUST_BACKTRACE=1
     volumes:
@@ -132,32 +404,62 @@ services:
       stoffel-avss-net:
         ipv4_address: 172.29.0.12
     depends_on:
+      coordinator:
+        condition: service_healthy
       party0:
         condition: service_healthy
     ports:
-      - "19002:9002/tcp"
-      - "19002:9002/udp"
+      - "127.0.0.1:19002:9002/tcp"
+      - "127.0.0.1:19002:9002/udp"
 
   # Party 3
   party3:
+    configs:
+      - *coordinator-pin
+      - source: node3_cert
+        target: /app/ids/nodes/cert3.crt
+    secrets:
+      - node3_key
     build:
       context: .
       dockerfile: Dockerfile
+      # TEMPORARY (§9.F.5): the unpublished coordinator 0.3.0, copied to the
+      # [patch.crates-io] path. Delete with the patch.
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
     container_name: stoffel-avss-party3
     hostname: party3
     environment:
       - STOFFEL_ROLE=party
-      - STOFFEL_AUTH_TOKEN=${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
       - STOFFEL_PARTY_ID=3
       - STOFFEL_BIND_ADDR=172.29.0.13:9003
-      - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
-      - STOFFEL_N_PARTIES=5
-      - STOFFEL_THRESHOLD=1
       - STOFFEL_PROGRAM=${STOFFEL_PROGRAM:-/app/programs/avss_keygen.stflb}
       - STOFFEL_ENTRY=main
       - STOFFEL_MPC_BACKEND=avss
       - STOFFEL_MPC_CURVE=${STOFFEL_MPC_CURVE:-}
       - STOFFEL_LOCAL_STORE=/app/data/local.redb
+      # Node identity, and the roster it is pinned to
+      # (docs/design/bootnode-elimination.md §9.D): the node roster the
+      # coordinator serves — the five certificates of its --node-certs — which
+      # this party fetches once over the connection STOFFEL_COORD_CERT pins and
+      # installs as the transport's peer-certificate allowlist, so membership
+      # is enforced per connection by mTLS. No client certificate joins them:
+      # this stack's clients are admitted by the coordinator and reach the
+      # party's RPC listener (STOFFEL_RPC_ADDR). No party carries a roster, a
+      # party count or a threshold of its own; the entrypoint refuses
+      # STOFFEL_NODE_ROSTER, STOFFEL_N_PARTIES and STOFFEL_THRESHOLD by name.
+      # Mesh seeds and epoch store; see party0 for what they are.
+      - STOFFEL_PEERS=${STOFFEL_PEERS-172.29.0.10:9000,172.29.0.11:9001,172.29.0.12:9002,172.29.0.14:9004}
+      - STOFFEL_EPOCH_STORE=/app/data/epochs
+      - STOFFEL_CERT=/app/ids/nodes/cert3.crt
+      - STOFFEL_KEY=/run/secrets/node3_key
+      # The coordinator this party pins (--coord-cert), the invocation it
+      # serves, and the RPC listener its clients' node legs reach.
+      - STOFFEL_COORD_ADDR=172.29.0.5:31415
+      - STOFFEL_COORD_CERT=/app/ids/server_cert.crt
+      - STOFFEL_EXPECT_ROSTER_DIGEST=${STOFFEL_EXPECT_ROSTER_DIGEST-}
+      - STOFFEL_EXECUTION_ID=${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}
+      - STOFFEL_RPC_ADDR=172.29.0.13:16183
       - RUST_LOG=info
       - RUST_BACKTRACE=1
     volumes:
@@ -166,32 +468,62 @@ services:
       stoffel-avss-net:
         ipv4_address: 172.29.0.13
     depends_on:
+      coordinator:
+        condition: service_healthy
       party0:
         condition: service_healthy
     ports:
-      - "19003:9003/tcp"
-      - "19003:9003/udp"
+      - "127.0.0.1:19003:9003/tcp"
+      - "127.0.0.1:19003:9003/udp"
 
   # Party 4
   party4:
+    configs:
+      - *coordinator-pin
+      - source: node4_cert
+        target: /app/ids/nodes/cert4.crt
+    secrets:
+      - node4_key
     build:
       context: .
       dockerfile: Dockerfile
+      # TEMPORARY (§9.F.5): the unpublished coordinator 0.3.0, copied to the
+      # [patch.crates-io] path. Delete with the patch.
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
     container_name: stoffel-avss-party4
     hostname: party4
     environment:
       - STOFFEL_ROLE=party
-      - STOFFEL_AUTH_TOKEN=${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
       - STOFFEL_PARTY_ID=4
       - STOFFEL_BIND_ADDR=172.29.0.14:9004
-      - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
-      - STOFFEL_N_PARTIES=5
-      - STOFFEL_THRESHOLD=1
       - STOFFEL_PROGRAM=${STOFFEL_PROGRAM:-/app/programs/avss_keygen.stflb}
       - STOFFEL_ENTRY=main
       - STOFFEL_MPC_BACKEND=avss
       - STOFFEL_MPC_CURVE=${STOFFEL_MPC_CURVE:-}
       - STOFFEL_LOCAL_STORE=/app/data/local.redb
+      # Node identity, and the roster it is pinned to
+      # (docs/design/bootnode-elimination.md §9.D): the node roster the
+      # coordinator serves — the five certificates of its --node-certs — which
+      # this party fetches once over the connection STOFFEL_COORD_CERT pins and
+      # installs as the transport's peer-certificate allowlist, so membership
+      # is enforced per connection by mTLS. No client certificate joins them:
+      # this stack's clients are admitted by the coordinator and reach the
+      # party's RPC listener (STOFFEL_RPC_ADDR). No party carries a roster, a
+      # party count or a threshold of its own; the entrypoint refuses
+      # STOFFEL_NODE_ROSTER, STOFFEL_N_PARTIES and STOFFEL_THRESHOLD by name.
+      # Mesh seeds and epoch store; see party0 for what they are.
+      - STOFFEL_PEERS=${STOFFEL_PEERS-172.29.0.10:9000,172.29.0.11:9001,172.29.0.12:9002,172.29.0.13:9003}
+      - STOFFEL_EPOCH_STORE=/app/data/epochs
+      - STOFFEL_CERT=/app/ids/nodes/cert4.crt
+      - STOFFEL_KEY=/run/secrets/node4_key
+      # The coordinator this party pins (--coord-cert), the invocation it
+      # serves, and the RPC listener its clients' node legs reach.
+      - STOFFEL_COORD_ADDR=172.29.0.5:31415
+      - STOFFEL_COORD_CERT=/app/ids/server_cert.crt
+      - STOFFEL_EXPECT_ROSTER_DIGEST=${STOFFEL_EXPECT_ROSTER_DIGEST-}
+      - STOFFEL_EXECUTION_ID=${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}
+      - STOFFEL_RPC_ADDR=172.29.0.14:16184
       - RUST_LOG=info
       - RUST_BACKTRACE=1
     volumes:
@@ -200,11 +532,43 @@ services:
       stoffel-avss-net:
         ipv4_address: 172.29.0.14
     depends_on:
+      coordinator:
+        condition: service_healthy
       party0:
         condition: service_healthy
     ports:
-      - "19004:9004/tcp"
-      - "19004:9004/udp"
+      - "127.0.0.1:19004:9004/tcp"
+      - "127.0.0.1:19004:9004/udp"
+
+  # The certificate-signing fixture's output client (see the header). Started
+  # only with `--profile clients`. Its certificate is mounted here and nowhere
+  # else: no party is told it, and the coordinator reads it only when
+  # STOFFEL_CLIENT_CERTS pre-registers it.
+  client0:
+    profiles: [clients]
+    configs:
+      - *coordinator-pin
+      - source: client0_cert
+        target: /app/ids/clients/cert0.crt
+    secrets:
+      - client0_key
+    <<: *client-common
+    container_name: stoffel-avss-client0
+    hostname: client0
+    environment:
+      <<: *client-env
+      STOFFEL_INPUTS: ${STOFFEL_CLIENT0_INPUT-}
+      STOFFEL_CLIENT_SLOT: ${STOFFEL_CLIENT0_SLOT-}
+      STOFFEL_CERT: /app/ids/clients/cert0.crt
+      STOFFEL_KEY: /run/secrets/client0_key
+    networks:
+      stoffel-avss-net:
+        ipv4_address: 172.29.0.100
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      party0:
+        condition: service_healthy
 
 networks:
   stoffel-avss-net:
@@ -215,8 +579,43 @@ networks:
           gateway: 172.29.0.1
 
 volumes:
+  stoffel-programs:
   stoffel-avss-party0-local:
   stoffel-avss-party1-local:
   stoffel-avss-party2-local:
   stoffel-avss-party3-local:
   stoffel-avss-party4-local:
+
+configs:
+  coordinator_cert:
+    file: ./ids/server_cert.crt
+  node0_cert:
+    file: ./ids/nodes/cert0.crt
+  node1_cert:
+    file: ./ids/nodes/cert1.crt
+  node2_cert:
+    file: ./ids/nodes/cert2.crt
+  node3_cert:
+    file: ./ids/nodes/cert3.crt
+  node4_cert:
+    file: ./ids/nodes/cert4.crt
+  client0_cert:
+    file: ./ids/clients/cert0.crt
+  client1_cert:
+    file: ./ids/clients/cert1.crt
+
+secrets:
+  client0_key:
+    file: ./ids/clients/key0.der
+  coordinator_key:
+    file: ./ids/server_key.der
+  node0_key:
+    file: ./ids/nodes/key0.der
+  node1_key:
+    file: ./ids/nodes/key1.der
+  node2_key:
+    file: ./ids/nodes/key2.der
+  node3_key:
+    file: ./ids/nodes/key3.der
+  node4_key:
+    file: ./ids/nodes/key4.der

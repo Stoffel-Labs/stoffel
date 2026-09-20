@@ -249,7 +249,11 @@ pub(crate) async fn execute_local_capturing_with_options(
     .backend(local_runner_backend(mpc_config.backend))
     .curve(local_runner_curve(mpc_config.backend))
     .parties(mpc_config.parties)
-    .threshold(mpc_config.threshold);
+    .threshold(mpc_config.threshold)
+    // `docs/design/bootnode-elimination.md`: the runtime carries the choice, the
+    // runner makes it. There is one topology today; the seam is what keeps a
+    // second one (§5, stage 11) from having to be threaded through here again.
+    .topology(runtime.configured_local_topology());
     if let Some(timeout) = options.timeout {
         runner = runner.timeout(timeout);
     }

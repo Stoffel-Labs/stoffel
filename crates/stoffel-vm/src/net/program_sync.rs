@@ -1,54 +1,39 @@
 // crates/stoffel-vm/src/net/program_sync.rs
-//! # Program Synchronization
+//! # Program identity and the content-addressed program cache
 //!
-//! This module handles the synchronization of compiled programs between VMs in a distributed network.
-//! When multiple VMs need to run the same program, they use this module to:
-//! 1. Agree on a common program ID and entry point
-//! 2. Exchange program bytecode efficiently
-//! 3. Cache programs locally to avoid redundant transfers
+//! A program is named by a domain-separated BLAKE3 hash of its bytes
+//! ([`program_id_from_bytes`]), and a node keeps the programs it has fetched in
+//! a cache directory keyed by that name ([`program_path`]).
 //!
-//! The protocol uses a simple message-based approach over QUIC connections.
+//! Stage 8 of `docs/design/bootnode-elimination.md` deleted the transfer
+//! protocol that used to live here: `agree_and_sync_program`, the
+//! `ProgramSyncMessage` enum, and the send/receive helpers that framed it. That
+//! path only ever ran against a bootnode, and it could not succeed — the
+//! bootnode validated uploads with a bare `blake3::hash` against this
+//! domain-separated id, so every honest upload was silently dropped (design doc
+//! §2). Program transfer between mesh members is [`crate::net::mesh::program`],
+//! which is chunked, verified, and pulled from a peer rather than pushed
+//! through a third party.
+//!
+//! What stays is the part both paths share: the identity, the verification, and
+//! the cache.
 
 use blake3::Hasher;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use stoffelnet::network_utils::PartyId;
-use stoffelnet::transports::quic::PeerConnection;
 
 pub type ProgramSyncResult<T> = Result<T, ProgramSyncError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProgramSyncError {
-    #[error("program size {size} exceeds u64::MAX")]
-    ProgramSizeExceedsWire { size: usize },
-    #[error("program size {size} is too large for this platform")]
-    ProgramSizeExceedsHost { size: u64 },
     #[error("failed to {operation} program cache path {path}: {reason}")]
     CacheIo {
         operation: &'static str,
         path: PathBuf,
         reason: String,
     },
-    #[error("failed to serialize program sync message: {reason}")]
-    Encode { reason: String },
-    #[error("failed to deserialize program sync message: {reason}")]
-    Decode { reason: String },
-    #[error("program sync transport {operation} failed: {reason}")]
-    Transport {
-        operation: &'static str,
-        reason: String,
-    },
-    #[error("unexpected program sync message: expected {expected}, got {actual}")]
-    UnexpectedMessage {
-        expected: &'static str,
-        actual: &'static str,
-    },
-    #[error("program_id mismatch: expected {expected}, got {actual}")]
-    ProgramIdMismatch { expected: String, actual: String },
     #[error("downloaded program hash mismatch: expected {expected}, got {actual}")]
     DownloadedProgramHashMismatch { expected: String, actual: String },
 }
@@ -56,41 +41,6 @@ pub enum ProgramSyncError {
 impl From<ProgramSyncError> for String {
     fn from(error: ProgramSyncError) -> Self {
         error.to_string()
-    }
-}
-
-/// Message types for program synchronization protocol
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ProgramSyncMessage {
-    ProgramAnnounce {
-        party_id: PartyId,
-        program_id: [u8; 32],
-        size: u64,
-        entry: String,
-    },
-    ProgramAck {
-        party_id: PartyId,
-        program_id: [u8; 32],
-    },
-    ProgramFetchRequest {
-        program_id: [u8; 32],
-    },
-    ProgramBytes {
-        program_id: [u8; 32],
-        bytes: Vec<u8>,
-    },
-    ProgramComplete {
-        program_id: [u8; 32],
-    },
-}
-
-fn message_kind(message: &ProgramSyncMessage) -> &'static str {
-    match message {
-        ProgramSyncMessage::ProgramAnnounce { .. } => "ProgramAnnounce",
-        ProgramSyncMessage::ProgramAck { .. } => "ProgramAck",
-        ProgramSyncMessage::ProgramFetchRequest { .. } => "ProgramFetchRequest",
-        ProgramSyncMessage::ProgramBytes { .. } => "ProgramBytes",
-        ProgramSyncMessage::ProgramComplete { .. } => "ProgramComplete",
     }
 }
 
@@ -132,96 +82,17 @@ pub fn program_id_from_bytes(bytes: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn program_size_from_len(size: usize) -> ProgramSyncResult<u64> {
-    u64::try_from(size).map_err(|_| ProgramSyncError::ProgramSizeExceedsWire { size })
-}
-
-fn program_size_to_usize(size: u64) -> ProgramSyncResult<usize> {
-    usize::try_from(size).map_err(|_| ProgramSyncError::ProgramSizeExceedsHost { size })
-}
-
 /// Ensures the cache directory exists
 pub fn ensure_cache_dir() -> ProgramSyncResult<()> {
     let dir = cache_dir();
     fs::create_dir_all(&dir).map_err(|error| cache_io_error("create", &dir, error))
 }
 
-/// Sends a control message to a peer using stoffelnet's simple send/receive
-pub async fn send_ctrl(
-    conn: &dyn PeerConnection,
-    msg: &ProgramSyncMessage,
-) -> ProgramSyncResult<()> {
-    let bytes = bincode::serialize(msg).map_err(|error| ProgramSyncError::Encode {
-        reason: error.to_string(),
-    })?;
-    conn.send(&bytes)
-        .await
-        .map_err(|reason| ProgramSyncError::Transport {
-            operation: "send control message",
-            reason,
-        })
-}
-
-/// Receives a control message from a peer
-pub async fn recv_ctrl(conn: &dyn PeerConnection) -> ProgramSyncResult<ProgramSyncMessage> {
-    let buf = conn
-        .receive()
-        .await
-        .map_err(|reason| ProgramSyncError::Transport {
-            operation: "receive control message",
-            reason,
-        })?;
-    let msg: ProgramSyncMessage =
-        bincode::deserialize(&buf).map_err(|error| ProgramSyncError::Decode {
-            reason: error.to_string(),
-        })?;
-    Ok(msg)
-}
-
-/// Sends program bytecode to a peer
-pub async fn send_program_bytes(
-    conn: &dyn PeerConnection,
-    program_id: [u8; 32],
-    bytes: Arc<Vec<u8>>,
-) -> ProgramSyncResult<()> {
-    let msg = ProgramSyncMessage::ProgramBytes {
-        program_id,
-        bytes: bytes.to_vec(),
-    };
-    send_ctrl(conn, &msg).await
-}
-
-fn program_bytes_from_message(
-    message: ProgramSyncMessage,
-    expected_id: [u8; 32],
-) -> ProgramSyncResult<Vec<u8>> {
-    match message {
-        ProgramSyncMessage::ProgramBytes { program_id, bytes } => {
-            if program_id != expected_id {
-                return Err(ProgramSyncError::ProgramIdMismatch {
-                    expected: program_id_hex(&expected_id),
-                    actual: program_id_hex(&program_id),
-                });
-            }
-            Ok(bytes)
-        }
-        other => Err(ProgramSyncError::UnexpectedMessage {
-            expected: "ProgramBytes",
-            actual: message_kind(&other),
-        }),
-    }
-}
-
-/// Receives program bytecode from a peer
-pub async fn recv_program_bytes(
-    conn: &dyn PeerConnection,
-    expected_id: [u8; 32],
-) -> ProgramSyncResult<Vec<u8>> {
-    let msg = recv_ctrl(conn).await?;
-    program_bytes_from_message(msg, expected_id)
-}
-
-fn verify_program_id(expected_id: &[u8; 32], bytes: &[u8]) -> ProgramSyncResult<()> {
+/// Check that `bytes` hash to `expected_id` under the domain-separated program id.
+///
+/// Crate-visible so the Stage 0 characterization harness can assert the
+/// program↔session binding without re-implementing the hash.
+pub(crate) fn verify_program_id(expected_id: &[u8; 32], bytes: &[u8]) -> ProgramSyncResult<()> {
     let actual_id = program_id_from_bytes(bytes);
     if actual_id == *expected_id {
         Ok(())
@@ -233,153 +104,9 @@ fn verify_program_id(expected_id: &[u8; 32], bytes: &[u8]) -> ProgramSyncResult<
     }
 }
 
-/// High-level helper to ensure all parties agree on the program and those who don't have it fetch it.
-pub async fn agree_and_sync_program(
-    bn_conn: &dyn PeerConnection,
-    my_party: PartyId,
-    entry: &str,
-    maybe_program_bytes: Option<Vec<u8>>,
-) -> ProgramSyncResult<([u8; 32], usize, String)> {
-    ensure_cache_dir()?;
-    let (pid, size) = if let Some(bytes) = maybe_program_bytes {
-        let pid = program_id_from_bytes(&bytes);
-        let path = program_path(&pid);
-        if !Path::new(&path).exists() {
-            fs::write(&path, &bytes).map_err(|error| cache_io_error("write", &path, error))?;
-        }
-        (pid, bytes.len())
-    } else {
-        // we don't have it; we will learn it from announce below
-        ([0u8; 32], 0usize)
-    };
-
-    // Announce what we have (or zero pid)
-    let announce = ProgramSyncMessage::ProgramAnnounce {
-        party_id: my_party,
-        program_id: pid,
-        size: program_size_from_len(size)?,
-        entry: entry.to_string(),
-    };
-    send_ctrl(bn_conn, &announce).await?;
-
-    // Receive leader's announce with canonical pid/size/entry
-    let announce2 = recv_ctrl(bn_conn).await?;
-    let (agreed_pid, agreed_size, agreed_entry) = match announce2 {
-        ProgramSyncMessage::ProgramAnnounce {
-            party_id: _,
-            program_id,
-            size,
-            entry,
-        } => (program_id, program_size_to_usize(size)?, entry),
-        other => {
-            return Err(ProgramSyncError::UnexpectedMessage {
-                expected: "ProgramAnnounce",
-                actual: message_kind(&other),
-            });
-        }
-    };
-
-    // Ack
-    let ack = ProgramSyncMessage::ProgramAck {
-        party_id: my_party,
-        program_id: agreed_pid,
-    };
-    send_ctrl(bn_conn, &ack).await?;
-
-    // If absent locally, fetch from bootnode
-    let local_path = program_path(&agreed_pid);
-    if !local_path.exists() {
-        // request the program
-        let req = ProgramSyncMessage::ProgramFetchRequest {
-            program_id: agreed_pid,
-        };
-        send_ctrl(bn_conn, &req).await?;
-
-        // receive the bytes
-        let bytes = recv_program_bytes(bn_conn, agreed_pid).await?;
-
-        // verify hash
-        verify_program_id(&agreed_pid, &bytes)?;
-
-        fs::write(&local_path, &bytes)
-            .map_err(|error| cache_io_error("write", &local_path, error))?;
-
-        // send completion acknowledgment
-        let complete = ProgramSyncMessage::ProgramComplete {
-            program_id: agreed_pid,
-        };
-        send_ctrl(bn_conn, &complete).await?;
-    }
-
-    Ok((agreed_pid, agreed_size, agreed_entry))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn program_size_conversion_round_trips_representable_lengths() {
-        let size = 4096usize;
-
-        let wire_size = program_size_from_len(size).unwrap();
-        let host_size = program_size_to_usize(wire_size).unwrap();
-
-        assert_eq!(host_size, size);
-    }
-
-    #[test]
-    #[cfg(target_pointer_width = "32")]
-    fn program_size_conversion_rejects_unrepresentable_wire_size() {
-        let err = program_size_to_usize(u64::from(u32::MAX) + 1).unwrap_err();
-
-        assert_eq!(
-            err,
-            ProgramSyncError::ProgramSizeExceedsHost {
-                size: u64::from(u32::MAX) + 1
-            }
-        );
-    }
-
-    #[test]
-    fn program_bytes_message_rejects_unexpected_message_type() {
-        let err = program_bytes_from_message(
-            ProgramSyncMessage::ProgramAck {
-                party_id: 7,
-                program_id: [1u8; 32],
-            },
-            [1u8; 32],
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            err,
-            ProgramSyncError::UnexpectedMessage {
-                expected: "ProgramBytes",
-                actual: "ProgramAck"
-            }
-        );
-    }
-
-    #[test]
-    fn program_bytes_message_reports_program_id_mismatch() {
-        let err = program_bytes_from_message(
-            ProgramSyncMessage::ProgramBytes {
-                program_id: [2u8; 32],
-                bytes: vec![1, 2, 3],
-            },
-            [1u8; 32],
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            err,
-            ProgramSyncError::ProgramIdMismatch {
-                expected: hex::encode([1u8; 32]),
-                actual: hex::encode([2u8; 32]),
-            }
-        );
-    }
 
     #[test]
     fn downloaded_program_hash_mismatch_is_typed() {
@@ -389,5 +116,35 @@ mod tests {
             err,
             ProgramSyncError::DownloadedProgramHashMismatch { .. }
         ));
+    }
+
+    /// The program id is the whole reason the bootnode's custody path was dead
+    /// (design doc §2): the bootnode compared a bare `blake3::hash` against this
+    /// domain-separated one, so it rejected every honest upload. The domain
+    /// separation is load-bearing for the mesh too — it is what a peer verifies
+    /// a pulled program against — so it is pinned here rather than assumed.
+    #[test]
+    fn the_program_id_is_domain_separated_from_a_bare_blake3_hash() {
+        let bytes = b"a compiled program";
+
+        assert_ne!(
+            program_id_from_bytes(bytes),
+            *blake3::hash(bytes).as_bytes()
+        );
+        verify_program_id(&program_id_from_bytes(bytes), bytes)
+            .expect("a program verifies against its own domain-separated id");
+    }
+
+    #[test]
+    fn the_cache_path_is_the_program_id_under_the_cache_directory() {
+        let program_id = [4u8; 32];
+
+        let path = program_path(&program_id);
+
+        assert_eq!(path.parent(), Some(cache_dir().as_path()));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(hex::encode(program_id).as_str())
+        );
     }
 }

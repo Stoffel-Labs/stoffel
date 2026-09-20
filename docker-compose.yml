@@ -6,66 +6,244 @@
 # Defaults run:
 #   crates/stoffel-lang/examples/mpc_aes128_circuit/main.stfl
 #
-# The AES circuit is long-running. To change the packaged program/backend:
-#   STOFFEL_PROGRAM=/app/programs/client_mul.stflb STOFFEL_MPC_BACKEND=honeybadger docker compose up --build
+# The AES circuit is long-running and has no client. The coordinator registers
+# whichever program the parties run (STOFFEL_PROGRAM, below), so a different
+# packaged program needs nothing else:
+#   STOFFEL_PROGRAM=/app/programs/matrix_average_fixed_point.stflb docker compose up --build
+#
+# Topology: a roster-pinned mesh behind a coordinator
+# (docs/design/bootnode-elimination.md §9). The coordinator is the only roster
+# authority: the five parties fetch its node roster once, over the connection
+# STOFFEL_COORD_CERT pins, dial each other from STOFFEL_PEERS and admit only
+# roster members. There is no bootstrap process and no shared bearer token, and
+# the entrypoint refuses STOFFEL_AUTH_TOKEN and STOFFEL_BOOTSTRAP_ADDR by name.
+# The coordinator's startup log names the roster digest; pass it as
+# STOFFEL_EXPECT_ROSTER_DIGEST to make every party and client refuse any other.
+#
+# Clients. client_mul reads one input from each of two client slots and the
+# parties reveal the sum (neither client receives an output). Its two slots are
+# registered with the coordinator alone, and the two client services start
+# only with `--profile clients`:
+#
+#   STOFFEL_PROGRAM=/app/programs/client_mul.stflb \
+#   STOFFEL_CLIENT_IO=1:0,1:0 \
+#   STOFFEL_CLIENT_CERTS=/app/ids/clients/cert0.crt,/app/ids/clients/cert1.crt \
+#     docker compose --profile clients up --build
+#
+# That pre-registers both client certificates (the default admission). To take
+# clients nobody named in advance, register the same slots under open admission
+# instead; each client then binds a free slot, or the one
+# STOFFEL_CLIENT{0,1}_SLOT names:
+#
+#   STOFFEL_PROGRAM=/app/programs/client_mul.stflb \
+#   STOFFEL_CLIENT_IO=1:0,1:0 STOFFEL_ADMISSION=open \
+#   STOFFEL_ASSOCIATION_DEADLINE_SECS=600 STOFFEL_INPUT_DEADLINE_SECS=900 \
+#     docker compose --profile clients up --build
+#
+# Either way no party is given a client certificate, count or slot.
+
+# Certificates are public, and each is mounted read-only as its own file, only
+# into the services that read it (docs/design/bootnode-elimination.md §9.F.0): the
+# coordinator gets the node certificates (the roster it serves) and the
+# client certificates a pre-registered run names; a party gets the
+# coordinator's certificate, which it pins, and its own; a client the same.
+# No party holds another node's certificate or any client's: membership is the
+# roster the coordinator serves, and clients are admitted by the coordinator,
+# never listed on a node. Private keys are never baked into an image or mounted
+# as a directory: each service receives exactly its own key as a compose
+# secret. The keys under ids/ are committed development fixtures, which is why
+# every published port is bound to 127.0.0.1 only.
+x-coordinator-pin: &coordinator-pin
+  source: coordinator_cert
+  target: /app/ids/server_cert.crt
+
+x-coordinator-certificates: &coordinator-certificates
+  - *coordinator-pin
+  - source: node0_cert
+    target: /app/ids/nodes/cert0.crt
+  - source: node1_cert
+    target: /app/ids/nodes/cert1.crt
+  - source: node2_cert
+    target: /app/ids/nodes/cert2.crt
+  - source: node3_cert
+    target: /app/ids/nodes/cert3.crt
+  - source: node4_cert
+    target: /app/ids/nodes/cert4.crt
+  - source: client0_cert
+    target: /app/ids/clients/cert0.crt
+  - source: client1_cert
+    target: /app/ids/clients/cert1.crt
 
 x-party-common: &party-common
   build:
     context: .
     dockerfile: Dockerfile
+    # TEMPORARY (§9.F.5): the unpublished coordinator 0.3.0, copied to the
+    # [patch.crates-io] path. Delete with the patch.
+    additional_contexts:
+      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
   networks:
     stoffel-net:
   volumes:
     - stoffel-local-store:/app/local-store
   environment: &party-env
-    STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:-stoffel-compose-honeybadger-token}
-    STOFFEL_N_PARTIES: ${STOFFEL_N_PARTIES:-5}
-    STOFFEL_THRESHOLD: ${STOFFEL_THRESHOLD:-1}
     STOFFEL_PROGRAM: ${STOFFEL_PROGRAM:-/app/programs/mpc_aes128_circuit.stflb}
     STOFFEL_ENTRY: ${STOFFEL_ENTRY:-main}
     STOFFEL_MPC_BACKEND: ${STOFFEL_MPC_BACKEND:-honeybadger}
     STOFFEL_MPC_CURVE: ${STOFFEL_MPC_CURVE:-bls12-381}
+    # Membership (docs/design/bootnode-elimination.md §9.D) is the node roster
+    # the coordinator serves: the five certificates of its --node-certs, which
+    # each party fetches once, before it binds anything, and installs as the
+    # transport's peer-certificate allowlist, so membership is enforced per
+    # connection by mTLS. Party indices come from
+    # their sorted SPKIs, not from STOFFEL_PARTY_ID, which survives only as the
+    # label on this stack's per-party volumes. It is not the key to them either:
+    # persistent state is keyed by each node's own certificate, so cert0's
+    # container opens cert0's store whatever number this file gives it. Expect
+    # the derived index in the logs to differ from STOFFEL_PARTY_ID — the
+    # shipped certificates do not sort into the order they are numbered in.
+    #
+    # No party carries a roster, a party count or a threshold of its own: the
+    # entrypoint refuses STOFFEL_NODE_ROSTER, STOFFEL_N_PARTIES and
+    # STOFFEL_THRESHOLD by name, and `--t` on the coordinator is the one place t
+    # is set.
+    #
+    # No client identity is given to a party (decision 3 of
+    # docs/design/bootnode-elimination.md §9): the entrypoint refuses
+    # STOFFEL_EXPECTED_CLIENTS and STOFFEL_CLIENT_INPUT_COUNT by name. Clients
+    # are admitted by the coordinator and reach a party's RPC listener
+    # (STOFFEL_RPC_ADDR), never the mesh; every party reads which client holds
+    # which slot, and who receives outputs, from the admissions it agrees with
+    # the other parties.
+    #
+    # Each party below carries a STOFFEL_PEERS list of the other four node
+    # addresses, dials them directly and pins them to the coordinator's roster,
+    # and binds and advertises 9000. No party drives the coordinator's rounds:
+    # the coordinator applies a round once a quorum of roster members has
+    # proposed it, so every party proposes every transition.
+    # STOFFEL_ROLE=leader on party0 is only a label.
+    STOFFEL_EXPECT_ROSTER_DIGEST: ${STOFFEL_EXPECT_ROSTER_DIGEST-}
     RUST_MIN_STACK: ${RUST_MIN_STACK:-67108864}
     RUST_LOG: ${RUST_LOG:-info}
     RUST_BACKTRACE: "1"
 
+x-client-common: &client-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+    # TEMPORARY (§9.F.5): see the party build.
+    additional_contexts:
+      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
+  networks:
+    stoffel-net:
+  environment: &client-env
+    STOFFEL_ROLE: client
+    # The parties' node RPC listeners (their STOFFEL_RPC_ADDR). The client
+    # reaches them, never the mesh, and pins every leg to the node roster the
+    # coordinator serves (docs/design/bootnode-elimination.md §9.E.1).
+    STOFFEL_SERVERS: 172.28.0.10:16180,172.28.0.11:16181,172.28.0.12:16182,172.28.0.13:16183,172.28.0.14:16184
+    STOFFEL_MPC_BACKEND: ${STOFFEL_MPC_BACKEND:-honeybadger}
+    STOFFEL_MPC_CURVE: ${STOFFEL_MPC_CURVE:-bls12-381}
+    STOFFEL_COORD_ADDR: 172.28.0.5:31415
+    STOFFEL_COORD_CERT: /app/ids/server_cert.crt
+    STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}"
+    # Optional refusals: another roster, or an execution of another program.
+    STOFFEL_EXPECT_ROSTER_DIGEST: ${STOFFEL_EXPECT_ROSTER_DIGEST-}
+    STOFFEL_EXPECT_PROGRAM_HASH: ${STOFFEL_EXPECT_PROGRAM_HASH-}
+    STOFFEL_CLIENT_DELAY: ${STOFFEL_CLIENT_DELAY:-20}
+    RUST_LOG: ${RUST_LOG:-info}
+    RUST_BACKTRACE: "1"
+
 services:
+  # The packaged programs exist only in the party image, and the coordinator
+  # registers the hash of the program the parties run (§9.F.1), so this
+  # one-shot service copies them onto a volume the coordinator mounts read-only.
+  programs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # TEMPORARY (§9.F.5): see the party build.
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
+    entrypoint: ["/bin/sh", "-c", "cp -R /app/programs/. /programs/"]
+    volumes:
+      - stoffel-programs:/programs
+
   coordinator:
+    configs: *coordinator-certificates
+    secrets:
+      - coordinator_key
     build:
       context: .
       dockerfile: docker/coordinator.Dockerfile
+      # TEMPORARY (§9.F.5): the unpublished coordinator 0.3.0, copied to the
+      # [patch.crates-io] path. Delete with the patch.
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
     container_name: stoffel-coordinator
     hostname: coordinator
+    depends_on:
+      programs:
+        condition: service_completed_successfully
+    volumes:
+      - stoffel-programs:/app/programs:ro
     command:
       - --bind-addr
       - 0.0.0.0
       - --port
       - "31415"
-      - --hash
-      - "0000000000000000000000000000000000000000000000000000000000000000"
+      # The program this execution is registered for: the wrapper hashes these
+      # bytes, and every party refuses a summary naming another program than
+      # the one it loaded (docs/design/bootnode-elimination.md §9.D.7 step 1,
+      # §9.F.1). Must be the parties' STOFFEL_PROGRAM.
+      - --program
+      - "${STOFFEL_PROGRAM:-/app/programs/mpc_aes128_circuit.stflb}"
+      # The invocation every party and client of this stack joins. The
+      # coordinator keys rounds, admissions, masked inputs and output shares
+      # on it. This coordinator is a fresh process per `docker compose up`,
+      # which registers the execution anew, so a constant is fine; a standing
+      # coordinator needs a new value per run.
+      - --execution-id
+      - "${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}"
       - --server-cert
       - /app/ids/server_cert.crt
       - --server-key
-      - /app/ids/server_key.der
-      - --n
-      - "${STOFFEL_N_PARTIES:-5}"
+      - /run/secrets/coordinator_key
+      # The node roster is these certificates and n is their number; t is the
+      # one threshold of the stack (compose substitutes it from the invoking
+      # shell, and it never reaches a party). Every client slot is registered
+      # up front, one `<inputs>:<outputs>` entry per slot; under pre-registered
+      # admission STOFFEL_CLIENT_CERTS names, in the same order, the
+      # certificate bound to each. Both empty registers no client slots.
+      - --node-certs
+      - /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
       - --t
       - "${STOFFEL_THRESHOLD:-1}"
-      - --mpc-backend
-      - "${STOFFEL_MPC_BACKEND:-honeybadger}"
-      - --mpc-curve
-      - "${STOFFEL_MPC_CURVE:-bls12-381}"
-      - --n-inputs
-      - "0"
-      - --output-clients
-      - /app/ids/clients/cert0.crt
-      - --initial-mpc-nodes
-      - /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
+      - --client-io
+      - "${STOFFEL_CLIENT_IO-}"
+      - --client-certs
+      - "${STOFFEL_CLIENT_CERTS-}"
+      # How clients are admitted to the slots (§9.C.2, §9.F.3): pre-registered
+      # (the default) binds STOFFEL_CLIENT_CERTS to the slots in order; open
+      # names no client, so any certificate holder that pins this coordinator
+      # may bind a free slot; invitation admits holders of an invitation that
+      # STOFFEL_INVITATION_ISSUER_CERT's key signed (mount that certificate
+      # into this service). Open and invitation need both deadlines, in seconds
+      # after the coordinator starts. An empty value is an absent flag, and a
+      # flag the chosen admission does not read makes the coordinator exit 2.
+      - --admission
+      - "${STOFFEL_ADMISSION:-pre-registered}"
+      - --invitation-issuer-cert
+      - "${STOFFEL_INVITATION_ISSUER_CERT-}"
+      - --association-deadline-secs
+      - "${STOFFEL_ASSOCIATION_DEADLINE_SECS-}"
+      - --input-deadline-secs
+      - "${STOFFEL_INPUT_DEADLINE_SECS-}"
     networks:
       stoffel-net:
         ipv4_address: 172.28.0.5
     ports:
-      - "31415:31415/tcp"
+      - "127.0.0.1:31415:31415/tcp"
     healthcheck:
       test: ["CMD-SHELL", "netstat -tuln | grep -q ':31415' || exit 1"]
       interval: 5s
@@ -74,6 +252,12 @@ services:
       start_period: 10s
 
   party0:
+    configs:
+      - *coordinator-pin
+      - source: node0_cert
+        target: /app/ids/nodes/cert0.crt
+    secrets:
+      - node0_key
     <<: *party-common
     container_name: stoffel-party0
     hostname: party0
@@ -87,19 +271,29 @@ services:
       STOFFEL_BIND_ADDR: 172.28.0.10:9000
       STOFFEL_ADVERTISE_IP: 172.28.0.10
       STOFFEL_COORD_ADDR: 172.28.0.5:31415
-      STOFFEL_TIMESTAMP: "0"
+      STOFFEL_COORD_CERT: /app/ids/server_cert.crt
+      # The invocation this container joins. The coordinator keys every RPC on
+      # it, so it must match the coordinator service's --execution-id and be
+      # the same for every party and client of one run.
+      STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}"
       STOFFEL_RPC_ADDR: 172.28.0.10:16180
       STOFFEL_LOCAL_STORE: /app/local-store/party-0.redb
+      # Monotone session epoch (blocker B5,
+      # docs/design/bootnode-elimination.md). On the same named volume as the
+      # local store, so the `docker compose down`/`up` cycle preserves it: an
+      # epoch store that resets to 0 makes the next run reuse the previous
+      # run's MPC session namespace. One directory per party, never shared.
+      STOFFEL_EPOCH_STORE: /app/local-store/epochs-party-0
+      # Mesh seeds: every other party. See STOFFEL_PEERS in the shared block.
+      STOFFEL_PEERS: ${STOFFEL_PEERS-172.28.0.11:9001,172.28.0.12:9002,172.28.0.13:9003,172.28.0.14:9004}
       STOFFEL_CERT: /app/ids/nodes/cert0.crt
-      STOFFEL_KEY: /app/ids/nodes/key0.der
+      STOFFEL_KEY: /run/secrets/node0_key
     networks:
       stoffel-net:
         ipv4_address: 172.28.0.10
     ports:
-      - "9000:9000/tcp"
-      - "9000:9000/udp"
-      - "10000:10000/tcp"
-      - "10000:10000/udp"
+      - "127.0.0.1:9000:9000/tcp"
+      - "127.0.0.1:9000:9000/udp"
     healthcheck:
       test: ["CMD-SHELL", "netstat -tuln | grep -q ':9000' || exit 1"]
       interval: 5s
@@ -108,6 +302,12 @@ services:
       start_period: 10s
 
   party1:
+    configs:
+      - *coordinator-pin
+      - source: node1_cert
+        target: /app/ids/nodes/cert1.crt
+    secrets:
+      - node1_key
     <<: *party-common
     container_name: stoffel-party1
     hostname: party1
@@ -121,22 +321,39 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "1"
       STOFFEL_BIND_ADDR: 172.28.0.11:9001
-      STOFFEL_BOOTSTRAP_ADDR: 172.28.0.10:9000
       STOFFEL_ADVERTISE_IP: 172.28.0.11
       STOFFEL_COORD_ADDR: 172.28.0.5:31415
-      STOFFEL_TIMESTAMP: "0"
+      STOFFEL_COORD_CERT: /app/ids/server_cert.crt
+      # The invocation this container joins. The coordinator keys every RPC on
+      # it, so it must match the coordinator service's --execution-id and be
+      # the same for every party and client of one run.
+      STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}"
       STOFFEL_RPC_ADDR: 172.28.0.11:16181
       STOFFEL_LOCAL_STORE: /app/local-store/party-1.redb
+      # Monotone session epoch (blocker B5,
+      # docs/design/bootnode-elimination.md). On the same named volume as the
+      # local store, so the `docker compose down`/`up` cycle preserves it: an
+      # epoch store that resets to 0 makes the next run reuse the previous
+      # run's MPC session namespace. One directory per party, never shared.
+      STOFFEL_EPOCH_STORE: /app/local-store/epochs-party-1
+      # Mesh seeds: every other party. See STOFFEL_PEERS in the shared block.
+      STOFFEL_PEERS: ${STOFFEL_PEERS-172.28.0.10:9000,172.28.0.12:9002,172.28.0.13:9003,172.28.0.14:9004}
       STOFFEL_CERT: /app/ids/nodes/cert1.crt
-      STOFFEL_KEY: /app/ids/nodes/key1.der
+      STOFFEL_KEY: /run/secrets/node1_key
     networks:
       stoffel-net:
         ipv4_address: 172.28.0.11
     ports:
-      - "9001:9001/tcp"
-      - "9001:9001/udp"
+      - "127.0.0.1:9001:9001/tcp"
+      - "127.0.0.1:9001:9001/udp"
 
   party2:
+    configs:
+      - *coordinator-pin
+      - source: node2_cert
+        target: /app/ids/nodes/cert2.crt
+    secrets:
+      - node2_key
     <<: *party-common
     container_name: stoffel-party2
     hostname: party2
@@ -150,22 +367,39 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "2"
       STOFFEL_BIND_ADDR: 172.28.0.12:9002
-      STOFFEL_BOOTSTRAP_ADDR: 172.28.0.10:9000
       STOFFEL_ADVERTISE_IP: 172.28.0.12
       STOFFEL_COORD_ADDR: 172.28.0.5:31415
-      STOFFEL_TIMESTAMP: "0"
+      STOFFEL_COORD_CERT: /app/ids/server_cert.crt
+      # The invocation this container joins. The coordinator keys every RPC on
+      # it, so it must match the coordinator service's --execution-id and be
+      # the same for every party and client of one run.
+      STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}"
       STOFFEL_RPC_ADDR: 172.28.0.12:16182
       STOFFEL_LOCAL_STORE: /app/local-store/party-2.redb
+      # Monotone session epoch (blocker B5,
+      # docs/design/bootnode-elimination.md). On the same named volume as the
+      # local store, so the `docker compose down`/`up` cycle preserves it: an
+      # epoch store that resets to 0 makes the next run reuse the previous
+      # run's MPC session namespace. One directory per party, never shared.
+      STOFFEL_EPOCH_STORE: /app/local-store/epochs-party-2
+      # Mesh seeds: every other party. See STOFFEL_PEERS in the shared block.
+      STOFFEL_PEERS: ${STOFFEL_PEERS-172.28.0.10:9000,172.28.0.11:9001,172.28.0.13:9003,172.28.0.14:9004}
       STOFFEL_CERT: /app/ids/nodes/cert2.crt
-      STOFFEL_KEY: /app/ids/nodes/key2.der
+      STOFFEL_KEY: /run/secrets/node2_key
     networks:
       stoffel-net:
         ipv4_address: 172.28.0.12
     ports:
-      - "9002:9002/tcp"
-      - "9002:9002/udp"
+      - "127.0.0.1:9002:9002/tcp"
+      - "127.0.0.1:9002:9002/udp"
 
   party3:
+    configs:
+      - *coordinator-pin
+      - source: node3_cert
+        target: /app/ids/nodes/cert3.crt
+    secrets:
+      - node3_key
     <<: *party-common
     container_name: stoffel-party3
     hostname: party3
@@ -179,22 +413,39 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "3"
       STOFFEL_BIND_ADDR: 172.28.0.13:9003
-      STOFFEL_BOOTSTRAP_ADDR: 172.28.0.10:9000
       STOFFEL_ADVERTISE_IP: 172.28.0.13
       STOFFEL_COORD_ADDR: 172.28.0.5:31415
-      STOFFEL_TIMESTAMP: "0"
+      STOFFEL_COORD_CERT: /app/ids/server_cert.crt
+      # The invocation this container joins. The coordinator keys every RPC on
+      # it, so it must match the coordinator service's --execution-id and be
+      # the same for every party and client of one run.
+      STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}"
       STOFFEL_RPC_ADDR: 172.28.0.13:16183
       STOFFEL_LOCAL_STORE: /app/local-store/party-3.redb
+      # Monotone session epoch (blocker B5,
+      # docs/design/bootnode-elimination.md). On the same named volume as the
+      # local store, so the `docker compose down`/`up` cycle preserves it: an
+      # epoch store that resets to 0 makes the next run reuse the previous
+      # run's MPC session namespace. One directory per party, never shared.
+      STOFFEL_EPOCH_STORE: /app/local-store/epochs-party-3
+      # Mesh seeds: every other party. See STOFFEL_PEERS in the shared block.
+      STOFFEL_PEERS: ${STOFFEL_PEERS-172.28.0.10:9000,172.28.0.11:9001,172.28.0.12:9002,172.28.0.14:9004}
       STOFFEL_CERT: /app/ids/nodes/cert3.crt
-      STOFFEL_KEY: /app/ids/nodes/key3.der
+      STOFFEL_KEY: /run/secrets/node3_key
     networks:
       stoffel-net:
         ipv4_address: 172.28.0.13
     ports:
-      - "9003:9003/tcp"
-      - "9003:9003/udp"
+      - "127.0.0.1:9003:9003/tcp"
+      - "127.0.0.1:9003:9003/udp"
 
   party4:
+    configs:
+      - *coordinator-pin
+      - source: node4_cert
+        target: /app/ids/nodes/cert4.crt
+    secrets:
+      - node4_key
     <<: *party-common
     container_name: stoffel-party4
     hostname: party4
@@ -208,20 +459,89 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "4"
       STOFFEL_BIND_ADDR: 172.28.0.14:9004
-      STOFFEL_BOOTSTRAP_ADDR: 172.28.0.10:9000
       STOFFEL_ADVERTISE_IP: 172.28.0.14
       STOFFEL_COORD_ADDR: 172.28.0.5:31415
-      STOFFEL_TIMESTAMP: "0"
+      STOFFEL_COORD_CERT: /app/ids/server_cert.crt
+      # The invocation this container joins. The coordinator keys every RPC on
+      # it, so it must match the coordinator service's --execution-id and be
+      # the same for every party and client of one run.
+      STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}"
       STOFFEL_RPC_ADDR: 172.28.0.14:16184
       STOFFEL_LOCAL_STORE: /app/local-store/party-4.redb
+      # Monotone session epoch (blocker B5,
+      # docs/design/bootnode-elimination.md). On the same named volume as the
+      # local store, so the `docker compose down`/`up` cycle preserves it: an
+      # epoch store that resets to 0 makes the next run reuse the previous
+      # run's MPC session namespace. One directory per party, never shared.
+      STOFFEL_EPOCH_STORE: /app/local-store/epochs-party-4
+      # Mesh seeds: every other party. See STOFFEL_PEERS in the shared block.
+      STOFFEL_PEERS: ${STOFFEL_PEERS-172.28.0.10:9000,172.28.0.11:9001,172.28.0.12:9002,172.28.0.13:9003}
       STOFFEL_CERT: /app/ids/nodes/cert4.crt
-      STOFFEL_KEY: /app/ids/nodes/key4.der
+      STOFFEL_KEY: /run/secrets/node4_key
     networks:
       stoffel-net:
         ipv4_address: 172.28.0.14
     ports:
-      - "9004:9004/tcp"
-      - "9004:9004/udp"
+      - "127.0.0.1:9004:9004/tcp"
+      - "127.0.0.1:9004:9004/udp"
+
+  # Client 0. Started only with `--profile clients` (see the header). Its
+  # certificate is mounted here and nowhere else: no party is told it, and the
+  # coordinator reads it only when STOFFEL_CLIENT_CERTS pre-registers it.
+  client0:
+    profiles: [clients]
+    configs:
+      - *coordinator-pin
+      - source: client0_cert
+        target: /app/ids/clients/cert0.crt
+    secrets:
+      - client0_key
+    <<: *client-common
+    container_name: stoffel-client0
+    hostname: client0
+    environment:
+      <<: *client-env
+      STOFFEL_INPUTS: ${STOFFEL_CLIENT0_INPUT-3}
+      STOFFEL_CLIENT_SLOT: ${STOFFEL_CLIENT0_SLOT-}
+      STOFFEL_CERT: /app/ids/clients/cert0.crt
+      STOFFEL_KEY: /run/secrets/client0_key
+    networks:
+      stoffel-net:
+        ipv4_address: 172.28.0.100
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      party0:
+        condition: service_healthy
+
+  # Client 1. Started only with `--profile clients` (see the header). Its
+  # certificate is mounted here and nowhere else: no party is told it, and the
+  # coordinator reads it only when STOFFEL_CLIENT_CERTS pre-registers it.
+  client1:
+    profiles: [clients]
+    configs:
+      - *coordinator-pin
+      - source: client1_cert
+        target: /app/ids/clients/cert1.crt
+    secrets:
+      - client1_key
+    <<: *client-common
+    container_name: stoffel-client1
+    hostname: client1
+    environment:
+      <<: *client-env
+      STOFFEL_INPUTS: ${STOFFEL_CLIENT1_INPUT-4}
+      STOFFEL_CLIENT_SLOT: ${STOFFEL_CLIENT1_SLOT-}
+      STOFFEL_CERT: /app/ids/clients/cert1.crt
+      STOFFEL_KEY: /run/secrets/client1_key
+    networks:
+      stoffel-net:
+        ipv4_address: 172.28.0.101
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      party0:
+        condition: service_healthy
 
 networks:
   stoffel-net:
@@ -232,4 +552,41 @@ networks:
           gateway: 172.28.0.1
 
 volumes:
+  stoffel-programs:
   stoffel-local-store:
+
+configs:
+  coordinator_cert:
+    file: ./ids/server_cert.crt
+  node0_cert:
+    file: ./ids/nodes/cert0.crt
+  node1_cert:
+    file: ./ids/nodes/cert1.crt
+  node2_cert:
+    file: ./ids/nodes/cert2.crt
+  node3_cert:
+    file: ./ids/nodes/cert3.crt
+  node4_cert:
+    file: ./ids/nodes/cert4.crt
+  client0_cert:
+    file: ./ids/clients/cert0.crt
+  client1_cert:
+    file: ./ids/clients/cert1.crt
+
+secrets:
+  client0_key:
+    file: ./ids/clients/key0.der
+  client1_key:
+    file: ./ids/clients/key1.der
+  coordinator_key:
+    file: ./ids/server_key.der
+  node0_key:
+    file: ./ids/nodes/key0.der
+  node1_key:
+    file: ./ids/nodes/key1.der
+  node2_key:
+    file: ./ids/nodes/key2.der
+  node3_key:
+    file: ./ids/nodes/key3.der
+  node4_key:
+    file: ./ids/nodes/key4.der

@@ -638,7 +638,9 @@ async fn test_avss_full_mesh_concurrent_startup_survives_duplicate_dials() {
 
         for j in 0..n {
             if i != j {
-                server.add_peer(derived_ids[j], addresses[j]);
+                server
+                    .add_peer(derived_ids[j], addresses[j])
+                    .expect("peers are added before start()");
             }
         }
 

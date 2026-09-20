@@ -5,14 +5,16 @@ pub mod avss_server;
 pub(crate) mod broadcast;
 pub mod client_store;
 pub mod curve;
-pub mod discovery;
 pub(crate) mod group_interpolation;
 pub mod hb_server;
+/// Session formation: the roster-pinned mesh that replaced the bootnode.
+///
+/// See `docs/design/bootnode-elimination.md`.
+pub mod mesh;
 pub mod mpc;
 pub mod mpc_runner;
 pub mod open_registry;
 pub use open_registry::{InstanceRegistry, OpenMessageRouter, UNKNOWN_SENDER_ID};
-pub mod p2p;
 pub mod program_sync;
 pub mod reservation;
 pub(crate) mod reveal_batcher;
@@ -122,11 +124,21 @@ pub fn block_on_current<T>(
     try_block_on_current(fut).map_err(String::from)
 }
 
-// Re-export key components
-pub use p2p::{
-    NetworkManager, PeerConnection, QuicMessage, QuicNetworkConfig, QuicNetworkManager, QuicNode,
-    QuicPeerConnection,
-};
+// Stage 10 of `docs/design/bootnode-elimination.md` deleted `net::p2p`, the
+// legacy in-VM QUIC stack, and with it this module's `NetworkManager`,
+// `PeerConnection`, `QuicMessage`, `QuicNetworkConfig`, `QuicNetworkManager`,
+// `QuicNode` and `QuicPeerConnection` re-exports.
+//
+// Those names are spelled identically to `stoffelnet::transports::quic`'s, so
+// the re-export shadowed the real transport for anyone importing from
+// `stoffel_vm::net` — and the stack behind it shipped a plaintext
+// `ROLE:SERVER:<id>` line handshake, a client verifier that accepted any
+// certificate, unframed 64 KiB reads and no allowlist. Its last non-test
+// consumer died in Stage 8; keeping it exported was a live downgrade path.
+//
+// Use `stoffelnet::transports::quic` directly. `crates/stoffel-vm` is a
+// published crate, so this is a semver break, taken in the same release train
+// as the SDK's.
 
 // Re-export backend selection
 pub use backend::{MpcBackendError, MpcBackendKind, MpcBackendResult};
@@ -156,23 +168,23 @@ pub use mpc_runner::{
 };
 // Re-export AVSS QUIC server types
 pub use avss_server::{
-    AvssPublicKeyEnvelopeError, AvssQuicConfig, AvssQuicServer, Bls12381AvssServer,
-    Bn254AvssServer, Curve25519AvssServer, Ed25519AvssServer, P256AvssServer, Secp256k1AvssServer,
+    AvssPublicKeyEnvelopeError, AvssQuicConfig, AvssQuicServer, AvssQuicServerError,
+    Bls12381AvssServer, Bn254AvssServer, Curve25519AvssServer, Ed25519AvssServer, P256AvssServer,
+    Secp256k1AvssServer,
 };
-// Re-export discovery helpers
-pub use discovery::{
-    bootstrap_with_bootnode, register_and_wait_for_session, run_bootnode, run_bootnode_with_config,
-    wait_until_min_parties, DiscoveryMessage, SessionRegistrationConfig,
-};
-// Re-export program sync + session helpers
-pub use program_sync::{
-    agree_and_sync_program, program_id_from_bytes, ProgramSyncError, ProgramSyncMessage,
-    ProgramSyncResult,
-};
-pub use session::{
-    agree_session_with_bootnode, derive_instance_id, SessionError, SessionInfo, SessionMessage,
-    SessionResult, CONTROL_STREAM_ID, PROGRAM_STREAM_ID,
-};
+// Re-export program identity + session helpers.
+//
+// Stage 8 of `docs/design/bootnode-elimination.md` removed the `discovery`
+// module and, with it, this block's `bootstrap_with_bootnode`,
+// `register_and_wait_for_session`, `run_bootnode`, `run_bootnode_with_config`,
+// `wait_until_min_parties`, `DiscoveryMessage` and `SessionRegistrationConfig`
+// re-exports, plus `agree_and_sync_program` / `ProgramSyncMessage` and the
+// `agree_session_with_bootnode` / `SessionMessage` / `CONTROL_STREAM_ID` /
+// `PROGRAM_STREAM_ID` session surface. `crates/stoffel-vm` is a published crate,
+// so this is a semver break, taken in the same release train as the SDK's.
+// Session formation is `net::mesh`.
+pub use program_sync::{program_id_from_bytes, ProgramSyncError, ProgramSyncResult};
+pub use session::{derive_instance_id, SessionExecutionId, INSTANCE_ID_CONTEXT};
 
 #[cfg(test)]
 mod tests {

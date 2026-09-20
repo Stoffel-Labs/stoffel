@@ -103,16 +103,24 @@ assert_eq!(result, vec![Value::I64(100)]);
   reconstruction requirements: HoneyBadger uses `2 * t + 1`, AVSS uses
   `t + 1`. This is separate from Byzantine party-count validation
   (`n >= 4 * t + 1`).
-- `StoffelClient::connect` opens real QUIC client connections through
-  `stoffel-networking`. For programs with `ClientStore` metadata,
-  `runtime.offchain_client_config(slot)` derives the typed client IO settings
-  from the compiled program and MPC runtime; callers then provide coordinator
-  address, node RPC addresses, timestamp, and client identity material before
-  calling `client.run_typed(...)`, `client.submit_typed(...)`, `client.run(...)`,
-  or `client.submit(...)`. Server launch for those programs uses
-  `ServerBuilder::offchain_coordinator(...)` to pass the
-  coordinator address, node RPC bind address, party identity files, timestamp,
-  and expected client certificates through to `stoffel-run`.
+- A client reaches an execution only through the coordinator
+  (`docs/design/bootnode-elimination.md` §9.E): it pins the coordinator's
+  certificate, associates with the execution, and submits and receives within
+  the slot, input range and output rights its admission names. Its identity
+  need not be known to anyone beforehand, and it never dials the node mesh.
+  For programs with `ClientStore` metadata,
+  `runtime.offchain_client_config(slot)` derives the backend, the slot to ask
+  for and the typed client IO; callers then provide the coordinator address and
+  certificate, the execution id, node RPC addresses and client identity
+  material (optionally an invitation, `expected_program_hash` and
+  `expected_roster_digest`) before calling `client.run_typed(...)`,
+  `client.submit_typed(...)`, `client.run(...)`, or `client.submit(...)`.
+  `n` and `t` are the coordinator's node roster: a roster the client's backend
+  cannot reconstruct at is refused as `Error::Unsupported` before associating.
+  Server launch for those programs uses `ServerBuilder::offchain_coordinator(...)`
+  to pass the coordinator address and certificate, node RPC bind address and
+  party identity files through to `stoffel-run`; no client identity reaches a
+  server.
 - AVSS protocol operations are owned by `stoffel-vm` and `mpc-protocols`.
   The SDK exposes the intended API boundary but does not implement an in-memory
   AVSS substitute. Local BLS12-381 AVSS programs delegate through the real
@@ -273,10 +281,7 @@ let deployment = NetworkDeployment::builder([
 let server = StoffelServer::builder(0)
     .network_deployment(&deployment)
     .build()?;
-let client = StoffelClient::builder()
-    .network_deployment(&deployment)
-    .build()?;
-# let _ = (server, client);
+# let _ = server;
 # Ok::<(), stoffel::Error>(())
 ```
 
@@ -303,9 +308,7 @@ let runtime = Stoffel::compile(
 
 let server_builders = runtime.servers_for_deployment(&deployment);
 let party_zero = server_builders[0].clone().build()?;
-let client = runtime.client_for_deployment(&deployment).build()?;
 assert!(party_zero.program().is_some());
-assert!(client.has_program());
 # Ok::<(), stoffel::Error>(())
 ```
 
@@ -325,20 +328,16 @@ Built runtimes expose the same status payloads through
 `runtime.summary()?` for a serializable status payload that combines program,
 MPC, network, and local input configuration.
 
-`runtime.client()` reuses the compiled program metadata and, when network
-config is present, pre-populates the client builder with the configured server
-addresses in party-id order. That client path requires complete server
-addresses for every party; call `NetworkConfig::validate_server_addresses()`
-when validating deployment TOML up front.
+`runtime.client()` reuses the compiled program metadata only. Network configs
+and deployments describe servers: a client never dials the node mesh, and
+learns its nodes from the coordinator's roster.
 `runtime.server(party_id)` also uses the attached network config, and fails
 fast if `party_id` does not match the config's `[network].party_id`.
 For deployment plans with all party addresses available, use
-`runtime.servers_for_deployment(&deployment)` and
-`runtime.client_for_deployment(&deployment)` to attach the compiled program
+`runtime.servers_for_deployment(&deployment)` to attach the compiled program
 while reusing the validated server addresses in party-id order.
-`StoffelClient::builder().network_config_file(path)` and
-`StoffelServer::builder(party_id).network_config_file(path)` provide the same
-validation for direct participant construction. Direct server builders also
+`StoffelServer::builder(party_id).network_config_file(path)` provides the same
+validation for direct server construction. Direct server builders also
 validate that `expected_clients` covers the attached program's declared
 `ClientStore` slots.
 
@@ -353,13 +352,16 @@ metadata before consuming the builder with `build()`.
 Server builders accept either additive `.peer(...)` calls or batch
 `.peers([...])` / `.with_peers(&[...])` replacement, matching
 `NetworkConfigBuilder`.
-Client builders likewise accept additive `.server(...)` calls or replacement
-`.servers([...])` / `.with_servers(&[...])` configuration.
+Client builders take no server list: a client's node addresses are its
+`OffChainClientConfig::node_rpc_addresses`, each leg pinned to the
+coordinator's node roster.
 Built servers expose `server.summary()` for a serializable operational snapshot
 containing party identity, bind address, peer count, backend, preprocessing,
 state, readiness, health, and whether an AVSS engine has been configured.
 Built clients expose `client.summary()` for a serializable status snapshot
-containing client identity, server count, attached-program flag, and state.
+containing the roster size once connected, the attached-program flag, and
+state; `client.node_roster()` and `client.admission()` expose the served roster
+and the admission a run was given.
 
 Programs that use `ClientStore` expose their required local coordinator inputs
 through `Program` metadata:
@@ -513,23 +515,23 @@ and operator dashboards. `HealthStatus` also implements `Display`, producing
 compact strings such as `healthy` or `unhealthy: server has been shut down`.
 Lifecycle enums (`ClientState`, `ServerState`, and `ComputationStatus`) also
 implement serde and `FromStr` with readable snake-case values for status APIs.
-Clients can establish real QUIC transport connections, and programs with
-`ClientStore` metadata can submit typed inputs through the configured off-chain
-coordinator and node RPC endpoints:
+Clients connect through the pinned coordinator, and programs with
+`ClientStore` metadata submit typed inputs within their admission, fetching
+masks from the configured node RPC endpoints:
 
 ```rust
 # use std::time::Duration;
 # use stoffel::prelude::*;
-# async fn example() -> stoffel::Result<()> {
+# async fn example(config: OffChainClientConfig) -> stoffel::Result<()> {
 let client = StoffelClient::builder()
-    .server("127.0.0.1:19200")
+    .offchain_io(config)
     .connection_timeout(Duration::from_secs(10))
     .connect()
     .await?;
 
 assert_eq!(client.state(), ClientState::Connected);
 assert!(client.is_connected());
-assert!(client.transport_client_id().is_some());
+assert!(client.node_roster().is_some());
 # Ok(())
 # }
 ```

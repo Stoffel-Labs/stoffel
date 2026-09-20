@@ -5,8 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLES_DIR="${ROOT_DIR}/examples"
 WORKSPACE_DIR="$(cd "${ROOT_DIR}/../.." && pwd)"
 VM_DIR="${STOFFEL_VM_DIR:-${WORKSPACE_DIR}}"
-COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#feature/no-feature-gates-and-multi-type-awareness}}"
-NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://github.com/Stoffel-Labs/stoffel-networking.git#feature/robust-identity-based-on-cert}}"
+# TEMPORARY — docs/design/bootnode-elimination.md §9.F.5: the images build against the
+# unpublished stoffel-mpc-coordinator 0.3.0, so --docker-mpc needs the checkout
+# named explicitly (checked below, only when Docker is used).
+COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-}}"
 OUT_DIR="${STOFFEL_EXAMPLES_OUT:-${EXAMPLES_DIR}/dist}"
 RUN_DOCKER_MPC=0
 RUN_HOST_MPC=0
@@ -37,10 +39,9 @@ five local StoffelVM host processes.
 
 Environment:
   STOFFEL_VM_DIR          VM checkout path
-  STOFFEL_COORDINATOR_CONTEXT Coordinator Docker build context; defaults to the git branch
-  STOFFEL_NETWORK_CONTEXT     Networking Docker build context; defaults to the git branch
-  STOFFEL_COORDINATOR_DIR     Backward-compatible local coordinator context override
-  STOFFEL_NETWORK_DIR         Backward-compatible local networking context override
+  STOFFEL_COORDINATOR_CONTEXT Coordinator Docker build context: the stoffel-mpc-coordinator
+                              0.3.0 checkout; required by --docker-mpc until 0.3.0 is published
+  STOFFEL_COORDINATOR_DIR     Backward-compatible spelling of STOFFEL_COORDINATOR_CONTEXT
   STOFFEL_EXAMPLES_OUT   Output directory for .stflb files
   STOFFEL_PROGRAM_NAME   Compiled binary to run in docker compose
   STOFFEL_MPC_BACKEND    honeybadger or avss
@@ -126,12 +127,18 @@ run_vm local_storage.stflb --local-store "${LOCAL_STORE}/example.redb" --cert "$
 run_vm avss_share_auditor.stflb --local-store "${LOCAL_STORE}/auditor.redb" --cert "$LOCAL_CERT" --key "$LOCAL_KEY"
 
 if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
+  if [ -z "$COORDINATOR_CONTEXT" ]; then
+    echo "--docker-mpc: set STOFFEL_COORDINATOR_CONTEXT (or STOFFEL_COORDINATOR_DIR) to the" >&2
+    echo "stoffel-mpc-coordinator 0.3.0 checkout until it is published" >&2
+    echo "(docs/design/bootnode-elimination.md §9.F.5)." >&2
+    exit 2
+  fi
+
   docker_mpc_down() {
     (
       cd "$EXAMPLES_DIR"
       STOFFEL_VM_DIR="$VM_DIR" \
       STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
-      STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
       STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
         docker compose -f docker-compose.mpc.yml down --remove-orphans >/dev/null 2>&1 || true
     )
@@ -148,7 +155,6 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
       cd "$EXAMPLES_DIR"
       STOFFEL_VM_DIR="$VM_DIR" \
       STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
-      STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
       STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
       STOFFEL_PROGRAM_NAME="$binary_name" \
       STOFFEL_MPC_BACKEND="$backend" \
@@ -168,7 +174,6 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
     echo "Running coordinator compose example: ${binary_name}"
     STOFFEL_VM_DIR="$VM_DIR" \
     STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
-    STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
     STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
     STOFFEL_PROGRAM_NAME="$binary_name" \
       "$EXAMPLES_DIR/run_coordinator_compose.sh" "$@"
@@ -186,27 +191,21 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
   run_docker_mpc avss_certificate_keygen.stflb avss p-256
   run_docker_mpc avss_certificate_sign.stflb avss p-256
 
-  STOFFEL_CLIENT_INPUT_COUNT=1 \
-  STOFFEL_COORDINATOR_N_INPUTS=2 \
-  STOFFEL_OUTPUTS=1 \
-  STOFFEL_CLIENT1_OUTPUTS=0 \
+  STOFFEL_CLIENT_IO=1:1,1:0 \
   STOFFEL_CLIENT0_INPUT=100 \
   STOFFEL_CLIENT1_INPUT=20 \
-  STOFFEL_CLIENT0_INDEX=0 \
-  STOFFEL_CLIENT1_INDEX=1 \
+  STOFFEL_CLIENT0_SLOT=0 \
+  STOFFEL_CLIENT1_SLOT=1 \
   EXPECTED_OUTPUT=320 \
   WAIT_TIMEOUT_SECS=420 \
     run_coordinator_example mpc_client_private_score.stflb
 
-  STOFFEL_CLIENT_INPUT_COUNT=6 \
-  STOFFEL_COORDINATOR_N_INPUTS=12 \
-  STOFFEL_OUTPUTS=6 \
-  STOFFEL_CLIENT1_OUTPUTS=0 \
+  STOFFEL_CLIENT_IO=6:6,6:0 \
   STOFFEL_OUTPUT_FIXED_POINT_FRACTIONAL_BITS=16 \
   STOFFEL_CLIENT0_INPUT='65536,131072,196608,262144,327680,393216' \
   STOFFEL_CLIENT1_INPUT='458752,524288,589824,655360,720896,786432' \
-  STOFFEL_CLIENT0_INDEX=0 \
-  STOFFEL_CLIENT1_INDEX=6 \
+  STOFFEL_CLIENT0_SLOT=0 \
+  STOFFEL_CLIENT1_SLOT=1 \
   EXPECTED_OUTPUT='8, 10, 12, 14, 16, 18' \
   WAIT_TIMEOUT_SECS=420 \
     run_coordinator_example mpc_client_federated_average.stflb

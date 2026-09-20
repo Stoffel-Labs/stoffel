@@ -11,11 +11,13 @@ use crate::client::{ClientBuilder, OffChainClientConfigBuilder};
 use crate::config::{
     MpcConfig, MpcConfigSummary, NetworkConfig, NetworkConfigSummary, NetworkDeployment,
 };
+use crate::coordinator::ClientIndex;
 use crate::error::{Error, Result};
 use crate::program::{BytecodeSummary, Program, ProgramSummary};
 use crate::server::ServerBuilder;
 use crate::types::{ProgramArgs, Value};
 use crate::vm;
+use crate::LocalTopology;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeSummary {
@@ -41,6 +43,9 @@ pub struct StoffelRuntime {
     /// a fallback only when the program does not statically declare outputs for
     /// a client (otherwise the manifest count wins).
     client_output_counts: std::collections::HashMap<u64, u64>,
+    /// How a local MPC run forms its party network
+    /// (`docs/design/bootnode-elimination.md`).
+    local_topology: LocalTopology,
 }
 
 impl StoffelRuntime {
@@ -62,7 +67,13 @@ impl StoffelRuntime {
             client_inputs,
             expected_clients,
             client_output_counts: std::collections::HashMap::new(),
+            local_topology: LocalTopology::default(),
         }
+    }
+
+    /// Set the topology a local MPC run uses (CLI / `Stoffel` builder).
+    pub(crate) fn set_local_topology(&mut self, topology: LocalTopology) {
+        self.local_topology = topology;
     }
 
     /// Set developer-supplied per-client output counts (CLI / Stoffel.toml).
@@ -105,50 +116,41 @@ impl StoffelRuntime {
         self.program.bytecode_summary()
     }
 
+    /// A client builder carrying this runtime's program. A client reaches an
+    /// execution through the coordinator only: configure it with
+    /// [`ClientBuilder::offchain_io`], starting from
+    /// [`Self::offchain_client_config`].
     pub fn client(&self) -> ClientBuilder {
-        let builder = ClientBuilder::new().with_program(self.program.clone());
-        match &self.network_config {
-            Some(config) => match config.server_addresses() {
-                Ok(addresses) => builder.servers(addresses),
-                Err(error) => builder.configuration_error(error.to_string()),
-            },
-            None => builder,
-        }
-    }
-
-    /// Create a client builder with this runtime's program and all deployment servers.
-    pub fn client_for_deployment(&self, deployment: &NetworkDeployment) -> ClientBuilder {
-        ClientBuilder::new()
-            .with_program(self.program.clone())
-            .network_deployment(deployment)
+        ClientBuilder::new().with_program(self.program.clone())
     }
 
     /// Create an off-chain client IO config builder from this runtime's typed program metadata.
     ///
-    /// The runtime supplies the MPC backend, topology, and output count for
-    /// `client_slot`. Callers still provide coordinator/node endpoints,
-    /// timestamp, and client identity explicitly.
+    /// The runtime supplies the MPC backend, the input and output types of
+    /// `client_slot`, and the slot itself as the one this client asks the
+    /// coordinator for. It supplies no topology and no input window: `n` and
+    /// `t` are the coordinator's node roster, and the coordinator assigns each
+    /// client's input range when it admits it
+    /// (`docs/design/bootnode-elimination.md` §9.E.2). Callers still provide
+    /// coordinator/node endpoints, the coordinator certificate and the client
+    /// identity explicitly.
     pub fn offchain_client_config(&self, client_slot: u64) -> Result<OffChainClientConfigBuilder> {
         let client = self.program.client(client_slot).ok_or_else(|| {
             Error::Configuration(format!(
                 "program does not declare ClientStore metadata for client slot {client_slot}"
             ))
         })?;
-        let input_start_index = self
-            .program
-            .clients()
-            .take_while(|schema| schema.client_slot() != client_slot)
-            .map(|schema| schema.input_count() as u64)
-            .sum();
+        let requested_slot = u32::try_from(client_slot).map(ClientIndex).map_err(|_| {
+            Error::Configuration(format!(
+                "client slot {client_slot} does not fit in a coordinator client index (u32)"
+            ))
+        })?;
         let mpc_config = self
             .mpc_config
             .as_ref()
             .ok_or_else(|| Error::Configuration("MPC configuration is required".to_owned()))?;
         Ok(OffChainClientConfigBuilder::default()
-            .client_slot(client_slot)
-            .input_start_index(input_start_index)
-            .parties(mpc_config.parties)
-            .threshold(mpc_config.threshold)
+            .client_slot(requested_slot)
             .backend(mpc_config.backend)
             .input_types(client.inputs().iter().copied())
             .output_types(client.outputs().iter().copied()))
@@ -223,6 +225,11 @@ impl StoffelRuntime {
 
     pub fn local_runner_binary_path(&self) -> Option<&Path> {
         self.local_runner_path.as_deref()
+    }
+
+    /// How a local MPC run forms its party network.
+    pub fn configured_local_topology(&self) -> LocalTopology {
+        self.local_topology
     }
 
     pub fn inputs(&self) -> &[(String, Value)] {
@@ -321,6 +328,16 @@ impl StoffelRuntime {
     /// Set the `stoffel-run` binary path used by local coordinator execution.
     pub fn local_runner_path(mut self, path: impl AsRef<Path>) -> Self {
         self.local_runner_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Choose how a local MPC run forms its party network.
+    ///
+    /// [`LocalTopology::RosterMesh`] is the only topology and the default;
+    /// `docs/design/bootnode-elimination.md` Stage 8 removed the leader/bootnode
+    /// one with the bootnode itself.
+    pub fn local_topology(mut self, topology: LocalTopology) -> Self {
+        self.local_topology = topology;
         self
     }
 

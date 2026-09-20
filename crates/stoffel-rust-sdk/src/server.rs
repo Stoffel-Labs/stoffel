@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use stoffel_mpc_coordinator_shared::{ExecutionId, RosterDigest};
 
 use crate::backend::avss::AvssEngine;
 use crate::config::{
@@ -78,6 +79,33 @@ impl FromStr for ServerState {
     }
 }
 
+/// How a spawned server finds the rest of its session.
+///
+/// `docs/design/bootnode-elimination.md`. Stage 7 added this type with two
+/// variants and deliberately left the default on the bootnode, because flipping
+/// it would have turned every existing SDK server into a build error — the hard
+/// break §8 of the design doc ruled out for this crate while the bootnode still
+/// existed. Stage 8 deleted the bootnode, so the variant goes and the required
+/// arguments change with the rest of the SDK's break: a mesh server needs
+/// [`ServerBuilder::peers`], [`ServerBuilder::offchain_coordinator`],
+/// [`ServerBuilder::identity_files`] and [`ServerBuilder::epoch_store`], all of
+/// which are values only the caller has.
+///
+/// One variant, kept as an enum rather than collapsed away. §9.E.2 renamed it
+/// from `RosterMesh`: the coordinator is the only roster authority (§8, §9 rule
+/// 1), so the variant names the only way a server learns who is in its
+/// session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ServerTopology {
+    /// A mesh pinned to the coordinator's node roster: the configured peer
+    /// addresses are seed hints, and the node roster the pinned coordinator
+    /// serves — fetched once at startup — is the membership.
+    #[default]
+    CoordinatorRosterMesh,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerBuilder {
     party_id: PartyId,
@@ -93,8 +121,11 @@ pub struct ServerBuilder {
     avss_engine: Option<AvssEngine>,
     verified_ordering: Option<VerifiedOrdering>,
     runner_path: Option<PathBuf>,
-    bootstrap_addr: Option<String>,
+    bootstrap_seed: Option<String>,
     entry: String,
+    identity: Option<ServerIdentity>,
+    topology: ServerTopology,
+    epoch_store: Option<PathBuf>,
     offchain_coordinator: Option<OffChainServerConfig>,
     config_error: Option<String>,
 }
@@ -115,8 +146,11 @@ impl ServerBuilder {
             avss_engine: None,
             verified_ordering: None,
             runner_path: None,
-            bootstrap_addr: None,
+            bootstrap_seed: None,
             entry: "main".to_owned(),
+            identity: None,
+            topology: ServerTopology::default(),
+            epoch_store: None,
             offchain_coordinator: None,
             config_error: None,
         }
@@ -232,17 +266,64 @@ impl ServerBuilder {
         self
     }
 
-    /// Configure this server as a follower of an existing bootnode.
+    /// Deprecated: there is no bootstrap process to follow.
     ///
-    /// Without a bootstrap address, party 0 starts as the leader/bootnode.
+    /// Stage 8 of `docs/design/bootnode-elimination.md` deleted the bootnode.
+    /// This is a shim rather than a removal so that existing callers keep
+    /// compiling: the address is carried through as one more `--peers` seed
+    /// hint, which is the only thing it can honestly mean now. A seed carries no
+    /// identity — membership is the coordinator's node roster — so an address
+    /// that is not a roster member simply fails its TLS handshake and costs
+    /// nothing.
+    ///
+    /// Prefer [`ServerBuilder::peers`] or [`ServerBuilder::peer`], which name
+    /// the party each address belongs to.
+    #[deprecated(
+        note = "the bootnode is gone; a bootstrap address is now just a peer seed hint. \
+                Use peers() or peer() instead."
+    )]
     pub fn bootstrap(mut self, address: impl Into<String>) -> Self {
-        self.bootstrap_addr = Some(address.into());
+        self.bootstrap_seed = Some(address.into());
         self
     }
 
     /// Configure the off-chain coordinator flags passed to `stoffel-run`.
     ///
     /// This is required when the attached program declares ClientStore IO.
+    /// The certificate and key this server presents on the mesh.
+    ///
+    /// The certificate must be one of the coordinator's node roster. The
+    /// [`OffChainServerConfig`] carries the same pair, and the two must agree.
+    pub fn identity_files(
+        mut self,
+        cert_path: impl AsRef<Path>,
+        key_path: impl AsRef<Path>,
+    ) -> Self {
+        self.identity = Some(ServerIdentity::new(cert_path, key_path));
+        self
+    }
+
+    /// Choose how this server forms its session.
+    ///
+    /// [`ServerTopology::CoordinatorRosterMesh`] is the only topology and the
+    /// default. The method stays so that a second way to be told the membership
+    /// would be a variant, not a second builder.
+    pub fn topology(mut self, topology: ServerTopology) -> Self {
+        self.topology = topology;
+        self
+    }
+
+    /// Where this node keeps its monotone session epoch (`--epoch-store`).
+    ///
+    /// Only read on the mesh path, where it is what makes `instance_id` fresh
+    /// across runs of one roster (blocker B5). One directory per node; two nodes
+    /// must not share one. Unset leaves `stoffel-run` to its own default
+    /// (`$STOFFEL_EPOCH_STORE`, then `$HOME/.stoffel/epochs`).
+    pub fn epoch_store(mut self, path: impl AsRef<Path>) -> Self {
+        self.epoch_store = Some(path.as_ref().to_path_buf());
+        self
+    }
+
     pub fn offchain_coordinator(mut self, config: OffChainServerConfig) -> Self {
         self.offchain_coordinator = Some(config);
         self
@@ -312,12 +393,27 @@ impl ServerBuilder {
         &self.entry
     }
 
+    /// Deprecated: the address configured through the [`ServerBuilder::bootstrap`]
+    /// shim, which is now an extra `--peers` seed hint.
+    #[deprecated(note = "the bootnode is gone; read the seed addresses with peers() instead.")]
     pub fn configured_bootstrap(&self) -> Option<&str> {
-        self.bootstrap_addr.as_deref()
+        self.bootstrap_seed.as_deref()
     }
 
     pub fn configured_offchain_coordinator(&self) -> Option<&OffChainServerConfig> {
         self.offchain_coordinator.as_ref()
+    }
+
+    pub fn configured_identity(&self) -> Option<&ServerIdentity> {
+        self.identity.as_ref()
+    }
+
+    pub fn configured_topology(&self) -> ServerTopology {
+        self.topology
+    }
+
+    pub fn configured_epoch_store(&self) -> Option<&Path> {
+        self.epoch_store.as_deref()
     }
 
     pub fn network_config(mut self, config: &NetworkConfig) -> Self {
@@ -452,7 +548,18 @@ impl ServerBuilder {
             program.validate_expected_clients(self.expected_clients)?;
         }
         if let Some(config) = &self.offchain_coordinator {
-            config.validate(self.expected_clients)?;
+            config.validate()?;
+        }
+        if let Some(identity) = &self.identity {
+            identity.validate()?;
+            if let Some(config) = &self.offchain_coordinator {
+                if identity.cert_path != config.cert_path || identity.key_path != config.key_path {
+                    return Err(Error::Configuration(
+                        "server identity files must match the off-chain coordinator identity files"
+                            .to_owned(),
+                    ));
+                }
+            }
         }
         if let Some(engine) = &self.avss_engine {
             match self.backend {
@@ -488,8 +595,11 @@ impl ServerBuilder {
             state: Arc::new(AtomicU8::new(ServerState::Created.as_u8())),
             verified_ordering: self.verified_ordering,
             runner_path: self.runner_path,
-            bootstrap_addr: self.bootstrap_addr,
+            bootstrap_seed: self.bootstrap_seed,
             entry: self.entry,
+            identity: self.identity,
+            topology: self.topology,
+            epoch_store: self.epoch_store,
             offchain_coordinator: self.offchain_coordinator,
             process: Arc::new(Mutex::new(None)),
             metrics,
@@ -497,14 +607,58 @@ impl ServerBuilder {
     }
 }
 
+/// The transport identity a spawned server presents, independent of whether it
+/// talks to an off-chain coordinator.
+///
+/// Stage 3 of `docs/design/bootnode-elimination.md` makes certificates — not a
+/// shared bearer token — the definition of membership, and §7 flags this type's
+/// absence: the SDK used to pass `--cert`/`--key` only from
+/// [`OffChainServerConfig`], so an SDK-spawned server with no coordinator had
+/// no certificate and could never join a roster-pinned mesh. Configure it with
+/// [`ServerBuilder::identity_files`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerIdentity {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+}
+
+impl ServerIdentity {
+    pub fn new(cert_path: impl AsRef<Path>, key_path: impl AsRef<Path>) -> Self {
+        Self {
+            cert_path: cert_path.as_ref().to_path_buf(),
+            key_path: key_path.as_ref().to_path_buf(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_existing_file("server certificate", &self.cert_path)?;
+        validate_existing_file("server private key", &self.key_path)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OffChainServerConfig {
     pub coordinator_address: String,
+    /// The coordinator's DER X.509 certificate, emitted as `--coord-cert`. The
+    /// party pins its key on every coordinator connection
+    /// (`docs/design/bootnode-elimination.md` §9.A).
+    pub coordinator_cert_path: PathBuf,
     pub rpc_bind_address: String,
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
-    pub timestamp: u64,
-    pub expected_client_certs: Vec<PathBuf>,
+    /// Which program invocation this party serves.
+    ///
+    /// Coordinator `0.2.0` keys rounds, reserved indices, masked inputs and
+    /// output shares on this, and `0.1.0`'s `reset_coord` teardown is gone: a
+    /// fresh id is what makes a run fresh. Every party and client of one
+    /// invocation must carry the same value.
+    pub execution_id: ExecutionId,
+    /// The node roster digest this party refuses any other than, emitted as
+    /// `--expect-roster-digest` (`docs/design/bootnode-elimination.md` §9.D.2).
+    /// Carries no certificate: it can only refuse what the coordinator serves.
+    #[serde(default)]
+    pub expected_roster_digest: Option<RosterDigest>,
 }
 
 impl OffChainServerConfig {
@@ -512,25 +666,28 @@ impl OffChainServerConfig {
         OffChainServerConfigBuilder::default()
     }
 
-    pub fn validate(&self, expected_clients: usize) -> Result<()> {
+    /// Checks this party's own coordinator configuration.
+    ///
+    /// It names no client: which clients take part is the coordinator's
+    /// per-execution admission, and a coordinated party refuses every flag that
+    /// would give it a client certificate (`docs/design/bootnode-elimination.md`
+    /// §9, decision 3; §9.E.2).
+    pub fn validate(&self) -> Result<()> {
         validate_socket_address("off-chain coordinator address", &self.coordinator_address)?;
         validate_socket_address("off-chain node RPC bind address", &self.rpc_bind_address)?;
-        if self.timestamp == 0 {
+        if self.execution_id.is_zero() {
             return Err(Error::Configuration(
-                "off-chain coordinator timestamp must be greater than zero".to_owned(),
+                "off-chain coordinator execution ID must not be all zeros; the coordinator \
+                 reserves that value and rejects it"
+                    .to_owned(),
             ));
         }
         validate_existing_file("off-chain server certificate", &self.cert_path)?;
         validate_existing_file("off-chain server private key", &self.key_path)?;
-        for path in &self.expected_client_certs {
-            validate_existing_file("expected off-chain client certificate", path)?;
-        }
-        if expected_clients > 0 && self.expected_client_certs.len() != expected_clients {
-            return Err(Error::Configuration(format!(
-                "expected_clients is {expected_clients}, but {} expected client certificate(s) were configured",
-                self.expected_client_certs.len()
-            )));
-        }
+        validate_existing_file(
+            "off-chain coordinator certificate",
+            &self.coordinator_cert_path,
+        )?;
         Ok(())
     }
 }
@@ -538,16 +695,25 @@ impl OffChainServerConfig {
 #[derive(Debug, Clone, Default)]
 pub struct OffChainServerConfigBuilder {
     coordinator_address: Option<String>,
+    coordinator_cert_path: Option<PathBuf>,
     rpc_bind_address: Option<String>,
     cert_path: Option<PathBuf>,
     key_path: Option<PathBuf>,
-    timestamp: Option<u64>,
-    expected_client_certs: Vec<PathBuf>,
+    execution_id: Option<ExecutionId>,
+    execution_id_error: Option<String>,
+    expected_roster_digest: Option<RosterDigest>,
 }
 
 impl OffChainServerConfigBuilder {
     pub fn coordinator(mut self, address: impl Into<String>) -> Self {
         self.coordinator_address = Some(address.into());
+        self
+    }
+
+    /// The coordinator's DER X.509 certificate, which the party pins. Required,
+    /// and emitted as `--coord-cert`.
+    pub fn coordinator_cert(mut self, path: impl AsRef<Path>) -> Self {
+        self.coordinator_cert_path = Some(path.as_ref().to_path_buf());
         self
     }
 
@@ -566,29 +732,36 @@ impl OffChainServerConfigBuilder {
         self
     }
 
-    pub fn timestamp(mut self, timestamp: u64) -> Self {
-        self.timestamp = Some(timestamp);
+    /// The program invocation this party serves. Required, and emitted as
+    /// `--execution-id`.
+    pub fn execution_id(mut self, execution_id: ExecutionId) -> Self {
+        self.execution_id = Some(execution_id);
         self
     }
 
-    pub fn expected_client_cert(mut self, path: impl AsRef<Path>) -> Self {
-        self.expected_client_certs.push(path.as_ref().to_path_buf());
+    /// Convenience form of [`Self::execution_id`] taking the 64-character
+    /// hexadecimal spelling the `--execution-id` flag uses.
+    pub fn execution_id_hex(mut self, execution_id: &str) -> Self {
+        match ExecutionId::from_str(execution_id.trim()) {
+            Ok(parsed) => self.execution_id = Some(parsed),
+            Err(error) => {
+                self.execution_id_error = Some(format!("invalid off-chain execution ID: {error}"))
+            }
+        }
         self
     }
 
-    pub fn expected_client_certs<I, P>(mut self, paths: I) -> Self
-    where
-        I: IntoIterator<Item = P>,
-        P: AsRef<Path>,
-    {
-        self.expected_client_certs = paths
-            .into_iter()
-            .map(|path| path.as_ref().to_path_buf())
-            .collect();
+    /// Refuse a coordinator that serves any node roster but the one with this
+    /// digest. Optional; emitted as `--expect-roster-digest`.
+    pub fn expected_roster_digest(mut self, digest: RosterDigest) -> Self {
+        self.expected_roster_digest = Some(digest);
         self
     }
 
     pub fn build(self) -> Result<OffChainServerConfig> {
+        if let Some(error) = self.execution_id_error {
+            return Err(Error::Configuration(error));
+        }
         let config = OffChainServerConfig {
             coordinator_address: self.coordinator_address.ok_or_else(|| {
                 Error::Configuration("off-chain coordinator address is required".to_owned())
@@ -602,12 +775,23 @@ impl OffChainServerConfigBuilder {
             key_path: self.key_path.ok_or_else(|| {
                 Error::Configuration("off-chain server private key path is required".to_owned())
             })?,
-            timestamp: self.timestamp.ok_or_else(|| {
-                Error::Configuration("off-chain coordinator timestamp is required".to_owned())
+            execution_id: self.execution_id.ok_or_else(|| {
+                Error::Configuration(
+                    "off-chain execution ID is required; every party and client of one \
+                     invocation must carry the same --execution-id"
+                        .to_owned(),
+                )
             })?,
-            expected_client_certs: self.expected_client_certs,
+            expected_roster_digest: self.expected_roster_digest,
+            coordinator_cert_path: self.coordinator_cert_path.ok_or_else(|| {
+                Error::Configuration(
+                    "off-chain coordinator certificate path is required; the party pins the \
+                     coordinator's key with --coord-cert"
+                        .to_owned(),
+                )
+            })?,
         };
-        config.validate(config.expected_client_certs.len())?;
+        config.validate()?;
         Ok(config)
     }
 }
@@ -628,8 +812,11 @@ pub struct StoffelServer {
     state: Arc<AtomicU8>,
     verified_ordering: Option<VerifiedOrdering>,
     runner_path: Option<PathBuf>,
-    bootstrap_addr: Option<String>,
+    bootstrap_seed: Option<String>,
     entry: String,
+    identity: Option<ServerIdentity>,
+    topology: ServerTopology,
+    epoch_store: Option<PathBuf>,
     offchain_coordinator: Option<OffChainServerConfig>,
     process: Arc<Mutex<Option<ServerProcess>>>,
     metrics: ServerMetrics,
@@ -692,9 +879,45 @@ impl StoffelServer {
             .mpc_config
             .as_ref()
             .ok_or_else(|| Error::Configuration("MPC configuration is required".to_owned()))?;
-        if self.party_id != 0 && self.bootstrap_addr.is_none() {
+        // What a mesh member needs in order to be one. Stage 8 of
+        // `docs/design/bootnode-elimination.md` deleted the two guards that used
+        // to stand here — "non-leader server start requires a bootstrap address"
+        // and "only party 0 can start as leader without bootstrap" — because
+        // both described a topology that no longer exists. These replace them.
+        //
+        // Checked at `start` rather than at `build`: `build` is a
+        // configuration-capture step that plenty of callers use without ever
+        // spawning anything, while these three are what the spawned process
+        // cannot do without. Each names the builder method rather than letting
+        // the child exit 2 with a flag name.
+        if self.seed_addresses().is_empty() {
             return Err(Error::Configuration(
-                "non-leader server start requires a bootstrap address".to_owned(),
+                "a mesh server forms its session by dialing the other members, so it needs \
+                 peer addresses: configure them with peers() or network_config()"
+                    .to_owned(),
+            ));
+        }
+        let Some(offchain_coordinator) = &self.offchain_coordinator else {
+            return Err(Error::Configuration(
+                "a mesh server needs offchain_coordinator(): membership is the coordinator's \
+                 node roster, fetched once at startup, and a seed address is only a hint"
+                    .to_owned(),
+            ));
+        };
+        if self.epoch_store.is_none() {
+            // Blocker B5. Without a path, `epoch_store_path(None)` resolves to
+            // `$HOME/.stoffel/epochs`, which every co-located party shares, and
+            // the record inside is keyed by roster digest — so the parties of
+            // one roster share one counter. They all read `last`, all propose
+            // `last + 1`, all agree on it, and then `EpochStore::commit`
+            // re-reads `last` under its write transaction: the first party
+            // commits, and every other one fails `NotMonotone` and aborts the
+            // join. One directory per node, never shared.
+            return Err(Error::Configuration(
+                "a mesh server needs epoch_store(): a per-node directory, never shared, or \
+                 co-located parties race one counter and all but the first abort the join \
+                 with NotMonotone"
+                    .to_owned(),
             ));
         }
 
@@ -708,12 +931,17 @@ impl StoffelServer {
         program.save_bytecode(&program_path)?;
 
         let mut command = Command::new(runner_path);
+        // `n` and `t` come from the coordinator's node roster (§9.D.2), so the
+        // configured `parties` and `threshold` are emitted as refusals: a server
+        // configured for five parties at `t = 1` refuses to run against a
+        // coordinator whose roster is anything else, instead of silently
+        // joining it.
         command
             .arg(&program_path)
             .arg(&self.entry)
-            .arg("--n-parties")
+            .arg("--expect-n-parties")
             .arg(mpc_config.parties.to_string())
-            .arg("--threshold")
+            .arg("--expect-threshold")
             .arg(mpc_config.threshold.to_string())
             .arg("--bind")
             .arg(&self.bind_addr)
@@ -724,42 +952,58 @@ impl StoffelServer {
         if let Some(curve) = self.backend.curve() {
             command.arg("--mpc-curve").arg(curve.to_string());
         }
-        if let Some(config) = &self.offchain_coordinator {
-            config.validate(self.expected_clients)?;
+        // The transport identity: the coordinator's node roster names nodes by
+        // certificate, and every mesh connection is authenticated by one.
+        // `build()` has already checked the two sources agree when both exist.
+        let identity = self.effective_identity();
+        if let Some(identity) = &identity {
+            identity.validate()?;
+            command
+                .arg("--key")
+                .arg(&identity.key_path)
+                .arg("--cert")
+                .arg(&identity.cert_path);
+        }
+        {
+            let config = offchain_coordinator;
+            config.validate()?;
             command
                 .arg("--off-chain-coord")
                 .arg(&config.coordinator_address)
+                .arg("--coord-cert")
+                .arg(&config.coordinator_cert_path)
+                .arg("--execution-id")
+                .arg(config.execution_id.to_string())
                 .arg("--rpc-bind")
-                .arg(&config.rpc_bind_address)
-                .arg("--key")
-                .arg(&config.key_path)
-                .arg("--cert")
-                .arg(&config.cert_path)
-                .arg("--timestamp")
-                .arg(config.timestamp.to_string());
-            if !config.expected_client_certs.is_empty() {
-                command.arg("--expected-clients").arg(
-                    config
-                        .expected_client_certs
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                );
+                .arg(&config.rpc_bind_address);
+            if let Some(digest) = &config.expected_roster_digest {
+                command
+                    .arg("--expect-roster-digest")
+                    .arg(digest.to_string());
             }
+            // No `--roster`, `--expected-clients` or `--timestamp`:
+            // `stoffel-run` refuses each by name. Membership is the
+            // coordinator's node roster, and clients are admitted by the
+            // coordinator and reach this party's RPC listener, never its mesh
+            // transport.
         }
-        if let Some(bootstrap) = &self.bootstrap_addr {
-            command
-                .arg("--party-id")
-                .arg(self.party_id.to_string())
-                .arg("--bootstrap")
-                .arg(bootstrap);
-        } else {
-            command.arg("--leader");
-            if self.party_id != 0 {
-                return Err(Error::Configuration(
-                    "only party 0 can start as leader without bootstrap".to_owned(),
-                ));
+        match self.topology {
+            // `--peers` are seed addresses, the coordinator's node roster is the
+            // membership, and no process here is anybody's bootstrap. Nor is any
+            // party the coordinator's round driver: transitions are
+            // quorum-gated, so every party proposes and none is designated.
+            ServerTopology::CoordinatorRosterMesh => {
+                command
+                    .arg("--party-id")
+                    .arg(self.party_id.to_string())
+                    .arg("--peers")
+                    .arg(self.seed_addresses().join(","));
+                // Always present: `start` refuses without one, because the
+                // default path is shared between co-located parties and that is
+                // a failed join, not a slow one (blocker B5).
+                if let Some(epoch_store) = &self.epoch_store {
+                    command.arg("--epoch-store").arg(epoch_store);
+                }
             }
         }
 
@@ -919,12 +1163,54 @@ impl StoffelServer {
         self.runner_path.as_deref()
     }
 
+    /// Deprecated: the address configured through the [`ServerBuilder::bootstrap`]
+    /// shim, which is now an extra `--peers` seed hint.
+    #[deprecated(note = "the bootnode is gone; read the seed addresses with peers() instead.")]
     pub fn bootstrap_addr(&self) -> Option<&str> {
-        self.bootstrap_addr.as_deref()
+        self.bootstrap_seed.as_deref()
     }
 
     pub fn offchain_coordinator(&self) -> Option<&OffChainServerConfig> {
         self.offchain_coordinator.as_ref()
+    }
+
+    /// The identity configured with [`ServerBuilder::identity_files`], if any.
+    pub fn identity(&self) -> Option<&ServerIdentity> {
+        self.identity.as_ref()
+    }
+
+    /// Every address this server will offer the mesh as a seed hint.
+    ///
+    /// The configured peers, plus whatever the deprecated
+    /// [`ServerBuilder::bootstrap`] shim was given. A seed is a hint and nothing
+    /// more — membership is the coordinator's node roster — so the two collapse
+    /// into one list with no ordering significance.
+    fn seed_addresses(&self) -> Vec<String> {
+        self.peers
+            .iter()
+            .map(|(_party_id, address)| address.clone())
+            .chain(self.bootstrap_seed.clone())
+            .collect()
+    }
+
+    /// The certificate and key this server actually presents: the configured
+    /// identity, or the off-chain coordinator's pair when only that is set.
+    pub fn effective_identity(&self) -> Option<ServerIdentity> {
+        self.identity.clone().or_else(|| {
+            self.offchain_coordinator
+                .as_ref()
+                .map(|config| ServerIdentity::new(&config.cert_path, &config.key_path))
+        })
+    }
+
+    /// How this server forms its session.
+    pub fn topology(&self) -> ServerTopology {
+        self.topology
+    }
+
+    /// Where this server keeps its monotone session epoch, if configured.
+    pub fn epoch_store(&self) -> Option<&Path> {
+        self.epoch_store.as_deref()
     }
 
     pub fn entry(&self) -> &str {

@@ -21,6 +21,13 @@ pub use wire::{
     encode_batch_share_wire_message, encode_hb_open_exp_wire_message, encode_rbc_wire_message,
     encode_single_share_wire_message, UNKNOWN_SENDER_ID,
 };
+// The in-band tags this module owns on the shared framed stream. Public so that
+// `net::mesh::wire` can state blocker B7's disjointness invariant over the real
+// constants instead of over copies of their spellings.
+pub use wire::{
+    AVSS_EXP_WIRE_PREFIX, AVSS_G2_EXP_WIRE_PREFIX, HB_EXP_OPEN_WIRE_PREFIX,
+    OPEN_REGISTRY_WIRE_PREFIX,
+};
 
 #[cfg(test)]
 mod tests;

@@ -173,17 +173,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ark-curve25519"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d934c527bc397a2591e85dfabd3a705eaa5eed71be763c7e4b802d62ec41ae3"
-dependencies = [
- "ark-ec",
- "ark-ff",
- "ark-std",
-]
-
-[[package]]
 name = "ark-ec"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -202,18 +191,6 @@ dependencies = [
  "num-integer",
  "num-traits",
  "zeroize",
-]
-
-[[package]]
-name = "ark-ed25519"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f7bef34b937f049401e156e80efaefce8d30a896cd927b06f9b01cdb8d5de53"
-dependencies = [
- "ark-curve25519",
- "ark-ec",
- "ark-ff",
- "ark-std",
 ]
 
 [[package]]
@@ -272,28 +249,6 @@ dependencies = [
  "educe",
  "fnv",
  "hashbrown 0.15.5",
-]
-
-[[package]]
-name = "ark-secp256k1"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8bd211c48debd3037b48873a7aa22c3aba034e83388aa4124795c9f220b88c7"
-dependencies = [
- "ark-ec",
- "ark-ff",
- "ark-std",
-]
-
-[[package]]
-name = "ark-secp256r1"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cf8be5820de567729bfa73a410ddd07cec8ad102d9a4bf61fd6b2e60db264e8"
-dependencies = [
- "ark-ec",
- "ark-ff",
- "ark-std",
 ]
 
 [[package]]
@@ -3228,31 +3183,19 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "stoffel-coordinator-docker"
 version = "0.1.0"
 dependencies = [
- "ark-bls12-381",
- "ark-bn254",
- "ark-curve25519",
- "ark-ec",
- "ark-ed25519",
- "ark-ff",
- "ark-secp256k1",
- "ark-secp256r1",
- "async-trait",
  "clap",
  "hex",
- "jsonrpsee",
  "rustls",
  "stoffel-mpc-coordinator-off-chain",
  "stoffel-mpc-coordinator-shared",
- "stoffelcrypto",
+ "thiserror 2.0.18",
  "tokio",
- "x509-parser 0.18.1",
 ]
 
 [[package]]
 name = "stoffel-mpc-coordinator-off-chain"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1c7858f0e6da81da3f26edc1d078cd3d69f8578bbaae01cfa737c6f8bdd1eab"
+version = "0.3.0"
+source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#272e4933c4aee6e8f33da7d1c877cb30881133cb"
 dependencies = [
  "ark-bls12-381",
  "ark-ff",
@@ -3265,6 +3208,7 @@ dependencies = [
  "rand 0.9.4",
  "rcgen",
  "serde",
+ "serde_json",
  "stoffel-mpc-coordinator-shared",
  "tokio",
  "tracing",
@@ -3272,16 +3216,17 @@ dependencies = [
 
 [[package]]
 name = "stoffel-mpc-coordinator-shared"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b32fe903439fde4c12bbb662341edd8265815d6b4978b92131985ebd5efb71d"
+version = "0.3.0"
+source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#272e4933c4aee6e8f33da7d1c877cb30881133cb"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
  "ark-ff",
  "ark-serialize",
  "async-trait",
+ "blake3",
  "futures-util",
+ "hex",
  "hpke",
  "hyper",
  "hyper-util",

@@ -325,10 +325,11 @@ struct RunArgs {
     /// Print function/instruction metadata before executing.
     #[arg(long = "program-info", visible_aliases = ["inspect", "info"])]
     program_info: bool,
-    /// Network client slot to use with --network.
+    /// Client slot to ask the coordinator for with --network; the coordinator's
+    /// admission grants it or refuses.
     #[arg(long, value_parser = parse_u64_arg, allow_hyphen_values = true)]
     client_id: Option<u64>,
-    /// Timeout for connecting to network nodes, in milliseconds.
+    /// Timeout for the pinned coordinator connection with --network, in milliseconds.
     #[arg(
         long,
         default_value_t = 10_000,
@@ -339,6 +340,11 @@ struct RunArgs {
     /// Path to the stoffel-run helper binary. Only used with --local.
     #[arg(long)]
     runner: Option<PathBuf>,
+    /// Form the local MPC network as a roster-pinned mesh. This is the only
+    /// topology and the default; the flag is kept so existing invocations still
+    /// work.
+    #[arg(long, visible_alias = "local-mesh")]
+    mesh: bool,
     /// Timeout for local MPC execution, in seconds.
     #[arg(
         long,
@@ -444,6 +450,11 @@ struct DevArgs {
     /// Path to the stoffel-run helper binary. Only used with --local.
     #[arg(long)]
     runner: Option<PathBuf>,
+    /// Form the local MPC network as a roster-pinned mesh. This is the only
+    /// topology and the default; the flag is kept so existing invocations still
+    /// work.
+    #[arg(long, visible_alias = "local-mesh")]
+    mesh: bool,
     /// Override [mpc].parties from Stoffel.toml for each dev run.
     #[arg(long, value_parser = parse_positive_usize_arg, allow_hyphen_values = true)]
     parties: Option<usize>,
@@ -503,6 +514,11 @@ struct TestArgs {
     /// Path to the stoffel-run helper binary. Only used with --local.
     #[arg(long)]
     runner: Option<PathBuf>,
+    /// Form the local MPC network as a roster-pinned mesh. This is the only
+    /// topology and the default; the flag is kept so existing invocations still
+    /// work.
+    #[arg(long, visible_alias = "local-mesh")]
+    mesh: bool,
     /// Catch run-command input mistakes so we can explain the test/run split.
     #[arg(long = "input", hide = true, value_name = "NAME=VALUE")]
     inputs: Vec<InputArg>,
@@ -902,6 +918,7 @@ async fn run(args: RunArgs) -> Result<()> {
     if let Some(path) = args.runner {
         builder = builder.local_runner_path(path);
     }
+    builder = builder.local_topology(local_topology());
     let result = builder
         .execute_local_function_with_timeout(&args.entry, Duration::from_secs(args.timeout_secs))
         .await?;
@@ -957,53 +974,55 @@ async fn run_network(args: RunArgs, inputs: Vec<InputArg>) -> Result<()> {
         .map(|input| input.value.clone())
         .collect::<Vec<_>>();
 
-    match read_run_network_config(&config_path)? {
-        RunNetworkConfig::OffChain(config) => {
-            let client_id = client_id_from_u64(args.client_id.unwrap_or(config.client_slot))?;
-            let client = runtime
-                .client()
-                .client_id(client_id)
-                .offchain_io(config)
-                .build()
-                .map_err(|error| {
-                    anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
-                })?;
-            println!("Connected to off-chain MPC coordinator configuration");
-            let result = client.run_function(&args.entry, &inputs).await?;
-            print_values(&result);
-        }
-        RunNetworkConfig::Network(config) => {
-            let summary = config.summary().map_err(|error| {
-                anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
-            })?;
-            let client_id = client_id_from_u64(args.client_id.unwrap_or(0))?;
-            let client = runtime
-                .client()
-                .client_id(client_id)
-                .network_config(&config)
-                .connection_timeout(Duration::from_millis(args.connect_timeout_ms))
-                .connect()
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
-                })?;
-            let client_summary = client.summary();
-            println!(
-                "Connected to MPC network ({} servers, backend {}, threshold {})",
-                client_summary.server_count, summary.backend, summary.threshold
-            );
-            anyhow::bail!(
-                "network config establishes transport connectivity, but computation submission requires an off-chain client config with coordinator/node RPC and client identity"
-            );
-        }
+    let mut config = read_run_network_config(&config_path)?;
+    // `--client-id` is the slot this client asks the coordinator for
+    // (docs/design/bootnode-elimination.md §9.E.2); without it, the config's
+    // own `client_slot`, if any. With neither, the coordinator assigns one.
+    if let Some(client_id) = args.client_id {
+        let slot = u32::try_from(client_id).map_err(|_| {
+            anyhow::anyhow!(
+                "--client-id {client_id} does not fit in a coordinator client index (at most {})",
+                u32::MAX
+            )
+        })?;
+        config.client_slot = Some(ClientIndex(slot));
     }
+    let client = runtime
+        .client()
+        .offchain_io(config)
+        .connection_timeout(Duration::from_millis(args.connect_timeout_ms))
+        .connect()
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
+        })?;
+    println!(
+        "Connected to the off-chain MPC coordinator ({} nodes in its roster)",
+        client
+            .node_roster()
+            .map_or_else(|| "unknown".to_owned(), |roster| roster.n().to_string())
+    );
+    let result = client.run_function(&args.entry, &inputs).await?;
+    print_values(&result);
     Ok(())
 }
 
-fn client_id_from_u64(value: u64) -> Result<ClientId> {
-    value
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("client id {value} does not fit on this platform"))
+/// The local topology `stoffel run --local`, `stoffel dev` and
+/// `stoffel test --local` all run on.
+///
+/// Stage 7 of `docs/design/bootnode-elimination.md` flipped these three paths
+/// onto the roster-pinned mesh and Stage 8 removed the `--bootnode` opt-out with
+/// the bootnode itself, so the choice is a constant today. It stays a named
+/// function rather than an inlined literal because it is the one place all three
+/// call sites share.
+///
+/// The one topology's roster is the in-process coordinator's (§9.D, §9.F.4):
+/// `LocalCoordinatorRunner` mints the node certificates, serves them as the
+/// coordinator's node roster, which every party fetches once, and keeps the
+/// per-party epoch stores in its own temporary directory. Nothing has to be
+/// configured.
+fn local_topology() -> LocalTopology {
+    LocalTopology::RosterMesh
 }
 
 fn validate_run_args(args: &RunArgs) -> Result<()> {
@@ -1038,6 +1057,11 @@ fn validate_run_args(args: &RunArgs) -> Result<()> {
     if network_mode && args.runner.is_some() {
         anyhow::bail!(
             "--runner only applies to local simulation; remove --runner when using --network or --config"
+        );
+    }
+    if network_mode && args.mesh {
+        anyhow::bail!(
+            "--mesh only applies to local simulation; a network run forms its session from --config"
         );
     }
     if let Some(path) = args.runner.as_deref() {
@@ -1281,7 +1305,7 @@ fn prepare_dev_run(args: &DevArgs) -> Result<Stoffel> {
     if let Some(path) = &args.runner {
         builder = builder.local_runner_path(path);
     }
-    Ok(builder)
+    Ok(builder.local_topology(local_topology()))
 }
 
 fn dev_source_path(project: &Project, path: Option<&Path>) -> PathBuf {
@@ -1343,6 +1367,7 @@ async fn test(args: TestArgs) -> Result<()> {
             if let Some(path) = &args.runner {
                 runtime = runtime.local_runner_path(path);
             }
+            runtime = runtime.local_topology(local_topology());
             runtime.execute_local_function(entry).await
         } else {
             runtime.execute_clear_function(entry)
@@ -1382,6 +1407,11 @@ fn validate_test_args(args: &TestArgs) -> Result<()> {
     if args.runner.is_some() && !args.local {
         anyhow::bail!(
             "--runner only applies to local MPC tests. Add --local to use the runner, or remove --runner for the embedded no-network test runner."
+        );
+    }
+    if args.mesh && !args.local {
+        anyhow::bail!(
+            "--mesh only applies to local MPC tests. Add --local to run the tests over a roster-pinned mesh, or remove --mesh for the embedded no-network test runner."
         );
     }
     if args.local {
@@ -2118,35 +2148,35 @@ fn validate_disassemble_args(args: &BuildArgs) -> Result<()> {
     Ok(())
 }
 
-enum RunNetworkConfig {
-    OffChain(OffChainClientConfig),
-    Network(NetworkConfig),
-}
-
-fn read_run_network_config(path: &Path) -> Result<RunNetworkConfig> {
+/// Reads `stoffel run --network --config`: an off-chain client config, the only
+/// kind a client has. A node `NetworkConfig` is refused by name — clients no
+/// longer connect to the node mesh (§9.E.3).
+fn read_run_network_config(path: &Path) -> Result<OffChainClientConfig> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     if looks_like_project_config(&raw) {
         anyhow::bail!(
-            "--config expects an MPC network/off-chain client config, but {} looks like a Stoffel project config; pass the project path as PATH instead",
+            "--config expects an off-chain client config, but {} looks like a Stoffel project config; pass the project path as PATH instead",
             path.display()
         );
     }
-    if let Ok(config) = toml::from_str::<OffChainClientConfig>(&raw) {
-        config.validate().map_err(|error| {
-            anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
-        })?;
-        return Ok(RunNetworkConfig::OffChain(config));
+    match toml::from_str::<OffChainClientConfig>(&raw) {
+        Ok(config) => {
+            config.validate().map_err(|error| {
+                anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
+            })?;
+            Ok(config)
+        }
+        Err(_) if looks_like_node_network_config(&raw) => anyhow::bail!(
+            "network config {} describes node transport, and clients no longer connect to the node mesh (direct client mode was removed); pass an off-chain client config with the coordinator's address and certificate, the execution id, node RPC addresses and a client identity",
+            path.display()
+        ),
+        Err(error) => anyhow::bail!(
+            "failed to parse {} as an off-chain client config: {}",
+            path.display(),
+            clean_repeated_invalid_config_prefix(&error.to_string())
+        ),
     }
-    NetworkConfig::from_toml_str(&raw)
-        .map(RunNetworkConfig::Network)
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "failed to parse {} as off-chain or network config: {}",
-                path.display(),
-                clean_repeated_invalid_config_prefix(&error.to_string())
-            )
-        })
 }
 
 fn clean_repeated_invalid_config_prefix(error: &str) -> String {
@@ -2156,6 +2186,15 @@ fn clean_repeated_invalid_config_prefix(error: &str) -> String {
     } else {
         error.to_owned()
     }
+}
+
+/// A node `NetworkConfig` has a `[network]` section; an off-chain client config
+/// has none.
+fn looks_like_node_network_config(raw: &str) -> bool {
+    toml::from_str::<toml::Value>(raw)
+        .ok()
+        .and_then(|value| value.as_table().map(|table| table.contains_key("network")))
+        .unwrap_or(false)
 }
 
 fn looks_like_project_config(raw: &str) -> bool {
@@ -3244,6 +3283,67 @@ fn parse_hex_bytes(raw: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// All three local paths reach the runner on the roster-pinned mesh.
+    ///
+    /// `docs/design/bootnode-elimination.md` §7 flagged `crates/stoffel-cli/` as
+    /// a coverage gap — three surfaces riding a path Stage 8 would delete the
+    /// flags of. Stage 7 flipped them to the mesh and Stage 8 removed
+    /// `--bootnode`, so what is left to pin is that `--mesh` still parses
+    /// (existing invocations keep working) and that every local path actually
+    /// threads [`local_topology`] through rather than leaving the runner on
+    /// whatever its own default happens to be.
+    ///
+    /// Asserted here rather than in `tests/cli.rs` because this mapping is what
+    /// the three call sites share; the integration test next to it covers only
+    /// that `--mesh` exists and is refused on the network paths.
+    #[test]
+    fn every_local_path_runs_on_the_roster_mesh() {
+        assert_eq!(local_topology(), LocalTopology::RosterMesh);
+
+        // Every local surface, spelled the way an operator spells it, with and
+        // without the flag that used to select between two topologies.
+        let run = match Cli::parse_from(["stoffel", "run", "--local", "program.stflb"]).command {
+            Command::Run(args) => args,
+            other => panic!("expected `stoffel run` to parse as Run, got {other:?}"),
+        };
+        assert!(!run.mesh, "`stoffel run --local` meshes without being told");
+
+        let meshed = match Cli::parse_from(["stoffel", "run", "--local", "--mesh", "program.stflb"])
+            .command
+        {
+            Command::Run(args) => args,
+            other => panic!("expected `stoffel run` to parse as Run, got {other:?}"),
+        };
+        assert!(
+            meshed.mesh,
+            "--mesh must still parse: it names what the default already does"
+        );
+
+        let dev = match Cli::parse_from(["stoffel", "dev"]).command {
+            Command::Dev(args) => args,
+            other => panic!("expected `stoffel dev` to parse as Dev, got {other:?}"),
+        };
+        assert!(!dev.mesh, "`stoffel dev` meshes without being told");
+
+        let test = match Cli::parse_from(["stoffel", "test", "--local"]).command {
+            Command::Test(args) => args,
+            other => panic!("expected `stoffel test` to parse as Test, got {other:?}"),
+        };
+        assert!(
+            !test.mesh,
+            "`stoffel test --local` meshes without being told"
+        );
+
+        // The bootnode opt-out is gone, not silently accepted: an invocation
+        // that still carries it fails to parse rather than running a topology
+        // the flag no longer selects.
+        assert!(
+            Cli::try_parse_from(["stoffel", "run", "--local", "--bootnode", "program.stflb"])
+                .is_err(),
+            "--bootnode was removed with the bootnode and must not parse"
+        );
+    }
 
     #[test]
     fn parse_value_accepts_bracketed_lists() {

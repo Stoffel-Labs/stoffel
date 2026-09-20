@@ -81,8 +81,9 @@ pub use config::{
 };
 pub use consensus::{ConsensusGate, NodePublicKey, VerifiedOrdering};
 pub use coordinator::{
-    Coordinator, OffChainCoordinator, OffChainCoordinatorClient, OffChainCoordinatorServer,
-    ShareBound,
+    ClientAdmission, ClientIndex, Coordinator, ExecutionId, NodeRoster, OffChainCoordinator,
+    OffChainCoordinatorClient, OffChainCoordinatorServer, OutputRights, RosterDigest, ShareBound,
+    SignedInvitation,
 };
 pub use error::{ConsensusError, CoordinatorError, Error, ErrorCategory, NetworkError, Result};
 pub use input_file::{load_client_inputs_file, load_named_inputs_file};
@@ -97,9 +98,15 @@ pub use program::{
 };
 pub use runtime::{LocalNetworkBuilder, RuntimeSummary, StoffelRuntime};
 pub use server::{
-    OffChainServerConfig, OffChainServerConfigBuilder, ServerBuilder, ServerState, ServerSummary,
-    StoffelServer,
+    OffChainServerConfig, OffChainServerConfigBuilder, ServerBuilder, ServerIdentity, ServerState,
+    ServerSummary, ServerTopology, StoffelServer,
 };
+/// How a local MPC run forms its party network.
+///
+/// Re-exported from the runner so that `local_topology` on this builder, on
+/// [`StoffelRuntime`], and on the runner itself are the same type rather than
+/// three spellings of one choice (`docs/design/bootnode-elimination.md`).
+pub use stoffel_vm_runner::LocalTopology;
 pub use stoffel_vm_types::compiled_binary::FunctionType;
 pub use stoffel_vm_types::core_types::ShareType;
 pub use types::{
@@ -177,6 +184,7 @@ pub struct Stoffel {
     client_inputs: Vec<(u64, Vec<Value>)>,
     expected_clients: Option<usize>,
     client_output_counts: std::collections::HashMap<u64, u64>,
+    local_topology: LocalTopology,
     compiler_options: CompilationOptions,
 }
 
@@ -425,6 +433,16 @@ impl Stoffel {
         self
     }
 
+    /// Choose how a local MPC run forms its party network.
+    ///
+    /// [`LocalTopology::RosterMesh`] is the only topology and the default;
+    /// `docs/design/bootnode-elimination.md` Stage 8 removed the leader/bootnode
+    /// one with the bootnode itself.
+    pub fn local_topology(mut self, topology: LocalTopology) -> Self {
+        self.local_topology = topology;
+        self
+    }
+
     /// Build a runtime from the configured program and MPC settings.
     pub fn build(self) -> Result<StoffelRuntime> {
         if let Some(error) = self.config_error {
@@ -502,6 +520,7 @@ impl Stoffel {
             self.expected_clients,
         );
         runtime.set_client_output_counts(self.client_output_counts);
+        runtime.set_local_topology(self.local_topology);
         Ok(runtime)
     }
 
@@ -680,6 +699,7 @@ impl Stoffel {
             client_inputs: Vec::new(),
             expected_clients: None,
             client_output_counts: std::collections::HashMap::new(),
+            local_topology: LocalTopology::default(),
             compiler_options: CompilationOptions::default(),
         }
     }

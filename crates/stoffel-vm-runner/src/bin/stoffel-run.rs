@@ -11,44 +11,57 @@ use std::process::exit;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use stoffel_mpc_coordinator_off_chain::node_rpc::{
-    NodeRPCClient as OffChainNodeRPCClient, NodeRPCServer as OffChainNodeRPCServer,
+use stoffel_mpc_coordinator_off_chain::node_rpc::NodeRPCServer as OffChainNodeRPCServer;
+use stoffel_mpc_coordinator_off_chain::{
+    CoordinatorLink, ExecutionSummary, OffChainCoordinatorClient,
 };
-use stoffel_mpc_coordinator_off_chain::OffChainCoordinatorClient;
-use stoffel_mpc_coordinator_shared::{Coordinator, NodeRPCError, Round};
+use stoffel_mpc_coordinator_shared::{
+    AssociationRequest, ClientAdmissionSet, ClientIndex, Coordinator, CoordinatorError,
+    ExecutionId, NodeRPCError, NodeRoster, OutputRights, PinError, RosterDigest, Round,
+    SignedInvitation, SpkiDer,
+};
 use stoffel_vm::core_vm::VirtualMachine;
 use stoffel_vm::net::curve::{field_from_i64, field_to_i64, SupportedMpcField};
 use stoffel_vm::net::hb_engine::HoneyBadgerMpcEngine;
-use stoffel_vm::net::mpc_engine::{DurableIdentityDigest, MpcEngine, MpcSessionTopology};
-use stoffel_vm::net::{
-    avss_protocol_instance_id, honeybadger_node_opts_with_truncation,
-    honeybadger_protocol_instance_id, honeybadger_protocol_timeout, spawn_receive_loops_split,
+use stoffel_vm::net::mesh::{
+    epoch_store_path, BarrierTag, DigestBarrier, DigestBarrierTag, EpochStore, JoinRequest,
+    MeshBarrier, MeshError, MeshJoin, MeshRouter, PexLimits, Roster, RosterError, SeedHints,
+    SessionJoin,
 };
+use stoffel_vm::net::mpc_engine::{DurableIdentityDigest, MpcEngine, MpcSessionTopology};
+use stoffel_vm::net::program_id_from_bytes;
+use stoffel_vm::net::SessionExecutionId;
 use stoffel_vm::net::{
-    program_id_from_bytes, register_and_wait_for_session, run_bootnode_with_config,
-    SessionRegistrationConfig,
+    honeybadger_node_opts_with_truncation, honeybadger_protocol_timeout, spawn_receive_loops_split,
 };
 use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 use stoffel_vm::runtime_hooks::{HookContext, HookEvent};
 use stoffel_vm::storage::preproc::LmdbPreprocStore;
 use stoffel_vm::storage::RedbLocalStorage;
+use stoffel_vm_runner::admissions::{
+    admission_agreement_digest, check_execution_summary, inputs_agreement_digest,
+    inputs_by_admission, outputs_by_admission, reservations_matching_admissions,
+    submissions_matching_admissions, MaskedInputMismatch, OutputRightsViolation,
+    ReservationMismatch, SummaryExpectations, SummaryMismatch,
+};
+use stoffel_vm_runner::coordinator_client::{
+    CoordinatorClientConfig, CoordinatorClientError, CoordinatorEndpoint,
+};
 use stoffel_vm_types::compiled_binary::{
     BinaryError, ClientIoManifest, CompiledBinary, MpcCurve, MPC_BACKEND_MANIFEST_FORMAT_VERSION,
     MPC_CURVE_MANIFEST_FORMAT_VERSION,
 };
 use stoffel_vm_types::core_types::{ShareType, TableRef, Value};
-use stoffelmpc_mpc::avss_mpc::{AvssMPCClient, AvssSessionId};
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::common::MPCProtocol;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use stoffelmpc_mpc::honeybadger::HoneyBadgerMPCNode;
 use stoffelmpc_mpc::honeybadger::SessionId as HbSessionId;
-use stoffelmpc_mpc::honeybadger::{HoneyBadgerMPCClient, HoneyBadgerMPCNode};
 use stoffelnet::network_utils::ClientId;
 use stoffelnet::network_utils::Network;
 use stoffelnet::transports::quic::{NetworkManager, QuicNetworkManager};
 use tokio::sync::mpsc;
-use x509_parser::prelude::*;
 type HbCoordinatorShare<F> = RobustShare<F>;
 
 fn manifest_client_input_types(
@@ -188,14 +201,849 @@ fn plan_preprocessing(
 }
 
 type HbOffChainCoordinator<F> = OffChainCoordinatorClient<F, HbCoordinatorShare<F>>;
-type HbOffChainNodeRpcClient<F> = OffChainNodeRPCClient<F, HbCoordinatorShare<F>>;
-type HbOffChainNodeRpcServer<F> = OffChainNodeRPCServer<F, HbCoordinatorShare<F>>;
 type AvssCoordinatorShare<F, G> = FeldmanShamirShare<F, G>;
 type AvssOffChainCoordinator<F, G> = OffChainCoordinatorClient<F, AvssCoordinatorShare<F, G>>;
-type AvssOffChainNodeRpcClient<F, G> = OffChainNodeRPCClient<F, AvssCoordinatorShare<F, G>>;
-type AvssOffChainNodeRpcServer<F, G> = OffChainNodeRPCServer<F, AvssCoordinatorShare<F, G>>;
+/// The reserved all-zero `ExecutionId`. Coordinator `0.2.0` rejects it on every
+/// path that takes one, which is exactly why it is what a coordinator-less run
+/// carries: reaching a coordinator RPC without an execution fails loudly.
+const UNUSED_EXECUTION_ID: ExecutionId = ExecutionId::from_bytes([0u8; 32]);
 
-const HB_PREPROCESSING_READY_PREFIX: &[u8] = b"STOFFEL_HB_PREPROCESSING_READY_V1";
+/// Which program invocation this run belongs to.
+///
+/// Coordinator `0.2.0` keys every RPC on an `ExecutionId`: rounds, reserved mask
+/// indices, masked inputs and output shares all live under one. `0.1.0`'s single
+/// implicit session — torn down by `reset_coord` — has no successor, so a
+/// coordinator-bearing run must name the invocation it joins, and a run with no
+/// coordinator has nothing to name.
+///
+/// The coordinator-less answer is [`UNUSED_EXECUTION_ID`] rather than an
+/// `Option` the callers would each have to unwrap: every read of the result sits
+/// inside a branch that already matched on `--off-chain-coord`, and the reserved
+/// all-zero value means a future bug that does reach a coordinator RPC without
+/// one is rejected there instead of silently joining somebody else's execution.
+fn resolve_coord_execution_id(
+    has_coordinator: bool,
+    execution_id: Option<ExecutionId>,
+) -> Result<ExecutionId, String> {
+    match (has_coordinator, execution_id) {
+        (true, Some(id)) => Ok(id),
+        (true, None) => Err(
+            "--off-chain-coord requires --execution-id <64 hex characters>. Every party \
+             and client of one invocation must pass the same value, and a later \
+             invocation must pass a different one."
+                .to_owned(),
+        ),
+        (false, Some(_)) => Err(
+            "--execution-id is only meaningful with --off-chain-coord; a mesh session's \
+             namespace comes from its agreed instance_id, not from the coordinator."
+                .to_owned(),
+        ),
+        (false, None) => Ok(UNUSED_EXECUTION_ID),
+    }
+}
+
+/// The coordinator certificate this process pins (`--coord-cert`).
+///
+/// Coordinator `0.3.0` has no connection without a pin
+/// (`docs/design/bootnode-elimination.md` §9.A): a connection that accepted any
+/// server would let whoever answers at the coordinator's address serve rounds,
+/// admissions and — once nodes take their roster from it — membership. The
+/// path is kept beside the derived key so every refusal can name the file.
+#[derive(Clone, Debug)]
+struct CoordinatorPin {
+    path: String,
+    spki: SpkiDer,
+}
+
+/// Why a `--coord-cert` value cannot be pinned.
+#[derive(Debug)]
+enum CoordinatorPinError {
+    Unreadable {
+        path: String,
+        reason: std::io::Error,
+    },
+    Unusable {
+        path: String,
+        reason: PinError,
+    },
+}
+
+impl std::fmt::Display for CoordinatorPinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable { path, reason } => {
+                write!(f, "cannot read --coord-cert {path}: {reason}")
+            }
+            Self::Unusable { path, reason } => write!(
+                f,
+                "--coord-cert {path} is not a usable DER X.509 certificate: {reason}"
+            ),
+        }
+    }
+}
+
+impl CoordinatorPin {
+    fn load(path: &str) -> Result<Self, CoordinatorPinError> {
+        let der = fs::read(path).map_err(|reason| CoordinatorPinError::Unreadable {
+            path: path.to_owned(),
+            reason,
+        })?;
+        let spki = SpkiDer::from_certificate_der(&der).map_err(|reason| {
+            CoordinatorPinError::Unusable {
+                path: path.to_owned(),
+                reason,
+            }
+        })?;
+        Ok(Self {
+            path: path.to_owned(),
+            spki,
+        })
+    }
+}
+
+/// `--coord-cert` is required exactly where `--off-chain-coord` is given.
+fn resolve_coordinator_pin(
+    has_coordinator: bool,
+    coord_cert_path: Option<&str>,
+) -> Result<Option<CoordinatorPin>, String> {
+    match (has_coordinator, coord_cert_path) {
+        (true, Some(path)) => CoordinatorPin::load(path)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+        (true, None) => Err(
+            "--off-chain-coord requires --coord-cert <path>. The coordinator is the roster \
+             authority, and a connection that does not pin its certificate accepts any server."
+                .to_owned(),
+        ),
+        (false, Some(_)) => Err(
+            "--coord-cert is only meaningful with --off-chain-coord; it pins the coordinator's \
+             certificate."
+                .to_owned(),
+        ),
+        (false, None) => Ok(None),
+    }
+}
+
+/// `--expect-roster-digest`, `--expect-n-parties` and `--expect-threshold`
+/// (`docs/design/bootnode-elimination.md` §9.D.2).
+///
+/// Defense in depth, not a second roster authority: none of them carries a
+/// certificate, so they can only refuse what the coordinator served, never
+/// supply membership. The digest is what lets an operator who knows the intended
+/// node set detect a coordinator that serves this process a different one; the
+/// two counts keep a caller's configured `parties` and `threshold` meaningful.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RosterExpectations {
+    digest: Option<RosterDigest>,
+    n_parties: Option<u64>,
+    threshold: Option<u64>,
+}
+
+/// Which roster size a `--expect-*` flag names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RosterSizeFlag {
+    NParties,
+    Threshold,
+}
+
+impl RosterSizeFlag {
+    fn flag(self) -> &'static str {
+        match self {
+            Self::NParties => "--expect-n-parties",
+            Self::Threshold => "--expect-threshold",
+        }
+    }
+}
+
+impl std::fmt::Display for RosterSizeFlag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.flag())
+    }
+}
+
+/// The coordinator served a roster of another size than `--expect-n-parties` or
+/// `--expect-threshold` names (exit 2, §9.D.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the coordinator serves a roster of n = {n}, t = {t}, not the expected {flag} {expected}; \
+     refusing to install it."
+)]
+struct UnexpectedRosterSize {
+    n: u64,
+    t: u64,
+    flag: RosterSizeFlag,
+    expected: u64,
+}
+
+impl RosterExpectations {
+    /// The first `--expect-*` flag this process was given, for the refusal
+    /// without a coordinator.
+    fn first_flag(&self) -> Option<&'static str> {
+        if self.digest.is_some() {
+            Some("--expect-roster-digest")
+        } else if self.n_parties.is_some() {
+            Some(RosterSizeFlag::NParties.flag())
+        } else if self.threshold.is_some() {
+            Some(RosterSizeFlag::Threshold.flag())
+        } else {
+            None
+        }
+    }
+
+    /// §9.D.1 step 3, outside `CoordinatorLink::connect`: the served `n` and `t`
+    /// against `--expect-n-parties` and `--expect-threshold`. The digest is
+    /// compared inside `connect`.
+    fn check_size(&self, roster: &NodeRoster) -> Result<(), UnexpectedRosterSize> {
+        let (n, t) = (roster.n(), roster.t());
+        for (flag, expected, served) in [
+            (RosterSizeFlag::NParties, self.n_parties, n),
+            (RosterSizeFlag::Threshold, self.threshold, t),
+        ] {
+            if let Some(expected) = expected {
+                if expected != served {
+                    return Err(UnexpectedRosterSize {
+                        n,
+                        t,
+                        flag,
+                        expected,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Parses `--expect-n-parties` / `--expect-threshold`.
+fn parse_expected_roster_size(flag: RosterSizeFlag, value: &str) -> Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|reason| format!("{flag} must be a non-negative integer: {reason}"))
+}
+
+/// Parses `--expect-roster-digest`.
+fn parse_expected_roster_digest(value: &str) -> Result<RosterDigest, String> {
+    RosterDigest::from_str(value.trim()).map_err(|error| format!("--expect-roster-digest: {error}"))
+}
+
+/// Exits for a coordinator connection that failed, naming a pin mismatch as the
+/// wrong server it is rather than as a missing one (§9.D.3): 13 for a transport
+/// failure, a pin mismatch or a served roster that fails verification, 2 for a
+/// served roster that is not the `--expect-roster-digest` one.
+fn exit_coordinator_connect_failure(
+    coord_addr: &(String, u16),
+    pin: &CoordinatorPin,
+    error: CoordinatorError,
+) -> ! {
+    match error {
+        CoordinatorError::ServerPinMismatch { .. } => eprintln!(
+            "Error: the coordinator at {}:{} presented a key that --coord-cert {} does not pin. \
+             Refusing to fetch a roster from it.",
+            coord_addr.0, coord_addr.1, pin.path
+        ),
+        CoordinatorError::Roster(error) => eprintln!(
+            "Error: the coordinator at {}:{} served a node roster that fails verification: {error}",
+            coord_addr.0, coord_addr.1
+        ),
+        CoordinatorError::UnexpectedRosterDigest { served, expected } => {
+            eprintln!(
+                "Error: the coordinator serves roster digest {served}, not the \
+                 --expect-roster-digest {expected}; refusing to install it."
+            );
+            exit(2);
+        }
+        other => eprintln!(
+            "Error: failed to connect to the off-chain coordinator at {}:{}: {other}",
+            coord_addr.0, coord_addr.1
+        ),
+    }
+    exit(13);
+}
+
+/// This node's own transport identity: `--cert` (with the path, so every
+/// refusal can name the file) and `--key`.
+struct NodeIdentity<'a> {
+    cert_path: &'a str,
+    cert_der: &'a [u8],
+    key_der: &'a [u8],
+}
+
+/// Design doc §9.D.1 steps 2-5: open the pinned coordinator link, which fetches
+/// and verifies the node roster exactly once; check the served size against
+/// `--expect-*`; check this node is a member; and build the VM [`Roster`] from
+/// the served certificates, which recomputes the §9.B digest and refuses a
+/// served one that differs. Nothing re-fetches the roster for the life of the
+/// process: the returned link becomes the round driver (§9.D.1 step 10).
+///
+/// Runs before any socket is bound, so every refusal names the coordinator's
+/// roster rather than surfacing as a transport error inside the join. Exits
+/// with the §9.D.3 message and code on every refusal.
+async fn fetch_node_roster(
+    coord_addr: &(String, u16),
+    pin: &CoordinatorPin,
+    expectations: RosterExpectations,
+    identity: NodeIdentity<'_>,
+) -> (CoordinatorLink, Roster) {
+    let own_spki = SpkiDer::from_certificate_der(identity.cert_der).unwrap_or_else(|reason| {
+        eprintln!(
+            "Error: --cert {} is not a usable DER X.509 certificate: {reason}",
+            identity.cert_path
+        );
+        exit(2);
+    });
+    let link = CoordinatorLink::connect(
+        &coord_addr.0,
+        coord_addr.1,
+        &pin.spki,
+        expectations.digest,
+        identity.cert_der.to_vec(),
+        identity.key_der.to_vec(),
+    )
+    .await
+    .unwrap_or_else(|error| exit_coordinator_connect_failure(coord_addr, pin, error));
+    let served = link.node_roster();
+
+    if let Err(unexpected) = expectations.check_size(served) {
+        eprintln!("Error: {unexpected}");
+        exit(2);
+    }
+    if served.position_of(&own_spki).is_none() {
+        eprintln!(
+            "Error: this node's certificate (--cert {}) is not one of the {} nodes in the \
+             coordinator's roster (digest {}). A node cannot join a session it is not a \
+             member of.",
+            identity.cert_path,
+            served.n(),
+            hex::encode(&served.digest().as_bytes()[..8])
+        );
+        exit(2);
+    }
+
+    let certificates: Vec<&[u8]> = served
+        .node_certificates()
+        .iter()
+        .map(|certificate| certificate.as_bytes())
+        .collect();
+    let roster =
+        match Roster::from_coordinator(&certificates, served.t(), *served.digest().as_bytes()) {
+            Ok(roster) => roster,
+            Err(error @ RosterError::DigestMismatch { .. }) => {
+                eprintln!("Error: {error}; refusing to install it.");
+                exit(2);
+            }
+            Err(error) => {
+                eprintln!(
+                    "Error: the coordinator at {}:{} served a node roster that fails \
+                     verification: {error}",
+                    coord_addr.0, coord_addr.1
+                );
+                exit(13);
+            }
+        };
+    eprintln!(
+        "[roster] the coordinator at {}:{} serves {} nodes (n={}, t={}, digest={}); fetched once",
+        coord_addr.0,
+        coord_addr.1,
+        roster.nodes().len(),
+        roster.n(),
+        roster.t(),
+        hex::encode(roster.digest())
+    );
+    (link, roster)
+}
+
+/// Both agreement barriers of one coordinated execution
+/// (`docs/design/bootnode-elimination.md` §9.D.6).
+///
+/// Created as soon as the join has agreed the `instance_id`, before any receive loop is
+/// spawned, so a peer's announcement that arrives before this node computed its own digest
+/// is stored rather than handed to the MPC engine.
+#[derive(Clone, Debug)]
+struct DigestBarriers {
+    admissions: Arc<DigestBarrier>,
+    inputs: Arc<DigestBarrier>,
+}
+
+impl DigestBarriers {
+    fn new(instance_id: u64, n: usize, my_id: usize) -> Self {
+        Self {
+            admissions: Arc::new(DigestBarrier::new(
+                DigestBarrierTag::AdmissionsAgreed,
+                instance_id,
+                n,
+                my_id,
+            )),
+            inputs: Arc::new(DigestBarrier::new(
+                DigestBarrierTag::InputsAgreed,
+                instance_id,
+                n,
+                my_id,
+            )),
+        }
+    }
+
+    /// Receive-loop half: `true` when `payload` is either barrier's frame, which the loop
+    /// must drop.
+    fn record(&self, sender: usize, payload: &[u8]) -> bool {
+        self.admissions.record(sender, payload) || self.inputs.record(sender, payload)
+    }
+}
+
+/// How long a node waits for every peer to announce an agreement digest. Every node reaches
+/// each barrier at the same protocol point, a coordinator broadcast apart.
+fn agreement_barrier_timeout() -> Duration {
+    session_registration_timeout()
+}
+
+/// Why a coordinated party stopped (§9.D.7). Exit 4 for an execution or output-rights error,
+/// 13 for everything else (§9.D.3).
+#[derive(Debug, thiserror::Error)]
+enum CoordinatedRunError {
+    #[error(transparent)]
+    Coordinator(#[from] CoordinatorError),
+    #[error(transparent)]
+    Summary(#[from] SummaryMismatch),
+    #[error("{0}; refusing to release mask shares.")]
+    Reservation(#[from] ReservationMismatch),
+    #[error(transparent)]
+    MaskedInput(#[from] MaskedInputMismatch),
+    #[error("{}", agreement_message(*execution_id, source))]
+    Agreement {
+        execution_id: ExecutionId,
+        source: MeshError,
+    },
+    #[error("the node RPC listener refused the admitted reservations: {0}")]
+    NodeRpc(NodeRPCError),
+    #[error("execution {execution_id} registers {mask_count} client inputs, more than this node can index")]
+    MaskCountUnindexable {
+        execution_id: ExecutionId,
+        mask_count: u64,
+    },
+    #[error(
+        "execution {execution_id} registers {mask_count} client inputs, and coordinated client \
+         inputs on HoneyBadger are implemented only for BLS12-381, not {curve}"
+    )]
+    UnsupportedInputCurve {
+        execution_id: ExecutionId,
+        mask_count: u64,
+        curve: &'static str,
+    },
+    #[error("{0}")]
+    Setup(String),
+    #[error("Execution error in '{entry}': {reason}")]
+    Execution { entry: String, reason: String },
+    #[error("Execution error in '{entry}': {violation}")]
+    OutputRights {
+        entry: String,
+        violation: OutputRightsViolation,
+    },
+}
+
+fn agreement_message(execution_id: ExecutionId, error: &MeshError) -> String {
+    match error {
+        MeshError::AdmissionDivergence { party_id } => format!(
+            "party {party_id} agreed different client admissions for execution {execution_id}; \
+             refusing to release mask shares."
+        ),
+        MeshError::InputDivergence { party_id } => format!(
+            "party {party_id} received different masked inputs for execution {execution_id}; \
+             refusing to use any of them."
+        ),
+        other => format!("execution {execution_id}: {other}"),
+    }
+}
+
+impl CoordinatedRunError {
+    fn agreement(execution_id: ExecutionId) -> impl FnOnce(MeshError) -> Self {
+        move |source| Self::Agreement {
+            execution_id,
+            source,
+        }
+    }
+
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::Execution { .. } | Self::OutputRights { .. } => 4,
+            _ => 13,
+        }
+    }
+
+    /// Prints the §9.D.3 message and exits with its code.
+    fn exit(self) -> ! {
+        let code = self.exit_code();
+        if code == 4 {
+            eprintln!("{self}");
+        } else {
+            eprintln!("Error: {self}");
+        }
+        exit(code);
+    }
+}
+
+/// §9.D.7 step 1: reads the execution summary and checks it against what this node loaded,
+/// before any preprocessing.
+async fn checked_execution_summary<F, S>(
+    coord: &OffChainCoordinatorClient<F, S>,
+    expectations: &SummaryExpectations<'_>,
+) -> Result<ExecutionSummary, CoordinatedRunError>
+where
+    F: ark_ff::FftField,
+    S: stoffel_mpc_coordinator_shared::ShareBound<F>,
+{
+    let summary = coord.get_execution_summary().await?;
+    check_execution_summary::<F, S>(&summary, expectations)?;
+    Ok(summary)
+}
+
+/// The number of client input masks `summary` registers, as an index this node can use.
+fn mask_count_of(summary: &ExecutionSummary) -> Result<usize, CoordinatedRunError> {
+    let mask_count = summary.client_slots.n_inputs();
+    usize::try_from(mask_count).map_err(|_| CoordinatedRunError::MaskCountUnindexable {
+        execution_id: summary.execution_id,
+        mask_count,
+    })
+}
+
+/// §9.D.7 step 6: the frozen admission set, agreed with every other node of the mesh.
+async fn agree_client_admissions<F, S>(
+    coord: &mut OffChainCoordinatorClient<F, S>,
+    summary: &ExecutionSummary,
+    barriers: &DigestBarriers,
+    net: &QuicNetworkManager,
+) -> Result<ClientAdmissionSet, CoordinatedRunError>
+where
+    F: ark_ff::FftField,
+    S: stoffel_mpc_coordinator_shared::ShareBound<F>,
+{
+    let set = coord.get_client_admissions().await?;
+    barriers
+        .admissions
+        .wait(
+            net,
+            admission_agreement_digest(summary, &set),
+            agreement_barrier_timeout(),
+        )
+        .await
+        .map_err(CoordinatedRunError::agreement(summary.execution_id))?;
+    Ok(set)
+}
+
+/// §9.D.7 steps 2–10 for a registration with inputs: provisions `mask_shares` at indices
+/// `0..mask_count`, reserves, freezes and agrees the admissions, releases exactly the
+/// reservations they imply, and returns the agreed set with each slot's unmasked inputs keyed
+/// on its agreed `ClientIndex` — once every node agreed the masked inputs.
+async fn collect_admitted_client_inputs<F, S>(
+    coord: &mut OffChainCoordinatorClient<F, S>,
+    node_rpc: &OffChainNodeRPCServer,
+    summary: &ExecutionSummary,
+    barriers: &DigestBarriers,
+    net: &QuicNetworkManager,
+    mask_shares: Vec<S>,
+) -> Result<
+    (
+        ClientAdmissionSet,
+        std::collections::BTreeMap<ClientIndex, Vec<S>>,
+    ),
+    CoordinatedRunError,
+>
+where
+    F: ark_ff::FftField,
+    S: stoffel_mpc_coordinator_shared::ShareBound<F>,
+{
+    let execution_id = summary.execution_id;
+    let mask_count = mask_shares.len() as u64;
+    let indexed: Vec<(u64, &S)> = mask_shares
+        .iter()
+        .enumerate()
+        .map(|(index, share)| (index as u64, share))
+        .collect();
+    node_rpc
+        .add_mask_shares_for_execution(execution_id, &indexed)
+        .await
+        .map_err(CoordinatedRunError::NodeRpc)?;
+
+    eprintln!("coordinator -> InputMaskReservation");
+    coord.reserve_input_masks().await?;
+    coord.wait_for_round(Round::InputMaskReservation).await?;
+    // The complete reservation map. Nothing is registered until the admissions are frozen and
+    // agreed.
+    let reserved = coord.wait_for_indices(mask_count).await?;
+
+    eprintln!("coordinator -> InputCollection");
+    coord.collect_inputs().await?;
+    coord.wait_for_round(Round::InputCollection).await?;
+    let set = agree_client_admissions(coord, summary, barriers, net).await?;
+    let reservations = reservations_matching_admissions(&set, &reserved)?;
+    node_rpc
+        .register_admitted_reservations_for_execution(execution_id, reservations)
+        .await
+        .map_err(CoordinatedRunError::NodeRpc)?;
+
+    eprintln!("waiting for masked client inputs");
+    let submissions = coord.wait_for_masked_input_submissions(mask_count).await?;
+    submissions_matching_admissions(summary, &set, &submissions)?;
+    barriers
+        .inputs
+        .wait(
+            net,
+            inputs_agreement_digest(execution_id, &submissions),
+            agreement_barrier_timeout(),
+        )
+        .await
+        .map_err(CoordinatedRunError::agreement(execution_id))?;
+    let unmasked =
+        OffChainCoordinatorClient::<F, S>::unmask_submissions(&submissions, &mask_shares)?;
+    let inputs = inputs_by_admission(&set, unmasked);
+    eprintln!("masked client inputs agreed and unmasked");
+    Ok((set, inputs))
+}
+
+/// §9.D.7 steps 12–13: delivers the program's captured client outputs by agreed slot, and
+/// takes the execution to `ProgramFinished` whether or not it has outputs, then retires it.
+async fn finish_coordinated_execution<F, S>(
+    coord: &OffChainCoordinatorClient<F, S>,
+    summary: &ExecutionSummary,
+    set: &ClientAdmissionSet,
+    captured: Vec<(usize, Vec<S>)>,
+    entry: &str,
+) -> Result<(), CoordinatedRunError>
+where
+    F: ark_ff::FftField,
+    S: stoffel_mpc_coordinator_shared::ShareBound<F>,
+{
+    let outputs = outputs_by_admission(set, captured).map_err(|violation| {
+        CoordinatedRunError::OutputRights {
+            entry: entry.to_owned(),
+            violation,
+        }
+    })?;
+    // Without output slots the coordinator allows `MPCExecution` -> `ProgramFinished`
+    // directly; with any, `OutputDistribution` cannot be skipped even if nothing was sent.
+    if summary.client_slots.has_output_slots() {
+        coord.send_output().await?;
+        coord.wait_for_round(Round::OutputDistribution).await?;
+        for (client, shares) in outputs {
+            // A client's identity is also the HPKE key its outputs are sealed to (§9.0).
+            coord
+                .send_output_shares(client.clone(), client, shares)
+                .await?;
+        }
+    }
+    coord.finalize().await?;
+    coord.wait_for_round(Round::ProgramFinished).await?;
+    if let Err(error) = coord.retire_execution().await {
+        eprintln!(
+            "Warning: failed to retire execution {}: {error}",
+            summary.execution_id
+        );
+    }
+    Ok(())
+}
+
+/// The VM client roster of a coordinated execution: every registered slot, by `ClientIndex`.
+fn coordinated_client_roster(summary: &ExecutionSummary) -> Vec<ClientId> {
+    (0..summary.client_slots.capacity() as usize).collect()
+}
+
+/// What `stoffel-run --client` was asked to do (`docs/design/bootnode-elimination.md` §9.E.2).
+///
+/// It names no node and no other client: the nodes come from the coordinator's roster, and
+/// this client's slot, input range and output rights from its admission.
+struct ClientRunArgs {
+    backend: MpcBackendKind,
+    curve_config: MpcCurveConfig,
+    /// `--inputs`; absent for a client of an output-only slot.
+    inputs: Option<String>,
+    output_format: CoordinatorOutputFormat,
+    coord_addr: (String, u16),
+    coordinator_pin: CoordinatorPin,
+    roster_expectations: RosterExpectations,
+    /// `--expect-program-hash`.
+    expected_program_hash: Option<[u8; 32]>,
+    /// `--client-slot` and `--invitation`.
+    request: AssociationRequest,
+    /// `--servers`: node RPC addresses, pinned by the roster.
+    server_addrs: Vec<SocketAddr>,
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+    execution_id: ExecutionId,
+}
+
+/// How a client prints the outputs it reconstructed.
+#[derive(Clone, Copy, Debug)]
+enum ClientOutputStyle {
+    /// HoneyBadger: `outputs: [..]`, each a signed integer or fixed-point value.
+    Values(CoordinatorOutputFormat),
+    /// AVSS: `Client output: field[n] 0x..`, the concatenated field elements.
+    FieldHex(MpcCurveConfig),
+}
+
+/// §9.E.1 for one client, over share type `S`: the pinned coordinator and roster (step 1,
+/// with `--expect-n-parties` / `--expect-threshold`), then
+/// [`CoordinatorClientConfig::run`]. Exits with the §9.D.3 / §9.E.1 message and code on every
+/// refusal.
+async fn run_coordinator_client_for<F, S>(args: ClientRunArgs, style: ClientOutputStyle)
+where
+    F: SupportedMpcField,
+    S: stoffel_mpc_coordinator_shared::ShareBound<F, ValueType = F>,
+{
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let inputs = args
+        .inputs
+        .as_deref()
+        .map(parse_inputs_as_field::<F>)
+        .unwrap_or_default();
+    let config = CoordinatorClientConfig {
+        coordinator: CoordinatorEndpoint {
+            host: args.coord_addr.0.clone(),
+            port: args.coord_addr.1,
+            pin: args.coordinator_pin.spki.clone(),
+        },
+        execution_id: args.execution_id,
+        backend: args.backend,
+        cert_der: args.cert_der,
+        key_der: args.key_der,
+        node_rpc_addresses: args
+            .server_addrs
+            .iter()
+            .map(|addr| (addr.ip().to_string(), addr.port()))
+            .collect(),
+        request: args.request,
+        expected_roster_digest: args.roster_expectations.digest,
+        expected_program_hash: args.expected_program_hash,
+        expected_output_count: None,
+    };
+
+    let link = match config.connect().await {
+        Ok(link) => link,
+        Err(CoordinatorClientError::Connect(error)) => {
+            exit_coordinator_connect_failure(&args.coord_addr, &args.coordinator_pin, error)
+        }
+        Err(other) => exit_coordinator_client_failure(other),
+    };
+    if let Err(unexpected) = args.roster_expectations.check_size(link.node_roster()) {
+        eprintln!("Error: {unexpected}");
+        exit(2);
+    }
+
+    let run = config
+        .run::<F, S>(link, inputs)
+        .await
+        .unwrap_or_else(|error| exit_coordinator_client_failure(error));
+    if let OutputRights::Receive { .. } = run.admission.output_rights {
+        match style {
+            ClientOutputStyle::Values(format) => {
+                println!(
+                    "outputs: {}",
+                    format_coordinator_outputs(&run.outputs, format)
+                )
+            }
+            ClientOutputStyle::FieldHex(curve_config) => println!(
+                "Client output: field[{}] 0x{}",
+                run.outputs.len(),
+                field_outputs_to_hex(&run.outputs, curve_config)
+            ),
+        }
+    }
+}
+
+/// Prints a client refusal and exits with its code (§9.E.1).
+fn exit_coordinator_client_failure(error: CoordinatorClientError) -> ! {
+    eprintln!("Error: {error}");
+    exit(error.exit_code());
+}
+
+/// Picks the share type of `--mpc-backend` / `--mpc-curve` and runs the client.
+async fn run_coordinator_client(args: ClientRunArgs) {
+    let args_output_format = args.output_format;
+    let curve_config = args.curve_config;
+    macro_rules! hb {
+        ($field:ty) => {
+            run_coordinator_client_for::<$field, HbCoordinatorShare<$field>>(
+                args,
+                ClientOutputStyle::Values(args_output_format),
+            )
+            .await
+        };
+    }
+    macro_rules! avss {
+        ($field:ty, $group:ty) => {
+            run_coordinator_client_for::<$field, AvssCoordinatorShare<$field, $group>>(
+                args,
+                ClientOutputStyle::FieldHex(curve_config),
+            )
+            .await
+        };
+    }
+    match (args.backend, curve_config) {
+        (MpcBackendKind::HoneyBadger, MpcCurveConfig::Bls12_381) => hb!(ark_bls12_381::Fr),
+        (MpcBackendKind::HoneyBadger, MpcCurveConfig::Bn254) => hb!(ark_bn254::Fr),
+        (MpcBackendKind::HoneyBadger, MpcCurveConfig::Curve25519) => hb!(ark_curve25519::Fr),
+        (MpcBackendKind::HoneyBadger, MpcCurveConfig::Ed25519) => hb!(ark_ed25519::Fr),
+        (MpcBackendKind::HoneyBadger, MpcCurveConfig::Secp256k1 | MpcCurveConfig::Secp256r1) => {
+            eprintln!(
+                "Error: curve {} is not supported by honeybadger backend",
+                curve_config.name()
+            );
+            exit(2);
+        }
+        (MpcBackendKind::Avss, MpcCurveConfig::Bls12_381) => {
+            avss!(ark_bls12_381::Fr, ark_bls12_381::G1Projective)
+        }
+        (MpcBackendKind::Avss, MpcCurveConfig::Bn254) => {
+            avss!(ark_bn254::Fr, ark_bn254::G1Projective)
+        }
+        (MpcBackendKind::Avss, MpcCurveConfig::Curve25519) => {
+            avss!(ark_curve25519::Fr, ark_curve25519::EdwardsProjective)
+        }
+        (MpcBackendKind::Avss, MpcCurveConfig::Ed25519) => {
+            avss!(ark_ed25519::Fr, ark_ed25519::EdwardsProjective)
+        }
+        (MpcBackendKind::Avss, MpcCurveConfig::Secp256k1) => {
+            avss!(ark_secp256k1::Fr, ark_secp256k1::Projective)
+        }
+        (MpcBackendKind::Avss, MpcCurveConfig::Secp256r1) => {
+            avss!(ark_secp256r1::Fr, ark_secp256r1::Projective)
+        }
+    }
+}
+
+/// Parses `--expect-program-hash`: the coordinator's `program_hash_of` of the program, as 64
+/// hexadecimal characters.
+fn parse_expected_program_hash(value: &str) -> Result<[u8; 32], String> {
+    let value = value.trim();
+    if value.len() != 64 {
+        return Err(format!(
+            "--expect-program-hash: expected 64 hexadecimal characters, got {}",
+            value.len()
+        ));
+    }
+    let bytes = hex::decode(value)
+        .map_err(|error| format!("--expect-program-hash: not hexadecimal: {error}"))?;
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&bytes);
+    Ok(hash)
+}
+
+/// Reads `--invitation`: a `SignedInvitation` as JSON, as `issue-invitation --out` writes it.
+fn read_invitation(path: &str) -> Result<SignedInvitation, String> {
+    let bytes =
+        fs::read(path).map_err(|reason| format!("cannot read --invitation {path}: {reason}"))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|reason| format!("--invitation {path} is not a signed invitation: {reason}"))
+}
+
+// `NodeRPCServer` lost its `<F, S>` parameters in coordinator `0.2.0`: mask shares
+// are stored as bytes and the server never reconstructs them, so one listener type
+// serves both backends. The share type now appears only where a share is actually
+// serialized (`add_mask_shares_for_execution`), which is why there is no
+// `HbOffChainNodeRpcServer`/`AvssOffChainNodeRpcServer` alias any more.
+
+// The preprocessing barrier's tag now lives in `stoffel_vm::net::mesh::wire`
+// beside the other in-band prefixes, and the send/collect pattern that used it
+// lives in `stoffel_vm::net::mesh::MeshBarrier`. Blocker B7's disjointness
+// invariant is therefore stated over the constants this binary actually sends.
 
 fn session_registration_timeout() -> Duration {
     let seconds = env::var("STOFFEL_SESSION_REGISTRATION_TIMEOUT_SECONDS")
@@ -206,14 +1054,73 @@ fn session_registration_timeout() -> Duration {
     Duration::from_secs(seconds)
 }
 
-fn extract_pubkey_from_cert(cert_der: &[u8]) -> Vec<u8> {
-    let (_, parsed) = X509Certificate::from_der(cert_der).expect("parse X.509 cert");
-    parsed
-        .public_key()
-        .subject_public_key
-        .data
-        .as_ref()
-        .to_vec()
+/// Build the [`SessionJoin`] this process uses to form its MPC session.
+///
+/// Stage 1 of `docs/design/bootnode-elimination.md` put this one constructor in
+/// front of both production join sites so that the later stages could choose the
+/// join here instead of editing the call sites again. Stage 5 added [`MeshJoin`]
+/// beside the bootnode; Stage 8 deleted the bootnode, so the choice collapses to
+/// one. Membership is the coordinator's node roster (§9.D), fetched once before
+/// this is called and handed in as a [`Roster`], never an `Option`: `--peers`
+/// without `--off-chain-coord` is refused before anything is bound.
+///
+/// The mesh's two remaining preconditions are refused here rather than deep
+/// inside the join, because both are configuration mistakes with one-line fixes:
+/// somebody has to be dialed (`--peers`), and `instance_id` freshness has to be
+/// persisted somewhere (the epoch store, blocker B5).
+fn build_session_join(
+    roster: Roster,
+    seeds: &SeedHints,
+    epochs: Option<Arc<EpochStore>>,
+    router: Arc<MeshRouter>,
+) -> Result<Box<dyn SessionJoin>, String> {
+    if seeds.is_empty() {
+        return Err(
+            "no --peers: a party forms its session by dialing the other members of \
+                    the roster, so it needs at least one address to start from"
+                .to_string(),
+        );
+    }
+    let epochs = epochs.ok_or_else(|| {
+        "a mesh join needs an epoch store for instance_id freshness; pass --epoch-store or \
+         set STOFFEL_EPOCH_STORE"
+            .to_string()
+    })?;
+    eprintln!(
+        "[mesh] joining: {} node roster, {} seed hint(s)",
+        roster.n(),
+        seeds.len()
+    );
+    // A first join forms out of dials alone. The peer book is exchanged
+    // *inside* the join handshake — after the mesh is already complete — so
+    // it cannot supply an address the mesh needs in order to form; it is
+    // what lets a *later* join in the same process start from less.
+    //
+    // The requirement is per pair *and directional*: a pair is dialed from
+    // one end only (`net::mesh::join::dials_towards`), so it is the member
+    // with the higher transport-derived id that has to hold the hint.
+    // Derived ids are BLAKE3 digests of the certificates, so which end that
+    // is cannot be read off a config file — which is exactly why the
+    // guidance is the blunt one. Listing all n-1 peers everywhere satisfies
+    // the requirement whatever the order turns out to be, and is what every
+    // shipped stack does. Fewer is not refused, because the node cannot
+    // tell here whether its own hints happen to be the covering half, but
+    // it is said out loud: the alternative is discovering it as a
+    // 90-second timeout.
+    let needed = roster.n().saturating_sub(1);
+    if seeds.len() < needed {
+        eprintln!(
+            "[mesh] warning: {} seed hint(s) for a {}-node roster. A pair of parties is \
+             dialed from one end only, and which end is decided by a digest of their \
+             certificates, so a short list may leave an edge that neither side dials. \
+             Pass all {needed} peer addresses unless you have worked the direction out.",
+            seeds.len(),
+            roster.n(),
+        );
+    }
+    Ok(Box::new(
+        MeshJoin::new(roster, seeds.clone(), epochs).with_router(router),
+    ))
 }
 
 fn durable_identity_from_cert(cert_der: &[u8]) -> DurableIdentityDigest {
@@ -306,32 +1213,6 @@ where
 
     format!("[{}]", rendered)
 }
-trait ReservedMaskIndices {
-    fn into_reserved_indices(self) -> Vec<u64>;
-}
-impl ReservedMaskIndices for u64 {
-    fn into_reserved_indices(self) -> Vec<u64> {
-        vec![self]
-    }
-}
-impl ReservedMaskIndices for Vec<u64> {
-    fn into_reserved_indices(self) -> Vec<u64> {
-        self
-    }
-}
-fn normalize_client_to_indices<I, V>(
-    client_to_indices: std::collections::HashMap<I, V>,
-) -> std::collections::HashMap<I, Vec<u64>>
-where
-    I: Eq + std::hash::Hash,
-    V: ReservedMaskIndices,
-{
-    client_to_indices
-        .into_iter()
-        .map(|(client_id, indices)| (client_id, indices.into_reserved_indices()))
-        .collect()
-}
-
 fn curve_config_from_manifest(curve: MpcCurve) -> MpcCurveConfig {
     match curve {
         MpcCurve::Bls12_381 => MpcCurveConfig::Bls12_381,
@@ -340,211 +1221,6 @@ fn curve_config_from_manifest(curve: MpcCurve) -> MpcCurveConfig {
         MpcCurve::Ed25519 => MpcCurveConfig::Ed25519,
         MpcCurve::Secp256k1 => MpcCurveConfig::Secp256k1,
         MpcCurve::Secp256r1 => MpcCurveConfig::Secp256r1,
-    }
-}
-fn store_reserved_client_inputs<F, I>(
-    vm: &mut VirtualMachine,
-    client_to_indices: &std::collections::HashMap<I, Vec<u64>>,
-    client_inputs: std::collections::HashMap<I, Vec<RobustShare<F>>>,
-    client_input_count: usize,
-    client_input_slots: &[usize],
-    client_input_types: &std::collections::BTreeMap<usize, Vec<ShareType>>,
-) where
-    F: ark_ff::FftField,
-    I: Eq + std::hash::Hash + std::fmt::Debug,
-{
-    if client_input_count == 0 {
-        eprintln!("--client-input-count must be greater than 0");
-        exit(13);
-    }
-
-    let mut seen_reserved_indices = std::collections::HashSet::new();
-    // Group each client's shares independently — clients may provide DIFFERENT
-    // numbers of inputs. The runner reserves a contiguous index block per client
-    // in slot order, so ordering clients by their lowest reserved index recovers
-    // the client-store ordinal (matching `client_input_slots` / the roster).
-    let mut per_client: Vec<(u64, Vec<RobustShare<F>>)> = Vec::new();
-
-    for (client_id, shares) in client_inputs {
-        if shares.is_empty() {
-            eprintln!(
-                "Coordinator returned zero input shares for client {:?}",
-                client_id
-            );
-            exit(13);
-        }
-        let reserved_indices = match client_to_indices.get(&client_id) {
-            Some(indices) => indices,
-            None => {
-                eprintln!(
-                    "Coordinator returned input for client {:?} without a reserved index",
-                    client_id
-                );
-                exit(13);
-            }
-        };
-        if reserved_indices.len() != shares.len() {
-            eprintln!(
-                "Coordinator returned {} input shares for client {:?}, but {} reserved indices were recorded",
-                shares.len(),
-                client_id,
-                reserved_indices.len()
-            );
-            exit(13);
-        }
-
-        let mut indexed_shares: Vec<(u64, RobustShare<F>)> =
-            reserved_indices.iter().copied().zip(shares).collect();
-        indexed_shares.sort_by_key(|(reserved_index, _)| *reserved_index);
-
-        let min_reserved_index = indexed_shares
-            .first()
-            .map(|(reserved_index, _)| *reserved_index)
-            .unwrap_or(0);
-        let mut ordered_shares = Vec::with_capacity(indexed_shares.len());
-        for (reserved_index, share) in indexed_shares {
-            if reserved_index > usize::MAX as u64 {
-                eprintln!(
-                    "Coordinator reserved index {} exceeds local usize range",
-                    reserved_index
-                );
-                exit(13);
-            }
-            if !seen_reserved_indices.insert(reserved_index as usize) {
-                eprintln!(
-                    "Coordinator assigned duplicate reserved index {} while collecting inputs",
-                    reserved_index
-                );
-                exit(13);
-            }
-            ordered_shares.push(share);
-        }
-        per_client.push((min_reserved_index, ordered_shares));
-    }
-
-    // Slot order == reservation order == ascending min reserved index.
-    per_client.sort_by_key(|(min_reserved_index, _)| *min_reserved_index);
-
-    for (client_store_index, (_min_reserved_index, shares)) in per_client.into_iter().enumerate() {
-        let client_slot = client_input_slots
-            .get(client_store_index)
-            .copied()
-            .unwrap_or(client_store_index);
-        let result = if let Some(share_types) = client_input_types.get(&client_slot) {
-            vm.try_store_client_input_with_types(client_slot, shares, share_types)
-        } else {
-            vm.try_store_client_input(client_slot, shares)
-        };
-        if let Err(error) = result {
-            eprintln!(
-                "Failed to store input shares for client slot {}: {}",
-                client_slot, error
-            );
-            exit(13);
-        }
-    }
-}
-fn store_reserved_client_inputs_feldman<F, G, I>(
-    vm: &mut VirtualMachine,
-    client_to_indices: &std::collections::HashMap<I, Vec<u64>>,
-    client_inputs: std::collections::HashMap<I, Vec<FeldmanShamirShare<F, G>>>,
-    client_input_count: usize,
-    client_input_slots: &[usize],
-    client_input_types: &std::collections::BTreeMap<usize, Vec<ShareType>>,
-) where
-    F: SupportedMpcField,
-    G: CurveGroup<ScalarField = F>,
-    I: Eq + std::hash::Hash + std::fmt::Debug,
-{
-    if client_input_count == 0 {
-        eprintln!("--client-input-count must be greater than 0");
-        exit(13);
-    }
-
-    let mut seen_reserved_indices = std::collections::HashSet::new();
-    // Group each client's shares independently — clients may provide DIFFERENT
-    // numbers of inputs. The runner reserves a contiguous index block per client
-    // in slot order, so ordering clients by their lowest reserved index recovers
-    // the client-store ordinal (matching `client_input_slots` / the roster).
-    let mut per_client: Vec<(u64, Vec<FeldmanShamirShare<F, G>>)> = Vec::new();
-
-    for (client_id, shares) in client_inputs {
-        if shares.is_empty() {
-            eprintln!(
-                "Coordinator returned zero AVSS input shares for client {:?}",
-                client_id
-            );
-            exit(13);
-        }
-        let reserved_indices = match client_to_indices.get(&client_id) {
-            Some(indices) => indices,
-            None => {
-                eprintln!(
-                    "Coordinator returned input for client {:?} without a reserved index",
-                    client_id
-                );
-                exit(13);
-            }
-        };
-        if reserved_indices.len() != shares.len() {
-            eprintln!(
-                "Coordinator returned {} AVSS input shares for client {:?}, but {} reserved indices were recorded",
-                shares.len(),
-                client_id,
-                reserved_indices.len()
-            );
-            exit(13);
-        }
-
-        let mut indexed_shares: Vec<(u64, FeldmanShamirShare<F, G>)> =
-            reserved_indices.iter().copied().zip(shares).collect();
-        indexed_shares.sort_by_key(|(reserved_index, _)| *reserved_index);
-
-        let min_reserved_index = indexed_shares
-            .first()
-            .map(|(reserved_index, _)| *reserved_index)
-            .unwrap_or(0);
-        let mut ordered_shares = Vec::with_capacity(indexed_shares.len());
-        for (reserved_index, share) in indexed_shares {
-            if reserved_index > usize::MAX as u64 {
-                eprintln!(
-                    "Coordinator reserved index {} exceeds local usize range",
-                    reserved_index
-                );
-                exit(13);
-            }
-            if !seen_reserved_indices.insert(reserved_index as usize) {
-                eprintln!(
-                    "Coordinator assigned duplicate reserved index {} while collecting inputs",
-                    reserved_index
-                );
-                exit(13);
-            }
-            ordered_shares.push(share);
-        }
-        per_client.push((min_reserved_index, ordered_shares));
-    }
-
-    // Slot order == reservation order == ascending min reserved index.
-    per_client.sort_by_key(|(min_reserved_index, _)| *min_reserved_index);
-
-    for (client_store_index, (_min_reserved_index, shares)) in per_client.into_iter().enumerate() {
-        let client_slot = client_input_slots
-            .get(client_store_index)
-            .copied()
-            .unwrap_or(client_store_index);
-        let result = if let Some(share_types) = client_input_types.get(&client_slot) {
-            vm.try_store_client_input_feldman_with_types(client_slot, shares, share_types)
-        } else {
-            vm.try_store_client_input_feldman(client_slot, shares)
-        };
-        if let Err(error) = result {
-            eprintln!(
-                "Failed to store AVSS input shares for client slot {}: {}",
-                client_slot, error
-            );
-            exit(13);
-        }
     }
 }
 fn configure_hb_preproc_store<F, G>(
@@ -568,188 +1244,6 @@ where
     engine.set_preproc_store_identity(persistent_identity);
     Ok(())
 }
-async fn load_reserved_mask_share<F, G>(
-    engine: &Arc<HoneyBadgerMpcEngine<F, G>>,
-    reserved_index: u64,
-) -> Result<RobustShare<F>, String>
-where
-    F: SupportedMpcField,
-    G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
-{
-    let reservation = engine.reservation_ops()?;
-    let share_bytes = reservation.get_mask_share(reserved_index).await?;
-    ark_serialize::CanonicalDeserialize::deserialize_compressed(share_bytes.as_slice())
-        .map_err(|e| format!("deserialize reserved mask share {reserved_index}: {:?}", e))
-}
-async fn load_reserved_mask_shares<F, G>(
-    engine: &Arc<HoneyBadgerMpcEngine<F, G>>,
-    capacity: usize,
-    reserved_indices: impl IntoIterator<Item = u64>,
-) -> Result<Vec<RobustShare<F>>, String>
-where
-    F: SupportedMpcField,
-    G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
-{
-    if capacity == 0 {
-        return Ok(Vec::new());
-    }
-
-    let mut slots: Vec<Option<RobustShare<F>>> = vec![None; capacity];
-    let mut reserved_indices: Vec<u64> = reserved_indices.into_iter().collect();
-    reserved_indices.sort_unstable();
-    for reserved_index in reserved_indices {
-        let slot = usize::try_from(reserved_index)
-            .map_err(|_| format!("reserved index {reserved_index} exceeds usize range"))?;
-        if slot >= capacity {
-            return Err(format!(
-                "reserved index {reserved_index} exceeds expected input capacity {capacity}"
-            ));
-        }
-        if slots[slot].is_some() {
-            return Err(format!(
-                "duplicate reserved mask share request for slot {reserved_index}"
-            ));
-        }
-        slots[slot] = Some(load_reserved_mask_share(engine, reserved_index).await?);
-    }
-
-    slots
-        .into_iter()
-        .enumerate()
-        .map(|(slot, share)| {
-            share.ok_or_else(|| format!("missing reserved mask share for slot {slot}"))
-        })
-        .collect()
-}
-
-/// Network adapter for MPC clients.
-///
-/// Client receive paths use authenticated sorted-key IDs and normalize them to
-/// protocol party IDs before messages enter MPC code. Sends use the explicit
-/// server IDs registered from `--servers`, so they are already in protocol
-/// party order.
-struct ClientNetworkAdapter {
-    inner: QuicNetworkManager,
-    local_position: usize,
-}
-
-fn client_transport_recipient(
-    recipient: stoffelnet::network_utils::PartyId,
-    local_position: usize,
-) -> Option<stoffelnet::network_utils::PartyId> {
-    if recipient >= local_position {
-        recipient.checked_add(1)
-    } else {
-        Some(recipient)
-    }
-}
-
-fn client_transport_targets(
-    recipient: stoffelnet::network_utils::PartyId,
-    local_position: usize,
-) -> Option<[stoffelnet::network_utils::PartyId; 1]> {
-    Some([client_transport_recipient(recipient, local_position)?])
-}
-
-#[async_trait::async_trait]
-impl Network for ClientNetworkAdapter {
-    type NodeType = <QuicNetworkManager as Network>::NodeType;
-    type NetworkConfig = <QuicNetworkManager as Network>::NetworkConfig;
-
-    async fn send(
-        &self,
-        recipient: stoffelnet::network_utils::PartyId,
-        message: &[u8],
-    ) -> Result<usize, stoffelnet::network_utils::NetworkError> {
-        let [mapped] = client_transport_targets(recipient, self.local_position).ok_or(
-            stoffelnet::network_utils::NetworkError::PartyNotFound(recipient),
-        )?;
-        let Some(connection) = self.inner.get_connection_by_party_id(mapped) else {
-            return Err(stoffelnet::network_utils::NetworkError::PartyNotFound(
-                recipient,
-            ));
-        };
-        let bytes = message.to_vec();
-        tokio::spawn(async move {
-            if let Err(error) = connection.send(&bytes).await {
-                eprintln!("[client] Failed to send MPC message to party {recipient}: {error}");
-            }
-        });
-        Ok(message.len())
-    }
-
-    async fn broadcast(
-        &self,
-        message: &[u8],
-    ) -> Result<usize, stoffelnet::network_utils::NetworkError> {
-        let n = self.party_count();
-        let mut total = 0usize;
-        let results = futures::future::join_all(
-            (0..n).map(|party_id| async move { (party_id, self.send(party_id, message).await) }),
-        )
-        .await;
-
-        for (party_id, result) in results {
-            match result {
-                Ok(bytes) => total += bytes,
-                Err(e) => {
-                    tracing::debug!("client broadcast to party {} failed: {:?}", party_id, e);
-                }
-            }
-        }
-        Ok(total)
-    }
-
-    fn parties(&self) -> Vec<&Self::NodeType> {
-        self.inner.parties()
-    }
-
-    fn parties_mut(&mut self) -> Vec<&mut Self::NodeType> {
-        self.inner.parties_mut()
-    }
-
-    fn config(&self) -> &Self::NetworkConfig {
-        self.inner.config()
-    }
-
-    fn node(&self, id: stoffelnet::network_utils::PartyId) -> Option<&Self::NodeType> {
-        self.inner.node(id)
-    }
-
-    fn node_mut(&mut self, id: stoffelnet::network_utils::PartyId) -> Option<&mut Self::NodeType> {
-        self.inner.node_mut(id)
-    }
-
-    async fn send_to_client(
-        &self,
-        client: ClientId,
-        message: &[u8],
-    ) -> Result<usize, stoffelnet::network_utils::NetworkError> {
-        self.inner.send_to_client(client, message).await
-    }
-
-    fn clients(&self) -> Vec<ClientId> {
-        self.inner.clients()
-    }
-
-    fn is_client_connected(&self, client: ClientId) -> bool {
-        self.inner.is_client_connected(client)
-    }
-
-    fn local_party_id(&self) -> stoffelnet::network_utils::PartyId {
-        self.inner.local_party_id()
-    }
-
-    fn party_count(&self) -> usize {
-        // Return n (not n+1) — exclude the client from the party count
-        self.inner.party_count().saturating_sub(1)
-    }
-
-    fn verified_ordering(&self) -> Option<stoffelnet::network_utils::VerifiedOrdering> {
-        self.inner.verified_ordering()
-    }
-}
-
 /// Network adapter for MPC servers that remaps sequential client indices
 /// (0, 1, ...) back to transport client IDs for send_to_client().
 /// The MPC protocol uses small indices (because session_id only has 8 bits),
@@ -836,6 +1330,78 @@ fn is_flag_present(raw_args: &[String], flag: &str) -> bool {
         .iter()
         .any(|arg| arg == flag || arg.starts_with(&format!("{flag}=")))
 }
+
+/// The client slot layout's one source, named by every flag that used to size it.
+const SLOT_LAYOUT_HINT: &str =
+    "The client slot layout is the coordinator's execution registration.";
+
+/// `n` and `t` have exactly one source.
+const ROSTER_SIZE_HINT: &str = "n and t come from the coordinator's node roster. To refuse a \
+     roster of another size, pass --expect-n-parties and --expect-threshold.";
+
+/// Flags this binary refuses by name, each with its hint
+/// (`docs/design/bootnode-elimination.md` §9.D.3). No hint names a flag of this
+/// table, so an operator is never sent from one refusal to the next.
+const REMOVED_FLAGS: &[(&str, &str)] = &[
+    (
+        "--roster",
+        "Membership is the coordinator's node roster, fetched once at startup. Pass \
+         --off-chain-coord, --coord-cert and --execution-id instead.",
+    ),
+    (
+        "--expected-clients",
+        "Client certificates no longer enter a node's transport allowlist. Clients \
+         associate with an execution through the coordinator, and nodes read the admissions \
+         from it.",
+    ),
+    (
+        "--wait-for-clients",
+        "Clients no longer connect to the node mesh. They associate through the coordinator \
+         and fetch their masks from the nodes' --rpc-bind listeners.",
+    ),
+    ("--client-roster", SLOT_LAYOUT_HINT),
+    ("--client-input-slots", SLOT_LAYOUT_HINT),
+    ("--client-input-count", SLOT_LAYOUT_HINT),
+    ("--client-input-total", SLOT_LAYOUT_HINT),
+    ("--n-parties", ROSTER_SIZE_HINT),
+    ("--threshold", ROSTER_SIZE_HINT),
+    (
+        "--timestamp",
+        "No coordinator takes a timestamp; an execution's deadlines are part of its \
+         registration. Remove the flag.",
+    ),
+    (
+        "--client-id",
+        "A client's slot is requested with --client-slot <index> and granted by the \
+         coordinator's admission.",
+    ),
+    (
+        "--client-index",
+        "The coordinator assigns each client's input range when it associates. Pass \
+         --client-slot <index> to ask for a specific slot.",
+    ),
+    (
+        "--outputs",
+        "A client's output count comes from its admission.",
+    ),
+    ("--expected-client-count", SLOT_LAYOUT_HINT),
+    (
+        "--bootnode",
+        "The bootnode is gone. Every node passes --off-chain-coord <host:port>, --coord-cert \
+         <path>, --execution-id <64-hex>, --peers <addrs> and --epoch-store <dir>, and runs no \
+         bootstrap process.",
+    ),
+    (
+        "--bootstrap",
+        "There is no bootstrap process to register with. Pass --peers <addrs> (seed hints); \
+         membership is the coordinator's node roster (--off-chain-coord, --coord-cert).",
+    ),
+    (
+        "--coord-driver",
+        "Coordinator transitions are quorum-gated: every party proposes every round and none \
+         is designated. Drop the flag.",
+    ),
+];
 
 fn fail_removed_flag(raw_args: &[String], old_flag: &str, replacement_hint: &str) {
     if is_flag_present(raw_args, old_flag) {
@@ -986,11 +1552,6 @@ fn format_vm_object(
     }
     format!("{{{}}}", parts.join(", "))
 }
-fn coordinator_output_share_bytes(vm: &mut VirtualMachine, result: &Value) -> Option<Vec<u8>> {
-    vm.read_share_object(result)
-        .ok()
-        .map(|(_ty, share_data)| share_data.as_bytes().to_vec())
-}
 fn parse_inputs_as_field<F: PrimeField>(inputs_str: &str) -> Vec<F> {
     // An output-only client has no inputs.
     if inputs_str.trim().is_empty() {
@@ -1053,120 +1614,6 @@ fn fixed_width_be_bytes(bytes: &[u8], width: usize) -> Vec<u8> {
     }
 }
 
-/// Connect to all MPC servers with retry logic, spawning a receive loop per connection.
-async fn connect_to_all_servers(
-    network: &Arc<tokio::sync::Mutex<QuicNetworkManager>>,
-    server_addrs: &[SocketAddr],
-    msg_tx: mpsc::Sender<(usize, Vec<u8>)>,
-) {
-    let max_retries = 10;
-    let retry_delay = Duration::from_millis(500);
-    let mut connected_servers = Vec::with_capacity(server_addrs.len());
-
-    for (server_idx, &addr) in server_addrs.iter().enumerate() {
-        let mut retry_count = 0;
-
-        loop {
-            eprintln!(
-                "[client] Connecting to server {} at {} (attempt {}/{})",
-                server_idx,
-                addr,
-                retry_count + 1,
-                max_retries
-            );
-
-            let connection_result = {
-                let mut net = network.lock().await;
-                net.connect_as_client(addr).await
-            };
-
-            match connection_result {
-                Ok(connection) => {
-                    eprintln!("[client] Connected to server {} at {}", server_idx, addr);
-                    connected_servers.push((addr, connection));
-                    break;
-                }
-                Err(e) => {
-                    retry_count += 1;
-                    if retry_count >= max_retries {
-                        eprintln!(
-                            "[client] Failed to connect to server {} at {} after {} attempts: {}",
-                            server_idx, addr, retry_count, e
-                        );
-                        exit(21);
-                    }
-                    eprintln!(
-                        "[client] Connection attempt {} failed: {}, retrying...",
-                        retry_count, e
-                    );
-                    tokio::time::sleep(retry_delay).await;
-                }
-            }
-        }
-    }
-
-    let (assigned_party_ids, local_party_id) = {
-        let net = network.lock().await;
-        let assigned = net.assign_party_ids();
-        let local = net.compute_local_party_id();
-        (assigned, local)
-    };
-    eprintln!(
-        "[client] Assigned authenticated party IDs for {} connections",
-        assigned_party_ids
-    );
-
-    let mut seen_peers = HashSet::new();
-    for (addr, connection) in connected_servers {
-        let authenticated_peer = connection.remote_party_id().unwrap_or_else(|| {
-            eprintln!(
-                "[client] Connected server {} has no authenticated party identity",
-                addr
-            );
-            exit(24);
-        });
-        let peer = local_party_id.map_or(authenticated_peer, |local_id| {
-            if authenticated_peer == local_id {
-                eprintln!(
-                    "[client] Connected server {} resolved to local authenticated identity {}",
-                    addr, authenticated_peer
-                );
-                exit(24);
-            }
-            if authenticated_peer > local_id {
-                authenticated_peer - 1
-            } else {
-                authenticated_peer
-            }
-        });
-
-        if !seen_peers.insert(peer) {
-            eprintln!(
-                "[client] Duplicate authenticated party identity {} detected for server {}",
-                peer, addr
-            );
-            exit(24);
-        }
-
-        let tx = msg_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                match connection.receive().await {
-                    Ok(data) => {
-                        if let Err(e) = tx.send((peer, data)).await {
-                            eprintln!("[client] Failed to forward message: {:?}", e);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[client] Connection to server {} closed: {}", peer, e);
-                        break;
-                    }
-                }
-            }
-        });
-    }
-}
 const CLIENT_SET_SYNC_PREFIX: &[u8; 4] = b"CSS1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClientSetSyncMessage {
@@ -1177,30 +1624,6 @@ fn normalize_client_ids(mut ids: Vec<ClientId>) -> Vec<ClientId> {
     ids.sort_unstable();
     ids.dedup();
     ids
-}
-
-fn input_client_ids_from_output_ids(
-    output_ids: &[Vec<u8>],
-    client_roster: &[usize],
-    client_input_slots: &[usize],
-    client_input_count: usize,
-) -> Vec<Vec<u8>> {
-    if client_input_count == 0 {
-        return Vec::new();
-    }
-    if client_input_slots.is_empty() {
-        return output_ids.to_vec();
-    }
-
-    let input_slots = client_input_slots.iter().copied().collect::<HashSet<_>>();
-    output_ids
-        .iter()
-        .enumerate()
-        .filter_map(|(ordinal, client_id)| {
-            let slot = client_roster.get(ordinal).copied().unwrap_or(ordinal);
-            input_slots.contains(&slot).then(|| client_id.clone())
-        })
-        .collect()
 }
 
 fn encode_client_set_sync(msg: &ClientSetSyncMessage) -> Result<Vec<u8>, String> {
@@ -1343,958 +1766,6 @@ async fn sync_client_set_across_parties(
     );
     Ok(())
 }
-struct HbClientProtocolConfig {
-    n: usize,
-    t: usize,
-    /// Number of input values this client contributes (0 for an output-only client).
-    input_len: usize,
-    /// Number of output values this client receives via `send_to_client` (0 for
-    /// an input-only client).
-    output_len: usize,
-    instance_id: u64,
-    client_index: u8,
-    local_position: usize,
-    curve_config: MpcCurveConfig,
-}
-struct AvssClientProtocolConfig {
-    n: usize,
-    t: usize,
-    output_len: usize,
-    instance_id: u64,
-    client_index: u8,
-    local_position: usize,
-    curve_config: MpcCurveConfig,
-}
-async fn run_hb_client_protocol_for_curve<F: PrimeField>(
-    config: HbClientProtocolConfig,
-    inputs_str: &str,
-    network_for_process: Arc<tokio::sync::Mutex<QuicNetworkManager>>,
-    mut msg_rx: mpsc::Receiver<(usize, Vec<u8>)>,
-) -> Result<(), String> {
-    let instance_id = honeybadger_protocol_instance_id(config.instance_id);
-    // Use the sequential client_index (0, 1, ...) as the MPC identity,
-    // not the transport-derived cid, because the session_id only has
-    // 8 bits for the client_id field.
-    let mpc_cid = config.client_index as usize;
-    // A client with no inputs is an output-only client: it does not run the
-    // input protocol, it only waits for the servers to deliver its output
-    // shares and reconstructs them. The `OutputClient` is sized by the number
-    // of outputs the client receives; an input client keeps its prior sizing.
-    let is_output_only = config.input_len == 0;
-    let output_client_len = if is_output_only {
-        config.output_len
-    } else {
-        config.input_len
-    };
-    let mut mpc_client = HoneyBadgerMPCClient::<F, Avid<HbSessionId>>::new(
-        mpc_cid,
-        config.n,
-        config.t,
-        instance_id,
-        parse_inputs_as_field::<F>(inputs_str),
-        output_client_len,
-    )
-    .map_err(|e| format!("Failed to create MPC client: {:?}", e))?;
-
-    let mut messages_processed = 0usize;
-    while let Some((sender_id, data)) = msg_rx.recv().await {
-        // Skip INST messages from other servers (already consumed the first one)
-        if data.len() == 13 && data.starts_with(b"INST") {
-            eprintln!(
-                "[client {}] Skipping extra INST from sender {}",
-                mpc_cid, sender_id
-            );
-            continue;
-        }
-        eprintln!(
-            "[client {}] Received {} bytes from sender {} (raw)",
-            mpc_cid,
-            data.len(),
-            sender_id
-        );
-
-        let adapter = {
-            let guard = network_for_process.lock().await;
-            ClientNetworkAdapter {
-                inner: (*guard).clone(),
-                local_position: config.local_position,
-            }
-        };
-
-        match mpc_client.process(sender_id, data, Arc::new(adapter)).await {
-            Ok(()) => {
-                messages_processed += 1;
-                eprintln!(
-                    "[client {}] Successfully processed message #{} from server {}",
-                    mpc_cid, messages_processed, sender_id
-                );
-                // Output-only client: finish as soon as the output shares
-                // reconstruct (>= 2t+1 received).
-                if is_output_only {
-                    if let Some(outputs) = mpc_client.output.get_output() {
-                        let output_hex = field_outputs_to_hex(&outputs, config.curve_config);
-                        println!("Client output: field[{}] 0x{}", outputs.len(), output_hex);
-                        eprintln!(
-                            "[client {}] Reconstructed {} output value(s)",
-                            mpc_cid,
-                            outputs.len()
-                        );
-                        return Ok(());
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "[client {}] Failed to process message from {}: {:?}",
-                    mpc_cid, sender_id, e
-                );
-            }
-        }
-
-        if !is_output_only && messages_processed >= config.n {
-            // Input client: keep the connection alive long enough for servers
-            // to drain their preprocessing backlog and process our masked input.
-            eprintln!(
-                "[client {}] Input protocol complete, holding connection for 300s...",
-                mpc_cid
-            );
-            tokio::time::sleep(Duration::from_secs(300)).await;
-            break;
-        }
-    }
-
-    if is_output_only {
-        return Err(format!(
-            "HB output client receiver closed before output reconstruction (processed {messages_processed} messages)"
-        ));
-    }
-
-    eprintln!(
-        "[client {}] Message processing done ({} messages)",
-        mpc_cid, messages_processed
-    );
-    Ok(())
-}
-async fn run_avss_client_protocol_for_curve<F, G>(
-    config: AvssClientProtocolConfig,
-    inputs_str: &str,
-    network_for_process: Arc<tokio::sync::Mutex<QuicNetworkManager>>,
-    mut msg_rx: mpsc::Receiver<(usize, Vec<u8>)>,
-) -> Result<(), String>
-where
-    F: PrimeField,
-    G: CurveGroup<ScalarField = F>,
-{
-    let mpc_cid = config.client_index as usize;
-    let instance_id = avss_protocol_instance_id(config.instance_id);
-    let mut mpc_client = AvssMPCClient::<F, Avid<AvssSessionId>, G>::new(
-        mpc_cid,
-        config.n,
-        config.t,
-        instance_id,
-        parse_inputs_as_field::<F>(inputs_str),
-        config.output_len,
-    )
-    .map_err(|e| format!("Failed to create AVSS MPC client: {:?}", e))?;
-
-    let mut messages_processed = 0usize;
-    while let Some((sender_id, data)) = msg_rx.recv().await {
-        eprintln!(
-            "[client {}] Received {} AVSS bytes from sender {}",
-            mpc_cid,
-            data.len(),
-            sender_id
-        );
-        if data.len() == 13 && data.starts_with(b"INST") {
-            eprintln!(
-                "[client {}] Skipping extra INST from sender {}",
-                mpc_cid, sender_id
-            );
-            continue;
-        }
-
-        let adapter = {
-            let guard = network_for_process.lock().await;
-            ClientNetworkAdapter {
-                inner: (*guard).clone(),
-                local_position: config.local_position,
-            }
-        };
-
-        match mpc_client.process(sender_id, data, Arc::new(adapter)).await {
-            Ok(()) => {
-                messages_processed += 1;
-                if let Some(outputs) = mpc_client.output.get_output() {
-                    let output_hex = field_outputs_to_hex(&outputs, config.curve_config);
-                    println!("Client output: field[{}] 0x{}", outputs.len(), output_hex);
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "[client {}] Failed to process AVSS message from {}: {:?}",
-                    mpc_cid, sender_id, e
-                );
-            }
-        }
-    }
-
-    Err(format!(
-        "AVSS client receiver closed before output reconstruction (processed {} messages)",
-        messages_processed
-    ))
-}
-async fn run_avss_client_for_curve(
-    curve_config: MpcCurveConfig,
-    config: AvssClientProtocolConfig,
-    inputs_str: &str,
-    network_for_process: Arc<tokio::sync::Mutex<QuicNetworkManager>>,
-    msg_rx: mpsc::Receiver<(usize, Vec<u8>)>,
-) -> Result<(), String> {
-    match curve_config {
-        MpcCurveConfig::Bls12_381 => {
-            run_avss_client_protocol_for_curve::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>(
-                config,
-                inputs_str,
-                network_for_process,
-                msg_rx,
-            )
-            .await
-        }
-        MpcCurveConfig::Bn254 => {
-            run_avss_client_protocol_for_curve::<ark_bn254::Fr, ark_bn254::G1Projective>(
-                config,
-                inputs_str,
-                network_for_process,
-                msg_rx,
-            )
-            .await
-        }
-        MpcCurveConfig::Curve25519 => {
-            run_avss_client_protocol_for_curve::<
-                ark_curve25519::Fr,
-                ark_curve25519::EdwardsProjective,
-            >(config, inputs_str, network_for_process, msg_rx)
-            .await
-        }
-        MpcCurveConfig::Ed25519 => {
-            run_avss_client_protocol_for_curve::<ark_ed25519::Fr, ark_ed25519::EdwardsProjective>(
-                config,
-                inputs_str,
-                network_for_process,
-                msg_rx,
-            )
-            .await
-        }
-        MpcCurveConfig::Secp256k1 => {
-            run_avss_client_protocol_for_curve::<ark_secp256k1::Fr, ark_secp256k1::Projective>(
-                config,
-                inputs_str,
-                network_for_process,
-                msg_rx,
-            )
-            .await
-        }
-        MpcCurveConfig::Secp256r1 => {
-            run_avss_client_protocol_for_curve::<ark_secp256r1::Fr, ark_secp256r1::Projective>(
-                config,
-                inputs_str,
-                network_for_process,
-                msg_rx,
-            )
-            .await
-        }
-    }
-}
-async fn run_hb_client_for_curve(
-    curve_config: MpcCurveConfig,
-    config: HbClientProtocolConfig,
-    inputs_str: &str,
-    network_for_process: Arc<tokio::sync::Mutex<QuicNetworkManager>>,
-    msg_rx: mpsc::Receiver<(usize, Vec<u8>)>,
-) -> Result<(), String> {
-    match curve_config {
-        MpcCurveConfig::Bls12_381 => {
-            run_hb_client_protocol_for_curve::<ark_bls12_381::Fr>(
-                config,
-                inputs_str,
-                network_for_process,
-                msg_rx,
-            )
-            .await
-        }
-        MpcCurveConfig::Bn254 => {
-            run_hb_client_protocol_for_curve::<ark_bn254::Fr>(
-                config,
-                inputs_str,
-                network_for_process,
-                msg_rx,
-            )
-            .await
-        }
-        MpcCurveConfig::Curve25519 => {
-            run_hb_client_protocol_for_curve::<ark_curve25519::Fr>(
-                config,
-                inputs_str,
-                network_for_process,
-                msg_rx,
-            )
-            .await
-        }
-        MpcCurveConfig::Ed25519 => {
-            run_hb_client_protocol_for_curve::<ark_ed25519::Fr>(
-                config,
-                inputs_str,
-                network_for_process,
-                msg_rx,
-            )
-            .await
-        }
-        MpcCurveConfig::Secp256k1 | MpcCurveConfig::Secp256r1 => Err(format!(
-            "client mode with honeybadger backend does not support curve {}",
-            curve_config.name()
-        )),
-    }
-}
-async fn run_as_client(
-    n_parties: Option<usize>,
-    threshold: Option<usize>,
-    mpc_backend: Option<&str>,
-    mpc_curve: Option<&str>,
-    client_inputs: Option<String>,
-    client_outputs: Option<usize>,
-    server_addrs: Vec<SocketAddr>,
-) {
-    let n = n_parties.unwrap_or_else(|| {
-        eprintln!("Error: --n-parties is required in client mode");
-        exit(2);
-    });
-    let t = threshold.unwrap_or(1);
-
-    let backend_kind = if let Some(backend_name) = mpc_backend {
-        MpcBackendKind::from_str(backend_name).unwrap_or_else(|e| {
-            eprintln!("Error: {}", e);
-            exit(2);
-        })
-    } else {
-        MpcBackendKind::default_backend()
-    };
-
-    // A client may be an input client (provides `--inputs`), an output-only
-    // client (provides `--outputs` and no inputs, e.g. a result recipient), or
-    // both. `--inputs` is therefore optional.
-    let inputs_str = client_inputs.unwrap_or_default();
-    let input_len = if inputs_str.trim().is_empty() {
-        0
-    } else {
-        inputs_str.split(',').count()
-    };
-    let output_len = client_outputs.unwrap_or(input_len);
-    if input_len == 0 && output_len == 0 {
-        eprintln!(
-            "Error: a client must either provide --inputs (comma-separated values) or receive \
-             outputs via --outputs <N> in client mode"
-        );
-        exit(2);
-    }
-
-    if server_addrs.is_empty() {
-        eprintln!("Error: --servers is required in client mode (comma-separated addresses)");
-        eprintln!("Example: --servers 172.18.0.2:9000,172.18.0.3:9000,172.18.0.4:9000,172.18.0.5:9000,172.18.0.6:9000");
-        exit(2);
-    }
-
-    if server_addrs.len() != n {
-        eprintln!(
-            "Warning: number of servers ({}) doesn't match n_parties ({})",
-            server_addrs.len(),
-            n
-        );
-    }
-
-    let curve_config = if let Some(name) = mpc_curve {
-        MpcCurveConfig::from_str(name).unwrap_or_else(|e| {
-            eprintln!("Error: {}", e);
-            exit(2);
-        })
-    } else {
-        MpcCurveConfig::default()
-    };
-
-    if let Err(e) = curve_config.validate_for_backend(backend_kind) {
-        eprintln!("Error: {}", e);
-        exit(2);
-    }
-
-    eprintln!(
-        "[client] Client mode (backend={}, curve={}, n={}, t={}, {} inputs, {} outputs, {} servers)",
-        backend_kind.name(),
-        curve_config.name(),
-        n,
-        t,
-        input_len,
-        output_len,
-        server_addrs.len()
-    );
-
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("install rustls crypto");
-
-    let network = Arc::new(tokio::sync::Mutex::new(QuicNetworkManager::new()));
-
-    for (party_id, &addr) in server_addrs.iter().enumerate() {
-        network.lock().await.add_node_with_party_id(party_id, addr);
-        eprintln!("[client] Added server party {} at {}", party_id, addr);
-    }
-
-    let (msg_tx, mut msg_rx) = mpsc::channel::<(usize, Vec<u8>)>(1000);
-
-    eprintln!("[client] Connecting to {} servers...", server_addrs.len());
-    connect_to_all_servers(&network, &server_addrs, msg_tx.clone()).await;
-
-    let cid = {
-        let net = network.lock().await;
-        net.local_derived_id()
-    };
-    eprintln!("[client {}] Derived transport client ID", cid);
-
-    // Read INST message from servers: [b"INST" | instance_id:u64 | client_index:u8]
-    let (instance_id, client_index, pending_messages) = {
-        let timeout_dur = Duration::from_secs(600);
-        let mut result: Option<(u64, u8)> = None;
-        let mut pending_messages = Vec::new();
-        let deadline = tokio::time::Instant::now() + timeout_dur;
-        while result.is_none() {
-            match tokio::time::timeout_at(deadline, msg_rx.recv()).await {
-                Ok(Some((sender, data))) => {
-                    if data.len() == 13 && &data[0..4] == b"INST" {
-                        let id_bytes: [u8; 8] = data[4..12].try_into().unwrap();
-                        let inst_id = u64::from_le_bytes(id_bytes);
-                        let idx = data[12];
-                        result = Some((inst_id, idx));
-                    } else {
-                        pending_messages.push((sender, data));
-                    }
-                }
-                Ok(None) => {
-                    eprintln!("[client {}] Channel closed before receiving INST", cid);
-                    exit(25);
-                }
-                Err(_) => {
-                    eprintln!("[client {}] Timeout waiting for INST from server", cid);
-                    exit(25);
-                }
-            }
-        }
-        let (id, idx) = result.unwrap();
-        eprintln!(
-            "[client {}] Received INST: instance_id={}, client_index={}",
-            cid, id, idx
-        );
-        (id, idx, pending_messages)
-    };
-
-    eprintln!(
-        "[client {}] Connected to all servers, starting input protocol...",
-        cid
-    );
-
-    // Get the client's position in the (n+1)-key sorted list so we can
-    // remap party IDs when sending (skip our own slot).
-    let local_position = {
-        let net = network.lock().await;
-        net.compute_local_party_id().unwrap_or(0)
-    };
-    eprintln!(
-        "[client {}] Local position in sorted key list: {}",
-        cid, local_position
-    );
-
-    let msg_rx = if pending_messages.is_empty() {
-        msg_rx
-    } else {
-        eprintln!(
-            "[client {}] Replaying {} protocol messages received before INST",
-            cid,
-            pending_messages.len()
-        );
-        let (replay_tx, replay_rx) = mpsc::channel::<(usize, Vec<u8>)>(1000);
-        tokio::spawn(async move {
-            for message in pending_messages {
-                if replay_tx.send(message).await.is_err() {
-                    return;
-                }
-            }
-            while let Some(message) = msg_rx.recv().await {
-                if replay_tx.send(message).await.is_err() {
-                    return;
-                }
-            }
-        });
-        replay_rx
-    };
-
-    let network_for_process = network.clone();
-    let inputs_for_task = inputs_str.clone();
-    let process_handle = match backend_kind {
-        MpcBackendKind::HoneyBadger => {
-            let protocol_config = HbClientProtocolConfig {
-                n,
-                t,
-                input_len,
-                output_len,
-                instance_id,
-                client_index,
-                local_position,
-                curve_config,
-            };
-            tokio::spawn(async move {
-                run_hb_client_for_curve(
-                    curve_config,
-                    protocol_config,
-                    &inputs_for_task,
-                    network_for_process,
-                    msg_rx,
-                )
-                .await
-            })
-        }
-        MpcBackendKind::Avss => {
-            let protocol_config = AvssClientProtocolConfig {
-                n,
-                t,
-                output_len,
-                instance_id,
-                client_index,
-                local_position,
-                curve_config,
-            };
-            tokio::spawn(async move {
-                run_avss_client_for_curve(
-                    curve_config,
-                    protocol_config,
-                    &inputs_for_task,
-                    network_for_process,
-                    msg_rx,
-                )
-                .await
-            })
-        }
-    };
-
-    let timeout_duration = Duration::from_secs(600);
-    match tokio::time::timeout(timeout_duration, process_handle).await {
-        Ok(Ok(Ok(()))) => {
-            eprintln!(
-                "[client {}] Successfully submitted inputs to MPC network",
-                cid
-            );
-        }
-        Ok(Ok(Err(e))) => {
-            eprintln!("[client {}] Input protocol failed: {}", cid, e);
-            exit(22);
-        }
-        Ok(Err(e)) => {
-            eprintln!("[client {}] Input task error: {:?}", cid, e);
-            exit(22);
-        }
-        Err(_) => {
-            eprintln!(
-                "[client {}] Timeout waiting for input protocol to complete",
-                cid
-            );
-            exit(23);
-        }
-    }
-}
-struct AvssOffchainCoordinatorClientArgs {
-    curve_config: MpcCurveConfig,
-    client_inputs: Option<String>,
-    client_outputs: Option<usize>,
-    output_format: CoordinatorOutputFormat,
-    server_addrs: Vec<SocketAddr>,
-    coord_addr: (String, u16),
-    cert_der: Vec<u8>,
-    key_der: Vec<u8>,
-    threshold: Option<usize>,
-    coordinator_client_index: Option<u64>,
-}
-async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
-    args: AvssOffchainCoordinatorClientArgs,
-) where
-    F: SupportedMpcField,
-    G: CurveGroup<ScalarField = F> + Send + Sync + 'static,
-{
-    let AvssOffchainCoordinatorClientArgs {
-        curve_config,
-        client_inputs,
-        client_outputs,
-        output_format: _output_format,
-        server_addrs,
-        coord_addr,
-        cert_der,
-        key_der,
-        threshold,
-        coordinator_client_index,
-    } = args;
-
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("install rustls crypto");
-
-    let t = threshold.unwrap_or(1);
-    let input_str = client_inputs.unwrap_or_else(|| {
-        eprintln!("Error: --inputs required in coordinator client mode");
-        exit(2);
-    });
-    let input_values = parse_inputs_as_field::<F>(&input_str);
-    if input_values.is_empty() {
-        eprintln!("Error: coordinator client mode requires at least one input value");
-        exit(2);
-    }
-    let output_len = client_outputs.unwrap_or(input_values.len());
-    let reserved_index = coordinator_client_index.unwrap_or_else(|| {
-        eprintln!(
-            "Error: coordinator client mode requires --client-index to claim a reserved input slot"
-        );
-        exit(2);
-    });
-
-    let mut coord: AvssOffChainCoordinator<F, G> =
-        AvssOffChainCoordinator::<F, G>::start_rpc_client(
-            &coord_addr.0,
-            coord_addr.1,
-            t as u64,
-            server_addrs.len() as u64,
-            output_len as u64,
-            cert_der.clone(),
-            key_der.clone(),
-        )
-        .await
-        .unwrap_or_else(|error| {
-            eprintln!("Failed to connect to AVSS off-chain coordinator: {error}");
-            exit(13);
-        });
-
-    coord.wait_for_round(Round::Preprocessing).await.unwrap();
-    coord
-        .wait_for_round(Round::InputMaskReservation)
-        .await
-        .unwrap();
-    for offset in 0..input_values.len() {
-        let index = reserved_index + offset as u64;
-        eprintln!("[client slot {index}] reserving input mask");
-        coord.reserve_mask_index(index).await.unwrap();
-    }
-
-    let rpc_addrs: Vec<(String, u16)> = server_addrs
-        .iter()
-        .map(|addr| (addr.ip().to_string(), addr.port()))
-        .collect();
-    let node_rpc_client: AvssOffChainNodeRpcClient<F, G> =
-        AvssOffChainNodeRpcClient::<F, G>::start_rpc_client(
-            rpc_addrs.len(),
-            t,
-            rpc_addrs,
-            cert_der,
-            key_der,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            eprintln!("Failed to connect to AVSS node RPC servers: {error}");
-            exit(13);
-        });
-    let mut masks = Vec::with_capacity(input_values.len());
-    for offset in 0..input_values.len() {
-        let index = reserved_index + offset as u64;
-        eprintln!("[client slot {index}] waiting for mask shares");
-        masks.push(node_rpc_client.receive_mask().await.unwrap());
-    }
-
-    coord.wait_for_round(Round::InputCollection).await.unwrap();
-    for (offset, (input_value, mask)) in input_values.iter().zip(masks).enumerate() {
-        let index = reserved_index + offset as u64;
-        eprintln!("[client slot {index}] submitting masked input");
-        coord
-            .send_masked_input(mask + *input_value, index)
-            .await
-            .unwrap();
-    }
-    if output_len == 0 {
-        eprintln!("[client slot {reserved_index}] input submission complete; no outputs requested");
-        return;
-    }
-
-    coord.wait_for_round(Round::MPCExecution).await.unwrap();
-    coord
-        .wait_for_round(Round::OutputDistribution)
-        .await
-        .unwrap();
-    let outputs = coord.obtain_outputs().await.unwrap();
-    let output_hex = field_outputs_to_hex(&outputs, curve_config);
-    println!("Client output: field[{}] 0x{}", outputs.len(), output_hex);
-}
-async fn run_avss_offchain_coordinator_client(args: AvssOffchainCoordinatorClientArgs) {
-    match args.curve_config {
-        MpcCurveConfig::Bls12_381 => {
-            run_avss_offchain_coordinator_client_for_curve::<
-                ark_bls12_381::Fr,
-                ark_bls12_381::G1Projective,
-            >(args)
-            .await
-        }
-        MpcCurveConfig::Bn254 => run_avss_offchain_coordinator_client_for_curve::<
-            ark_bn254::Fr,
-            ark_bn254::G1Projective,
-        >(args)
-        .await,
-        MpcCurveConfig::Curve25519 => {
-            run_avss_offchain_coordinator_client_for_curve::<
-                ark_curve25519::Fr,
-                ark_curve25519::EdwardsProjective,
-            >(args)
-            .await
-        }
-        MpcCurveConfig::Ed25519 => {
-            run_avss_offchain_coordinator_client_for_curve::<
-                ark_ed25519::Fr,
-                ark_ed25519::EdwardsProjective,
-            >(args)
-            .await
-        }
-        MpcCurveConfig::Secp256k1 => {
-            run_avss_offchain_coordinator_client_for_curve::<
-                ark_secp256k1::Fr,
-                ark_secp256k1::Projective,
-            >(args)
-            .await
-        }
-        MpcCurveConfig::Secp256r1 => {
-            run_avss_offchain_coordinator_client_for_curve::<
-                ark_secp256r1::Fr,
-                ark_secp256r1::Projective,
-            >(args)
-            .await
-        }
-    }
-}
-#[allow(clippy::too_many_arguments)]
-async fn run_hb_coordinator_client_for_field<F>(
-    client_inputs: Option<String>,
-    client_outputs: Option<usize>,
-    output_format: CoordinatorOutputFormat,
-    server_addrs: Vec<SocketAddr>,
-    coord_addr: Option<(String, u16)>,
-    contract_addr: Option<String>,
-    cert_der: Vec<u8>,
-    key_der: Vec<u8>,
-    threshold: Option<usize>,
-    coordinator_client_index: Option<u64>,
-    eth_node_addr: Option<String>,
-    wallet_sk_str: Option<String>,
-) where
-    F: SupportedMpcField,
-{
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("install rustls crypto");
-
-    let t = threshold.unwrap_or(1);
-    let input_str = client_inputs.expect("--inputs required in client mode");
-    let input_values = parse_inputs_as_field::<F>(&input_str);
-    if input_values.is_empty() {
-        eprintln!("Error: coordinator client mode requires at least one input value");
-        exit(2);
-    }
-    let output_len = client_outputs.unwrap_or(input_values.len());
-    let reserved_index = coordinator_client_index.unwrap_or_else(|| {
-        eprintln!(
-            "Error: coordinator client mode requires --client-index to claim a reserved input slot"
-        );
-        exit(2);
-    });
-
-    if contract_addr.is_some() {
-        let _ = (eth_node_addr, wallet_sk_str);
-        eprintln!(
-            "Error: on-chain coordinator mode is temporarily unavailable in the crates.io-ready build"
-        );
-        exit(2);
-    }
-
-    // Off-chain client mode
-    let ca = coord_addr.expect("--off-chain-coord required in off-chain client mode");
-    let mut coord: HbOffChainCoordinator<F> = HbOffChainCoordinator::<F>::start_rpc_client(
-        &ca.0,
-        ca.1,
-        t as u64,
-        server_addrs.len() as u64,
-        output_len as u64,
-        cert_der.clone(),
-        key_der.clone(),
-    )
-    .await
-    .unwrap_or_else(|error| {
-        eprintln!("Failed to connect to off-chain coordinator: {error}");
-        exit(13);
-    });
-
-    coord.wait_for_round(Round::Preprocessing).await.unwrap();
-    coord
-        .wait_for_round(Round::InputMaskReservation)
-        .await
-        .unwrap();
-    for offset in 0..input_values.len() {
-        let index = reserved_index + offset as u64;
-        eprintln!("[client slot {index}] reserving input mask");
-        coord.reserve_mask_index(index).await.unwrap();
-    }
-
-    let rpc_addrs: Vec<(String, u16)> = server_addrs
-        .iter()
-        .map(|a| (a.ip().to_string(), a.port()))
-        .collect();
-    let node_rpc_client: HbOffChainNodeRpcClient<F> =
-        HbOffChainNodeRpcClient::<F>::start_rpc_client(
-            rpc_addrs.len(),
-            t,
-            rpc_addrs,
-            cert_der,
-            key_der,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            eprintln!("Failed to connect to node RPC servers: {error}");
-            exit(13);
-        });
-    let mut masks = Vec::with_capacity(input_values.len());
-    for offset in 0..input_values.len() {
-        let index = reserved_index + offset as u64;
-        eprintln!("[client slot {index}] waiting for mask shares");
-        masks.push(node_rpc_client.receive_mask().await.unwrap());
-    }
-
-    coord.wait_for_round(Round::InputCollection).await.unwrap();
-    for (offset, (input_value, mask)) in input_values.iter().zip(masks).enumerate() {
-        let index = reserved_index + offset as u64;
-        eprintln!("[client slot {index}] submitting masked input");
-        coord
-            .send_masked_input(mask + *input_value, index)
-            .await
-            .unwrap();
-    }
-    if output_len == 0 {
-        eprintln!("[client slot {reserved_index}] input submission complete; no outputs requested");
-        return;
-    }
-
-    coord.wait_for_round(Round::MPCExecution).await.unwrap();
-    eprintln!("[client slot {reserved_index}] waiting for output distribution");
-    coord
-        .wait_for_round(Round::OutputDistribution)
-        .await
-        .unwrap();
-    let outputs = coord.obtain_outputs().await.unwrap();
-    println!(
-        "outputs: {}",
-        format_coordinator_outputs(&outputs, output_format)
-    );
-}
-#[allow(clippy::too_many_arguments)]
-async fn run_hb_coordinator_client(
-    curve_config: MpcCurveConfig,
-    client_inputs: Option<String>,
-    client_outputs: Option<usize>,
-    output_format: CoordinatorOutputFormat,
-    server_addrs: Vec<SocketAddr>,
-    coord_addr: Option<(String, u16)>,
-    contract_addr: Option<String>,
-    cert_der: Vec<u8>,
-    key_der: Vec<u8>,
-    threshold: Option<usize>,
-    coordinator_client_index: Option<u64>,
-    eth_node_addr: Option<String>,
-    wallet_sk_str: Option<String>,
-) {
-    match curve_config {
-        MpcCurveConfig::Bls12_381 => {
-            run_hb_coordinator_client_for_field::<ark_bls12_381::Fr>(
-                client_inputs,
-                client_outputs,
-                output_format,
-                server_addrs,
-                coord_addr,
-                contract_addr,
-                cert_der,
-                key_der,
-                threshold,
-                coordinator_client_index,
-                eth_node_addr,
-                wallet_sk_str,
-            )
-            .await
-        }
-        MpcCurveConfig::Bn254 => {
-            run_hb_coordinator_client_for_field::<ark_bn254::Fr>(
-                client_inputs,
-                client_outputs,
-                output_format,
-                server_addrs,
-                coord_addr,
-                contract_addr,
-                cert_der,
-                key_der,
-                threshold,
-                coordinator_client_index,
-                eth_node_addr,
-                wallet_sk_str,
-            )
-            .await
-        }
-        MpcCurveConfig::Curve25519 => {
-            run_hb_coordinator_client_for_field::<ark_curve25519::Fr>(
-                client_inputs,
-                client_outputs,
-                output_format,
-                server_addrs,
-                coord_addr,
-                contract_addr,
-                cert_der,
-                key_der,
-                threshold,
-                coordinator_client_index,
-                eth_node_addr,
-                wallet_sk_str,
-            )
-            .await
-        }
-        MpcCurveConfig::Ed25519 => {
-            run_hb_coordinator_client_for_field::<ark_ed25519::Fr>(
-                client_inputs,
-                client_outputs,
-                output_format,
-                server_addrs,
-                coord_addr,
-                contract_addr,
-                cert_der,
-                key_der,
-                threshold,
-                coordinator_client_index,
-                eth_node_addr,
-                wallet_sk_str,
-            )
-            .await
-        }
-        MpcCurveConfig::Secp256k1 | MpcCurveConfig::Secp256r1 => {
-            eprintln!(
-                "Error: curve {} is not supported by honeybadger backend",
-                curve_config.name()
-            );
-            exit(2);
-        }
-    }
-}
 struct HbPartySetup<'a> {
     net: Arc<QuicNetworkManager>,
     my_id: usize,
@@ -2303,12 +1774,23 @@ struct HbPartySetup<'a> {
     t: usize,
     instance_id: u64,
     expected_client_count: Option<usize>,
-    coordinator_client_count_hint: usize,
+    /// Client input masks a coordinated execution registers (§9.D.7 step 1): preprocessing
+    /// is sized for them on top of the program's own demand.
+    coordinator_mask_count: usize,
     client_input_count: usize,
     client_input_types: &'a std::collections::BTreeMap<usize, Vec<ShareType>>,
     preprocessing_demand: stoffel_vm_types::compiled_binary::PreprocessingDemand,
     program_hash: [u8; 32],
     preproc_store_path: Option<&'a str>,
+    /// Blocker B6: the receive loops must consume mesh control frames, or they
+    /// reach the HoneyBadger node as protocol messages. Built once in `main`
+    /// from the coordinator's node roster, so the peer book is pinned to the
+    /// session rather than open to any SPKI an authenticated peer cares to
+    /// invent.
+    mesh_router: Arc<MeshRouter>,
+    /// The agreement barriers of a coordinated execution (§9.D.6), offered every frame
+    /// beside the preprocessing barrier.
+    digest_barriers: Option<DigestBarriers>,
 }
 async fn setup_hb_party_for_curve<F, G>(
     vm: &mut VirtualMachine,
@@ -2326,12 +1808,14 @@ where
         t,
         instance_id,
         expected_client_count,
-        coordinator_client_count_hint,
+        coordinator_mask_count,
         client_input_count,
         client_input_types,
         preprocessing_demand,
         program_hash,
         preproc_store_path,
+        mesh_router,
+        digest_barriers,
     } = setup;
 
     // ---- Phase 1: Wait for clients ----
@@ -2428,8 +1912,10 @@ where
     // reveals only the program's size octave (privacy), not its exact operation
     // counts. The plan folds in the dependency that prandbit generation consumes
     // a triple + random per bit, and a baseline so light programs still run.
-    let client_random_count = input_ids.len().max(coordinator_client_count_hint);
-    let n_client_random = client_random_count.saturating_mul(client_input_count);
+    let n_client_random = input_ids
+        .len()
+        .saturating_mul(client_input_count)
+        .saturating_add(coordinator_mask_count);
     let plan = plan_preprocessing(&preprocessing_demand, t, n_client_random);
     let n_triples = plan.n_triples;
     let n_random = plan.n_random;
@@ -2505,7 +1991,7 @@ where
         my_id
     );
     let (mut server_rx, mut client_rx) =
-        spawn_receive_loops_split(net.clone(), my_id, n, open_message_router).await;
+        spawn_receive_loops_split(net.clone(), my_id, n, open_message_router, mesh_router).await;
 
     // Map canonical client transport IDs to MPC protocol indices.
     let client_id_to_index: std::collections::HashMap<ClientId, usize> = input_ids
@@ -2518,7 +2004,18 @@ where
     // Only this task calls process() — no other task touches the processing_node.
     let processing_net = net.clone();
     let process_party_id = my_id;
-    let (preprocessing_ready_tx, mut preprocessing_ready_rx) = mpsc::channel::<usize>(n);
+    // The all-to-all rendezvous every party has to reach before any party moves
+    // on, generalized out of this file into `stoffel_vm::net::mesh::barrier`.
+    // The frames are byte-identical to the ones this loop used to build and
+    // match by hand (`prefix || instance_id.to_le_bytes()`), which is what
+    // makes the migration a no-op on the wire.
+    let preprocessing_barrier = Arc::new(MeshBarrier::new(
+        BarrierTag::PreprocessingReady,
+        instance_id,
+        n,
+        my_id,
+    ));
+    let recording_barrier = preprocessing_barrier.clone();
     tokio::spawn(async move {
         let mut msg_count = 0u64;
         let trace_messages = std::env::var("STOFFEL_RUN_TRACE_MESSAGES")
@@ -2526,13 +2023,16 @@ where
         loop {
             tokio::select! {
                 Some((sender_id, raw_msg)) = server_rx.recv() => {
-                    if raw_msg.starts_with(HB_PREPROCESSING_READY_PREFIX) {
-                        if let Err(error) = preprocessing_ready_tx.send(sender_id).await {
-                            eprintln!(
-                                "[party {}] Failed to record preprocessing-ready marker from {}: {}",
-                                process_party_id, sender_id, error
-                            );
-                        }
+                    // Consumed here, never handed on: a barrier frame is not a
+                    // protocol message, and its tag is disjoint from every
+                    // other prefix on this stream (blocker B7).
+                    if recording_barrier.record(sender_id, &raw_msg) {
+                        continue;
+                    }
+                    if digest_barriers
+                        .as_ref()
+                        .is_some_and(|barriers| barriers.record(sender_id, &raw_msg))
+                    {
                         continue;
                     }
 
@@ -2611,45 +2111,10 @@ where
             "[party {}] Waiting for all parties to finish MPC preprocessing...",
             my_id
         );
-        let mut ready_message =
-            Vec::with_capacity(HB_PREPROCESSING_READY_PREFIX.len() + std::mem::size_of::<u64>());
-        ready_message.extend_from_slice(HB_PREPROCESSING_READY_PREFIX);
-        ready_message.extend_from_slice(&instance_id.to_le_bytes());
-        for peer_id in 0..n {
-            if peer_id == my_id {
-                continue;
-            }
-            net.send(peer_id, &ready_message).await.map_err(|error| {
-                format!(
-                    "Failed to send preprocessing-ready marker to party {}: {}",
-                    peer_id, error
-                )
-            })?;
-        }
-
-        let mut ready_parties = std::collections::HashSet::with_capacity(n.saturating_sub(1));
-        let barrier_timeout = honeybadger_protocol_timeout();
-        let barrier_result = tokio::time::timeout(barrier_timeout, async {
-            while ready_parties.len() < n.saturating_sub(1) {
-                let sender_id = preprocessing_ready_rx.recv().await.ok_or_else(|| {
-                    "Preprocessing-ready marker channel closed before all parties were ready"
-                        .to_string()
-                })?;
-                if sender_id != my_id {
-                    ready_parties.insert(sender_id);
-                }
-            }
-            Ok::<(), String>(())
-        })
-        .await
-        .map_err(|_| {
-            format!(
-                "Timed out waiting for preprocessing-ready markers ({}/{})",
-                ready_parties.len(),
-                n.saturating_sub(1)
-            )
-        })?;
-        barrier_result?;
+        preprocessing_barrier
+            .wait(net.as_ref(), honeybadger_protocol_timeout())
+            .await
+            .map_err(|error| error.to_string())?;
         eprintln!(
             "[party {}] All parties completed MPC preprocessing; continuing",
             my_id
@@ -2770,6 +2235,18 @@ struct AvssPartySetup<'a> {
     expected_client_count: Option<usize>,
     client_input_count: usize,
     client_input_types: &'a std::collections::BTreeMap<usize, Vec<ShareType>>,
+    /// Client input masks a coordinated execution registers (§9.D.7 step 1): the random-share
+    /// pool is generated this much larger, so provisioning them leaves the program's own
+    /// randomness in place.
+    coordinator_mask_count: usize,
+    /// The agreement barriers of a coordinated execution (§9.D.6), offered every frame right
+    /// after the mesh router so an agreement frame never reaches the AVSS engine.
+    digest_barriers: Option<DigestBarriers>,
+    /// Blocker B6, seventh site. This is the production AVSS *party* path: it
+    /// spawns its own per-peer receive loops below rather than going through
+    /// `AvssQuicServer::spawn_message_loops`, so without a router here a
+    /// `MSH1`-tagged frame reaches the AVSS engine as a protocol message.
+    mesh_router: Arc<MeshRouter>,
 }
 async fn setup_avss_party_for_curve<F, G>(
     vm: &mut VirtualMachine,
@@ -2789,6 +2266,9 @@ where
         expected_client_count,
         client_input_count,
         client_input_types,
+        coordinator_mask_count,
+        digest_barriers,
+        mesh_router,
     } = setup;
 
     // ---- Phase 1: Wait for clients ----
@@ -3008,9 +2488,12 @@ where
         .map_err(|error| format!("Invalid AVSS MPC topology: {error}"))?
         .with_local_identity(local_identity)
         .with_input_ids(mpc_input_ids);
-    let engine = AvssMpcEngine::<F, G>::from_config(AvssEngineConfig::new(session, sk_i, pk_map))
-        .await
-        .map_err(|e| format!("Failed to create AVSS engine: {}", e))?;
+    let engine = AvssMpcEngine::<F, G>::from_config(
+        AvssEngineConfig::new(session, sk_i, pk_map)
+            .with_additional_random_shares(coordinator_mask_count),
+    )
+    .await
+    .map_err(|e| format!("Failed to create AVSS engine: {}", e))?;
     engine.set_client_output_id_map(input_ids.clone()).await;
 
     engine
@@ -3024,19 +2507,55 @@ where
     let (msg_tx, _server_rx) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(65536);
     let (client_tx, mut client_rx) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(4096);
 
+    // Every server connection is read, the loopback one included: the engine
+    // broadcasts to every party, itself too, and a party that never drains its
+    // own loopback stream never sees its own protocol messages, so its
+    // preprocessing waits forever. The HoneyBadger loops
+    // (`spawn_receive_loops_split`) read it the same way.
+    let mut spawned_senders = std::collections::HashSet::new();
     for (peer_id, conn) in &connections {
-        if *peer_id == my_id {
+        let peer_id = *peer_id;
+        let authenticated_sender_id = conn.remote_party_id().unwrap_or(peer_id);
+        if authenticated_sender_id >= n || !spawned_senders.insert(authenticated_sender_id) {
             continue;
         }
-        let peer_id = *peer_id;
         let engine = engine.clone();
         let open_message_router = engine.open_message_router();
         let tx = msg_tx.clone();
         let conn = conn.clone();
         let net_clone = net.clone();
-        let authenticated_sender_id = conn.remote_party_id().unwrap_or(peer_id);
+        let mesh_router = mesh_router.clone();
+        let digest_barriers = digest_barriers.clone();
         tokio::spawn(async move {
+            // Blocker B6, seventh site: this loop is the production AVSS party
+            // path and does not go through `AvssQuicServer`, so the mesh router
+            // has to be offered every payload here too. It is first in the
+            // chain, and `Err` continues rather than falling through — a
+            // refused mesh frame is still a mesh frame and must never reach
+            // `process_wrapped_message_with_network`.
+            let peer_key = conn.authenticated_peer_public_key();
             while let Ok(data) = conn.receive().await {
+                match mesh_router.try_handle_wire_message_from(
+                    authenticated_sender_id,
+                    peer_key.as_ref(),
+                    &data,
+                ) {
+                    Ok(true) => continue,
+                    Err(e) => {
+                        eprintln!(
+                            "[AVSS] Party refused a mesh control frame from {}: {}",
+                            authenticated_sender_id, e
+                        );
+                        continue;
+                    }
+                    Ok(false) => {}
+                }
+                if digest_barriers
+                    .as_ref()
+                    .is_some_and(|barriers| barriers.record(authenticated_sender_id, &data))
+                {
+                    continue;
+                }
                 if let Ok(true) =
                     open_message_router.try_handle_wire_message(authenticated_sender_id, &data)
                 {
@@ -3234,64 +2753,95 @@ where
 
     Ok(engine)
 }
-#[allow(clippy::too_many_arguments)]
-async fn run_avss_coordinated_party_for_curve<F, G>(
-    vm: &mut VirtualMachine,
+/// Everything a coordinated AVSS party needs, gathered once after the join.
+struct CoordinatedAvssParty<'a> {
+    vm: &'a mut VirtualMachine,
     net: Arc<QuicNetworkManager>,
     my_id: usize,
     n: usize,
     t: usize,
     instance_id: u64,
-    coord_addr: (String, u16),
+    /// The pinned link that fetched the node roster (§9.D.1 step 10).
+    link: CoordinatorLink,
     rpc_addr: (String, u16),
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
-    expected_clients: &[String],
-    as_leader: bool,
-    agreed_entry: &str,
-) -> Result<(), String>
+    execution_id: ExecutionId,
+    agreed_entry: &'a str,
+    program_hash: [u8; 32],
+    manifest: &'a ClientIoManifest,
+    mesh_router: Arc<MeshRouter>,
+    digest_barriers: DigestBarriers,
+}
+
+async fn run_avss_coordinated_party_for_curve<F, G>(
+    party: CoordinatedAvssParty<'_>,
+) -> Result<(), CoordinatedRunError>
 where
     F: SupportedMpcField,
     G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
 {
-    let input_ids: Vec<Vec<u8>> = expected_clients
-        .iter()
-        .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
-        .collect();
-
-    let coord: AvssOffChainCoordinator<F, G> = AvssOffChainCoordinator::<F, G>::start_rpc_client(
-        &coord_addr.0,
-        coord_addr.1,
-        t as u64,
-        n as u64,
-        2,
-        cert_der.clone(),
-        key_der.clone(),
-    )
-    .await
-    .map_err(|error| format!("Failed to connect to AVSS off-chain coordinator: {error}"))?;
-
-    let mut node_rpc: AvssOffChainNodeRpcServer<F, G> = AvssOffChainNodeRpcServer::<F, G>::start(
-        &rpc_addr.0,
-        rpc_addr.1,
-        cert_der.clone(),
-        key_der.clone(),
-    )
-    .await
-    .map_err(|error| format!("Failed to start AVSS node RPC server: {error}"))?;
-
-    if as_leader {
-        coord.reset_coord().await.map_err(|e| e.to_string())?;
-        coord
-            .start_preprocessing()
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
-    let client_input_types = std::collections::BTreeMap::new();
-    let engine = setup_avss_party_for_curve::<F, G>(
+    let CoordinatedAvssParty {
         vm,
         net,
+        my_id,
+        n,
+        t,
+        instance_id,
+        link,
+        rpc_addr,
+        cert_der,
+        key_der,
+        execution_id,
+        agreed_entry,
+        program_hash,
+        manifest,
+        mesh_router,
+        digest_barriers,
+    } = party;
+
+    // §9.D.1 step 10: the link that fetched the roster drives the rounds. No
+    // second connection and no second roster fetch.
+    let mut coord: AvssOffChainCoordinator<F, G> =
+        AvssOffChainCoordinator::<F, G>::from_link(link, execution_id);
+
+    // §9.D.7 step 1: before any preprocessing, and before the pool is sized.
+    let summary = checked_execution_summary::<F, AvssCoordinatorShare<F, G>>(
+        &coord,
+        &SummaryExpectations {
+            execution_id,
+            program_hash,
+            backend: MpcBackendKind::Avss,
+            n,
+            t,
+            manifest,
+        },
+    )
+    .await?;
+    let mask_count = mask_count_of(&summary)?;
+
+    // The node RPC listener is per-execution: every client request carries the execution it
+    // belongs to, and an unregistered one is rejected.
+    let node_rpc = OffChainNodeRPCServer::start_for_execution(
+        &rpc_addr.0,
+        rpc_addr.1,
+        execution_id,
+        cert_der.clone(),
+        key_der.clone(),
+    )
+    .await
+    .map_err(|error| {
+        CoordinatedRunError::Setup(format!("Failed to start AVSS node RPC server: {error}"))
+    })?;
+
+    // Every party proposes every transition; the coordinator applies a round once a quorum
+    // of the roster has proposed it.
+    coord.start_preprocessing().await?;
+
+    let client_input_types = manifest_client_input_types(manifest);
+    let engine = setup_avss_party_for_curve::<F, G>(
+        vm,
+        net.clone(),
         AvssPartySetup {
             my_id,
             local_identity: durable_identity_from_cert(&cert_der),
@@ -3301,270 +2851,131 @@ where
             expected_client_count: None,
             client_input_count: 1,
             client_input_types: &client_input_types,
+            coordinator_mask_count: mask_count,
+            digest_barriers: Some(digest_barriers.clone()),
+            mesh_router,
         },
     )
-    .await?;
+    .await
+    .map_err(CoordinatedRunError::Setup)?;
     engine.enable_client_output_capture().await;
 
-    if input_ids.is_empty() {
+    let mut admissions = None;
+    if mask_count == 0 {
         eprintln!(
-            "[party {}] AVSS coordinator mode has no client inputs; preprocessing complete, skipping input collection",
+            "[party {}] execution {execution_id} registers no client inputs; skipping input collection",
             my_id
         );
     } else {
-        let mut mask_shares = Vec::with_capacity(input_ids.len());
-        {
+        // One mask per registered input, at indices `0..mask_count`.
+        let mask_shares = {
             let node = engine.node_handle().lock().await;
-            for idx in 0..input_ids.len() {
-                let local_shares = node
-                    .preprocessing_material
-                    .lock()
-                    .await
-                    .take_v_random_shares(1)
-                    .map_err(|e| {
-                        format!("Not enough AVSS random shares for client {idx}: {:?}", e)
-                    })?;
-                let share = local_shares
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| format!("AVSS random share batch for client {idx} was empty"))?;
-                node_rpc
-                    .add_mask_share(idx as u64, &share)
-                    .await
-                    .map_err(|e| format!("add_mask_share: {:?}", e))?;
-                mask_shares.push(share);
-            }
-        }
-
-        if as_leader {
-            coord
-                .reserve_input_masks()
+            let shares = node
+                .preprocessing_material
+                .lock()
                 .await
-                .map_err(|e| e.to_string())?;
+                .take_v_random_shares(mask_count)
+                .map_err(|error| {
+                    CoordinatedRunError::Setup(format!(
+                        "Not enough AVSS random shares for {mask_count} input masks: {error:?}"
+                    ))
+                })?;
+            shares
+        };
+        let (set, inputs) = collect_admitted_client_inputs(
+            &mut coord,
+            &node_rpc,
+            &summary,
+            &digest_barriers,
+            net.as_ref(),
+            mask_shares,
+        )
+        .await?;
+        for (client_index, shares) in inputs {
+            let slot = client_index.0 as usize;
+            let stored = match client_input_types.get(&slot) {
+                Some(share_types) => {
+                    vm.try_store_client_input_feldman_with_types(slot, shares, share_types)
+                }
+                None => vm.try_store_client_input_feldman(slot, shares),
+            };
+            stored.map_err(|error| {
+                CoordinatedRunError::Setup(format!(
+                    "Failed to store AVSS input shares for client slot {slot}: {error}"
+                ))
+            })?;
         }
-        coord
-            .wait_for_round(Round::InputMaskReservation)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let client_to_indices = normalize_client_to_indices(
-            coord
-                .wait_for_indices(input_ids.len() as u64)
-                .await
-                .map_err(|e| e.to_string())?,
-        );
-
-        for (cid, indices) in &client_to_indices {
-            for idx in indices {
-                node_rpc
-                    .add_reserved_index(cid.clone(), *idx)
-                    .await
-                    .or_else(|e| match e {
-                        NodeRPCError::JSONError => {
-                            eprintln!(
-                                "[party {}] add_reserved_index observed a stale client sink for index {}; continuing",
-                                my_id, idx
-                            );
-                            Ok(())
-                        }
-                        other => Err(format!("add_reserved_index: {:?}", other)),
-                    })?;
-            }
-        }
-
-        if as_leader {
-            coord.collect_inputs().await.map_err(|e| e.to_string())?;
-        }
-        coord
-            .wait_for_round(Round::InputCollection)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let client_inputs = coord
-            .wait_for_inputs(input_ids.len() as u64, mask_shares)
-            .await
-            .map_err(|e| e.to_string())?;
-        let client_input_types = std::collections::BTreeMap::new();
-        store_reserved_client_inputs_feldman::<F, G, _>(
-            vm,
-            &client_to_indices,
-            client_inputs,
-            1,
-            &[],
-            &client_input_types,
-        );
+        admissions = Some(set);
     }
 
-    if as_leader {
-        coord.start_mpc().await.map_err(|e| e.to_string())?;
-    }
-    coord
-        .wait_for_round(Round::MPCExecution)
-        .await
-        .map_err(|e| e.to_string())?;
+    coord.start_mpc().await?;
+    coord.wait_for_round(Round::MPCExecution).await?;
+    // An execution without inputs freezes its admissions when `MPCExecution` begins.
+    let set = match admissions {
+        Some(set) => set,
+        None => {
+            agree_client_admissions(&mut coord, &summary, &digest_barriers, net.as_ref()).await?
+        }
+    };
+    vm.set_client_roster(coordinated_client_roster(&summary));
 
     eprintln!("Starting VM execution of '{}'...", agreed_entry);
     let result = vm
         .execute(agreed_entry)
-        .map_err(|err| format!("Execution error in '{}': {}", agreed_entry, err))?;
+        .map_err(|error| CoordinatedRunError::Execution {
+            entry: agreed_entry.to_owned(),
+            reason: error.to_string(),
+        })?;
 
-    let captured_outputs = engine.drain_client_output_records().await;
-    if !captured_outputs.is_empty() {
-        if as_leader {
-            coord.send_output().await.map_err(|e| e.to_string())?;
-        }
-        coord
-            .wait_for_round(Round::OutputDistribution)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        for record in captured_outputs {
-            let client_key = input_ids.get(record.client_id).ok_or_else(|| {
-                format!(
-                    "AVSS output client index {} has no matching coordinator client identity",
-                    record.client_id
-                )
-            })?;
-            coord
-                .send_output_shares(client_key.clone(), client_key.clone(), record.shares)
-                .await
-                .map_err(|e| format!("send_output_shares: {e}"))?;
-        }
-
-        if as_leader {
-            coord.finalize().await.map_err(|e| e.to_string())?;
-        }
-    }
+    let captured = engine
+        .drain_client_output_records()
+        .await
+        .into_iter()
+        .map(|record| (record.client_id, record.shares))
+        .collect();
+    finish_coordinated_execution(&coord, &summary, &set, captured, agreed_entry).await?;
 
     print_vm_result(vm, result);
     Ok(())
 }
-#[allow(clippy::too_many_arguments)]
+
 async fn run_avss_coordinated_party(
     curve_config: MpcCurveConfig,
-    vm: &mut VirtualMachine,
-    net: Arc<QuicNetworkManager>,
-    my_id: usize,
-    n: usize,
-    t: usize,
-    instance_id: u64,
-    coord_addr: (String, u16),
-    rpc_addr: (String, u16),
-    cert_der: Vec<u8>,
-    key_der: Vec<u8>,
-    expected_clients: &[String],
-    as_leader: bool,
-    agreed_entry: &str,
-) -> Result<(), String> {
+    party: CoordinatedAvssParty<'_>,
+) -> Result<(), CoordinatedRunError> {
     match curve_config {
         MpcCurveConfig::Bls12_381 => {
             run_avss_coordinated_party_for_curve::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>(
-                vm,
-                net,
-                my_id,
-                n,
-                t,
-                instance_id,
-                coord_addr,
-                rpc_addr,
-                cert_der,
-                key_der,
-                expected_clients,
-                as_leader,
-                agreed_entry,
+                party,
             )
             .await
         }
         MpcCurveConfig::Bn254 => {
-            run_avss_coordinated_party_for_curve::<ark_bn254::Fr, ark_bn254::G1Projective>(
-                vm,
-                net,
-                my_id,
-                n,
-                t,
-                instance_id,
-                coord_addr,
-                rpc_addr,
-                cert_der,
-                key_der,
-                expected_clients,
-                as_leader,
-                agreed_entry,
-            )
-            .await
+            run_avss_coordinated_party_for_curve::<ark_bn254::Fr, ark_bn254::G1Projective>(party)
+                .await
         }
         MpcCurveConfig::Curve25519 => {
             run_avss_coordinated_party_for_curve::<
                 ark_curve25519::Fr,
                 ark_curve25519::EdwardsProjective,
-            >(
-                vm,
-                net,
-                my_id,
-                n,
-                t,
-                instance_id,
-                coord_addr,
-                rpc_addr,
-                cert_der,
-                key_der,
-                expected_clients,
-                as_leader,
-                agreed_entry,
-            )
+            >(party)
             .await
         }
         MpcCurveConfig::Ed25519 => {
             run_avss_coordinated_party_for_curve::<ark_ed25519::Fr, ark_ed25519::EdwardsProjective>(
-                vm,
-                net,
-                my_id,
-                n,
-                t,
-                instance_id,
-                coord_addr,
-                rpc_addr,
-                cert_der,
-                key_der,
-                expected_clients,
-                as_leader,
-                agreed_entry,
+                party,
             )
             .await
         }
         MpcCurveConfig::Secp256k1 => {
             run_avss_coordinated_party_for_curve::<ark_secp256k1::Fr, ark_secp256k1::Projective>(
-                vm,
-                net,
-                my_id,
-                n,
-                t,
-                instance_id,
-                coord_addr,
-                rpc_addr,
-                cert_der,
-                key_der,
-                expected_clients,
-                as_leader,
-                agreed_entry,
+                party,
             )
             .await
         }
         MpcCurveConfig::Secp256r1 => {
             run_avss_coordinated_party_for_curve::<ark_secp256r1::Fr, ark_secp256r1::Projective>(
-                vm,
-                net,
-                my_id,
-                n,
-                t,
-                instance_id,
-                coord_addr,
-                rpc_addr,
-                cert_der,
-                key_der,
-                expected_clients,
-                as_leader,
-                agreed_entry,
+                party,
             )
             .await
         }
@@ -3600,7 +3011,6 @@ async fn main() {
     let raw_args = env::args().skip(1).collect::<Vec<_>>();
 
     if raw_args.is_empty() {
-        // Allow bootnode-only mode without program path
         print_usage_and_exit();
     }
 
@@ -3609,42 +3019,73 @@ async fn main() {
     let mut trace_instr = false;
     let mut trace_regs = false;
     let mut trace_stack = false;
-    let mut as_bootnode = false;
-    let mut as_leader = false;
+    // `--leader` carried two unrelated meanings (docs/design/bootnode-elimination.md
+    // §5, row 6): "run an in-process bootnode and register with it", and "advance
+    // the off-chain coordinator's `Round`s". Stage 6 split the second out as
+    // `--coord-driver`; Stage 8 deleted the bootnode, and `--leader` with it.
+    //
+    // Stage 9 deleted `--coord-driver` too. Coordinator `0.1.0` hard-gated
+    // `transition` on `mpc_nodes[0]`, so exactly one party had to drive the
+    // rounds; `0.2.0` records a vote from any roster member and applies a round
+    // once `transition_quorum()` of them have proposed it. Every party therefore
+    // proposes every transition, and a proposal for a round the quorum already
+    // passed is a no-op rather than an error. There is no designated party left
+    // on this path at all.
     let mut as_client = false;
-    let mut upload_program_bytes = true;
     let mut bind_addr: Option<SocketAddr> = None;
+    // `--party-id` is no longer an identity: every party index is derived from
+    // the lexicographic order of the coordinator roster's DER SPKIs, and the runner has
+    // discarded any externally assigned id since before this migration started.
+    // It is not what selects party mode either — `--peers` is. What it still
+    // does is label this node's on-disk state: the `--local-store` /
+    // `--preproc-store` paths and the `party-N.redb` volumes the compose stacks
+    // mount are named by it. It is not the *key* to that state — that is
+    // `DurableIdentityDigest`, derived from this node's certificate — so a label
+    // that disagrees with the derived rank is reported after the join and the
+    // run continues on the derived index.
     let mut party_id: Option<usize> = None;
-    let mut bootstrap_addr: Option<SocketAddr> = None;
-    let mut n_parties: Option<usize> = None;
-    let mut threshold: Option<usize> = None;
     let mut client_inputs: Option<String> = None;
-    let mut client_outputs: Option<usize> = None;
     let mut output_fixed_point_fractional_bits: Option<usize> = None;
-    let mut expected_client_count: Option<usize> = None;
-    let mut client_input_count: usize = 1;
-    // Actual TOTAL number of client input values across all clients (sum of each
-    // client's count). 0 = unset, in which case we fall back to the uniform
-    // `num_clients * client_input_count`. Lets clients provide different counts.
-    let mut client_input_total: usize = 0;
-    let mut _enable_nat: bool = false;
-    let mut _stun_servers: Vec<SocketAddr> = Vec::new();
     let mut server_addrs: Vec<SocketAddr> = Vec::new();
     let mut mpc_backend: Option<String> = None;
     let mut mpc_curve: Option<String> = None;
     let mut rpc_addr: Option<(String, u16)> = None;
     let mut coord_addr: Option<(String, u16)> = None;
+    // `--coord-cert`: the coordinator certificate every coordinator connection
+    // pins. Resolved into a `CoordinatorPin` once the flags are parsed.
+    let mut coord_cert_path: Option<String> = None;
+    // `--expect-roster-digest`, `--expect-n-parties`, `--expect-threshold`:
+    // refusals of a coordinator roster other than the intended one (§9.D.2).
+    let mut roster_expectations = RosterExpectations::default();
     let mut key_der: Option<Vec<u8>> = None;
     let mut cert_der: Option<Vec<u8>> = None;
-    let mut expected_clients: Vec<String> = Vec::new();
-    let mut client_roster: Vec<usize> = Vec::new();
-    let mut client_input_slots: Vec<usize> = Vec::new();
+    // `--cert`'s path, kept so a refusal can name the file.
+    let mut cert_path: Option<String> = None;
+    // `--peers`: addresses to try first. Hints, not membership — see
+    // `SeedHints` and `docs/design/bootnode-elimination.md` §8. Membership is
+    // the coordinator's node roster (§9.D).
+    let mut peer_hints: Vec<SocketAddr> = Vec::new();
     let mut eth_node_addr: Option<String> = None;
     let mut wallet_sk_str: Option<String> = None;
     let mut contract_addr: Option<String> = None;
-    let mut coordinator_client_index: Option<u64> = None;
+    let mut coordinator_client_slot: Option<ClientIndex> = None;
+    // `--invitation` and `--expect-program-hash`: a coordinator client's invitation, and the
+    // program it refuses to associate with any other one of (§9.E.2).
+    let mut invitation_path: Option<String> = None;
+    let mut expected_program_hash: Option<[u8; 32]> = None;
     let mut preproc_store_path: Option<String> = None;
     let mut local_store_path: Option<String> = None;
+    // `--epoch-store`: where this node's monotone instance_id epoch lives
+    // (blocker B5). See `stoffel_vm::net::mesh::epoch` for the path, the
+    // environment variable and the compose volume it belongs on.
+    let mut epoch_store_flag: Option<String> = None;
+    // `--execution-id`: which program invocation this process belongs to.
+    // Coordinator `0.2.0` keys every RPC on it — rounds, reserved indices,
+    // masked inputs and output shares are all per-execution — so it replaces
+    // `0.1.0`'s single implicit session and its `reset_coord` teardown. Required
+    // whenever `--off-chain-coord` is given; the all-zero value is reserved and
+    // rejected by the coordinator, so it is rejected here too.
+    let mut execution_id: Option<ExecutionId> = None;
     let mut advertise_addr: Option<SocketAddr> = None;
 
     for arg in &raw_args {
@@ -3656,61 +3097,47 @@ async fn main() {
             trace_regs = true;
         } else if arg == "--trace-stack" {
             trace_stack = true;
-        } else if arg == "--bootnode" {
-            as_bootnode = true;
-        } else if arg == "--leader" {
-            as_leader = true;
         } else if arg == "--client" {
             as_client = true;
-        } else if arg == "--no-program-upload" {
-            upload_program_bytes = false;
-        } else if arg == "--nat" {
-            _enable_nat = true;
         } else if let Some(_rest) = arg.strip_prefix("--bind") {
             // support "--bind" and "--bind=.."
             // actual value parsed later from positional with key
         } else if let Some(_rest) = arg.strip_prefix("--party-id") {
-        } else if let Some(_rest) = arg.strip_prefix("--bootstrap") {
-        } else if let Some(_rest) = arg.strip_prefix("--n-parties") {
-        } else if let Some(_rest) = arg.strip_prefix("--threshold") {
         } else if let Some(_rest) = arg.strip_prefix("--inputs") {
-        } else if let Some(_rest) = arg.strip_prefix("--outputs") {
         } else if let Some(_rest) = arg.strip_prefix("--output-fixed-point-fractional-bits") {
-        } else if let Some(_rest) = arg.strip_prefix("--wait-for-clients") {
-        } else if let Some(_rest) = arg.strip_prefix("--client-input-count") {
-        } else if let Some(_rest) = arg.strip_prefix("--client-input-total") {
-        } else if let Some(_rest) = arg.strip_prefix("--stun-servers") {
         } else if let Some(_rest) = arg.strip_prefix("--servers") {
         } else if let Some(_rest) = arg.strip_prefix("--mpc-backend") {
         } else if let Some(_rest) = arg.strip_prefix("--mpc-curve") {
         } else if let Some(_rest) = arg.strip_prefix("--rpc-bind") {
         } else if let Some(_rest) = arg.strip_prefix("--off-chain-coord") {
+        } else if let Some(_rest) = arg.strip_prefix("--coord-cert") {
         } else if let Some(_rest) = arg.strip_prefix("--on-chain-coord") {
         } else if let Some(_rest) = arg.strip_prefix("--eth-node") {
         } else if let Some(_rest) = arg.strip_prefix("--wallet-sk") {
         } else if let Some(_rest) = arg.strip_prefix("--key") {
         } else if let Some(_rest) = arg.strip_prefix("--cert") {
-        } else if let Some(_rest) = arg.strip_prefix("--expected-clients") {
-        } else if let Some(_rest) = arg.strip_prefix("--client-roster") {
-        } else if let Some(_rest) = arg.strip_prefix("--client-input-slots") {
-        } else if let Some(_rest) = arg.strip_prefix("--client-index") {
+        } else if let Some(_rest) = arg.strip_prefix("--expect-roster-digest") {
+        } else if let Some(_rest) = arg.strip_prefix("--expect-n-parties") {
+        } else if let Some(_rest) = arg.strip_prefix("--expect-threshold") {
+        } else if let Some(_rest) = arg.strip_prefix("--peers") {
+        } else if let Some(_rest) = arg.strip_prefix("--client-slot") {
         } else if let Some(_rest) = arg.strip_prefix("--preproc-store") {
+        } else if let Some(_rest) = arg.strip_prefix("--epoch-store") {
+        } else if let Some(_rest) = arg.strip_prefix("--execution-id") {
         } else if let Some(_rest) = arg.strip_prefix("--local-store") {
         } else if let Some(_rest) = arg.strip_prefix("--advertise") {
-        } else if let Some(_rest) = arg.strip_prefix("--no-program-upload") {
         }
     }
 
-    fail_removed_flag(
-        &raw_args,
-        "--client-id",
-        "Client IDs are now transport-derived. Remove `--client-id`.",
-    );
-    fail_removed_flag(
-        &raw_args,
-        "--expected-client-count",
-        "Use `--expected-clients <cert-paths-or-addrs>` instead.",
-    );
+    // `docs/design/bootnode-elimination.md` §9.D.3. The coordinator is the only
+    // roster authority, and client participation is its per-execution admission,
+    // so every flag that gave a node a membership list, a party count, a
+    // threshold or a client list of its own fails by name. None of the hints
+    // names a removed flag, so an operator is never sent from one refusal to the
+    // next.
+    for (flag, hint) in REMOVED_FLAGS {
+        fail_removed_flag(&raw_args, flag, hint);
+    }
     fail_removed_flag(
         &raw_args,
         "--node-ids",
@@ -3721,6 +3148,37 @@ async fn main() {
         "--adkg-curve",
         "Use `--mpc-curve <name>` instead.",
     );
+    // Stage 8 of `docs/design/bootnode-elimination.md`. Each of these names the
+    // replacement rather than just disappearing: a flag that silently stops
+    // being parsed turns a deployment that no longer forms a session into a
+    // debugging session, and every one of these appeared in a shipped compose
+    // file, script or README command line.
+    fail_removed_flag(
+        &raw_args,
+        "--leader",
+        "`--leader` meant two unrelated things and both are gone. Its bootnode half was \
+         removed with the bootnode; its round-driver half was removed when coordinator \
+         transitions became quorum-gated, so every party now proposes every round.",
+    );
+    fail_removed_flag(
+        &raw_args,
+        "--no-program-upload",
+        "Nothing uploads program bytes during session formation any more. Mount the \
+         program and pass its path, as every shipped stack already does.",
+    );
+    fail_removed_flag(
+        &raw_args,
+        "--nat",
+        "The `nat` feature never worked and is removed (design doc §4): nothing read the \
+         flag, and the shipped path ran no connectivity checks. Give every party a \
+         reachable `--advertise` address.",
+    );
+    fail_removed_flag(
+        &raw_args,
+        "--stun-servers",
+        "The `nat` feature never worked and is removed (design doc §4). Give every party \
+         a reachable `--advertise` address.",
+    );
 
     // collect positional args (non-flags)
     let mut positional = raw_args
@@ -3729,10 +3187,7 @@ async fn main() {
         .collect::<Vec<_>>();
 
     if positional.is_empty() {
-        // Allow bootnode-only mode without program path
-        if !as_bootnode {
-            print_usage_and_exit();
-        }
+        print_usage_and_exit();
     }
 
     // Parse key-value style flags
@@ -3749,29 +3204,9 @@ async fn main() {
                     party_id = Some(v.parse().expect("Invalid --party-id"));
                 }
             }
-            "--bootstrap" => {
-                if let Some(v) = args_iter.next() {
-                    bootstrap_addr = Some(v.parse().expect("Invalid --bootstrap addr"));
-                }
-            }
-            "--n-parties" => {
-                if let Some(v) = args_iter.next() {
-                    n_parties = Some(v.parse().expect("Invalid --n-parties"));
-                }
-            }
-            "--threshold" => {
-                if let Some(v) = args_iter.next() {
-                    threshold = Some(v.parse().expect("Invalid --threshold"));
-                }
-            }
             "--inputs" => {
                 if let Some(v) = args_iter.next() {
                     client_inputs = Some(v);
-                }
-            }
-            "--outputs" => {
-                if let Some(v) = args_iter.next() {
-                    client_outputs = Some(v.parse().expect("Invalid --outputs"));
                 }
             }
             "--output-fixed-point-fractional-bits" => {
@@ -3780,35 +3215,6 @@ async fn main() {
                         v.parse()
                             .expect("Invalid --output-fixed-point-fractional-bits"),
                     );
-                }
-            }
-            "--wait-for-clients" => {
-                if let Some(v) = args_iter.next() {
-                    expected_client_count = Some(v.parse().expect("Invalid --wait-for-clients"));
-                }
-            }
-            "--client-input-count" => {
-                if let Some(v) = args_iter.next() {
-                    client_input_count = v.parse().expect("Invalid --client-input-count");
-                }
-            }
-            "--client-input-total" => {
-                if let Some(v) = args_iter.next() {
-                    client_input_total = v.parse().expect("Invalid --client-input-total");
-                }
-            }
-            "--stun-servers" => {
-                if let Some(v) = args_iter.next() {
-                    _stun_servers = v
-                        .split(',')
-                        .filter_map(|s| {
-                            let s = s.trim();
-                            s.parse::<SocketAddr>().ok().or_else(|| {
-                                eprintln!("Warning: Invalid STUN server address '{}', skipping", s);
-                                None
-                            })
-                        })
-                        .collect();
                 }
             }
             "--servers" => {
@@ -3851,6 +3257,11 @@ async fn main() {
                     coord_addr = Some((host, port));
                 }
             }
+            "--coord-cert" => {
+                if let Some(v) = args_iter.next() {
+                    coord_cert_path = Some(v);
+                }
+            }
             "--on-chain-coord" => {
                 if let Some(v) = args_iter.next() {
                     contract_addr = Some(v);
@@ -3874,11 +3285,62 @@ async fn main() {
             "--cert" => {
                 if let Some(v) = args_iter.next() {
                     cert_der = Some(std::fs::read(&v).expect("Failed to read --cert file"));
+                    cert_path = Some(v);
                 }
             }
-            "--client-index" => {
+            "--expect-roster-digest" => {
                 if let Some(v) = args_iter.next() {
-                    coordinator_client_index = Some(v.parse().expect("Invalid --client-index"));
+                    roster_expectations.digest =
+                        Some(parse_expected_roster_digest(&v).unwrap_or_else(|message| {
+                            eprintln!("Error: {message}");
+                            exit(2);
+                        }));
+                }
+            }
+            "--expect-n-parties" => {
+                if let Some(v) = args_iter.next() {
+                    roster_expectations.n_parties = Some(
+                        parse_expected_roster_size(RosterSizeFlag::NParties, &v).unwrap_or_else(
+                            |message| {
+                                eprintln!("Error: {message}");
+                                exit(2);
+                            },
+                        ),
+                    );
+                }
+            }
+            "--expect-threshold" => {
+                if let Some(v) = args_iter.next() {
+                    roster_expectations.threshold = Some(
+                        parse_expected_roster_size(RosterSizeFlag::Threshold, &v).unwrap_or_else(
+                            |message| {
+                                eprintln!("Error: {message}");
+                                exit(2);
+                            },
+                        ),
+                    );
+                }
+            }
+            "--invitation" => {
+                if let Some(v) = args_iter.next() {
+                    invitation_path = Some(v);
+                }
+            }
+            "--expect-program-hash" => {
+                if let Some(v) = args_iter.next() {
+                    expected_program_hash =
+                        Some(parse_expected_program_hash(&v).unwrap_or_else(|message| {
+                            eprintln!("Error: {message}");
+                            exit(2);
+                        }));
+                }
+            }
+            "--client-slot" => {
+                if let Some(v) = args_iter.next() {
+                    coordinator_client_slot = Some(ClientIndex(v.parse().unwrap_or_else(|_| {
+                        eprintln!("Error: --client-slot takes a slot number, got {v:?}");
+                        exit(2);
+                    })));
                 }
             }
             "--preproc-store" => {
@@ -3891,26 +3353,34 @@ async fn main() {
                     local_store_path = Some(v);
                 }
             }
-            "--expected-clients" => {
+            "--epoch-store" => {
                 if let Some(v) = args_iter.next() {
-                    expected_clients = v.split(',').map(|s| s.trim().to_string()).collect();
+                    epoch_store_flag = Some(v);
                 }
             }
-            "--client-roster" => {
+            "--execution-id" => {
                 if let Some(v) = args_iter.next() {
-                    client_roster = v
-                        .split(',')
-                        .filter(|s| !s.trim().is_empty())
-                        .map(|s| s.trim().parse().expect("Invalid --client-roster slot"))
-                        .collect();
+                    let parsed = ExecutionId::from_str(v.trim()).unwrap_or_else(|error| {
+                        eprintln!("Error: invalid --execution-id: {error}");
+                        exit(2);
+                    });
+                    if parsed.is_zero() {
+                        eprintln!(
+                            "Error: --execution-id must not be all zeros; the coordinator \
+                             reserves that value and rejects it."
+                        );
+                        exit(2);
+                    }
+                    execution_id = Some(parsed);
                 }
             }
-            "--client-input-slots" => {
+            "--peers" => {
                 if let Some(v) = args_iter.next() {
-                    client_input_slots = v
+                    peer_hints = v
                         .split(',')
-                        .filter(|s| !s.trim().is_empty())
-                        .map(|s| s.trim().parse().expect("Invalid --client-input-slots slot"))
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.parse().expect("Invalid --peers address"))
                         .collect();
                 }
             }
@@ -3919,7 +3389,6 @@ async fn main() {
                     advertise_addr = Some(v.parse().expect("Invalid --advertise addr"));
                 }
             }
-            "--no-program-upload" => {}
             _ => {}
         }
     }
@@ -3941,6 +3410,123 @@ async fn main() {
         &key_der,
         local_store_path.is_some() || preproc_store_path.is_some(),
     );
+    let coord_execution_id = resolve_coord_execution_id(coord_addr.is_some(), execution_id)
+        .unwrap_or_else(|message| {
+            eprintln!("Error: {message}");
+            exit(2);
+        });
+    let coordinator_pin = resolve_coordinator_pin(coord_addr.is_some(), coord_cert_path.as_deref())
+        .unwrap_or_else(|message| {
+            eprintln!("Error: {message}");
+            exit(2);
+        });
+    // §9.D.2: the `--expect-*` flags refuse a roster a coordinator served, so
+    // without one they have nothing to refuse.
+    if coord_addr.is_none() {
+        if let Some(flag) = roster_expectations.first_flag() {
+            eprintln!(
+                "Error: {flag} is only meaningful with --off-chain-coord; it refuses a node \
+                 roster the coordinator serves."
+            );
+            exit(2);
+        }
+    }
+
+    // --- Seed hints (docs/design/bootnode-elimination.md §5, row 4) ---
+    //
+    // `--peers` is a list of addresses to try, not a statement of membership:
+    // membership is the coordinator's node roster (§9.D), and every dial made
+    // from a hint pins a roster certificate, so a wrong or hostile address costs
+    // a failed handshake and nothing else.
+    //
+    // A *missing* address is not equally cheap. A first join forms out of dials,
+    // and the peer book is exchanged inside the join handshake — after the mesh
+    // is already complete — so PEX cannot supply an address the mesh needs in
+    // order to form. The real requirement is per pair: for every two parties, at
+    // least one of them must hold a hint for the other. Nothing here enforces
+    // n-1 entries because a partial list can be covered from the other side, but
+    // `build_session_join` warns when it is short of n-1.
+    let seed_hints = SeedHints::new(peer_hints, advertise_addr.or(bind_addr));
+    if !seed_hints.is_empty() {
+        eprintln!(
+            "[mesh] {} seed peer hint(s) recorded, not yet dialed: {}",
+            seed_hints.len(),
+            seed_hints
+                .addrs()
+                .iter()
+                .map(|addr| addr.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    // --- The join (docs/design/bootnode-elimination.md §5) ---
+    //
+    // `--peers` is what makes this process a party rather than a local run:
+    // there is no bootstrap process to register with any more, so seeds are the
+    // only way into a session.
+    let mesh_join_requested = !seed_hints.is_empty();
+
+    // §9.D.3: a mesh's membership has exactly one source, so a party without a
+    // coordinator has none. Refused before anything is opened or bound.
+    if mesh_join_requested && !as_client && coord_addr.is_none() {
+        eprintln!(
+            "Error: --peers forms a mesh whose membership only the coordinator defines. Pass \
+             --off-chain-coord <host:port>, --coord-cert <path> and --execution-id <64-hex>."
+        );
+        exit(2);
+    }
+    // A coordinated execution is run by a mesh of parties: the summary, the
+    // agreement barriers and the admissions all belong to a party (§9.D.7).
+    if coord_addr.is_some() && !as_client && !mesh_join_requested {
+        CoordinatedRunError::Setup(
+            "--off-chain-coord runs a party of a mesh; pass --peers so this node joins one"
+                .to_owned(),
+        )
+        .exit();
+    }
+    // §9.D.1 step 1: a party's own identity is read before any network I/O.
+    let party_identity = if mesh_join_requested && !as_client {
+        match (
+            cert_path.as_deref(),
+            cert_der.as_deref(),
+            key_der.as_deref(),
+        ) {
+            (Some(cert_path), Some(cert_der), Some(key_der)) => Some(NodeIdentity {
+                cert_path,
+                cert_der,
+                key_der,
+            }),
+            _ => {
+                eprintln!(
+                    "Error: a party needs --cert and --key: the coordinator's node roster names \
+                     nodes by certificate, and a node proves it is one of them with its key."
+                );
+                exit(2);
+            }
+        }
+    } else {
+        None
+    };
+
+    // Not opened for a client, which joins no session and derives no
+    // `instance_id` of its own (blocker B5).
+    let epoch_store: Option<Arc<EpochStore>> = if mesh_join_requested && !as_client {
+        let path = epoch_store_path(epoch_store_flag.as_deref());
+        match EpochStore::open(&path) {
+            Ok(store) => {
+                eprintln!("[mesh] session epoch store at {}", path.display());
+                Some(Arc::new(store))
+            }
+            Err(error) => {
+                eprintln!("Error: {}", error);
+                exit(2);
+            }
+        }
+    } else {
+        None
+    };
+
     if contract_addr.is_some() {
         let _ = (eth_node_addr.as_ref(), wallet_sk_str.as_ref());
         eprintln!(
@@ -3949,113 +3535,114 @@ async fn main() {
         exit(2);
     }
 
-    // Bootnode-only mode (no program execution)
-    if as_bootnode && !as_leader {
-        let bind = bind_addr.unwrap_or_else(|| "127.0.0.1:9000".parse().unwrap());
-        eprintln!("Starting bootnode on {}", bind);
-        // Install crypto provider for quinn/rustls
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("install rustls crypto");
-        // Pass expected parties if specified, so bootnode waits for all before announcing session
-        if let Err(e) = run_bootnode_with_config(bind, n_parties).await {
-            eprintln!("Bootnode error: {}", e);
-            exit(10);
+    // `--client-slot`, `--invitation` and `--expect-program-hash` shape a coordinator
+    // client's association; nothing else associates.
+    let is_coordinator_client = as_client && coord_addr.is_some();
+    for (given, flag, meaning) in [
+        (
+            coordinator_client_slot.is_some(),
+            "--client-slot",
+            "it names the client slot to bind",
+        ),
+        (
+            invitation_path.is_some(),
+            "--invitation",
+            "it is presented when the client associates",
+        ),
+        (
+            expected_program_hash.is_some(),
+            "--expect-program-hash",
+            "it refuses to associate with an execution of another program",
+        ),
+    ] {
+        if given && !is_coordinator_client {
+            eprintln!(
+                "Error: {flag} is only meaningful for a coordinator client (--client with \
+                 --off-chain-coord); {meaning}."
+            );
+            exit(2);
         }
-        return;
     }
 
-    // Client mode: connect to MPC servers and provide inputs
+    // Client mode: associate through the coordinator and provide inputs (§9.E.1).
     if as_client {
-        if coord_addr.is_some()
-            && contract_addr.is_none()
-            && mpc_backend.as_deref().is_some_and(|backend| {
-                backend.eq_ignore_ascii_case("avss") || backend.eq_ignore_ascii_case("adkg")
-            })
-        {
-            let curve_config = if let Some(ref name) = mpc_curve {
-                match MpcCurveConfig::from_str(name) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        exit(2);
-                    }
-                }
-            } else {
-                MpcCurveConfig::default()
-            };
-            if let Err(e) = curve_config.validate_for_backend(MpcBackendKind::Avss) {
-                eprintln!("Error: {}", e);
+        // §9.E.3: a client reaching nodes through the mesh transport would need
+        // every node to allowlist its key before the node's manager is shared —
+        // an identity known in advance, which clients need not have — and that
+        // allowlist is role-blind, so the key could dial as a node. Clients
+        // therefore associate through the coordinator, and nothing else.
+        let Some(coord) = coord_addr.clone() else {
+            eprintln!(
+                "Error: direct client mode was removed. A client associates with an execution \
+                 through the coordinator: pass --off-chain-coord <host:port>, --coord-cert \
+                 <path>, --execution-id <64-hex> and --servers <node RPC addresses>."
+            );
+            exit(2);
+        };
+        let coordinator_pin =
+            coordinator_pin.expect("--coord-cert is resolved wherever --off-chain-coord is");
+        let backend = match mpc_backend.as_deref() {
+            Some(name) => MpcBackendKind::from_str(name).unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
                 exit(2);
-            }
-            run_avss_offchain_coordinator_client(AvssOffchainCoordinatorClientArgs {
-                curve_config,
-                client_inputs,
-                client_outputs,
-                output_format: coordinator_output_format,
-                server_addrs,
-                coord_addr: coord_addr.clone().unwrap(),
-                cert_der: cert_der.clone().expect("--cert required in client mode"),
-                key_der: key_der.clone().expect("--key required in client mode"),
-                threshold,
-                coordinator_client_index,
+            }),
+            None => MpcBackendKind::HoneyBadger,
+        };
+        let curve_config = match mpc_curve.as_deref() {
+            Some(name) => MpcCurveConfig::from_str(name).unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                exit(2);
+            }),
+            None => MpcCurveConfig::default(),
+        };
+        if let Err(error) = curve_config.validate_for_backend(backend) {
+            eprintln!("Error: {error}");
+            exit(2);
+        }
+        let (Some(cert_der), Some(key_der)) = (cert_der.clone(), key_der.clone()) else {
+            eprintln!(
+                "Error: a coordinator client needs --cert and --key: its admission is keyed on \
+                 its certificate, and its key signs its inputs and opens its outputs."
+            );
+            exit(2);
+        };
+        // Checked before anything is dialed: an association is irrevocable, so a
+        // client that could not reach a node after associating would hold its
+        // slot until the coordinator's deadline aborted the execution.
+        if server_addrs.is_empty() {
+            eprintln!(
+                "Error: a coordinator client needs --servers <node RPC addresses>: it fetches \
+                 its masks from the parties' --rpc-bind listeners, each pinned to the \
+                 coordinator's node roster."
+            );
+            exit(2);
+        }
+        let invitation = invitation_path.as_deref().map(|path| {
+            read_invitation(path).unwrap_or_else(|message| {
+                eprintln!("Error: {message}");
+                exit(2);
             })
-            .await;
-            return;
-        }
-
-        // Coordinator-based client mode
-        if contract_addr.is_some() || coord_addr.is_some() {
-            {
-                let curve_config = if let Some(ref name) = mpc_curve {
-                    match MpcCurveConfig::from_str(name) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            eprintln!("Error: {}", e);
-                            exit(2);
-                        }
-                    }
-                } else {
-                    MpcCurveConfig::default()
-                };
-                if let Err(e) = curve_config.validate_for_backend(MpcBackendKind::HoneyBadger) {
-                    eprintln!("Error: {}", e);
-                    exit(2);
-                }
-                run_hb_coordinator_client(
-                    curve_config,
-                    client_inputs,
-                    client_outputs,
-                    coordinator_output_format,
-                    server_addrs,
-                    coord_addr,
-                    None,
-                    cert_der.expect("--cert required in client mode"),
-                    key_der.expect("--key required in client mode"),
-                    threshold,
-                    coordinator_client_index,
-                    None,
-                    None,
-                )
-                .await;
-                return;
-            }
-        }
-
-        // Direct client mode (no coordinator)
-        {
-            run_as_client(
-                n_parties,
-                threshold,
-                mpc_backend.as_deref(),
-                mpc_curve.as_deref(),
-                client_inputs,
-                client_outputs,
-                server_addrs,
-            )
-            .await;
-            return;
-        }
+        });
+        run_coordinator_client(ClientRunArgs {
+            backend,
+            curve_config,
+            inputs: client_inputs,
+            output_format: coordinator_output_format,
+            coord_addr: coord,
+            coordinator_pin,
+            roster_expectations,
+            expected_program_hash,
+            request: AssociationRequest {
+                slot: coordinator_client_slot,
+                invitation,
+            },
+            server_addrs,
+            cert_der,
+            key_der,
+            execution_id: coord_execution_id,
+        })
+        .await;
+        return;
     }
 
     let path_opt = if !positional.is_empty() {
@@ -4161,147 +3748,30 @@ async fn main() {
         exit(2);
     }
 
-    if expected_client_count.is_some() && !backend_kind.supports_client_input() {
-        eprintln!(
-            "Error: {} backend does not support --wait-for-clients",
-            backend_kind.name()
-        );
-        exit(2);
-    }
-
-    // Optional: bring up networking in party mode if bootstrap provided or if leader
+    // Optional: bring up networking in party mode when seeds were given.
     let mut net_opt: Option<Arc<QuicNetworkManager>> = None;
     let program_id: [u8; 32];
     let mut agreed_entry = entry.clone();
     let mut session_instance_id: Option<u64> = None;
     let mut session_n_parties: Option<usize> = None;
     let mut session_threshold: Option<usize> = None;
+    // The mesh control plane's receive side, shared by every party receive loop
+    // this process spawns (blocker B6). Built once, in party mode pinned to the
+    // coordinator's node roster: an unpinned book lets any
+    // transport-authenticated peer insert arbitrary SPKIs, while a pinned one
+    // refuses anything outside the roster for one set lookup.
+    let mesh_router: Arc<MeshRouter>;
+    // The pinned coordinator link that fetched the roster (§9.D.1 step 2). It
+    // becomes the round driver once the backend and curve are resolved (step
+    // 10): no second connection and no second roster fetch.
+    let mut coordinator_link: Option<CoordinatorLink> = None;
 
-    // Leader mode: this party also runs the bootnode
-    if as_leader {
-        let bind = bind_addr.unwrap_or_else(|| "127.0.0.1:9000".parse().unwrap());
-        let my_id = party_id.unwrap_or(0usize);
-
-        // Install crypto provider for quinn/rustls
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("install rustls crypto");
-
-        // Must have program path
-        if path_opt.is_none() {
-            eprintln!("Error: leader mode requires a program path");
-            exit(2);
-        }
-        let program_path = path_opt.as_ref().unwrap();
-        let bytes = std::fs::read(program_path).expect("read program");
-        program_id = program_id_from_bytes(&bytes);
-
-        // Get MPC parameters (required for session)
-        let n = n_parties.unwrap_or_else(|| {
-            eprintln!("Error: --n-parties is required for leader mode");
-            exit(2);
-        });
-        let t = threshold.unwrap_or(1);
-
-        eprintln!(
-            "[leader/party {}] Starting bootnode on {} and participating in session (n={}, t={})",
-            my_id, bind, n, t
-        );
-
-        // Spawn bootnode in background
-        let bootnode_bind = bind;
-        let bootnode_n = n;
-        tokio::spawn(async move {
-            if let Err(e) = run_bootnode_with_config(bootnode_bind, Some(bootnode_n)).await {
-                eprintln!("Bootnode error: {}", e);
-            }
-        });
-
-        // Give bootnode a moment to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Now connect to ourselves as the bootnode
-        let mut mgr = QuicNetworkManager::with_node_id(my_id);
-        if let (Some(cert), Some(key)) = (cert_der.as_ref(), key_der.as_ref()) {
-            if let Err(e) = mgr.set_local_certificate_der(cert.clone(), key.clone()) {
-                eprintln!("Failed to configure local node certificate: {}", e);
-                exit(11);
-            }
-        }
-        // Listen on a different port for peer connections
-        let party_bind: SocketAddr = format!("{}:{}", bind.ip(), bind.port() + 1000)
-            .parse()
-            .unwrap();
-        if let Err(e) = mgr.listen(party_bind).await {
-            eprintln!("Failed to listen on {}: {}", party_bind, e);
-            exit(11);
-        }
-
-        // When the bind address is 0.0.0.0 (e.g. ECS/Fargate), connecting TO 0.0.0.0
-        // fails on Linux because it is not a valid destination. Use 127.0.0.1 to reach
-        // our own bootnode instead.
-        let bootnode_connect: SocketAddr = if bind.ip().is_unspecified() {
-            format!("127.0.0.1:{}", bind.port()).parse().unwrap()
-        } else {
-            bind
-        };
-
-        eprintln!(
-            "[leader/party {}] Party listening on {}, registering with bootnode {} (connect via {})",
-            my_id, party_bind, bind, bootnode_connect
-        );
-
-        // Register with our own bootnode and wait for session. By default the
-        // leader uploads program bytes so parties without a local copy can fetch
-        // them; mounted-program deployments can opt out to avoid a large
-        // discovery message.
-        let program_bytes = if upload_program_bytes {
-            Some(bytes)
-        } else {
-            None
-        };
-        let session_info = match register_and_wait_for_session(
-            &mut mgr,
-            SessionRegistrationConfig {
-                bootnode: bootnode_connect,
-                my_party_id: my_id,
-                my_listen: advertise_addr.unwrap_or(party_bind),
-                program_id,
-                entry: entry.clone(),
-                n_parties: n,
-                threshold: t,
-                timeout: session_registration_timeout(),
-                program_bytes,
-            },
-        )
-        .await
-        {
-            Ok(info) => info,
-            Err(e) => {
-                eprintln!("Session registration failed: {}", e);
-                exit(12);
-            }
-        };
-
-        // Use session parameters
-        agreed_entry = session_info.entry.clone();
-        session_instance_id = Some(session_info.instance_id);
-        session_n_parties = Some(session_info.n_parties);
-        session_threshold = Some(session_info.threshold);
-
-        eprintln!(
-            "[leader/party {}] Session started: instance_id={}, n={}, t={}, entry={}",
-            my_id,
-            session_info.instance_id,
-            session_info.n_parties,
-            session_info.threshold,
-            agreed_entry
-        );
-
-        let net = Arc::new(mgr);
-        net_opt = Some(net.clone());
-    } else if let Some(bootnode) = bootstrap_addr {
-        // Regular party mode: connect to external bootnode
+    if mesh_join_requested {
+        // Party mode. One way in since Stage 8: form a roster-pinned mesh from
+        // the seed addresses. There is no bootstrap process, no "leader mode"
+        // that runs one in-process, and since Stage 9 no round driver either —
+        // both halves of what `--leader` meant are gone. Since §9.D the roster
+        // is the coordinator's, fetched once, before anything is bound.
         let bind = bind_addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
         let my_id = party_id.unwrap_or(0usize);
         rustls::crypto::ring::default_provider()
@@ -4317,20 +3787,40 @@ async fn main() {
         let bytes = std::fs::read(program_path).expect("read program");
         program_id = program_id_from_bytes(&bytes);
 
-        // Get MPC parameters (required for session)
-        let n = n_parties.unwrap_or_else(|| {
-            eprintln!("Error: --n-parties is required for party mode");
-            exit(2);
-        });
-        let t = threshold.unwrap_or(1);
+        // §9.D.1 steps 2-5: the pinned coordinator link, the roster it served
+        // (fetched once), this node's membership and the VM roster, all before
+        // a socket is bound. `n` and `t` have exactly one source: that roster.
+        let identity = party_identity
+            .as_ref()
+            .expect("a party's identity is read before any network I/O");
+        let coord = coord_addr
+            .as_ref()
+            .expect("--peers without --off-chain-coord was refused above");
+        let pin = coordinator_pin
+            .as_ref()
+            .expect("--coord-cert is resolved wherever --off-chain-coord is");
+        let (link, roster) = fetch_node_roster(
+            coord,
+            pin,
+            roster_expectations,
+            NodeIdentity {
+                cert_path: identity.cert_path,
+                cert_der: identity.cert_der,
+                key_der: identity.key_der,
+            },
+        )
+        .await;
+        coordinator_link = Some(link);
+        let n = roster.n();
+        let t = roster.t();
 
-        // Prepare QUIC manager
+        // §9.D.1 step 6: the transport.
         let mut mgr = QuicNetworkManager::with_node_id(my_id);
-        if let (Some(cert), Some(key)) = (cert_der.as_ref(), key_der.as_ref()) {
-            if let Err(e) = mgr.set_local_certificate_der(cert.clone(), key.clone()) {
-                eprintln!("Failed to configure local node certificate: {}", e);
-                exit(11);
-            }
+        if let Err(e) =
+            mgr.set_local_certificate_der(identity.cert_der.to_vec(), identity.key_der.to_vec())
+        {
+            eprintln!("Failed to configure local node certificate: {}", e);
+            exit(11);
         }
         // Listen so peers can connect back directly
         if let Err(e) = mgr.listen(bind).await {
@@ -4342,34 +3832,51 @@ async fn main() {
         // In a real deployment, you should use specific ports, not port 0.
         let actual_listen = bind;
         eprintln!(
-            "[party {}] Listening on {}, connecting to bootnode {}",
-            my_id, actual_listen, bootnode
+            "[party {}] Listening on {}, forming a roster-pinned mesh from {} seed(s)",
+            my_id,
+            actual_listen,
+            seed_hints.len()
         );
 
-        // Register with bootnode and wait for session to be announced. This
-        // blocks until all n parties have registered. By default parties upload
-        // program bytes so the bootnode can distribute to parties that don't
-        // have a local copy; mounted-program deployments can opt out.
-        let program_bytes = if upload_program_bytes {
-            Some(bytes)
-        } else {
-            None
+        // §9.D.1 step 7: the peer book, pinned to the roster.
+        eprintln!(
+            "[mesh] peer book pinned to the {}-node roster",
+            roster.nodes().len()
+        );
+        mesh_router = Arc::new(MeshRouter::pinned_to(
+            roster.nodes().iter().cloned(),
+            PexLimits::default(),
+        ));
+
+        // §9.D.1 step 9: the join installs the roster as the transport's
+        // allowlist (nodes only), and keys the epoch store by its digest.
+        let join = match build_session_join(
+            roster,
+            &seed_hints,
+            epoch_store.clone(),
+            mesh_router.clone(),
+        ) {
+            Ok(join) => join,
+            Err(reason) => {
+                eprintln!("Error: {}", reason);
+                exit(2);
+            }
         };
-        let session_info = match register_and_wait_for_session(
-            &mut mgr,
-            SessionRegistrationConfig {
-                bootnode,
-                my_party_id: my_id,
-                my_listen: advertise_addr.unwrap_or(actual_listen),
-                program_id,
-                entry: entry.clone(),
-                n_parties: n,
-                threshold: t,
-                timeout: session_registration_timeout(),
-                program_bytes,
-            },
-        )
-        .await
+        let session_info = match join
+            .join(
+                &mut mgr,
+                JoinRequest {
+                    my_party_id: my_id,
+                    my_listen: advertise_addr.unwrap_or(actual_listen),
+                    program_id,
+                    entry: entry.clone(),
+                    n_parties: n,
+                    threshold: t,
+                    execution_id: SessionExecutionId::from_bytes(*coord_execution_id.as_bytes()),
+                    timeout: session_registration_timeout(),
+                },
+            )
+            .await
         {
             Ok(info) => info,
             Err(e) => {
@@ -4393,15 +3900,46 @@ async fn main() {
             agreed_entry
         );
 
+        // `--party-id` is not an identity any more, and it is not the storage
+        // key either: persistent state is keyed by `DurableIdentityDigest`,
+        // derived from this node's own certificate (`required_storage_identity`),
+        // so a node holding `cert0` opens `cert0`'s store whatever number the
+        // operator typed. What `--party-id` still does is *label* that state —
+        // the `--local-store` / `--preproc-store` paths and the `party-N.redb`
+        // volumes the compose stacks mount are named by it.
+        //
+        // The index this node is addressed by on the wire is its rank in the
+        // roster's lexicographic SPKI order, which no operator can predict from
+        // a certificate file name. The invariant that matters — roster rank ==
+        // transport rank — is enforced inside the join itself
+        // (`MeshError::RankMismatch`) and has already passed by the time we get
+        // here. So a label that disagrees with the rank is confusing, not
+        // wrong: it is reported once, by name, and the run continues on the
+        // derived index.
+        if let (Some(declared), Some(derived)) = (party_id, mgr.compute_local_party_id()) {
+            if declared != derived {
+                eprintln!(
+                    "[party {}] note: --party-id {} names this node's on-disk state; on the \
+                     wire this node is party {}, its rank in the lexicographic order of the \
+                     coordinator roster's certificates, and that is the index the remaining log \
+                     lines use. The two numbers are independent and need not agree: storage is \
+                     keyed by this node's certificate, not by --party-id.",
+                    declared, declared, derived
+                );
+            }
+        }
+
         let net = Arc::new(mgr);
         net_opt = Some(net.clone());
     } else {
+        // A local run forms no mesh, so its router never sees a peer.
+        mesh_router = Arc::new(MeshRouter::new());
         // local run: must have path
         if let Some(p) = &path_opt {
             let bytes = std::fs::read(p).expect("read program");
             program_id = program_id_from_bytes(&bytes);
         } else {
-            eprintln!("Error: local run requires a program path unless --bootnode or --leader");
+            eprintln!("Error: local run requires a program path");
             exit(2);
         }
     }
@@ -4410,7 +3948,8 @@ async fn main() {
     let load_path: String = if let Some(p) = path_opt.clone() {
         p
     } else {
-        // Use cached program path if we fetched it from bootnode
+        // Content-addressed cache fallback: a program pulled from a peer
+        // (`net::mesh::program`) lands under its own id.
         let p = stoffel_vm::net::program_sync::program_path(&program_id);
         p.to_string_lossy().to_string()
     };
@@ -4657,49 +4196,32 @@ async fn main() {
     // COORDINATOR (or no coordinator)
     // =====================================================================
 
-    // Coordinator initialization (both leader and party modes)
+    // HoneyBadger coordinator connection. The AVSS party opens its own
+    // (`run_avss_coordinated_party_for_curve`).
     let mut coord_opt: Option<HbOffChainCoordinator<ark_bls12_381::Fr>> = None;
-    let mut node_rpc_opt: Option<HbOffChainNodeRpcServer<ark_bls12_381::Fr>> = None;
-    let mut input_ids: Vec<Vec<u8>> = Vec::new();
-    let mut output_ids: Vec<Vec<u8>> = Vec::new();
+    let mut node_rpc_opt: Option<OffChainNodeRPCServer> = None;
     let mut hb_bls12381_coord_engine: Option<
         Arc<HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>>,
     > = None;
+    // What a coordinated HoneyBadger party agreed (§9.D.7): the checked summary, and the
+    // admission set every node of the mesh agreed on.
+    let mut coord_summary: Option<ExecutionSummary> = None;
+    let mut coord_admissions: Option<ClientAdmissionSet> = None;
+    let mut digest_barriers: Option<DigestBarriers> = None;
 
     if matches!(backend_kind, MpcBackendKind::HoneyBadger) {
-        if let Some(ref ca) = coord_addr {
-            let coord = HbOffChainCoordinator::<ark_bls12_381::Fr>::start_rpc_client(
-                &ca.0,
-                ca.1,
-                session_threshold.unwrap_or(1) as u64,
-                session_n_parties.unwrap_or_else(|| n_parties.unwrap_or(5)) as u64,
-                1,
-                cert_der.clone().expect("--cert required"),
-                key_der.clone().expect("--key required"),
-            )
-            .await
-            .unwrap_or_else(|error| {
-                eprintln!("Failed to connect to off-chain coordinator: {error}");
-                exit(13);
-            });
-            coord_opt = Some(coord);
-
-            output_ids = expected_clients
-                .iter()
-                .filter(|path| !path.trim().is_empty())
-                .map(|path| extract_pubkey_from_cert(&fs::read(path).expect("read client cert")))
-                .collect();
-            input_ids = input_client_ids_from_output_ids(
-                &output_ids,
-                &client_roster,
-                &client_input_slots,
-                client_input_count,
-            );
+        // §9.D.1 step 10: the link that fetched the roster drives the rounds.
+        if let Some(link) = coordinator_link.take() {
+            coord_opt = Some(HbOffChainCoordinator::<ark_bls12_381::Fr>::from_link(
+                link,
+                coord_execution_id,
+            ));
 
             if let Some(ref rpc) = rpc_addr {
-                let node_rpc = HbOffChainNodeRpcServer::<ark_bls12_381::Fr>::start(
+                let node_rpc = OffChainNodeRPCServer::start_for_execution(
                     &rpc.0,
                     rpc.1,
+                    coord_execution_id,
                     cert_der.clone().unwrap(),
                     key_der.clone().unwrap(),
                 )
@@ -4715,13 +4237,14 @@ async fn main() {
 
     // If in party mode, configure MPC engine based on selected backend
     if let Some(net) = net_opt.clone() {
-        // Use the network-derived party ID (sorted public key index), not the
-        // bootnode-assigned one, because send() routes via sorted public keys.
+        // The party index is the network-derived one (rank in the sorted public
+        // key list), never anything a peer or a flag asserted, because send()
+        // routes via sorted public keys.
         let my_id = net.local_party_id();
-        // Use session parameters (already agreed upon with bootnode)
+        // Session parameters, agreed all-to-all during the join.
         let n = session_n_parties.unwrap_or_else(|| net.parties().len());
         let t = session_threshold.unwrap_or(1);
-        // Use the session instance_id (agreed with all parties via bootnode)
+        // The session instance_id, likewise agreed with every party.
         let instance_id =
             session_instance_id.expect("session instance_id should be set in party mode");
 
@@ -4744,14 +4267,49 @@ async fn main() {
             connections.len()
         );
 
+        // §9.D.6: both agreement barriers exist before any receive loop is spawned.
+        if coord_addr.is_some() {
+            digest_barriers = Some(DigestBarriers::new(instance_id, n, my_id));
+        }
+
         match backend_kind {
             MpcBackendKind::HoneyBadger => {
-                // Phase 1: Coordinator preprocessing trigger
-                if let Some(ref mut coord) = coord_opt {
-                    if as_leader {
-                        coord.reset_coord().await.unwrap();
-                        coord.start_preprocessing().await.unwrap();
+                // Phase 1: the execution summary, checked before any preprocessing
+                // (§9.D.7 step 1), then the preprocessing proposal. Quorum-gated:
+                // every party proposes, and the coordinator applies the round once
+                // `transition_quorum()` of them have.
+                let mut mask_count = 0usize;
+                if let Some(ref coord) = coord_opt {
+                    let summary = checked_execution_summary::<
+                        ark_bls12_381::Fr,
+                        HbCoordinatorShare<ark_bls12_381::Fr>,
+                    >(
+                        coord,
+                        &SummaryExpectations {
+                            execution_id: coord_execution_id,
+                            program_hash: program_id,
+                            backend: MpcBackendKind::HoneyBadger,
+                            n,
+                            t,
+                            manifest: &client_io_manifest,
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|error| error.exit());
+                    mask_count = mask_count_of(&summary).unwrap_or_else(|error| error.exit());
+                    if mask_count > 0 && !matches!(curve_config, MpcCurveConfig::Bls12_381) {
+                        CoordinatedRunError::UnsupportedInputCurve {
+                            execution_id: coord_execution_id,
+                            mask_count: mask_count as u64,
+                            curve: curve_config.name(),
+                        }
+                        .exit();
                     }
+                    coord_summary = Some(summary);
+                    coord
+                        .start_preprocessing()
+                        .await
+                        .unwrap_or_else(|error| CoordinatedRunError::from(error).exit());
                 }
                 // Phase 2: Create MPC engine + preprocessing + coordinator input phases
                 macro_rules! setup_hb {
@@ -4767,13 +4325,17 @@ async fn main() {
                                 n,
                                 t,
                                 instance_id,
-                                expected_client_count,
-                                coordinator_client_count_hint: 0,
-                                client_input_count,
+                                // Clients never reach the node mesh (§9.E.3): every party is coordinated,
+                                // and its clients reach the node RPC listener.
+                                expected_client_count: None,
+                                coordinator_mask_count: 0,
+                                client_input_count: 1,
                                 client_input_types: &client_input_types,
                                 preprocessing_demand,
                                 program_hash: program_id,
                                 preproc_store_path: preproc_store_path.as_deref(),
+                                mesh_router: mesh_router.clone(),
+                                digest_barriers: digest_barriers.clone(),
                             },
                         )
                         .await
@@ -4803,13 +4365,16 @@ async fn main() {
                             n,
                             t,
                             instance_id,
-                            expected_client_count: None, // coordinator handles clients
-                            coordinator_client_count_hint: output_ids.len(),
-                            client_input_count,
+                            // Clients never reach the node mesh in a coordinated run.
+                            expected_client_count: None,
+                            coordinator_mask_count: mask_count,
+                            client_input_count: 1,
                             client_input_types: &client_input_types,
                             preprocessing_demand,
                             program_hash: program_id,
                             preproc_store_path: preproc_store_path.as_deref(),
+                            mesh_router: mesh_router.clone(),
+                            digest_barriers: digest_barriers.clone(),
                         },
                     )
                     .await
@@ -4820,130 +4385,64 @@ async fn main() {
                             exit(13);
                         }
                     };
-                    if coord_opt.is_some() {
-                        engine.enable_client_output_capture().await;
-                        hb_bls12381_coord_engine = Some(engine.clone());
-                    }
+                    engine.enable_client_output_capture().await;
+                    hb_bls12381_coord_engine = Some(engine.clone());
 
-                    // Coordinator mask distribution + input collection
+                    // §9.D.7 steps 2-10: masks, reservations, agreed admissions and
+                    // agreed masked inputs, stored by agreed client index.
                     if let Some(ref mut coord) = coord_opt {
-                        let node_rpc = node_rpc_opt
-                            .as_mut()
-                            .expect("--rpc-bind required with coordinator");
-
-                        if !input_ids.is_empty() {
-                            // Actual total across clients (supports asymmetric
-                            // per-client input counts); fall back to the uniform
-                            // estimate only when the total wasn't supplied.
-                            let total_input_count = if client_input_total > 0 {
-                                client_input_total
-                            } else {
-                                input_ids.len().saturating_mul(client_input_count)
-                            };
-                            let precomputed_mask_shares = Some(
-                                engine
-                                    .node_handle()
-                                    .lock()
-                                    .await
-                                    .preprocessing_material
-                                    .lock()
-                                    .await
-                                    .take_random_shares(total_input_count)
-                                    .unwrap_or_else(|e| {
-                                        eprintln!("take_random_shares: {}", e);
-                                        exit(13);
-                                    }),
-                            );
-
-                            if let Some(ref mask_shares) = precomputed_mask_shares {
-                                for (i, share) in mask_shares.iter().enumerate() {
-                                    node_rpc
-                                        .add_mask_share(i as u64, share)
-                                        .await
-                                        .unwrap_or_else(|e| {
-                                            eprintln!("add_mask_share: {:?}", e);
-                                            exit(13);
-                                        });
-                                }
-                            }
-
-                            if as_leader {
-                                eprintln!("[party {my_id}] coordinator -> InputMaskReservation");
-                                coord.reserve_input_masks().await.unwrap();
-                            }
-                            coord
-                                .wait_for_round(Round::InputMaskReservation)
+                        if mask_count > 0 {
+                            let node_rpc = node_rpc_opt
+                                .as_ref()
+                                .expect("--rpc-bind required with coordinator");
+                            let summary = coord_summary
+                                .as_ref()
+                                .expect("the summary is checked before preprocessing");
+                            let barriers = digest_barriers
+                                .as_ref()
+                                .expect("a coordinated party creates its agreement barriers");
+                            let mask_shares = engine
+                                .node_handle()
+                                .lock()
                                 .await
-                                .unwrap();
-
-                            eprintln!("[party {my_id}] waiting for reserved input indices");
-                            let client_to_indices = normalize_client_to_indices(
-                                coord
-                                    .wait_for_indices(total_input_count as u64)
-                                    .await
-                                    .unwrap(),
-                            );
-                            eprintln!("[party {my_id}] reserved input indices received");
-
-                            let mask_shares = if let Some(mask_shares) = precomputed_mask_shares {
-                                mask_shares
-                            } else {
-                                let mask_shares = load_reserved_mask_shares(
-                                    &engine,
-                                    total_input_count,
-                                    client_to_indices.values().flatten().copied(),
-                                )
+                                .preprocessing_material
+                                .lock()
                                 .await
-                                .unwrap_or_else(|e| {
-                                    eprintln!("load_reserved_mask_shares: {}", e);
-                                    exit(13);
+                                .take_random_shares(mask_count)
+                                .unwrap_or_else(|error| {
+                                    CoordinatedRunError::Setup(format!(
+                                        "Not enough random shares for {mask_count} input masks: {error}"
+                                    ))
+                                    .exit()
                                 });
-
-                                for idx in client_to_indices.values().flatten().copied() {
-                                    node_rpc
-                                        .add_mask_share(idx, &mask_shares[idx as usize])
-                                        .await
-                                        .unwrap_or_else(|e| {
-                                            eprintln!("add_mask_share: {:?}", e);
-                                            exit(13);
-                                        });
-                                }
-
-                                mask_shares
-                            };
-
-                            for (cid, indices) in &client_to_indices {
-                                for idx in indices {
-                                    node_rpc
-                                        .add_reserved_index(cid.clone(), *idx)
-                                        .await
-                                        .unwrap_or_else(|e| {
-                                            eprintln!("add_reserved_index: {:?}", e);
-                                            exit(13);
-                                        });
+                            let (set, inputs) = collect_admitted_client_inputs(
+                                coord,
+                                node_rpc,
+                                summary,
+                                barriers,
+                                net.as_ref(),
+                                mask_shares,
+                            )
+                            .await
+                            .unwrap_or_else(|error| error.exit());
+                            for (client_index, shares) in inputs {
+                                let slot = client_index.0 as usize;
+                                let stored = match client_input_types.get(&slot) {
+                                    Some(share_types) => vm.try_store_client_input_with_types(
+                                        slot,
+                                        shares,
+                                        share_types,
+                                    ),
+                                    None => vm.try_store_client_input(slot, shares),
+                                };
+                                if let Err(error) = stored {
+                                    CoordinatedRunError::Setup(format!(
+                                        "Failed to store input shares for client slot {slot}: {error}"
+                                    ))
+                                    .exit();
                                 }
                             }
-
-                            if as_leader {
-                                eprintln!("[party {my_id}] coordinator -> InputCollection");
-                                coord.collect_inputs().await.unwrap();
-                            }
-                            coord.wait_for_round(Round::InputCollection).await.unwrap();
-
-                            eprintln!("[party {my_id}] waiting for masked client inputs");
-                            let client_inputs = coord
-                                .wait_for_inputs(total_input_count as u64, mask_shares)
-                                .await
-                                .unwrap();
-                            eprintln!("[party {my_id}] masked client inputs received");
-                            store_reserved_client_inputs(
-                                &mut vm,
-                                &client_to_indices,
-                                client_inputs,
-                                client_input_count,
-                                &client_input_slots,
-                                &client_input_types,
-                            );
+                            coord_admissions = Some(set);
                         }
                     }
                 } else {
@@ -4983,7 +4482,7 @@ async fn main() {
                     curve_config.name()
                 );
 
-                if let Some(coord) = coord_addr.clone() {
+                if let Some(link) = coordinator_link.take() {
                     let rpc = rpc_addr.clone().unwrap_or_else(|| {
                         eprintln!("Error: --rpc-bind is required with AVSS coordinator mode");
                         exit(2);
@@ -4996,26 +4495,32 @@ async fn main() {
                         eprintln!("Error: --key is required with AVSS coordinator mode");
                         exit(2);
                     });
-                    if let Err(e) = run_avss_coordinated_party(
+                    if let Err(error) = run_avss_coordinated_party(
                         curve_config,
-                        &mut vm,
-                        net.clone(),
-                        my_id,
-                        n,
-                        t,
-                        instance_id,
-                        coord,
-                        rpc,
-                        cert,
-                        key,
-                        &expected_clients,
-                        as_leader,
-                        &agreed_entry,
+                        CoordinatedAvssParty {
+                            vm: &mut vm,
+                            net: net.clone(),
+                            my_id,
+                            n,
+                            t,
+                            instance_id,
+                            link,
+                            rpc_addr: rpc,
+                            cert_der: cert,
+                            key_der: key,
+                            execution_id: coord_execution_id,
+                            agreed_entry: &agreed_entry,
+                            program_hash: program_id,
+                            manifest: &client_io_manifest,
+                            mesh_router: mesh_router.clone(),
+                            digest_barriers: digest_barriers
+                                .clone()
+                                .expect("a coordinated party creates its agreement barriers"),
+                        },
                     )
                     .await
                     {
-                        eprintln!("[party {}] AVSS coordinator execution failed: {}", my_id, e);
-                        exit(13);
+                        error.exit();
                     }
                     return;
                 }
@@ -5033,9 +4538,14 @@ async fn main() {
                                 n,
                                 t,
                                 instance_id,
-                                expected_client_count,
-                                client_input_count,
+                                // Clients never reach the node mesh (§9.E.3): every party is coordinated,
+                                // and its clients reach the node RPC listener.
+                                expected_client_count: None,
+                                client_input_count: 1,
                                 client_input_types: &client_input_types,
+                                coordinator_mask_count: 0,
+                                digest_barriers: None,
+                                mesh_router: mesh_router.clone(),
                             },
                         )
                         .await
@@ -5077,17 +4587,37 @@ async fn main() {
 
     // Coordinator: signal MPC execution phase
     if let Some(ref mut coord) = coord_opt {
-        if as_leader {
-            eprintln!("[party] coordinator -> MPCExecution");
-            coord.start_mpc().await.unwrap();
+        eprintln!("[party] coordinator -> MPCExecution");
+        coord
+            .start_mpc()
+            .await
+            .unwrap_or_else(|error| CoordinatedRunError::from(error).exit());
+        coord
+            .wait_for_round(Round::MPCExecution)
+            .await
+            .unwrap_or_else(|error| CoordinatedRunError::from(error).exit());
+        let summary = coord_summary
+            .as_ref()
+            .expect("a coordinated party checks the summary before preprocessing");
+        // An execution without inputs freezes its admissions when `MPCExecution` begins
+        // (§9.D.7), so this node agrees them now, before running the program.
+        if coord_admissions.is_none() {
+            let net = net_opt
+                .as_ref()
+                .expect("a coordinated HoneyBadger run is a party");
+            let barriers = digest_barriers
+                .as_ref()
+                .expect("a coordinated party creates its agreement barriers");
+            coord_admissions = Some(
+                agree_client_admissions(coord, summary, barriers, net.as_ref())
+                    .await
+                    .unwrap_or_else(|error| error.exit()),
+            );
         }
-        coord.wait_for_round(Round::MPCExecution).await.unwrap();
+        vm.set_client_roster(coordinated_client_roster(summary));
     }
 
     eprintln!("Starting VM execution of '{}'...", agreed_entry);
-    if !client_roster.is_empty() {
-        vm.set_client_roster(client_roster.clone());
-    }
 
     // Execute entry function. Prefer the async MPC scheduler when an async-capable
     // engine was installed so secret-share operations yield instead of blocking
@@ -5108,92 +4638,33 @@ async fn main() {
 
     match execution_result {
         Ok(result) => {
-            {
-                let mut handled_by_coordinator = false;
-
-                if let Some(ref mut coord) = coord_opt {
-                    handled_by_coordinator = true;
-                    // Coordinator output delivery
-                    let output_share = if output_ids.is_empty() {
-                        None
-                    } else {
-                        coordinator_output_share_bytes(&mut vm, &result)
-                    };
-                    let captured_outputs = if let Some(engine) = hb_bls12381_coord_engine.as_ref() {
-                        engine.drain_client_output_records().await
-                    } else {
-                        Vec::new()
-                    };
-
-                    if output_share.is_some() || !captured_outputs.is_empty() {
-                        let mut output_shares_by_client: Vec<
-                            Vec<HbCoordinatorShare<ark_bls12_381::Fr>>,
-                        > = vec![Vec::new(); output_ids.len()];
-
-                        if let Some(output_share) = output_share {
-                            let share: HbCoordinatorShare<ark_bls12_381::Fr> =
-                                ark_serialize::CanonicalDeserialize::deserialize_compressed(
-                                    output_share.as_slice(),
-                                )
-                                .expect("deserialize output share");
-                            for shares in output_shares_by_client.iter_mut() {
-                                shares.push(share.clone());
-                            }
-                        }
-
-                        for record in captured_outputs {
-                            let Some(shares) = output_shares_by_client.get_mut(record.client_id)
-                            else {
-                                eprintln!(
-                                    "Execution error in '{}': HoneyBadger output client index {} has no matching coordinator client identity",
-                                    agreed_entry,
-                                    record.client_id
-                                );
-                                exit(4);
-                            };
-                            shares.extend(record.shares);
-                        }
-
-                        if as_leader {
-                            coord.send_output().await.unwrap();
-                        }
-                        coord
-                            .wait_for_round(Round::OutputDistribution)
-                            .await
-                            .unwrap();
-
-                        for (cid, output_shares) in
-                            output_ids.iter().zip(output_shares_by_client.into_iter())
-                        {
-                            if output_shares.is_empty() {
-                                continue;
-                            }
-                            if let Err(e) = coord
-                                .send_output_shares(cid.clone(), cid.clone(), output_shares)
-                                .await
-                            {
-                                eprintln!(
-                                    "Warning: failed to submit output shares for client {:?}: {}",
-                                    cid, e
-                                );
-                            }
-                        }
-                        if as_leader {
-                            if let Err(e) = coord.finalize().await {
-                                eprintln!(
-                                    "Warning: failed to finalize off-chain coordinator round: {}",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    print_vm_result(&mut vm, result.clone());
-                }
-
-                if !handled_by_coordinator {
-                    print_vm_result(&mut vm, result);
-                }
+            // §9.D.7 step 12: outputs come only from `send_to_client`, by agreed slot, and
+            // every coordinated run reaches `ProgramFinished`.
+            if let Some(ref coord) = coord_opt {
+                let captured = match hb_bls12381_coord_engine.as_ref() {
+                    Some(engine) => engine
+                        .drain_client_output_records()
+                        .await
+                        .into_iter()
+                        .map(|record| (record.client_id, record.shares))
+                        .collect(),
+                    None => Vec::new(),
+                };
+                finish_coordinated_execution(
+                    coord,
+                    coord_summary
+                        .as_ref()
+                        .expect("a coordinated party checks the summary before preprocessing"),
+                    coord_admissions
+                        .as_ref()
+                        .expect("a coordinated party agrees the admissions before it runs"),
+                    captured,
+                    &agreed_entry,
+                )
+                .await
+                .unwrap_or_else(|error| error.exit());
             }
+            print_vm_result(&mut vm, result);
         }
         Err(err) => {
             eprintln!("Execution error in '{}': {}", agreed_entry, err);
@@ -5213,109 +4684,149 @@ Flags:
   --trace-instr           Trace instructions before/after execution
   --trace-regs            Trace register reads/writes
   --trace-stack           Trace function calls and stack push/pop
-  --bootnode              Run as bootnode only (coordinates party discovery)
-  --leader                Run as leader: bootnode + party 0 in one process
+  --execution-id <hex>    The program invocation this process joins, as 64
+                          hexadecimal characters. Required with
+                          --off-chain-coord and refused without it: the
+                          coordinator keys rounds, reserved mask indices, masked
+                          inputs and output shares on it, and has no reset, so
+                          every party and client of one invocation passes the
+                          same value and a later invocation passes a different
+                          one. The all-zero value is reserved
   --client                Run as client (provide inputs to MPC network)
-  --no-program-upload     Do not upload program bytes during session registration
-  --bind <addr:port>      Bind address for bootnode or party listen
-  --party-id <usize>      Party id (party mode, 0-indexed)
-  --bootstrap <addr:port> Bootnode address (party mode or client mode)
-  --n-parties <usize>     Number of parties for MPC (required in party/leader/client mode)
-  --threshold <usize>     Threshold t (default: 1)
+  --bind <addr:port>      Party listen address
+  --advertise <addr:port> Address peers should dial to reach this party, when it differs
+                          from --bind (a published container port, say). Defaults to
+                          --bind
+  --party-id <usize>      Labels this node's on-disk state (--local-store,
+                          --preproc-store). NOT an identity: the index
+                          this node is addressed by on the wire is its rank in the
+                          lexicographic order of the coordinator roster's certificates,
+                          and persistent storage is keyed by this node's certificate,
+                          not by this flag. A --party-id that differs from the
+                          derived rank is reported once and the run continues
   --mpc-backend <name>    MPC backend: honeybadger (default) or avss
   --mpc-curve <name>      MPC curve: bls12-381 (default), bn254, curve25519, ed25519;
                           AVSS also supports secp256k1 and p-256
-  --inputs <values>       Comma-separated input values (client mode)
-  --outputs <n>           Number of output field elements to reconstruct (client mode)
+  --inputs <values>       Comma-separated input values (client mode), one per input of
+                          the client's slot; omitted for an output-only slot. A count
+                          other than the slot's is refused (exit 2) before associating
+                          whenever the slot is known
   --output-fixed-point-fractional-bits <n>
                           Decode coordinator client outputs as fixed-point values
                           with n fractional bits instead of raw field integers
-  --servers <addrs>       Comma-separated server addresses (client mode)
-  --wait-for-clients <n>
-                          Number of client inputs to collect before starting computation
-                          (HoneyBadger only; ALPN handles routing, this controls coordination)
-  --client-input-count <n>
-                          Number of input shares each direct host-mode client submits
-                          (default: 1; use with --wait-for-clients)
+  --servers <addrs>       Comma-separated node RPC addresses (client mode). Hints: every
+                          leg is pinned to a member of the coordinator's node roster
   --off-chain-coord <addr:port>
-                          Off-chain coordinator address
+                          Off-chain coordinator address. Required in party and client
+                          mode. Requires --coord-cert
+  --coord-cert <path>     DER-encoded X.509 certificate of the off-chain coordinator.
+                          Required with --off-chain-coord and refused without it: every
+                          coordinator connection pins this key, and a server presenting
+                          any other key is refused (exit 13)
+  --expect-roster-digest <64-hex>
+                          Optional, party and client mode: refuse (exit 2) a node roster
+                          whose digest is not this one. Carries no certificate: it can
+                          only refuse what the coordinator serves
+  --expect-n-parties <u64>, --expect-threshold <u64>
+                          Optional, party and client mode: refuse (exit 2) a node roster
+                          of another size
   --on-chain-coord <address>
                           Temporarily unavailable in the crates.io-ready build
   --eth-node <url>        Reserved for future on-chain coordinator support
   --wallet-sk <hex>       Reserved for future on-chain coordinator support
   --rpc-bind <addr:port>  Node RPC server bind address (for mask distribution)
-  --cert <path>           Path to DER-encoded X.509 certificate
+  --cert <path>           Path to DER-encoded X.509 certificate. Required for a party:
+                          it must be one of the coordinator's node roster
   --key <path>            Path to DER-encoded private key
-  --client-index <u64>    Reserved coordinator input index (coordinator client mode)
+  --client-slot <u32>     Client slot this coordinator client asks to bind; optional.
+                          Without it a client takes the slot its certificate is
+                          pre-registered to, its invitation's slot or, under open
+                          admission, the lowest-numbered free slot (every slot must then
+                          have one shape). Its input range and output count are the
+                          coordinator's admission, never a flag
+  --invitation <path>     A signed invitation (JSON, as issue-invitation writes it),
+                          presented when this coordinator client associates. Required
+                          under invitation admission, refused under any other
+  --expect-program-hash <64-hex>
+                          Optional, client mode: refuse (exit 2) to associate with an
+                          execution registered for any other program
   --preproc-store <path>  Persistent HoneyBadger preprocessing store directory
   --local-store <path>    Persistent VM local storage database
-  --expected-clients <cert-paths>
-                          Comma-separated client cert paths for off-chain coordinator mode
+  --epoch-store <dir>     Directory holding this node's monotone session epoch, keyed by
+                          the coordinator's roster digest, which is what keeps instance_id
+                          fresh across runs of one roster. Needed only with --peers.
+                          Defaults to $STOFFEL_EPOCH_STORE, then to ~/.stoffel/epochs.
+                          Must persist across restarts and must not be shared between nodes
+  --peers <addrs>         Comma-separated peer addresses to try first, and the switch
+                          that selects party mode. Seed hints, not membership:
+                          membership is the coordinator's node roster, and every dial
+                          pins a roster certificate, so a wrong address costs one
+                          failed handshake. A missing one costs the mesh: peer exchange
+                          runs inside the join handshake, after the mesh is already
+                          complete, so it cannot fill an edge the mesh needs in order to
+                          form. List every other party unless you know the ones you leave
+                          out will dial this node themselves. Requires --off-chain-coord,
+                          --coord-cert, --execution-id and an epoch store
   -h, --help              Show this help
 
-Required environment:
-  STOFFEL_AUTH_TOKEN      Shared secret required by bootnode and all parties for
-                          authenticated discovery registration
-
 Multi-Party Execution:
-  In party mode, all parties register with the bootnode and wait until
-  all n-parties have joined. The bootnode then broadcasts a session with
-  a shared instance_id to all parties, ensuring they all use the same
-  MPC configuration.
+  The coordinator is the only roster authority. A party opens one connection to
+  it, pinned to --coord-cert, and fetches the node roster (the node certificates
+  and t) exactly once, before it binds anything. It refuses to run if its own
+  --cert is not one of those nodes. It installs the roster as its transport's
+  peer-certificate allowlist — nodes only; clients never reach the node mesh —
+  and forms a mesh by dialing the seed addresses it was given. The session
+  (program, entry, execution, n, t, instance_id) is agreed all-to-all once every
+  party is connected. There is no bootstrap process and no shared bearer token.
 
-  Use --leader on one party to have it also run the bootnode. This reduces
-  the number of processes needed by one.
+  Party indices are derived locally from the lexicographic order of the roster's
+  DER SubjectPublicKeyInfo bytes, so every party computes the same index for
+  every other party without anyone announcing one.
+
+  instance_id freshness comes from a monotone epoch persisted per node
+  (--epoch-store) and keyed by the roster digest. Roster, program and entry are
+  constant across runs of a deployment, so without it every run would reuse one
+  MPC session namespace.
+
+  Every party proposes every round transition, and the coordinator applies one
+  once a quorum of the roster has proposed it. No party is designated. What
+  every party and client must share is --execution-id, which names the
+  invocation their rounds, inputs and outputs belong to. Clients associate with
+  that execution through the coordinator, which admits them per execution, and
+  reach the parties' --rpc-bind listeners.
+
+Removed flags (each exits 2 naming its replacement):
+  --roster, --n-parties, --threshold, --expected-clients, --wait-for-clients,
+  --client-roster, --client-input-count, --client-input-slots,
+  --client-input-total, --timestamp, --client-id, --client-index, --outputs
 
 Examples:
   # Local execution (no MPC)
   stoffel-run program.stfbin
   stoffel-run program.stfbin main --trace-instr
 
-  # Multi-party execution (5 parties, threshold 1) - Leader mode (recommended)
-  # Terminal 1: Leader (bootnode + party 0)
-  STOFFEL_AUTH_TOKEN=replace-with-random-secret \
-  stoffel-run program.stfbin main --leader --bind 127.0.0.1:9000 --n-parties 5 --threshold 1
+  # Multi-party execution (3 parties). The coordinator at 127.0.0.1:31415 serves
+  # the node roster and drives execution $EXEC; --peers are hints, and
+  # --epoch-store keeps instance_id fresh across runs. Each party lists every
+  # other party: a first mesh forms out of dials alone, so an address nobody
+  # holds is an edge that never forms.
+  COORD="--off-chain-coord 127.0.0.1:31415 --coord-cert coordinator.crt --execution-id $EXEC"
+  stoffel-run program.stfbin main --party-id 0 --bind 127.0.0.1:9001 $COORD \
+    --cert node0.crt --key node0.der --rpc-bind 127.0.0.1:10001 \
+    --peers 127.0.0.1:9002,127.0.0.1:9003 --epoch-store /var/lib/stoffel/epochs-0
+  stoffel-run program.stfbin main --party-id 1 --bind 127.0.0.1:9002 $COORD \
+    --cert node1.crt --key node1.der --rpc-bind 127.0.0.1:10002 \
+    --peers 127.0.0.1:9001,127.0.0.1:9003 --epoch-store /var/lib/stoffel/epochs-1
+  stoffel-run program.stfbin main --party-id 2 --bind 127.0.0.1:9003 $COORD \
+    --cert node2.crt --key node2.der --rpc-bind 127.0.0.1:10003 \
+    --peers 127.0.0.1:9001,127.0.0.1:9002 --epoch-store /var/lib/stoffel/epochs-2
 
-  # Terminals 2-5: Other parties
-  STOFFEL_AUTH_TOKEN=replace-with-random-secret \
-  stoffel-run program.stfbin main --party-id 1 --bootstrap 127.0.0.1:9000 --bind 127.0.0.1:9002 --n-parties 5 --threshold 1
-  STOFFEL_AUTH_TOKEN=replace-with-random-secret \
-  stoffel-run program.stfbin main --party-id 2 --bootstrap 127.0.0.1:9000 --bind 127.0.0.1:9003 --n-parties 5 --threshold 1
-  STOFFEL_AUTH_TOKEN=replace-with-random-secret \
-  stoffel-run program.stfbin main --party-id 3 --bootstrap 127.0.0.1:9000 --bind 127.0.0.1:9004 --n-parties 5 --threshold 1
-  STOFFEL_AUTH_TOKEN=replace-with-random-secret \
-  stoffel-run program.stfbin main --party-id 4 --bootstrap 127.0.0.1:9000 --bind 127.0.0.1:9005 --n-parties 5 --threshold 1
-
-  # Alternative: Separate bootnode (6 processes total)
-  # Terminal 1: Bootnode only
-  STOFFEL_AUTH_TOKEN=replace-with-random-secret \
-  stoffel-run --bootnode --bind 127.0.0.1:9000 --n-parties 5
-
-  # Terminals 2-6: All parties
-  STOFFEL_AUTH_TOKEN=replace-with-random-secret \
-  stoffel-run program.stfbin main --party-id 0 --bootstrap 127.0.0.1:9000 --bind 127.0.0.1:9001 --n-parties 5 --threshold 1
-  STOFFEL_AUTH_TOKEN=replace-with-random-secret \
-  stoffel-run program.stfbin main --party-id 1 --bootstrap 127.0.0.1:9000 --bind 127.0.0.1:9002 --n-parties 5 --threshold 1
-  # ... etc
-
-  # Multi-party execution with client inputs (canonical sorted client IDs)
-  # Terminal 1: Leader with expected client count
-  stoffel-run program.stfbin main --leader --bind 127.0.0.1:9000 --n-parties 5 --threshold 1 --wait-for-clients 2
-
-  # Terminals 2-5: Other parties (same expected-client-count)
-  stoffel-run program.stfbin main --party-id 1 --bootstrap 127.0.0.1:9000 --bind 127.0.0.1:9002 --n-parties 5 --wait-for-clients 2
-  # ... etc
-
-  # Client mode: provide inputs to the MPC network
-  # Note: clients connect directly to party servers, not the bootnode
-  stoffel-run --client --inputs 10,20 --servers 127.0.0.1:10000,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004,127.0.0.1:9005 --n-parties 5
-  stoffel-run --client --inputs 30,40 --servers 127.0.0.1:10000,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004,127.0.0.1:9005 --n-parties 5
-
-  # Docker example with client inputs:
-  # Start parties with expected-client-count:
-  # docker run ... -e STOFFEL_EXPECTED_CLIENT_COUNT=2 stoffelvm:latest
-  # Then run clients connecting to the party servers:
-  stoffel-run --client --inputs 42 --servers 172.18.0.2:9000,172.18.0.3:9000,172.18.0.4:9000,172.18.0.5:9000,172.18.0.6:9000 --n-parties 5
+  # Client mode: associate with the execution through the coordinator — whose
+  # admission, not this command line, decides the client's slot, input range and
+  # outputs — fetch masks from the parties' node RPC listeners and submit masked
+  # inputs. The client's certificate need not appear in any configuration.
+  stoffel-run --client --inputs 10,20 $COORD --cert client.crt --key client.der \
+    --servers 127.0.0.1:10001,127.0.0.1:10002,127.0.0.1:10003
 "#
     );
     exit(1);
@@ -5324,12 +4835,245 @@ Examples:
 #[cfg(test)]
 mod tests {
     use super::{
-        band_pow2, client_transport_recipient, client_transport_targets, field_outputs_to_hex,
-        format_coordinator_outputs, input_client_ids_from_output_ids, plan_preprocessing,
-        render_fixed_point_i64, CoordinatorOutputFormat,
+        band_pow2, build_session_join, field_outputs_to_hex, format_coordinator_outputs,
+        parse_expected_roster_digest, parse_expected_roster_size, plan_preprocessing,
+        render_fixed_point_i64, resolve_coord_execution_id, CoordinatorOutputFormat, ExecutionId,
+        RosterExpectations, RosterSizeFlag, UnexpectedRosterSize, REMOVED_FLAGS,
+        UNUSED_EXECUTION_ID,
     };
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use stoffel_vm::net::mesh::{EpochStore, MeshRouter, Roster, SeedHints};
     use stoffel_vm::net::MpcCurveConfig;
     use stoffel_vm_types::compiled_binary::PreprocessingDemand;
+    use stoffelnet::network_utils::NodePublicKey;
+
+    fn addr(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{port}")
+            .parse()
+            .expect("parse loopback address")
+    }
+
+    /// A three-node roster plus a scratch epoch store, so `build_session_join`
+    /// can be driven with real values.
+    fn roster_and_epochs() -> (Roster, Arc<EpochStore>, std::path::PathBuf) {
+        // Distinct SPKI-shaped byte strings. `build_session_join` never looks
+        // inside the roster, and minting real certificates here would test
+        // `rcgen`.
+        let keys = (1u8..=3)
+            .map(|byte| NodePublicKey(vec![byte; 32]))
+            .collect();
+        let dir = std::env::temp_dir().join(format!(
+            "stoffel-run-epochs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock is after the unix epoch")
+                .as_nanos()
+        ));
+        let store = EpochStore::open(&dir).expect("open a scratch epoch store");
+        (
+            Roster::from_node_keys(keys, 1).expect("build a three-node roster"),
+            Arc::new(store),
+            dir,
+        )
+    }
+
+    /// Stage 9: a coordinator-bearing run names the invocation it joins, and a
+    /// run without a coordinator has nothing to name.
+    ///
+    /// Both directions are errors rather than defaults. Coordinator `0.2.0` has
+    /// no `reset_coord`, so the id *is* what separates one run from the next; a
+    /// defaulted one would silently attach this process to whatever execution
+    /// happened to carry that value, on the leg that carries client inputs.
+    #[test]
+    fn a_coordinator_bearing_run_must_name_its_execution() {
+        let id = ExecutionId::from_bytes([7u8; 32]);
+
+        assert_eq!(resolve_coord_execution_id(true, Some(id)), Ok(id));
+
+        let missing = resolve_coord_execution_id(true, None)
+            .expect_err("a coordinator run without an execution id is a configuration error");
+        assert!(missing.contains("--execution-id"), "{missing}");
+
+        let unused = resolve_coord_execution_id(false, Some(id))
+            .expect_err("an execution id without a coordinator names nothing");
+        assert!(unused.contains("--off-chain-coord"), "{unused}");
+
+        // The coordinator-less answer is the reserved value, which every
+        // coordinator RPC rejects.
+        assert_eq!(
+            resolve_coord_execution_id(false, None),
+            Ok(UNUSED_EXECUTION_ID)
+        );
+        assert!(UNUSED_EXECUTION_ID.is_zero());
+    }
+
+    /// The join the seam produces, stated where it is chosen.
+    ///
+    /// The assertion is over `Debug`, because `SessionJoin` is a trait object
+    /// by the time it leaves this function — which is the point: the two call
+    /// sites in `main` cannot tell one join from another, which is what let
+    /// Stage 5 add a path without editing them and what will let stage 11 add
+    /// the coordinator-issued one the same way.
+    #[test]
+    fn a_roster_seeds_and_an_epoch_store_build_the_mesh_join() {
+        let (roster, epochs, dir) = roster_and_epochs();
+        let router = Arc::new(MeshRouter::new());
+
+        let mesh = build_session_join(
+            roster,
+            &SeedHints::new(vec![addr(9001)], None),
+            Some(epochs),
+            router,
+        )
+        .expect("a roster, seeds and an epoch store are a complete mesh configuration");
+
+        assert!(format!("{mesh:?}").contains("MeshJoin"), "{mesh:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Both remaining mesh preconditions are configuration mistakes with
+    /// one-line fixes, so they are refused where the choice is made rather than
+    /// deep inside the join, where they would surface as a transport-level
+    /// message.
+    ///
+    /// The membership precondition this test used to cover beside them — seeds
+    /// without `--roster` — is now a type: the join takes the coordinator's
+    /// [`Roster`], never an `Option`, and `--peers` without `--off-chain-coord`
+    /// is refused before anything is bound
+    /// (`tests/coordinator_pin.rs::peers_without_a_coordinator_are_refused`).
+    #[test]
+    fn the_mesh_join_refuses_to_form_without_seeds_or_freshness() {
+        let (roster, epochs, dir) = roster_and_epochs();
+        let router = Arc::new(MeshRouter::new());
+        let seeds = SeedHints::new(vec![addr(9001)], None);
+
+        let missing_epochs = build_session_join(roster.clone(), &seeds, None, router.clone())
+            .expect_err("seeds without an epoch store cannot keep instance_id fresh");
+        assert!(missing_epochs.contains("--epoch-store"), "{missing_epochs}");
+
+        let nothing = build_session_join(roster, &SeedHints::default(), Some(epochs), router)
+            .expect_err("a party with nothing to dial has no way into a session");
+        assert!(nothing.contains("--peers"), "{nothing}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Design doc §9.D.3: no removed flag's hint names another removed flag, so
+    /// an operator following one refusal is never sent to the next.
+    #[test]
+    fn no_removed_flag_hint_names_a_removed_flag() {
+        for (flag, hint) in REMOVED_FLAGS {
+            assert!(!hint.is_empty(), "{flag} has an empty hint");
+            for (removed, _) in REMOVED_FLAGS {
+                let named = hint
+                    .split(|character: char| {
+                        character.is_whitespace() || matches!(character, ',' | '(' | ')' | ';')
+                    })
+                    .any(|word| word.trim_end_matches('.') == *removed);
+                assert!(
+                    !named,
+                    "the hint for {flag} names the removed {removed}: {hint}"
+                );
+            }
+        }
+        let mut flags: Vec<&str> = REMOVED_FLAGS.iter().map(|(flag, _)| *flag).collect();
+        flags.sort_unstable();
+        flags.dedup();
+        assert_eq!(
+            flags.len(),
+            REMOVED_FLAGS.len(),
+            "a removed flag is listed twice"
+        );
+    }
+
+    /// `--expect-*` refuse a served roster of another size, name the flag and
+    /// the served `n` and `t`, and accept the roster they describe.
+    #[test]
+    fn roster_expectations_refuse_another_size_by_flag() {
+        use stoffel_mpc_coordinator_shared::{NodeCertificateDer, NodeRoster};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let roster = NodeRoster::new(
+            1,
+            (0..3)
+                .map(|_| {
+                    let generated =
+                        rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+                            .expect("generate a node certificate");
+                    NodeCertificateDer::from_der(generated.cert.der().to_vec())
+                })
+                .collect(),
+        )
+        .expect("three nodes at t = 1 are a roster");
+
+        assert_eq!(RosterExpectations::default().check_size(&roster), Ok(()));
+        let matching = RosterExpectations {
+            n_parties: Some(3),
+            threshold: Some(1),
+            ..RosterExpectations::default()
+        };
+        assert_eq!(matching.check_size(&roster), Ok(()));
+
+        let wrong_n = RosterExpectations {
+            n_parties: Some(7),
+            ..RosterExpectations::default()
+        };
+        let refusal = wrong_n
+            .check_size(&roster)
+            .expect_err("a roster of another size is refused");
+        assert_eq!(
+            refusal,
+            UnexpectedRosterSize {
+                n: 3,
+                t: 1,
+                flag: RosterSizeFlag::NParties,
+                expected: 7,
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "the coordinator serves a roster of n = 3, t = 1, not the expected \
+             --expect-n-parties 7; refusing to install it."
+        );
+
+        let wrong_t = RosterExpectations {
+            threshold: Some(2),
+            ..RosterExpectations::default()
+        };
+        assert_eq!(
+            wrong_t.check_size(&roster).map_err(|error| error.flag),
+            Err(RosterSizeFlag::Threshold)
+        );
+    }
+
+    #[test]
+    fn expectation_flags_parse_or_name_themselves() {
+        assert_eq!(
+            parse_expected_roster_size(RosterSizeFlag::NParties, "5"),
+            Ok(5)
+        );
+        let refusal = parse_expected_roster_size(RosterSizeFlag::Threshold, "-1")
+            .expect_err("a negative count is refused");
+        assert!(
+            refusal.starts_with("--expect-threshold must be a non-negative integer: "),
+            "{refusal}"
+        );
+
+        let digest = "ab".repeat(32);
+        assert_eq!(
+            parse_expected_roster_digest(&digest.to_uppercase())
+                .expect("64 hexadecimal characters parse in either case")
+                .to_string(),
+            digest
+        );
+        assert_eq!(
+            parse_expected_roster_digest("abc").expect_err("three characters are too few"),
+            "--expect-roster-digest: expected 64 hexadecimal characters, got 3"
+        );
+    }
 
     fn demand(triples: u64, prandbits: u64, prandints: u64, dynamic: bool) -> PreprocessingDemand {
         PreprocessingDemand {
@@ -5339,6 +5083,37 @@ mod tests {
             prandints,
             dynamic,
         }
+    }
+
+    /// Blocker B6's seventh site, guarded where it lives.
+    ///
+    /// `setup_avss_party_for_curve` spawns the production AVSS *party* receive
+    /// loop itself — it does not go through `AvssQuicServer::spawn_message_loops`
+    /// — so `stoffel-vm`'s own
+    /// `every_receive_loop_offers_its_payloads_to_the_mesh_router` cannot see
+    /// it: that test `include_str!`s `hb_server.rs` and `avss_server.rs`, and a
+    /// library test reaching across a crate boundary would break
+    /// `cargo publish` for a `publish = true` crate. The guard therefore lives
+    /// here, over this file.
+    ///
+    /// The failure it prevents is silent in both directions: a mesh control
+    /// frame would be handed to `process_wrapped_message_with_network`, and the
+    /// loop below discards "process failed" errors by name.
+    #[test]
+    fn the_avss_party_receive_loop_offers_its_payloads_to_the_mesh_router() {
+        // Assembled at runtime so this assertion does not match itself.
+        let needle = format!("mesh_router.try_handle_{}", "wire_message_from(");
+        let source: String = include_str!("stoffel-run.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+
+        assert_eq!(
+            source.matches(&needle).count(),
+            1,
+            "the AVSS party receive loop must consume mesh control frames before \
+             the AVSS engine sees them"
+        );
     }
 
     #[test]
@@ -5362,24 +5137,6 @@ mod tests {
                 "band over-provisions by at most ~1/8 octave"
             );
         }
-    }
-
-    #[test]
-    fn client_transport_routing_keeps_lower_recipient_unchanged() {
-        assert_eq!(client_transport_recipient(1, 3), Some(1));
-    }
-
-    #[test]
-    fn client_transport_routing_shifts_past_local_position_without_leaking() {
-        assert_eq!(client_transport_recipient(3, 3), Some(4));
-        assert_eq!(client_transport_recipient(4, 3), Some(5));
-        assert_eq!(client_transport_targets(3, 3), Some([4]));
-        assert!(!client_transport_targets(3, 3).unwrap().contains(&3));
-    }
-
-    #[test]
-    fn client_transport_routing_rejects_shift_overflow() {
-        assert_eq!(client_transport_recipient(usize::MAX, 0), None);
     }
 
     #[test]
@@ -5436,33 +5193,6 @@ mod tests {
             format_coordinator_outputs(&outputs, CoordinatorOutputFormat::FieldInteger),
             "[-10]"
         );
-    }
-
-    #[test]
-    fn output_only_clients_do_not_become_input_clients() {
-        let output_ids = vec![vec![10], vec![11], vec![12]];
-
-        let input_ids = input_client_ids_from_output_ids(&output_ids, &[0, 1, 2], &[], 0);
-
-        assert!(input_ids.is_empty());
-    }
-
-    #[test]
-    fn client_input_slots_select_sparse_input_clients_from_output_roster() {
-        let output_ids = vec![vec![20], vec![21], vec![22]];
-
-        let input_ids = input_client_ids_from_output_ids(&output_ids, &[0, 2, 5], &[2], 1);
-
-        assert_eq!(input_ids, vec![vec![21]]);
-    }
-
-    #[test]
-    fn missing_client_input_slots_preserves_legacy_all_clients_are_inputs() {
-        let output_ids = vec![vec![30], vec![31]];
-
-        let input_ids = input_client_ids_from_output_ids(&output_ids, &[], &[], 1);
-
-        assert_eq!(input_ids, output_ids);
     }
 
     #[test]

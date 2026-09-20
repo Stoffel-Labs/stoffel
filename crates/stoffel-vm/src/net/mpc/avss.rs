@@ -175,6 +175,7 @@ where
             session,
             secret_key,
             public_keys,
+            additional_random_shares,
         } = config;
         let (topology, local_identity, network, input_ids, open_message_router) =
             session.into_parts();
@@ -188,7 +189,7 @@ where
         let opts = AvssMpcNodeOpts::new(
             n_parties,
             threshold,
-            DEFAULT_N_RANDOM_SHARES,
+            DEFAULT_N_RANDOM_SHARES.saturating_add(additional_random_shares),
             DEFAULT_N_TRIPLES,
             secret_key,
             public_keys,

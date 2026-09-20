@@ -1,37 +1,64 @@
-# Persistent preprocessing override for the reserve-index coordinator stack.
+# Restart override for the reserve-index coordinator stack.
 #
-# Use with docker-compose.coordinator.reserve-index.yml to keep each party's
-# HoneyBadger preprocessing material in a named LMDB volume across runs. This
-# is separate from AVSS local-store persistence in docker-compose.avss.yml.
+# Use with docker-compose.coordinator.reserve-index.yml to run the stack twice
+# over the same per-party volumes (docker/test-coordinator-preproc-store.sh
+# keeps them across its `down`/`up` cycle). The volume persists each party's
+# session epoch store (STOFFEL_EPOCH_STORE) and nothing else.
+#
+# It used to persist HoneyBadger preprocessing material too, through
+# STOFFEL_PREPROC_STORE. No preprocessing item may serve two executions — a
+# stored item could be drawn by a second execution
+# (docs/design/bootnode-elimination.md §9.C.9 part 4) — so this override no
+# longer sets it, and the entrypoint refuses STOFFEL_PREPROC_STORE by name. Every
+# run preprocesses afresh.
+#
+# What a restart still has to prove is freshness: the epoch store, keyed by the
+# coordinator's roster digest, is what gives the second run a new instance_id
+# although the roster, the program and the execution id are the same (blocker
+# B5). One directory per node; never shared.
+#
+# Membership is not restated: it is the node roster the coordinator serves,
+# which every party fetches at startup (§9.D), and no party carries a roster of
+# its own.
+#
+# STOFFEL_PEERS is restated per party: it is what a party dials, and one that
+# lost it here would have nothing to form a session from — stoffel-run refuses
+# an empty seed list by name. The per-party address lists are the base stack's
+# defaults.
 
 services:
   party0:
     environment:
-      STOFFEL_PREPROC_STORE: /var/lib/stoffel-preproc
+      STOFFEL_PEERS: ${STOFFEL_PEERS-172.29.0.11:9001,172.29.0.12:9002,172.29.0.13:9003,172.29.0.14:9004}
+      STOFFEL_EPOCH_STORE: /var/lib/stoffel-preproc/epochs
     volumes:
       - coordri-preproc-party0:/var/lib/stoffel-preproc
 
   party1:
     environment:
-      STOFFEL_PREPROC_STORE: /var/lib/stoffel-preproc
+      STOFFEL_PEERS: ${STOFFEL_PEERS-172.29.0.10:9000,172.29.0.12:9002,172.29.0.13:9003,172.29.0.14:9004}
+      STOFFEL_EPOCH_STORE: /var/lib/stoffel-preproc/epochs
     volumes:
       - coordri-preproc-party1:/var/lib/stoffel-preproc
 
   party2:
     environment:
-      STOFFEL_PREPROC_STORE: /var/lib/stoffel-preproc
+      STOFFEL_PEERS: ${STOFFEL_PEERS-172.29.0.10:9000,172.29.0.11:9001,172.29.0.13:9003,172.29.0.14:9004}
+      STOFFEL_EPOCH_STORE: /var/lib/stoffel-preproc/epochs
     volumes:
       - coordri-preproc-party2:/var/lib/stoffel-preproc
 
   party3:
     environment:
-      STOFFEL_PREPROC_STORE: /var/lib/stoffel-preproc
+      STOFFEL_PEERS: ${STOFFEL_PEERS-172.29.0.10:9000,172.29.0.11:9001,172.29.0.12:9002,172.29.0.14:9004}
+      STOFFEL_EPOCH_STORE: /var/lib/stoffel-preproc/epochs
     volumes:
       - coordri-preproc-party3:/var/lib/stoffel-preproc
 
   party4:
     environment:
-      STOFFEL_PREPROC_STORE: /var/lib/stoffel-preproc
+      STOFFEL_PEERS: ${STOFFEL_PEERS-172.29.0.10:9000,172.29.0.11:9001,172.29.0.12:9002,172.29.0.13:9003}
+      STOFFEL_EPOCH_STORE: /var/lib/stoffel-preproc/epochs
     volumes:
       - coordri-preproc-party4:/var/lib/stoffel-preproc
 

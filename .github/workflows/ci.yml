@@ -48,15 +48,50 @@ jobs:
       - name: Build release runner
         run: cargo build --release --package stoffel-vm-runner --bin stoffel-run
 
+      # NOTE: `tests::mesh_join_harness` is deliberately absent from the skip
+      # list below. It is the regression cover for session formation
+      # (docs/design/bootnode-elimination.md) and must actually run.
+      #
+      # `tests::leader_bootnode_integration` was renamed to
+      # `tests::mesh_hb_integration` in Stage 8: its header claimed a bootnode
+      # handshake its body never performed. The skip entry moved with it.
+      #
+      # Cost, measured on this exact command (no name filter, default
+      # parallelism, the stoffel-vm lib binary, 3 runs each way): 7.45-7.47s
+      # over 691 tests with the harness, 0.61s over 675 without it, so
+      # roughly 7s. Unlike the rest of the suite that time does *not* overlap
+      # with anything: the module serialises its runs behind its own lock, and
+      # three of its cases are deliberately slow -- a staggered start that waits
+      # 3s for its last party, a second one that waits 1.5s, and a topology case
+      # that has to let a discovery budget expire to prove a seed list cannot
+      # cover the mesh. They wait because the thing under test is a timing shape,
+      # so the waits are the test; shortening them would delete the coverage.
+      #
+      # A *failing* run is bounded, not hung: a join's phase budgets are
+      # per-phase and can sum past the caller's timeout, so the harness wraps
+      # each join set in its own 60s RUN_TIMEOUT and aborts every party task
+      # when it fires. Worst case for the module is therefore
+      # ~3 minutes and a named assertion failure.
+      #
+      # `tests::p2p_integration` left the skip list in Stage 10. It was skipped
+      # because it awaited server tasks that looped on `accept()` until a
+      # timeout expired, and because the stack it tested -- the legacy in-VM
+      # `net::p2p`, deleted in that stage -- was dead code no deployment ran.
+      # It now covers stoffelnet's QUIC transport, which every MPC backend and
+      # the mesh join do use, and every server task accepts a known number of
+      # connections and services a known number of exchanges, so the module
+      # terminates on its own. Measured on this command: 0.07s for its four
+      # cases, and fully overlapped with the rest of the suite: the stoffel-vm
+      # lib binary runs 13.66-13.75s with it and 13.66-13.87s without, 3 runs
+      # each way.
       - name: Run tests
         run: |
           cargo test --workspace --all-features -- \
             --skip tests::avss_e2e_integration \
             --skip tests::avss_integration::test_e2e \
             --skip tests::dkg_primitives \
-            --skip tests::leader_bootnode_integration \
+            --skip tests::mesh_hb_integration \
             --skip tests::mpc_multiplication_integration \
-            --skip tests::p2p_integration \
             --skip tests::threshold_signatures \
             --skip turmoil_ \
             --skip tests::vm_mesh_integration \
@@ -90,11 +125,104 @@ jobs:
           path: target/release/stoffel-run
           retention-days: 7
 
+  mesh-join-harness:
+    name: Mesh Join Harness
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-
+
+      # Characterization cover for session formation
+      # (docs/design/bootnode-elimination.md). Runs the module on its
+      # own, single-threaded, so a mesh-join regression is attributable and
+      # cannot be lost in the main job's skip list.
+      - name: Run mesh join characterization harness
+        run: |
+          cargo test --package stoffel-vm --lib --features hb_itest \
+            tests::mesh_join_harness -- --test-threads=1 --nocapture
+
+  local-topology-e2e:
+    name: Local Topology E2E
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-
+
+      # The mesh-join-harness job above covers mesh formation in process; this
+      # one covers what that job cannot reach -- the real `stoffel-run` argv,
+      # spawned as separate processes against a real off-chain coordinator. The
+      # case is `#[ignore]`d (it spawns processes and binds ports), so it runs
+      # in no other job.
+      #
+      # It is run repeatedly on purpose. Mesh formation is concurrent, and a
+      # formation bug shows up as a flake, not a failure: the race
+      # `net::mesh::join::dials_towards` fixes failed roughly one run in three
+      # and would have passed a single-run job most of the time.
+      #
+      # The bootnode baseline this job used to run alongside it is gone with the
+      # bootnode (Stage 8).
+      - name: Roster mesh, five consecutive runs
+        run: |
+          for attempt in 1 2 3 4 5; do
+            echo "== mesh e2e attempt ${attempt} =="
+            cargo test --package stoffel-vm-runner --test local_coordinator_e2e \
+              local_offchain_coordinator_runs_networked_vm_over_a_roster_mesh \
+              -- --ignored --nocapture
+          done
+
+      # docs/design/bootnode-elimination.md §9.H: a client whose certificate is
+      # minted after the run started, and appears in no configuration,
+      # associates under open admission, provides its input and receives its
+      # output. Ignored for the same reason as the case above.
+      - name: Unconfigured client under open admission
+        run: |
+          cargo test --package stoffel-vm-runner --test local_coordinator_e2e \
+            local_offchain_coordinator_admits_an_unconfigured_client_under_open_admission \
+            -- --ignored --exact --nocapture
+
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
     needs: [build-and-test]
 
+    # TEMPORARY — docs/design/bootnode-elimination.md §9.F.5, §9.I. The images
+    # build against the unpublished stoffel-mpc-coordinator 0.3.0, which both
+    # workspaces reach through a [patch.crates-io] path on a developer machine,
+    # copied into the build from a BuildKit named context called `coordinator`.
+    # No `build-contexts:` entry can point a GitHub runner at that path, so
+    # `COPY --from=coordinator` resolves `coordinator` as an image reference and
+    # this job fails by construction until 0.3.0 is published. Delete this note
+    # with the patch; do not "fix" the job by dropping the COPY.
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

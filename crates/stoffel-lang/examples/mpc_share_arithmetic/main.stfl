@@ -13,6 +13,7 @@ def main() -> Share:
   if client_count > 0:
     var client_left = ClientStore.take_share(0, 0)
     product = client_left.mul(right)
+    MpcOutput.send_to_client(0, [product])
   else:
     product = Share.from_clear(37).mul(right)
 

@@ -14,6 +14,9 @@ where
     pub session: MpcSessionConfig,
     pub secret_key: F,
     pub public_keys: Arc<Vec<G>>,
+    /// Random shares preprocessing generates beyond the program's own pool —
+    /// for example one client input mask per registered coordinator input.
+    pub additional_random_shares: usize,
 }
 
 impl<F, G> AvssEngineConfig<F, G>
@@ -26,6 +29,15 @@ where
             session,
             secret_key,
             public_keys,
+            additional_random_shares: 0,
         }
+    }
+
+    /// Generate `count` more random shares than the default pool, so that
+    /// drawing `count` of them (client input masks) leaves the program's own
+    /// randomness untouched.
+    pub fn with_additional_random_shares(mut self, count: usize) -> Self {
+        self.additional_random_shares = count;
+        self
     }
 }

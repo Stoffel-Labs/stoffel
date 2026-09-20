@@ -1,13 +1,20 @@
-//! Leader Bootnode Integration Test
+//! Mesh HoneyBadger integration test: fixed-point federated averaging.
 //!
-//! This test demonstrates the leader bootnode pattern where one party
-//! acts as both bootnode and participant:
+//! The file this replaced was called `leader_bootnode_integration.rs` and its
+//! header described a bootnode handshake — a leader registering party 0,
+//! followers connecting to it, program bytes synced through it. **None of that
+//! was ever in the body** (design doc §5: "`leader_bootnode_integration.rs`
+//! contains no bootnode code at all"). What it actually does, and still does, is
+//! build a five-party HoneyBadger mesh directly over QUIC with a hardcoded
+//! `instance_id`, which is exactly the shape Stage 8 leaves behind. The name and
+//! this header are corrected to match; the body is unchanged.
 //!
-//! 1. Leader starts bootnode in background and registers as party 0
-//! 2. Other parties connect to leader's bootnode
-//! 3. Session is established with shared instance_id
-//! 4. Program bytes are synced via bootnode
-//! 5. All parties execute fixed-point matrix averaging
+//! What it covers:
+//!
+//! 1. Five parties wired into a routed QUIC mesh, no bootstrap process anywhere
+//! 2. Preprocessing and client input distribution
+//! 3. Fixed-point element-wise matrix averaging across the parties
+//! 4. Element-wise verification of the revealed averages
 //!
 //! Matrix size: 6 elements (e.g., 2x3 or 3x2 matrix)
 
@@ -253,20 +260,25 @@ fn create_federated_average_binary() -> Vec<u8> {
     buffer
 }
 
-/// Test the leader bootnode pattern with fixed-point matrix averaging
+/// Fixed-point matrix averaging over a five-party HoneyBadger mesh.
 ///
 /// This test:
-/// 1. Creates 5 parties (simulating leader bootnode pattern)
+/// 1. Creates 5 parties wired directly into a routed QUIC mesh
 /// 2. Runs preprocessing and client input distribution
 /// 3. Executes fixed-point federated averaging
 /// 4. Verifies element-wise average results
+///
+/// `instance_id` is hardcoded here rather than agreed: this test builds the
+/// transport itself and never runs a session join, so it is not cover for the
+/// freshness invariant (blocker B5). `net::mesh::epoch` and the mesh-join
+/// harness own that.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_leader_bootnode_matrix_average_fixed_point() {
+async fn test_mesh_matrix_average_fixed_point() {
     init_crypto_provider();
     setup_test_tracing();
     let _hb_itest_lock = acquire_hb_itest_lock().await;
 
-    info!("=== Starting Leader Bootnode Matrix Average Fixed-Point Test ===");
+    info!("=== Starting Mesh Matrix Average Fixed-Point Test ===");
     info!(
         "Matrix: {}x{} = {} elements per client",
         MATRIX_ROWS, MATRIX_COLS, MATRIX_SIZE
@@ -712,7 +724,7 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     }
 
     info!("");
-    info!("=== Leader Bootnode Matrix Average Fixed-Point Test PASSED ===");
+    info!("=== Mesh Matrix Average Fixed-Point Test PASSED ===");
     info!(
         "Successfully computed federated average of {} matrices ({}x{}) from {} clients",
         client_count, MATRIX_ROWS, MATRIX_COLS, client_count

@@ -3,17 +3,17 @@ use serde::{Deserialize, Serialize};
 /// Maximum wire message payload size accepted from the network (1 MB).
 pub(super) const MAX_WIRE_MESSAGE_LEN: usize = 1_048_576;
 
-pub(super) const OPEN_REGISTRY_WIRE_PREFIX: &[u8; 4] = b"OPN1";
+pub const OPEN_REGISTRY_WIRE_PREFIX: &[u8; 4] = b"OPN1";
 
 /// Sentinel value indicating the sender's party identity is unknown.
 pub const UNKNOWN_SENDER_ID: usize = usize::MAX;
 
 /// HoneyBadger open-in-exp wire prefix.
-pub(super) const HB_EXP_OPEN_WIRE_PREFIX: &[u8; 4] = b"XOP1";
+pub const HB_EXP_OPEN_WIRE_PREFIX: &[u8; 4] = b"XOP1";
 /// AVSS open-in-exp wire prefix.
-pub(super) const AVSS_EXP_WIRE_PREFIX: &[u8; 4] = b"AXOP";
+pub const AVSS_EXP_WIRE_PREFIX: &[u8; 4] = b"AXOP";
 /// AVSS G2 open-in-exp wire prefix.
-pub(super) const AVSS_G2_EXP_WIRE_PREFIX: &[u8; 4] = b"AXG2";
+pub const AVSS_G2_EXP_WIRE_PREFIX: &[u8; 4] = b"AXG2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ExpOpenWireMessage {

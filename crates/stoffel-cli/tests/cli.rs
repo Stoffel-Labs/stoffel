@@ -1958,9 +1958,17 @@ fn run_network_validates_config_path_before_parsing() {
                 .and(predicate::str::contains("does not exist")),
         );
 
+    // An off-chain client config missing the coordinator certificate every
+    // coordinator connection pins (docs/design/bootnode-elimination.md §9.E.2).
+    let execution_id = vec!["7"; 32].join(", ");
     fs::write(
         temp.path().join("network.toml"),
-        "protocol = \"honeybadger\"\nparties = 5\nthreshold = 1\n",
+        format!(
+            "coordinator_host = \"127.0.0.1\"\ncoordinator_port = 31415\n\
+             execution_id = [{execution_id}]\nbackend = \"honeybadger\"\n\
+             node_rpc_addresses = [\"127.0.0.1:10000\"]\ncert_der = [1]\nkey_der = [1]\n\
+             input_types = []\noutput_types = []\ntimeout = 1000\n"
+        ),
     )
     .unwrap();
     let parent = temp.path().parent().unwrap();
@@ -1980,7 +1988,7 @@ fn run_network_validates_config_path_before_parsing() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("missing server address"))
+        .stderr(predicate::str::contains("coordinator_cert_der"))
         .stderr(predicate::str::contains("network config network.toml does not exist").not())
         .stderr(predicate::str::contains("Invalid configuration: Invalid configuration").not());
 
@@ -2266,8 +2274,11 @@ fn run_network_validates_program_before_parsing_config_contents() {
         .stderr(predicate::str::contains("failed to parse").not());
 }
 
+/// Retargets `run_network_accepts_network_config_and_attempts_connection`:
+/// direct client mode was removed (docs/design/bootnode-elimination.md §9.E.3),
+/// so a node `NetworkConfig` is refused by name instead of being dialed.
 #[test]
-fn run_network_accepts_network_config_and_attempts_connection() {
+fn run_network_refuses_a_node_network_config_by_name() {
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -2321,9 +2332,14 @@ random_shares = 1
         ])
         .assert()
         .failure()
-        .stderr(
-            predicate::str::contains("failed to connect").or(predicate::str::contains("timed out")),
-        );
+        .stderr(predicate::str::contains(
+            "network config network.toml describes node transport, and clients no longer \
+             connect to the node mesh (direct client mode was removed); pass an off-chain client \
+             config with the coordinator's address and certificate, the execution id, node RPC \
+             addresses and a client identity",
+        ))
+        .stderr(predicate::str::contains("failed to connect").not())
+        .stderr(predicate::str::contains("timed out").not());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -4240,6 +4256,71 @@ fn test_rejects_run_only_flags_with_actionable_guidance() {
             "--runner only applies to local MPC tests",
         ))
         .stderr(predicate::str::contains("Add --local"));
+}
+
+/// `--mesh` is offered on the three commands that run local parties, refused
+/// everywhere else — before anything is compiled — and `--bootnode` is gone.
+///
+/// Stage 7 of `docs/design/bootnode-elimination.md` flipped the CLI's local
+/// paths onto the mesh and kept the old one reachable as `--bootnode`; Stage 8
+/// deleted the bootnode, so that opt-out no longer parses at all. The default
+/// itself is pinned by `every_local_path_runs_on_the_roster_mesh` in
+/// `src/main.rs`, where the parsed flags and the `LocalTopology` they select are
+/// both reachable; here the contract is that `--mesh` is scoped to local runs
+/// and that a stale `--bootnode` invocation fails loudly rather than quietly
+/// doing something else.
+#[test]
+fn mesh_is_offered_on_the_local_paths_and_refused_on_the_others() {
+    let temp = TempDir::new().unwrap();
+
+    for command in ["run", "dev", "test"] {
+        Command::cargo_bin("stoffel")
+            .unwrap()
+            .arg(command)
+            .arg("--help")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--mesh"))
+            .stdout(predicate::str::contains("roster-pinned mesh"))
+            .stdout(predicate::str::contains("--bootnode").not());
+    }
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("run")
+        .arg(temp.path())
+        .args(["--network", "--config", "network.toml", "--mesh"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--mesh only applies to local simulation",
+        ))
+        .stderr(predicate::str::contains("failed to parse").not());
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("test")
+        .arg(temp.path())
+        .arg("--mesh")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--mesh only applies to local MPC tests",
+        ))
+        .stderr(predicate::str::contains("Add --local"));
+
+    // The removed opt-out. An unknown flag is a parse error, so a stale script
+    // stops rather than silently running the topology that replaced it.
+    for command in ["run", "dev", "test"] {
+        Command::cargo_bin("stoffel")
+            .unwrap()
+            .arg(command)
+            .arg(temp.path())
+            .arg("--bootnode")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("--bootnode"));
+    }
 }
 
 #[test]

@@ -982,6 +982,103 @@ mod tests {
         ShamirBeaverTriple::new(random_share(rng), random_share(rng), random_share(rng))
     }
 
+    /// Two executions must never draw the same preprocessing item.
+    ///
+    /// A Beaver triple used in two computations is a privacy break, not merely a
+    /// correctness bug, so the property is pinned here rather than left to the
+    /// reader of `reserve_at`. Two independent `LmdbPreprocStore` handles on ONE
+    /// store directory stand in for two executions racing the same material — the
+    /// cross-process case, since LMDB is multi-process and `load`, `reserve_at` and
+    /// `delete` are three separate transactions.
+    ///
+    /// What is asserted is DISJOINTNESS: whatever each claimant walks away with,
+    /// the item ranges must not overlap. That is the property the privacy argument
+    /// actually needs, and it is stronger than "the second claimant is refused" —
+    /// being handed a *different* slice is a perfectly good outcome, being handed
+    /// the *same* slice is not.
+    ///
+    /// Honest limitation: this guarantee is structural, not guarded. The consumed
+    /// cursor advances inside a single LMDB write transaction served by a
+    /// single-threaded actor, so a lost update cannot be produced from outside.
+    /// Disabling `reserve_at`'s compare-and-swap does not make this test fail (the
+    /// `consumed > count` bound still refuses the overclaim). The test documents and
+    /// locks in the observable contract; it is not evidence that the CAS itself is
+    /// load-bearing.
+    #[tokio::test]
+    async fn a_preprocessing_item_is_never_served_to_two_executions() {
+        let dir = tempfile::tempdir().expect("temp store dir");
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(7);
+        let triples: Vec<_> = (0..8).map(|_| random_triple(&mut rng)).collect();
+        let (data, item_size) = serialize_beaver_triples::<Fr>(&triples).unwrap();
+
+        let scope =
+            PreprocKeyScope::new([9u8; 32], MpcFieldKind::Bn254Fr, 5, 1, legacy_identity(0));
+        let key = scope.beaver_triple();
+
+        let seeder = LmdbPreprocStore::open(dir.path()).expect("open store");
+        seeder
+            .store(
+                &key,
+                &PreprocBlob::try_new(data, item_size, triples.len()).unwrap(),
+            )
+            .await
+            .expect("seed the store");
+        drop(seeder);
+
+        // Two handles on one directory: two executions, one pool of material.
+        let first = LmdbPreprocStore::open(dir.path()).expect("open first");
+        let second = LmdbPreprocStore::open(dir.path()).expect("open second");
+
+        // Both read the blob before either claims — the interleaving that would hand
+        // the same triples to both if claiming were a plain read-modify-write.
+        let seen_by_first = first.load(&key).await.unwrap().expect("blob present");
+        let seen_by_second = second.load(&key).await.unwrap().expect("blob present");
+        assert_eq!(
+            seen_by_first.meta.consumed, seen_by_second.meta.consumed,
+            "both executions must start from the same cursor for this race to be real"
+        );
+        assert_eq!(seen_by_first.meta.available(), triples.len() as u32);
+
+        // Each asks for half, so BOTH can succeed without exceeding the count. This is
+        // what makes the assertion about overlap rather than about refusal: the
+        // `consumed > count` bound cannot mask a lost update here.
+        let half = triples.len() as u32 / 2;
+        let first_end = first
+            .reserve_at(&key, seen_by_first.meta.consumed, half)
+            .await
+            .expect("the first execution claims its half");
+        let first_range = seen_by_first.meta.consumed..first_end;
+
+        let second_range = match second
+            .reserve_at(&key, seen_by_second.meta.consumed, half)
+            .await
+        {
+            // The CAS refused the stale cursor. The second execution retries from the
+            // cursor as it now stands, which is the disjoint upper half.
+            Err(PreprocStoreError::CursorMismatch { actual, .. }) => {
+                let end = second
+                    .reserve_at(&key, actual, half)
+                    .await
+                    .expect("retrying from the current cursor claims the rest");
+                actual..end
+            }
+            Ok(end) => (end - half)..end,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+
+        assert!(
+            first_range.end <= second_range.start || second_range.end <= first_range.start,
+            "two executions were handed overlapping preprocessing items: {first_range:?} and {second_range:?}"
+        );
+
+        // And once a winner consumes the key outright, nothing is left for a later run.
+        first.delete(&key).await.expect("winner consumes the key");
+        assert!(
+            second.load(&key).await.unwrap().is_none(),
+            "a consumed key leaves nothing behind for a later execution"
+        );
+    }
+
     #[test]
     fn robust_share_roundtrip() {
         let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(42);

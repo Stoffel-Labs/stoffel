@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashSet};
+use std::ffi::OsString;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -8,27 +9,31 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::{BigInteger, PrimeField};
-use stoffel_mpc_coordinator_off_chain::tests::fake_coord::{
-    HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
-};
 use stoffel_mpc_coordinator_off_chain::{
-    node_rpc::NodeRPCClient as OffChainNodeRPCClient, OffChainCoordinatorClient,
+    CoordinatorRPCServerSharedBase, ExecutionRegistration, OffChainCoordinatorConnection,
     OffChainCoordinatorServer,
 };
+use stoffel_mpc_coordinator_shared::rpc::RpcServerLimits;
 use stoffel_mpc_coordinator_shared::self_signed_certs;
-use stoffel_mpc_coordinator_shared::Coordinator;
+use stoffel_mpc_coordinator_shared::{
+    AdmissionPolicy, AssociationRequest, ClientAdmission, ClientIdentity, ClientIndex,
+    ClientSlotSpec, ClientSlotTable, CoordinatorError, ExecutionDeadlines, ExecutionId,
+    NodeCertificateDer, NodeRoster, OutputRights, SpkiDer, UnixSeconds,
+};
 use stoffel_vm_types::compiled_binary::{utils::save_to_file, CompiledBinary};
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
+use stoffelnet::transports::quic::QuicNetworkManager;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
-use x509_parser::prelude::{FromDer, X509Certificate};
 
+use crate::coordinator_client::{
+    CoordinatorClientConfig, CoordinatorClientError, CoordinatorEndpoint,
+};
 use stoffel_vm::net::program_id_from_bytes;
 use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
-const DEFAULT_AUTH_TOKEN: &str = "stoffel-local-coordinator-runner";
 
 #[derive(Debug, thiserror::Error)]
 pub enum LocalCoordinatorRunnerError {
@@ -38,6 +43,9 @@ pub enum LocalCoordinatorRunnerError {
     Io(#[from] std::io::Error),
     #[error("local coordinator error: {0}")]
     Coordinator(#[from] stoffel_mpc_coordinator_shared::CoordinatorError),
+    /// A client of the run stopped (`docs/design/bootnode-elimination.md` §9.E.1).
+    #[error("local coordinator client: {0}")]
+    Client(#[from] CoordinatorClientError),
     #[error("local coordinator runner timed out after {0:?}")]
     Timeout(Duration),
     #[error("local party {name} timed out after {timeout:?}: {output}")]
@@ -70,11 +78,37 @@ pub struct LocalCoordinatorRunner {
     backend: MpcBackendKind,
     curve_config: MpcCurveConfig,
     timeout: Duration,
-    auth_token: String,
     client_inputs: Vec<LocalClientInput>,
     expected_clients: Option<usize>,
     /// Per-client number of output values to receive via `send_to_client`.
     client_output_counts: std::collections::HashMap<u64, u64>,
+    /// How the spawned parties find each other
+    /// (`docs/design/bootnode-elimination.md`).
+    topology: LocalTopology,
+    /// How clients come to hold the run's client slots
+    /// (`docs/design/bootnode-elimination.md` §9.F.4).
+    admission: LocalAdmission,
+}
+
+/// How clients come to hold a local run's client slots
+/// (`docs/design/bootnode-elimination.md` §9.C.2, §9.F.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum LocalAdmission {
+    /// The runner mints one certificate per client slot and pre-registers it,
+    /// then submits each slot's `client_input` values itself.
+    #[default]
+    PreRegistered,
+    /// No client identity appears anywhere in the run's configuration: the
+    /// runner mints no client certificates, registers the slot table with
+    /// deadlines (the run's `timeout` from registration) and starts no clients
+    /// of its own. Any certificate holder that pins the run's coordinator may
+    /// bind a free slot through [`run_offchain_client`], which is how a
+    /// computation takes clients whose identities are not known in advance.
+    ///
+    /// Slot input counts come from the program's client IO manifest, so
+    /// `client_input` values are refused: the runner submits nothing.
+    Open,
 }
 
 impl LocalCoordinatorRunner {
@@ -93,17 +127,44 @@ impl LocalCoordinatorRunner {
                 threshold: 1,
                 curve_config,
                 timeout: DEFAULT_TIMEOUT,
-                auth_token: DEFAULT_AUTH_TOKEN.to_owned(),
                 client_inputs: Vec::new(),
                 expected_clients: None,
                 client_output_counts: std::collections::HashMap::new(),
+                topology: LocalTopology::default(),
+                admission: LocalAdmission::default(),
             },
         }
     }
 
+    /// [`start`](Self::start), one client per pre-registered slot with inputs,
+    /// then [`RunningLocalCoordinator::finish`].
+    ///
+    /// Under [`LocalAdmission::Open`] with client slots nobody would bind a
+    /// slot, and the run would hold at input collection until its deadline
+    /// aborted it, so that is refused: use `start` and [`run_offchain_client`].
     pub async fn run(self) -> LocalCoordinatorRunnerResult<LocalCoordinatorRunOutput> {
         self.validate()?;
-        let _local_run_guard = local_run_lock().lock().await;
+        self.refuse_open_without_clients()?;
+        self.start().await?.finish().await
+    }
+
+    fn refuse_open_without_clients(&self) -> LocalCoordinatorRunnerResult<()> {
+        if self.admission == LocalAdmission::Open && !self.client_slot_table()?.slots().is_empty() {
+            return Err(LocalCoordinatorRunnerError::Configuration(
+                "run() starts only pre-registered clients; with LocalAdmission::Open use start() and run_offchain_client"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Starts the in-process coordinator and every party, and returns while they
+    /// run. The returned handle owns the run: its directory, its coordinator and
+    /// its parties live exactly as long as it does, and a second local run
+    /// cannot start before it is dropped.
+    pub async fn start(self) -> LocalCoordinatorRunnerResult<RunningLocalCoordinator> {
+        self.validate()?;
+        let local_run_guard = local_run_lock().lock().await;
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let temp = TempRunDir::new()?;
@@ -113,161 +174,125 @@ impl LocalCoordinatorRunner {
         let program_id = program_id_from_bytes(&program_bytes);
 
         let node_identities = write_node_identities(temp.path(), self.parties)?;
-        let node_public_keys = node_identities
-            .iter()
-            .map(|identity| public_key_from_cert(&identity.cert_der))
-            .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?;
-        let known_client_inputs = self.known_client_inputs();
-        let mut local_clients = write_client_identities(temp.path(), &known_client_inputs)?;
-        for client in local_clients.iter_mut() {
-            client.output_count = self.output_count_for_slot(client.client_slot);
-        }
-        let client_bindings = local_clients
-            .iter()
-            .map(|client| Ok((client.client_slot, public_key_from_cert(&client.cert_der)?)))
-            .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?;
+        let node_roster = NodeRoster::new(
+            self.threshold as u64,
+            node_identities
+                .iter()
+                .map(|identity| NodeCertificateDer::from_der(identity.cert_der.clone()))
+                .collect(),
+        )
+        .map_err(CoordinatorError::from)?;
+        let client_slots = self.client_slot_table()?;
+        // Under `Open` no client identity exists before a client associates, so
+        // the runner mints none: the slot table is the whole of what it knows.
+        let local_clients = match self.admission {
+            LocalAdmission::PreRegistered => {
+                write_client_identities(temp.path(), &self.known_client_inputs())?
+            }
+            LocalAdmission::Open => Vec::new(),
+        };
 
         let coord_port = reserve_port()?;
         let coord_cert = self_signed_certs::server_cert();
-        let (n_inputs, output_clients) = self.coordinator_client_io_binding(&client_bindings)?;
-        let coord_state = HoneyBadgerCoordinatorRPCServerSharedBase::new(
-            program_id,
-            self.parties as u64,
-            self.threshold as u64,
-            node_public_keys,
-            n_inputs,
-            output_clients,
-        );
-        let _coord = OffChainCoordinatorServer::<HoneyBadgerCoordinatorConnection>::start_coord(
+        let coord_cert_der = coord_cert.cert.der().to_vec();
+        let coordinator_spki =
+            SpkiDer::from_certificate_der(&coord_cert_der).map_err(CoordinatorError::from)?;
+        // Every party pins this certificate with `--coord-cert`
+        // (docs/design/bootnode-elimination.md §9.A, §9.F.4). It is public; the
+        // key never leaves this process.
+        let coord_cert_path = temp.path().join("coordinator.crt");
+        std::fs::write(&coord_cert_path, &coord_cert_der)?;
+        // Every RPC names the invocation it belongs to, and there is no reset.
+        // A fresh id per run is what keeps two runs of this runner from sharing
+        // coordinator state even when the program, roster and ports repeat. The
+        // all-zero id is reserved and rejected, which `Uuid::new_v4` twice
+        // cannot produce.
+        let execution_id = mint_execution_id();
+        let (admission, deadlines) = match self.admission {
+            // It mints one certificate per client slot, and exactly those
+            // identities take part.
+            LocalAdmission::PreRegistered => (
+                AdmissionPolicy::PreRegistered {
+                    clients: local_clients
+                        .iter()
+                        .map(|client| client_identity_of(&client.cert_der))
+                        .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?,
+                },
+                None,
+            ),
+            LocalAdmission::Open => (
+                AdmissionPolicy::Open,
+                Some(open_admission_deadlines(UnixSeconds::now(), self.timeout)),
+            ),
+        };
+        let registration = ExecutionRegistration {
+            execution_id,
+            program_hash: program_id,
+            client_slots,
+            admission,
+            deadlines,
+        };
+        let coord_state = CoordinatorRPCServerSharedBase::new_for_execution(
+            node_roster,
+            coordinator_spki,
+            registration,
+        )?;
+        let coordinator = OffChainCoordinatorServer::<OffChainCoordinatorConnection>::start_coord(
             coord_state,
             "127.0.0.1",
             coord_port,
-            self.threshold as u64,
-            coord_cert.cert.der().to_vec(),
+            coord_cert_der.clone(),
             coord_cert.signing_key.serialize_der(),
+            RpcServerLimits::default(),
         )
         .await?;
 
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        let bootnode = socket_with_port_pair()?;
-        let mut children = Vec::with_capacity(self.parties + local_clients.len());
+        let mut parties = Vec::with_capacity(self.parties);
         let mut node_rpc_addrs = Vec::with_capacity(self.parties);
-        children.push(self.spawn_party(
-            "leader",
-            SpawnPartyContext {
-                program_path: &program_path,
-                identity: &node_identities[0],
-                role: PartyRole::Leader { bootnode },
-                clients: &local_clients,
-                coord_port,
-                timestamp,
+        match self.topology {
+            LocalTopology::RosterMesh => {
+                let mesh = MeshLayout::reserve(temp.path(), &node_identities)?;
+                // Symmetric: every party is spawned the same way, at the same
+                // time, with the same flags bar its own identity, seeds and
+                // epoch store.
+                //
+                // Starting all five at once is also the harshest case for mesh
+                // formation: every party is missing every other one at the same
+                // instant. `net::mesh::join::dials_towards` is what makes that
+                // safe — a pair is dialed from one end only, so no connection is
+                // ever torn down by stoffelnet's simultaneous-connect
+                // tie-breaker.
+                for (party_id, identity) in node_identities.iter().enumerate() {
+                    parties.push(self.spawn_party(
+                        &format!("party{party_id}"),
+                        SpawnPartyContext {
+                            program_path: &program_path,
+                            identity,
+                            role: mesh.role_for(party_id),
+                            coord_port,
+                            coord_cert_path: &coord_cert_path,
+                            execution_id,
+                        },
+                        &mut node_rpc_addrs,
+                    )?);
+                }
+            }
+        }
+
+        Ok(RunningLocalCoordinator {
+            parties,
+            pre_registered_clients: local_clients,
+            endpoint: LocalClientEndpoint {
+                coordinator: SocketAddr::from((Ipv4Addr::LOCALHOST, coord_port)),
+                coordinator_cert_der: coord_cert_der,
+                execution_id,
+                node_rpc_addresses: node_rpc_addrs,
+                backend: self.backend,
             },
-            &mut node_rpc_addrs,
-        )?);
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        for (party_id, identity) in node_identities.iter().enumerate().skip(1) {
-            children.push(self.spawn_party(
-                &format!("party{party_id}"),
-                SpawnPartyContext {
-                    program_path: &program_path,
-                    identity,
-                    role: PartyRole::Follower {
-                        party_id,
-                        bootnode,
-                        bind: socket_with_port_pair()?,
-                    },
-                    clients: &local_clients,
-                    coord_port,
-                    timestamp,
-                },
-                &mut node_rpc_addrs,
-            )?);
-        }
-
-        let timeout = self.timeout;
-        let threshold = self.threshold;
-        let client_results_future = async {
-            match self.backend {
-                MpcBackendKind::HoneyBadger => {
-                    futures::future::join_all(
-                        local_clients
-                            .iter()
-                            .filter(|client| client.input.has_input())
-                            .cloned()
-                            .map(|client| {
-                                run_honeybadger_offchain_client(
-                                    client,
-                                    node_rpc_addrs.clone(),
-                                    coord_port,
-                                    self.parties,
-                                    threshold,
-                                    timeout,
-                                )
-                            }),
-                    )
-                    .await
-                }
-                MpcBackendKind::Avss => {
-                    futures::future::join_all(
-                        local_clients
-                            .iter()
-                            .filter(|client| client.input.has_input())
-                            .cloned()
-                            .map(|client| {
-                                run_avss_offchain_client(
-                                    client,
-                                    node_rpc_addrs.clone(),
-                                    coord_port,
-                                    self.parties,
-                                    threshold,
-                                    timeout,
-                                )
-                            }),
-                    )
-                    .await
-                }
-            }
-        };
-        let party_outputs_future = futures::future::join_all(
-            children
-                .into_iter()
-                .map(|(name, child)| wait_for_child(name, child, timeout)),
-        );
-
-        tokio::pin!(client_results_future);
-        tokio::pin!(party_outputs_future);
-
-        let (client_results, combined_output, party_outputs) = tokio::select! {
-            client_results = &mut client_results_future => {
-                let outputs = party_outputs_future.await;
-                let (combined_output, party_outputs) = Self::collect_party_outputs(outputs)?;
-                (client_results, combined_output, party_outputs)
-            }
-            outputs = &mut party_outputs_future => {
-                let (combined_output, _party_outputs) = Self::collect_party_outputs(outputs)?;
-                return Err(LocalCoordinatorRunnerError::ProcessFailures(format!(
-                    "local coordinator parties exited before client IO completed\n\ncompleted process output:\n{combined_output}"
-                )));
-            }
-        };
-
-        let mut client_outputs = Vec::new();
-        for result in client_results {
-            if let Some(record) = result? {
-                client_outputs.push(record);
-            }
-        }
-
-        Ok(LocalCoordinatorRunOutput {
-            combined_output,
-            party_outputs,
-            client_outputs,
+            timeout: self.timeout,
+            _coordinator: coordinator,
+            _run_dir: temp,
+            _local_run_guard: local_run_guard,
         })
     }
 
@@ -340,6 +365,7 @@ impl LocalCoordinatorRunner {
         }
         self.validate_expected_clients()?;
         self.validate_client_inputs()?;
+        self.client_slot_table()?;
         Ok(())
     }
 
@@ -370,6 +396,17 @@ impl LocalCoordinatorRunner {
     }
 
     fn validate_client_inputs(&self) -> LocalCoordinatorRunnerResult<()> {
+        if self.admission == LocalAdmission::Open {
+            // Under `Open` the runner starts no client, so a value handed to it
+            // would never be submitted; the clients bring their own inputs.
+            if let Some(client) = self.client_inputs.iter().find(|client| client.has_input()) {
+                return Err(LocalCoordinatorRunnerError::Configuration(format!(
+                    "client slot {} was given inputs, but under LocalAdmission::Open the runner submits none: pass them to run_offchain_client",
+                    client.client_slot
+                )));
+            }
+            return Ok(());
+        }
         if self.binary.client_io_manifest.clients.is_empty() && self.client_inputs.is_empty() {
             return Ok(());
         }
@@ -503,44 +540,91 @@ impl LocalCoordinatorRunner {
         Ok(bytes)
     }
 
-    fn coordinator_client_io_binding(
-        &self,
-        client_bindings: &[(u64, Vec<u8>)],
-    ) -> LocalCoordinatorRunnerResult<(u64, Vec<Vec<u8>>)> {
-        let mut n_inputs = 0_u64;
-        let output_clients = client_bindings
+    /// The number of inputs the program's client IO manifest declares for
+    /// `client_slot`, if it declares that slot at all.
+    fn manifest_input_count(&self, client_slot: u64) -> Option<u64> {
+        self.binary
+            .client_io_manifest
+            .clients
             .iter()
-            .map(|(_slot, identity)| identity.clone())
-            .collect::<Vec<_>>();
-        if self.binary.client_io_manifest.clients.is_empty() {
-            for input in &self.client_inputs {
-                client_bindings
-                    .iter()
-                    .find(|(slot, _identity)| *slot == input.client_slot)
-                    .ok_or_else(|| {
-                        LocalCoordinatorRunnerError::Configuration(format!(
-                            "client slot {} does not have a local client identity",
-                            input.client_slot
-                        ))
-                    })?;
-                n_inputs += input.values.len() as u64;
-            }
-            return Ok((n_inputs, output_clients));
-        }
+            .find(|schema| schema.client_slot == client_slot)
+            .map(|schema| schema.inputs.len() as u64)
+    }
 
-        for schema in &self.binary.client_io_manifest.clients {
-            client_bindings
-                .iter()
-                .find(|(slot, _identity)| *slot == schema.client_slot)
-                .ok_or_else(|| {
-                    LocalCoordinatorRunnerError::Configuration(format!(
-                        "client slot {} does not have a local client identity",
-                        schema.client_slot
-                    ))
-                })?;
-            n_inputs += schema.inputs.len() as u64;
-        }
-        Ok((n_inputs, output_clients))
+    /// The coordinator's client slot table for this run: one slot per
+    /// `known_client_inputs` entry, in slot order.
+    ///
+    /// A slot's position is its `ClientIndex`, so the slots must be exactly
+    /// `0..k`. Its input count is the manifest's declared count or, for a slot
+    /// the manifest does not declare, the number of values this runner submits
+    /// for it — `validate_client_inputs` has already matched the two where
+    /// both exist — and its output count is `output_count_for_slot`. The
+    /// coordinator derives every slot's input range from these counts, in slot
+    /// order, which is the same contiguous layout `write_client_identities`
+    /// used to assign by hand.
+    fn client_slot_table(&self) -> LocalCoordinatorRunnerResult<ClientSlotTable> {
+        let slots = self
+            .known_client_inputs()
+            .into_iter()
+            .enumerate()
+            .map(|(position, client)| {
+                if client.client_slot != position as u64 {
+                    return Err(LocalCoordinatorRunnerError::Configuration(format!(
+                        "client slots must be contiguous from 0; slot {position} has neither inputs nor outputs"
+                    )));
+                }
+                let spec = ClientSlotSpec {
+                    input_count: self
+                        .manifest_input_count(client.client_slot)
+                        .unwrap_or(client.values.len() as u64),
+                    output_count: self.output_count_for_slot(client.client_slot),
+                };
+                if spec.input_count == 0 && spec.output_count == 0 {
+                    return Err(LocalCoordinatorRunnerError::Configuration(format!(
+                        "client slot {position} is output-only, but its output count is unknown: set client_output_count({position}, <count>)"
+                    )));
+                }
+                Ok(spec)
+            })
+            .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?;
+        Ok(ClientSlotTable::new(slots))
+    }
+
+    /// The `stoffel-run` argv of one party, bar the program's own process
+    /// settings.
+    ///
+    /// Membership, `n` and `t` are the in-process coordinator's node roster,
+    /// which the party fetches once over the link `--coord-cert` pins
+    /// (`docs/design/bootnode-elimination.md` §9.D.1, §9.F.4), so no `--roster`,
+    /// `--n-parties` or `--threshold` is emitted — `stoffel-run` refuses each by
+    /// name. No client identity, count or slot reaches a party either, under
+    /// either admission policy (§3, §9.F.4): a coordinated party takes the slot
+    /// table and the admitted clients from the coordinator, and clients reach it
+    /// through its RPC listener, so a client certificate here would only have
+    /// widened the mesh transport's allowlist to a non-node.
+    fn party_args(&self, context: &SpawnPartyContext<'_>, rpc_addr: SocketAddr) -> Vec<OsString> {
+        let mut args: Vec<OsString> = vec![
+            context.program_path.into(),
+            self.entry.clone().into(),
+            "--mpc-backend".into(),
+            self.backend.name().into(),
+            "--curve".into(),
+            self.curve_config.name().into(),
+            "--off-chain-coord".into(),
+            format!("127.0.0.1:{}", context.coord_port).into(),
+            "--coord-cert".into(),
+            context.coord_cert_path.into(),
+            "--execution-id".into(),
+            context.execution_id.to_string().into(),
+            "--rpc-bind".into(),
+            rpc_addr.to_string().into(),
+            "--cert".into(),
+            context.identity.cert_path.clone().into(),
+            "--key".into(),
+            context.identity.key_path.clone().into(),
+        ];
+        args.extend(context.role.runner_args().into_iter().map(OsString::from));
+        args
     }
 
     fn spawn_party(
@@ -553,27 +637,7 @@ impl LocalCoordinatorRunner {
         node_rpc_addrs.push(rpc_addr);
         let mut command = Command::new(&self.runner_path);
         command
-            .arg(context.program_path)
-            .arg(&self.entry)
-            .arg("--n-parties")
-            .arg(self.parties.to_string())
-            .arg("--threshold")
-            .arg(self.threshold.to_string())
-            .arg("--mpc-backend")
-            .arg(self.backend.name())
-            .arg("--curve")
-            .arg(self.curve_config.name())
-            .arg("--off-chain-coord")
-            .arg(format!("127.0.0.1:{}", context.coord_port))
-            .arg("--rpc-bind")
-            .arg(rpc_addr.to_string())
-            .arg("--cert")
-            .arg(&context.identity.cert_path)
-            .arg("--key")
-            .arg(&context.identity.key_path)
-            .arg("--timestamp")
-            .arg(context.timestamp.to_string())
-            .env("STOFFEL_AUTH_TOKEN", &self.auth_token)
+            .args(self.party_args(&context, rpc_addr))
             // Tie each spawned party to this runner's lifetime: `kill_on_drop`
             // handles a graceful drop, and the parent-death watchdog (keyed off
             // this env var) covers the case where the runner is force-killed
@@ -582,61 +646,6 @@ impl LocalCoordinatorRunner {
             .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if !context.clients.is_empty() {
-            command
-                .arg("--expected-clients")
-                .arg(
-                    context
-                        .clients
-                        .iter()
-                        .map(|client| client.cert_path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                )
-                .arg("--client-input-count")
-                .arg(self.max_client_input_count().to_string())
-                .arg("--client-input-total")
-                .arg(self.total_client_input_count().to_string());
-            command.arg("--client-roster").arg(
-                context
-                    .clients
-                    .iter()
-                    .map(|client| client.client_slot.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-            command.arg("--client-input-slots").arg(
-                context
-                    .clients
-                    .iter()
-                    .filter(|client| client.input.has_input())
-                    .map(|client| client.client_slot.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-        }
-
-        match context.role {
-            PartyRole::Leader { bootnode } => {
-                command
-                    .arg("--leader")
-                    .arg("--bind")
-                    .arg(bootnode.to_string());
-            }
-            PartyRole::Follower {
-                party_id,
-                bootnode,
-                bind,
-            } => {
-                command
-                    .arg("--party-id")
-                    .arg(party_id.to_string())
-                    .arg("--bootstrap")
-                    .arg(bootnode.to_string())
-                    .arg("--bind")
-                    .arg(bind.to_string());
-            }
-        }
 
         let child = command.spawn()?;
         // Profiler attachment hooks. External `sample`/`ps` can't reliably discover
@@ -671,25 +680,6 @@ impl LocalCoordinatorRunner {
             }
         }
         Ok((name.to_owned(), child))
-    }
-
-    fn max_client_input_count(&self) -> usize {
-        self.client_inputs
-            .iter()
-            .filter(|client| !client.values.is_empty())
-            .map(|client| client.values.len())
-            .max()
-            .unwrap_or(0)
-    }
-
-    /// Total number of input values across all clients (sum of per-client
-    /// counts). Clients may supply different numbers of inputs, so the input
-    /// mask reservation/wait must use this actual total, not `num_clients * max`.
-    fn total_client_input_count(&self) -> usize {
-        self.client_inputs
-            .iter()
-            .map(|client| client.values.len())
-            .sum()
     }
 }
 
@@ -729,8 +719,14 @@ impl LocalCoordinatorRunnerBuilder {
         self
     }
 
-    pub fn auth_token(mut self, auth_token: impl Into<String>) -> Self {
-        self.runner.auth_token = auth_token.into();
+    /// Choose how the spawned parties form their network.
+    ///
+    /// [`LocalTopology::RosterMesh`] is the only topology and the default;
+    /// `docs/design/bootnode-elimination.md` Stage 8 removed the leader/bootnode
+    /// one. The method stays so that a second way to form a session would be a
+    /// variant, not a second runner.
+    pub fn topology(mut self, topology: LocalTopology) -> Self {
+        self.runner.topology = topology;
         self
     }
 
@@ -756,6 +752,13 @@ impl LocalCoordinatorRunnerBuilder {
     /// client-IO manifest (the statically recorded output schema).
     pub fn client_output_count(mut self, client_slot: u64, count: u64) -> Self {
         self.runner.client_output_counts.insert(client_slot, count);
+        self
+    }
+
+    /// How clients come to hold the run's client slots. Defaults to
+    /// [`LocalAdmission::PreRegistered`].
+    pub fn admission(mut self, admission: LocalAdmission) -> Self {
+        self.runner.admission = admission;
         self
     }
 
@@ -877,115 +880,251 @@ struct NodeIdentity {
 #[derive(Clone)]
 struct LocalClientIdentity {
     input: LocalClientInput,
-    cert_path: PathBuf,
     key_path: PathBuf,
     cert_der: Vec<u8>,
-    reserved_index_start: u64,
     client_slot: u64,
-    /// Number of output values this client receives via `send_to_client`.
-    output_count: u64,
 }
 
-async fn run_honeybadger_offchain_client(
-    client: LocalClientIdentity,
-    node_rpc_addrs: Vec<SocketAddr>,
-    coord_port: u16,
-    parties: usize,
-    threshold: usize,
-    timeout: Duration,
-) -> LocalCoordinatorRunnerResult<Option<ClientOutputRecord>> {
-    tokio::time::timeout(timeout, async move {
-        eprintln!(
-            "[local-client {}] starting off-chain coordinator input submission",
-            client.client_slot
-        );
-        let input_values = client
-            .input
-            .values
-            .iter()
-            .map(|value| parse_input_as_field(value))
-            .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?;
-        eprintln!(
-            "[local-client {}] connecting coordinator",
-            client.client_slot
-        );
-        let mut coord: OffChainCoordinatorClient<Fr, RobustShare<Fr>> =
-            OffChainCoordinatorClient::start_rpc_client(
-                "127.0.0.1",
-                coord_port,
-                threshold as u64,
-                parties as u64,
-                client.output_count,
-                client.cert_der.clone(),
-                std::fs::read(&client.key_path)?,
-            )
-            .await?;
+/// Everything a client needs to reach a running local coordinator and its
+/// nodes. It names no client: under [`LocalAdmission::Open`] any certificate
+/// holder may use it to bind a free slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalClientEndpoint {
+    pub coordinator: SocketAddr,
+    /// The in-process coordinator's certificate, pinned by every client
+    /// connection (`docs/design/bootnode-elimination.md` §9.A).
+    pub coordinator_cert_der: Vec<u8>,
+    pub execution_id: ExecutionId,
+    /// The parties' node RPC listeners, in spawn order.
+    pub node_rpc_addresses: Vec<SocketAddr>,
+    pub backend: MpcBackendKind,
+}
 
-        for offset in 0..input_values.len() {
-            let index = client.reserved_index_start + offset as u64;
-            eprintln!(
-                "[local-client {}] reserving mask index {}",
-                client.client_slot, index
-            );
-            reserve_mask_index_when_ready(&mut coord, index, timeout).await?;
+/// What one client got from a local run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalClientRun {
+    /// The slot, input range and output rights the coordinator admitted it to.
+    pub admission: ClientAdmission,
+    /// Reconstructed outputs, each reduced to its low 64 bits (`fr_to_u64`);
+    /// empty without output rights.
+    pub outputs: Vec<u64>,
+}
+
+/// A local run started by [`LocalCoordinatorRunner::start`].
+///
+/// It owns everything the run needs for as long as it lasts: the lock that
+/// keeps a second local run from overlapping it, the run directory (identities,
+/// program, epoch stores, `coordinator.crt`), the in-process coordinator and
+/// the party processes, which are killed when it is dropped.
+///
+/// Fields drop in declaration order, which is the teardown order: the parties
+/// are killed before the coordinator stops, the run directory goes after both,
+/// and the lock is released last, so a dropped run never overlaps the next one.
+pub struct RunningLocalCoordinator {
+    parties: Vec<(String, Child)>,
+    pre_registered_clients: Vec<LocalClientIdentity>,
+    endpoint: LocalClientEndpoint,
+    timeout: Duration,
+    _coordinator: OffChainCoordinatorServer<OffChainCoordinatorConnection>,
+    _run_dir: TempRunDir,
+    _local_run_guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl RunningLocalCoordinator {
+    /// Where a client of this run connects, and which coordinator key it pins.
+    pub fn client_endpoint(&self) -> &LocalClientEndpoint {
+        &self.endpoint
+    }
+
+    /// Runs one client per pre-registered slot with inputs, waits for every
+    /// party to exit, and collects the run's output. Fails if a party exits
+    /// before those clients finished.
+    pub async fn finish(self) -> LocalCoordinatorRunnerResult<LocalCoordinatorRunOutput> {
+        let Self {
+            parties,
+            pre_registered_clients,
+            endpoint,
+            timeout,
+            _coordinator,
+            _run_dir,
+            _local_run_guard,
+        } = self;
+
+        let client_results_future = futures::future::join_all(
+            pre_registered_clients
+                .iter()
+                .filter(|client| client.input.has_input())
+                .map(|client| run_pre_registered_client(client, &endpoint, timeout)),
+        );
+        let party_outputs_future = futures::future::join_all(
+            parties
+                .into_iter()
+                .map(|(name, child)| wait_for_child(name, child, timeout)),
+        );
+
+        tokio::pin!(client_results_future);
+        tokio::pin!(party_outputs_future);
+
+        let (client_results, combined_output, party_outputs) = tokio::select! {
+            client_results = &mut client_results_future => {
+                let outputs = party_outputs_future.await;
+                let (combined_output, party_outputs) =
+                    LocalCoordinatorRunner::collect_party_outputs(outputs)?;
+                (client_results, combined_output, party_outputs)
+            }
+            outputs = &mut party_outputs_future => {
+                let (combined_output, _party_outputs) =
+                    LocalCoordinatorRunner::collect_party_outputs(outputs)?;
+                return Err(LocalCoordinatorRunnerError::ProcessFailures(format!(
+                    "local coordinator parties exited before client IO completed\n\ncompleted process output:\n{combined_output}"
+                )));
+            }
+        };
+
+        let mut client_outputs = Vec::new();
+        for result in client_results {
+            if let Some(record) = result? {
+                client_outputs.push(record);
+            }
         }
 
-        eprintln!("[local-client {}] connecting node RPC", client.client_slot);
-        let rpc_addrs = node_rpc_addrs
+        Ok(LocalCoordinatorRunOutput {
+            combined_output,
+            party_outputs,
+            client_outputs,
+        })
+    }
+}
+
+/// The deadlines an `Open` local run registers: the run's `timeout` from
+/// registration for both, rounded up to whole seconds so that a sub-second
+/// timeout still names a deadline later than the coordinator's clock.
+fn open_admission_deadlines(registration: UnixSeconds, timeout: Duration) -> ExecutionDeadlines {
+    let secs = timeout
+        .as_secs()
+        .saturating_add(u64::from(timeout.subsec_nanos() > 0))
+        .max(1);
+    let deadline = UnixSeconds(registration.0.saturating_add(secs));
+    ExecutionDeadlines {
+        association: deadline,
+        input: deadline,
+    }
+}
+
+/// A fresh, non-zero [`ExecutionId`] for one run.
+///
+/// Two v4 UUIDs supply the 32 bytes. Both carry fixed version/variant bits, so
+/// the all-zero value the coordinator reserves cannot be produced.
+fn mint_execution_id() -> ExecutionId {
+    let mut bytes = [0u8; 32];
+    bytes[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    bytes[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    ExecutionId::from_bytes(bytes)
+}
+
+/// The coordinator identity form of a certificate's key: the `subject_public_key`
+/// BIT STRING, derived through the one canonical derivation the coordinator uses.
+fn client_identity_of(cert_der: &[u8]) -> LocalCoordinatorRunnerResult<ClientIdentity> {
+    Ok(SpkiDer::from_certificate_der(cert_der)
+        .map_err(CoordinatorError::from)?
+        .client_identity())
+}
+
+/// §9.E.1 for one client against a running local coordinator
+/// ([`crate::coordinator_client`]): pins the run's coordinator, checks the
+/// execution's summary, associates with `request`, reserves, fetches masks for
+/// and submits exactly the admitted input range, and — with output rights —
+/// reconstructs its outputs from one signed item per node.
+///
+/// `cert_der` and `key_der` are the client's own identity; the runner need not
+/// have seen it before. Under [`LocalAdmission::Open`] this is how a client
+/// whose identity is not known in advance joins the computation.
+pub async fn run_offchain_client(
+    endpoint: &LocalClientEndpoint,
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+    request: AssociationRequest,
+    inputs: &[String],
+    timeout: Duration,
+) -> LocalCoordinatorRunnerResult<LocalClientRun> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let input_values = inputs
+        .iter()
+        .map(|value| parse_input_as_field(value))
+        .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?;
+    let config = CoordinatorClientConfig {
+        coordinator: CoordinatorEndpoint {
+            host: endpoint.coordinator.ip().to_string(),
+            port: endpoint.coordinator.port(),
+            pin: SpkiDer::from_certificate_der(&endpoint.coordinator_cert_der)
+                .map_err(CoordinatorError::from)?,
+        },
+        execution_id: endpoint.execution_id,
+        backend: endpoint.backend,
+        cert_der,
+        key_der,
+        node_rpc_addresses: endpoint
+            .node_rpc_addresses
             .iter()
             .map(|addr| (addr.ip().to_string(), addr.port()))
-            .collect::<Vec<_>>();
-        let node_rpc: OffChainNodeRPCClient<Fr, RobustShare<Fr>> =
-            OffChainNodeRPCClient::start_rpc_client(
-                parties,
-                threshold,
-                rpc_addrs,
-                client.cert_der,
-                std::fs::read(&client.key_path)?,
-            )
-            .await?;
-
-        let mut masks = Vec::with_capacity(input_values.len());
-        for _ in 0..input_values.len() {
-            eprintln!("[local-client {}] receiving mask", client.client_slot);
-            masks.push(node_rpc.receive_mask().await?);
+            .collect(),
+        request,
+        expected_roster_digest: None,
+        expected_program_hash: None,
+        expected_output_count: None,
+    };
+    let run = tokio::time::timeout(timeout, async {
+        match endpoint.backend {
+            MpcBackendKind::HoneyBadger => {
+                config
+                    .connect_and_run::<Fr, RobustShare<Fr>>(input_values)
+                    .await
+            }
+            MpcBackendKind::Avss => {
+                config
+                    .connect_and_run::<Fr, FeldmanShamirShare<Fr, G1Projective>>(input_values)
+                    .await
+            }
         }
-
-        for (offset, (input, mask)) in input_values.into_iter().zip(masks).enumerate() {
-            let index = client.reserved_index_start + offset as u64;
-            eprintln!(
-                "[local-client {}] submitting masked input {}",
-                client.client_slot, index
-            );
-            send_masked_input_when_ready(&coord, input + mask, index, timeout).await?;
-        }
-        eprintln!(
-            "[local-client {}] input submission complete",
-            client.client_slot
-        );
-
-        if client.output_count == 0 {
-            return Ok(None);
-        }
-
-        eprintln!(
-            "[local-client {}] obtaining {} client output value(s)",
-            client.client_slot, client.output_count
-        );
-        let output_values: Vec<Fr> = coord.obtain_outputs().await?;
-        eprintln!(
-            "[local-client {}] received {} client output value(s)",
-            client.client_slot,
-            output_values.len()
-        );
-        let values = output_values.iter().map(fr_to_u64).collect::<Vec<_>>();
-        Ok(Some(ClientOutputRecord {
-            client_slot: client.client_slot,
-            values,
-        }))
     })
     .await
-    .map_err(|_| LocalCoordinatorRunnerError::Timeout(timeout))?
+    .map_err(|_| LocalCoordinatorRunnerError::Timeout(timeout))??;
+    Ok(LocalClientRun {
+        admission: run.admission,
+        outputs: run.outputs.iter().map(fr_to_u64).collect(),
+    })
+}
+
+/// One pre-registered client of [`RunningLocalCoordinator::finish`]: binds the
+/// slot its certificate was registered to and submits the runner's values.
+async fn run_pre_registered_client(
+    client: &LocalClientIdentity,
+    endpoint: &LocalClientEndpoint,
+    timeout: Duration,
+) -> LocalCoordinatorRunnerResult<Option<ClientOutputRecord>> {
+    let slot = u32::try_from(client.client_slot).map_err(|_| {
+        LocalCoordinatorRunnerError::Configuration(format!(
+            "client slot {} does not fit a coordinator client index",
+            client.client_slot
+        ))
+    })?;
+    let run = run_offchain_client(
+        endpoint,
+        client.cert_der.clone(),
+        std::fs::read(&client.key_path)?,
+        AssociationRequest {
+            slot: Some(ClientIndex(slot)),
+            invitation: None,
+        },
+        &client.input.values,
+        timeout,
+    )
+    .await?;
+    let receives = matches!(run.admission.output_rights, OutputRights::Receive { .. });
+    Ok(receives.then_some(ClientOutputRecord {
+        client_slot: client.client_slot,
+        values: run.outputs,
+    }))
 }
 
 /// Reduce a field element to its low 64 bits (exact for the small values —
@@ -996,175 +1135,6 @@ fn fr_to_u64(value: &Fr) -> u64 {
     let n = bytes.len().min(8);
     buf[..n].copy_from_slice(&bytes[..n]);
     u64::from_le_bytes(buf)
-}
-
-async fn run_avss_offchain_client(
-    client: LocalClientIdentity,
-    node_rpc_addrs: Vec<SocketAddr>,
-    coord_port: u16,
-    parties: usize,
-    threshold: usize,
-    timeout: Duration,
-) -> LocalCoordinatorRunnerResult<Option<ClientOutputRecord>> {
-    tokio::time::timeout(timeout, async move {
-        eprintln!(
-            "[local-client {}] starting AVSS off-chain coordinator input submission",
-            client.client_slot
-        );
-        let input_values = client
-            .input
-            .values
-            .iter()
-            .map(|value| parse_input_as_field(value))
-            .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?;
-        let mut coord: OffChainCoordinatorClient<Fr, FeldmanShamirShare<Fr, G1Projective>> =
-            OffChainCoordinatorClient::start_rpc_client(
-                "127.0.0.1",
-                coord_port,
-                threshold as u64,
-                parties as u64,
-                input_values.len() as u64,
-                client.cert_der.clone(),
-                std::fs::read(&client.key_path)?,
-            )
-            .await?;
-
-        for offset in 0..input_values.len() {
-            let index = client.reserved_index_start + offset as u64;
-            eprintln!(
-                "[local-client {}] reserving AVSS mask index {}",
-                client.client_slot, index
-            );
-            reserve_avss_mask_index_when_ready(&mut coord, index, timeout).await?;
-        }
-
-        let rpc_addrs = node_rpc_addrs
-            .iter()
-            .map(|addr| (addr.ip().to_string(), addr.port()))
-            .collect::<Vec<_>>();
-        let node_rpc: OffChainNodeRPCClient<Fr, FeldmanShamirShare<Fr, G1Projective>> =
-            OffChainNodeRPCClient::start_rpc_client(
-                parties,
-                threshold,
-                rpc_addrs,
-                client.cert_der,
-                std::fs::read(&client.key_path)?,
-            )
-            .await?;
-
-        let mut masks = Vec::with_capacity(input_values.len());
-        for _ in 0..input_values.len() {
-            eprintln!("[local-client {}] receiving AVSS mask", client.client_slot);
-            masks.push(node_rpc.receive_mask().await?);
-        }
-
-        for (offset, (input, mask)) in input_values.into_iter().zip(masks).enumerate() {
-            let index = client.reserved_index_start + offset as u64;
-            eprintln!(
-                "[local-client {}] submitting AVSS masked input {}",
-                client.client_slot, index
-            );
-            send_avss_masked_input_when_ready(&coord, input + mask, index, timeout).await?;
-        }
-        eprintln!(
-            "[local-client {}] AVSS input submission complete",
-            client.client_slot
-        );
-        // AVSS client-output reconstruction is not yet wired into the local
-        // runner; HoneyBadger is the path exercised by the client-IO examples.
-        Ok(None)
-    })
-    .await
-    .map_err(|_| LocalCoordinatorRunnerError::Timeout(timeout))?
-}
-
-async fn reserve_mask_index_when_ready(
-    coord: &mut OffChainCoordinatorClient<Fr, RobustShare<Fr>>,
-    index: u64,
-    timeout: Duration,
-) -> LocalCoordinatorRunnerResult<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        match coord.reserve_mask_index(index).await {
-            Ok(()) => return Ok(()),
-            Err(error) if coordinator_wrong_round(&error) => {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(LocalCoordinatorRunnerError::Timeout(timeout));
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-}
-
-async fn reserve_avss_mask_index_when_ready(
-    coord: &mut OffChainCoordinatorClient<Fr, FeldmanShamirShare<Fr, G1Projective>>,
-    index: u64,
-    timeout: Duration,
-) -> LocalCoordinatorRunnerResult<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        match coord.reserve_mask_index(index).await {
-            Ok(()) => return Ok(()),
-            Err(error) if coordinator_wrong_round(&error) => {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(LocalCoordinatorRunnerError::Timeout(timeout));
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-}
-
-async fn send_masked_input_when_ready(
-    coord: &OffChainCoordinatorClient<Fr, RobustShare<Fr>>,
-    masked_input: Fr,
-    index: u64,
-    timeout: Duration,
-) -> LocalCoordinatorRunnerResult<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        match coord.send_masked_input(masked_input, index).await {
-            Ok(()) => return Ok(()),
-            Err(error) if coordinator_wrong_round(&error) => {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(LocalCoordinatorRunnerError::Timeout(timeout));
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-}
-
-async fn send_avss_masked_input_when_ready(
-    coord: &OffChainCoordinatorClient<Fr, FeldmanShamirShare<Fr, G1Projective>>,
-    masked_input: Fr,
-    index: u64,
-    timeout: Duration,
-) -> LocalCoordinatorRunnerResult<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        match coord.send_masked_input(masked_input, index).await {
-            Ok(()) => return Ok(()),
-            Err(error) if coordinator_wrong_round(&error) => {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(LocalCoordinatorRunnerError::Timeout(timeout));
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-}
-
-fn coordinator_wrong_round(error: &stoffel_mpc_coordinator_shared::CoordinatorError) -> bool {
-    let message = error.to_string();
-    message.contains("WrongRound")
-        || message.contains("Need round")
-        || message.contains("current round is")
 }
 
 fn parse_input_as_field(value: &str) -> LocalCoordinatorRunnerResult<Fr> {
@@ -1200,24 +1170,133 @@ fn parse_input_as_field(value: &str) -> LocalCoordinatorRunnerResult<Fr> {
     Ok(stoffel_vm::net::field_from_i64::<Fr>(value))
 }
 
+/// How a local multi-party run forms its network.
+///
+/// Stage 7 of `docs/design/bootnode-elimination.md` flipped this to the mesh and
+/// Stage 8 removed the alternative, so there is exactly one variant today. The
+/// type survives its own collapse deliberately: it is the surface behind all
+/// four local paths — `stoffel run --local`, `stoffel dev`, `stoffel test
+/// --local` and the SDK's `execute_local_*`.
+///
+/// Nothing has to be configured for the mesh: its roster is the in-process
+/// coordinator's node roster (design doc §9.D, §9.F.4), built from the node
+/// certificates this runner mints and fetched by every party once, and its
+/// per-party epoch stores go in the same temporary directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum LocalTopology {
+    /// Every party is symmetric: a roster-pinned mesh formed from `--peers`
+    /// seed addresses, with no bootstrap process anywhere.
+    ///
+    /// The run's own node certificates are the in-process coordinator's node
+    /// roster, which every party fetches over its pinned link; each party
+    /// additionally gets its own epoch store directory, because two nodes
+    /// sharing one would race on the monotone counter that keeps `instance_id`
+    /// fresh (blocker B5).
+    #[default]
+    RosterMesh,
+}
+
 enum PartyRole {
-    Leader {
-        bootnode: SocketAddr,
-    },
-    Follower {
+    /// One member of a roster-pinned mesh.
+    Mesh {
         party_id: usize,
-        bootnode: SocketAddr,
         bind: SocketAddr,
+        /// The other parties' listen addresses, as `--peers` seed hints.
+        peers: Vec<SocketAddr>,
+        /// This party's own epoch store directory.
+        epoch_store: PathBuf,
     },
+}
+
+impl PartyRole {
+    /// The `stoffel-run` flags this role contributes, in emission order.
+    ///
+    /// Split out from the spawn so that the flag set is assertable without
+    /// starting five processes and a coordinator.
+    fn runner_args(&self) -> Vec<String> {
+        match self {
+            PartyRole::Mesh {
+                party_id,
+                bind,
+                peers,
+                epoch_store,
+            } => {
+                // No round-driver flag: coordinator `0.2.0` applies a round once
+                // a quorum of roster members has proposed it, so every party
+                // proposes every transition and none of them is designated.
+                vec![
+                    "--party-id".to_owned(),
+                    party_id.to_string(),
+                    "--bind".to_owned(),
+                    bind.to_string(),
+                    "--peers".to_owned(),
+                    peers
+                        .iter()
+                        .map(|addr| addr.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    "--epoch-store".to_owned(),
+                    epoch_store.display().to_string(),
+                ]
+            }
+        }
+    }
+}
+
+/// The addresses and epoch stores one roster-pinned mesh run needs. The roster
+/// itself is the coordinator's.
+struct MeshLayout {
+    binds: Vec<SocketAddr>,
+    epoch_stores: Vec<PathBuf>,
+}
+
+impl MeshLayout {
+    fn reserve(run_dir: &Path, identities: &[NodeIdentity]) -> LocalCoordinatorRunnerResult<Self> {
+        let binds = identities
+            .iter()
+            .map(|_| reserve_party_port())
+            .collect::<std::io::Result<Vec<_>>>()?;
+        // One directory per node, never shared: `agree_epoch` is `max` over the
+        // parties' proposals bounded by each node's own `last`, so two nodes
+        // reading and writing one store would propose against a counter the
+        // other had already moved.
+        let epoch_stores = (0..identities.len())
+            .map(|party_id| run_dir.join(format!("epochs-party-{party_id}")))
+            .collect();
+        Ok(Self {
+            binds,
+            epoch_stores,
+        })
+    }
+
+    fn role_for(&self, party_id: usize) -> PartyRole {
+        PartyRole::Mesh {
+            party_id,
+            bind: self.binds[party_id],
+            // Every other party, so that no pair depends on a single node being
+            // reachable first: the mesh forms out of dials, and peer exchange
+            // happens after it is already complete.
+            peers: self
+                .binds
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != party_id)
+                .map(|(_, addr)| *addr)
+                .collect(),
+            epoch_store: self.epoch_stores[party_id].clone(),
+        }
+    }
 }
 
 struct SpawnPartyContext<'a> {
     program_path: &'a Path,
     identity: &'a NodeIdentity,
     role: PartyRole,
-    clients: &'a [LocalClientIdentity],
     coord_port: u16,
-    timestamp: u64,
+    /// The in-process coordinator's certificate, which every party pins.
+    coord_cert_path: &'a Path,
+    execution_id: ExecutionId,
 }
 
 struct TempRunDir {
@@ -1242,15 +1321,43 @@ impl Drop for TempRunDir {
     }
 }
 
+/// Mint `count` node identities, indexed by the rank the mesh will derive.
+///
+/// The certificates are freshly generated, so their SPKI order is a fresh
+/// permutation on every run. Sorting them here — by the same
+/// `public_key_from_certificate_der` bytes stoffelnet ranks parties on, never
+/// the bare BIT STRING (blocker B2) — makes spawn index *equal* roster rank by
+/// construction. Nothing depends on that equality (the wire index is derived,
+/// and persistent state is keyed by each node's certificate), but without it
+/// this runner names a party's epoch store `epochs-party-3` while the mesh
+/// addresses it as party 0, which is a confusing thing to hand a reader of the
+/// logs. It also lines the coordinator's `mpc_nodes` registration order up with
+/// the MPC party indices, since `run` registers these identities in order.
 fn write_node_identities(
     path: &Path,
     count: usize,
 ) -> LocalCoordinatorRunnerResult<Vec<NodeIdentity>> {
-    (0..count)
-        .map(|index| {
+    let mut minted = (0..count)
+        .map(|_| {
             let cert = self_signed_certs::client_cert();
             let cert_der = cert.cert.der().to_vec();
             let key_der = cert.signing_key.serialize_der();
+            let spki = QuicNetworkManager::public_key_from_certificate_der(&cert_der).map_err(
+                |reason| {
+                    LocalCoordinatorRunnerError::Configuration(format!(
+                        "derive SPKI from minted node certificate: {reason}"
+                    ))
+                },
+            )?;
+            Ok((spki.0, cert_der, key_der))
+        })
+        .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?;
+    minted.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+
+    minted
+        .into_iter()
+        .enumerate()
+        .map(|(index, (_, cert_der, key_der))| {
             let cert_path = path.join(format!("node{index}.cert.der"));
             let key_path = path.join(format!("node{index}.key.der"));
             std::fs::write(&cert_path, &cert_der)?;
@@ -1269,41 +1376,31 @@ fn write_client_identities(
     inputs: &[LocalClientInput],
 ) -> LocalCoordinatorRunnerResult<Vec<LocalClientIdentity>> {
     let mut sorted_inputs = inputs.to_vec();
+    // Slot order is registration order: the coordinator's `PreRegistered` policy
+    // binds `clients[i]` to slot `i`, and derives each slot's contiguous input
+    // range from the slot table (clients may supply different numbers of
+    // inputs). The VM groups the returned shares per client (see
+    // `store_reserved_client_inputs`), so no uniform padding is required.
     sorted_inputs.sort_by_key(|input| input.client_slot);
-    // Reserve a contiguous block per client in slot order (clients may supply
-    // different numbers of inputs). The VM groups the returned shares per client
-    // (see `store_reserved_client_inputs`), so no uniform padding is required.
-    let mut next_reserved_index = 0_u64;
     sorted_inputs
         .into_iter()
         .map(|input| {
             let cert = self_signed_certs::client_cert();
             let cert_der = cert.cert.der().to_vec();
             let key_der = cert.signing_key.serialize_der();
-            let cert_path = path.join(format!("client{}.cert.der", input.client_slot));
+            // Only the key goes to disk, for the client this runner runs: the
+            // certificate is registered with the coordinator from memory and
+            // no party is ever given it.
             let key_path = path.join(format!("client{}.key.der", input.client_slot));
-            std::fs::write(&cert_path, &cert_der)?;
             std::fs::write(&key_path, key_der)?;
-            let reserved_index_start = next_reserved_index;
-            next_reserved_index += input.values.len() as u64;
             Ok(LocalClientIdentity {
                 client_slot: input.client_slot,
                 input,
-                cert_path,
                 key_path,
                 cert_der,
-                reserved_index_start,
-                output_count: 0,
             })
         })
         .collect()
-}
-
-fn public_key_from_cert(cert_der: &[u8]) -> LocalCoordinatorRunnerResult<Vec<u8>> {
-    let (_, cert) = X509Certificate::from_der(cert_der).map_err(|error| {
-        LocalCoordinatorRunnerError::Configuration(format!("parse node certificate: {error:?}"))
-    })?;
-    Ok(cert.public_key().subject_public_key.data.as_ref().to_vec())
 }
 
 async fn wait_for_child(
@@ -1422,7 +1519,15 @@ fn local_runner_curve_from_manifest(
     }
 }
 
-fn socket_with_port_pair() -> std::io::Result<SocketAddr> {
+/// Reserve a free loopback port for one party to bind.
+///
+/// This used to be `socket_with_port_pair`, and it required *two* free ports —
+/// `port` and `port + 1000` — because a leader bound its bootnode on one and its
+/// own party listener on the other (`docs/design/bootnode-elimination.md` §7
+/// lists all four homes of that convention). A mesh party binds one socket and
+/// advertises the port it bound, so the pairing is gone and with it the
+/// possibility of a party advertising a port nothing listens on.
+fn reserve_party_port() -> std::io::Result<SocketAddr> {
     // Mix the wall-clock nanos with the process id and a per-call counter so
     // that runner processes launched concurrently (e.g. parallel CLI tests)
     // and successive calls within one process begin their scan from different
@@ -1442,13 +1547,13 @@ fn socket_with_port_pair() -> std::io::Result<SocketAddr> {
         .wrapping_add(call.wrapping_mul(1009));
     for offset in 0..30_000u16 {
         let port = 20_000 + ((seed.wrapping_add(offset)) % 30_000);
-        if port_is_free(port) && port_is_free(port + 1000) {
+        if port_is_free(port) {
             return Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
         }
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::AddrNotAvailable,
-        "could not reserve a localhost bootnode port with a free +1000 party port in 20000..50999",
+        "could not reserve a free localhost party port in 20000..49999",
     ))
 }
 
@@ -1478,10 +1583,267 @@ mod tests {
         LocalCoordinatorRunner::builder("/bin/sh", binary)
     }
 
+    fn mesh_identity(dir: &Path, index: usize) -> NodeIdentity {
+        NodeIdentity {
+            cert_path: dir.join(format!("node{index}.cert.der")),
+            key_path: dir.join(format!("node{index}.key.der")),
+            cert_der: vec![index as u8; 4],
+        }
+    }
+
+    /// `--party-id N` names this runner's `party-N` volumes, and the mesh
+    /// addresses a node by its rank in the roster's lexicographic SPKI order.
+    /// The two are independent quantities — a mismatch is reported and the run
+    /// continues on the derived rank — but for freshly minted certificates the
+    /// runner controls both, so it makes them equal rather than leaving a
+    /// reader of the logs to reconcile `epochs-party-3` with `[party 0]`.
+    #[test]
+    fn minted_node_identities_are_indexed_by_the_rank_the_mesh_will_derive() {
+        let dir = TempRunDir::new().expect("create run dir");
+        let identities = write_node_identities(dir.path(), 5).expect("mint node identities");
+
+        let ranks: Vec<Vec<u8>> = identities
+            .iter()
+            .map(|identity| {
+                QuicNetworkManager::public_key_from_certificate_der(&identity.cert_der)
+                    .expect("derive SPKI from minted certificate")
+                    .0
+            })
+            .collect();
+        let mut sorted = ranks.clone();
+        sorted.sort();
+        assert_eq!(
+            ranks, sorted,
+            "identity N must be the certificate the roster ranks N, so that the spawn index \
+             this runner passes as --party-id is the index the mesh derives"
+        );
+
+        for (index, identity) in identities.iter().enumerate() {
+            assert_eq!(
+                identity.cert_path,
+                dir.path().join(format!("node{index}.cert.der")),
+                "the on-disk name must follow the rank, not the mint order"
+            );
+        }
+    }
+
+    /// Retargets `the_mesh_topology_replaces_bootstrap_with_seeds_a_roster_and_an_epoch_store`
+    /// (design doc §9.H): a mesh party is pinned to the coordinator, from which it
+    /// fetches the node roster, and names no roster, party count, threshold,
+    /// timestamp or client of its own. Asserted over the whole argv without
+    /// starting five processes and a coordinator.
+    #[test]
+    fn a_mesh_party_is_pinned_to_the_coordinator_and_names_no_roster_or_client() {
+        let dir = Path::new("/tmp/stoffel-mesh-layout-test");
+        let identities: Vec<NodeIdentity> = (0..3).map(|index| mesh_identity(dir, index)).collect();
+        let layout = MeshLayout::reserve(dir, &identities).expect("reserve mesh layout");
+
+        let party1 = layout.role_for(1).runner_args();
+        let flags: Vec<&str> = party1
+            .iter()
+            .filter(|arg| arg.starts_with("--"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            flags,
+            vec!["--party-id", "--bind", "--peers", "--epoch-store"],
+            "a mesh party is spelled by its identity, its seeds and its epoch store; \
+             membership is the coordinator's"
+        );
+
+        let runner = test_runner(CompiledBinary::new()).build().expect("runner");
+        let coord_cert_path = dir.join("coordinator.crt");
+        let argv: Vec<String> = runner
+            .party_args(
+                &SpawnPartyContext {
+                    program_path: &dir.join("program.stflb"),
+                    identity: &identities[1],
+                    role: layout.role_for(1),
+                    coord_port: 31415,
+                    coord_cert_path: &coord_cert_path,
+                    execution_id: ExecutionId::from_bytes([7u8; 32]),
+                },
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 10001)),
+            )
+            .into_iter()
+            .map(|arg| arg.into_string().expect("utf-8 argv"))
+            .collect();
+        let value_of = |flag: &str| {
+            argv.iter()
+                .position(|arg| arg == flag)
+                .map(|index| argv[index + 1].as_str())
+        };
+        assert_eq!(value_of("--off-chain-coord"), Some("127.0.0.1:31415"));
+        assert_eq!(
+            value_of("--coord-cert"),
+            coord_cert_path.to_str(),
+            "every party pins the in-process coordinator's certificate"
+        );
+        assert_eq!(
+            value_of("--cert"),
+            identities[1].cert_path.to_str(),
+            "a party presents its own node certificate"
+        );
+        for absent in [
+            "--roster",
+            "--expected-clients",
+            "--n-parties",
+            "--threshold",
+            "--timestamp",
+            "--wait-for-clients",
+            "--client-input-count",
+            "--client-roster",
+        ] {
+            assert!(
+                !argv.iter().any(|arg| arg == absent),
+                "{absent} must not reach a party: {argv:?}"
+            );
+        }
+
+        let peers = &party1[party1.iter().position(|arg| arg == "--peers").unwrap() + 1];
+        assert_eq!(
+            peers,
+            &format!("{},{}", layout.binds[0], layout.binds[2]),
+            "every other party, and never this party's own address"
+        );
+
+        let epochs = &party1[party1
+            .iter()
+            .position(|arg| arg == "--epoch-store")
+            .unwrap()
+            + 1];
+        assert_eq!(epochs, &dir.join("epochs-party-1").display().to_string());
+        let all_stores: BTreeSet<&PathBuf> = layout.epoch_stores.iter().collect();
+        assert_eq!(
+            all_stores.len(),
+            identities.len(),
+            "two nodes sharing one epoch store would race on the counter that keeps \
+             instance_id fresh (blocker B5)"
+        );
+    }
+
+    /// No party drives the coordinator's rounds any more.
+    ///
+    /// This case is the record of Stage 9: it used to assert that exactly one
+    /// party carried `--coord-driver`, because published coordinator `0.1.0`
+    /// hard-gated `transition` on `mpc_nodes[0]`. `0.2.0` records a vote from
+    /// any roster member and applies a round at `transition_quorum()`, so the
+    /// designated party is gone and every party's argv is the same bar its own
+    /// identity, seeds and epoch store — which is what makes the symmetry claim
+    /// in `LocalTopology::RosterMesh` literally true.
+    #[test]
+    fn no_mesh_party_is_designated_to_drive_the_coordinator() {
+        let dir = Path::new("/tmp/stoffel-mesh-driver-test");
+        let identities: Vec<NodeIdentity> = (0..3).map(|index| mesh_identity(dir, index)).collect();
+        let layout = MeshLayout::reserve(dir, &identities).expect("reserve mesh layout");
+
+        for party_id in 0..identities.len() {
+            let args = layout.role_for(party_id).runner_args();
+            assert!(
+                !args.iter().any(|arg| arg == "--coord-driver"),
+                "party {party_id} still emits a round-driver flag: {args:?}"
+            );
+        }
+
+        // Symmetry, stated over the flag names rather than their values: every
+        // party emits the same flags, and only the values differ.
+        let flags = |party_id: usize| {
+            layout
+                .role_for(party_id)
+                .runner_args()
+                .into_iter()
+                .filter(|arg| arg.starts_with("--"))
+                .collect::<Vec<_>>()
+        };
+        for party_id in 1..identities.len() {
+            assert_eq!(flags(0), flags(party_id));
+        }
+    }
+
+    /// Every coordinator-bearing party is spawned with the run's `--execution-id`.
+    ///
+    /// Coordinator `0.2.0` keys rounds, reserved indices, masked inputs and
+    /// output shares on it, and dropped `0.1.0`'s `reset_coord`: a fresh id per
+    /// run is what keeps two runs of this runner from sharing coordinator state.
+    #[test]
+    fn a_spawned_party_carries_the_runs_execution_id() {
+        let execution_id = mint_execution_id();
+        assert!(!execution_id.is_zero());
+        assert_ne!(execution_id, mint_execution_id());
+
+        let rendered = execution_id.to_string();
+        assert_eq!(rendered.len(), 64);
+        assert_eq!(
+            rendered.parse::<ExecutionId>().expect("round trip"),
+            execution_id
+        );
+    }
+
+    /// Stage 7's whole point, and Stage 8's confirmation of it.
+    ///
+    /// This case has been rewritten twice and the direction of travel is the
+    /// record: it first asserted that a mesh run was opt-in, then (Stage 7) that
+    /// the mesh was the default and the bootnode the opt-out. Stage 8 deleted
+    /// the opt-out, so there is one topology and it is the mesh.
+    #[test]
+    fn a_local_run_meshes_and_has_no_other_topology() {
+        assert_eq!(LocalTopology::default(), LocalTopology::RosterMesh);
+        let runner = test_runner(CompiledBinary::new()).build().expect("runner");
+        assert_eq!(runner.topology, LocalTopology::RosterMesh);
+
+        let explicit = test_runner(CompiledBinary::new())
+            .topology(LocalTopology::RosterMesh)
+            .build()
+            .expect("runner");
+        assert_eq!(explicit.topology, LocalTopology::RosterMesh);
+    }
+
+    /// A party binds one port and advertises the port it bound.
+    ///
+    /// The `bind_port + 1000` convention this replaced existed only because a
+    /// leader ran a bootnode on one port and its own party listener on the
+    /// other. Stage 8 removed it from all four of its homes at once
+    /// (`docs/design/bootnode-elimination.md` §7): here, in `stoffel-run`, in
+    /// `docker/entrypoint.sh` and in the `Dockerfile`'s `EXPOSE`. Removing it
+    /// from some and not others makes a party advertise a port nothing listens
+    /// on, which is a hang rather than an error.
+    #[test]
+    fn a_mesh_party_reserves_one_port_and_does_not_pair_it() {
+        let dir = Path::new("/tmp/stoffel-mesh-port-test");
+        let identities: Vec<NodeIdentity> = (0..3).map(|index| mesh_identity(dir, index)).collect();
+        let layout = MeshLayout::reserve(dir, &identities).expect("reserve mesh layout");
+
+        for bind in &layout.binds {
+            assert!(
+                port_is_free(bind.port()),
+                "a reserved party port must still be free until the child binds it"
+            );
+        }
+
+        let party1 = layout.role_for(1).runner_args();
+        let bind = &party1[party1.iter().position(|arg| arg == "--bind").unwrap() + 1];
+        let peers = &party1[party1.iter().position(|arg| arg == "--peers").unwrap() + 1];
+        assert_eq!(bind, &layout.binds[1].to_string());
+        assert_eq!(
+            peers,
+            &format!("{},{}", layout.binds[0], layout.binds[2]),
+            "peers are the other parties' bind addresses, with no port arithmetic"
+        );
+    }
+
+    /// Retargeted for coordinator `0.3.0` (docs/design/bootnode-elimination.md
+    /// §9.F.4): this used to assert `coordinator_client_io_binding`'s
+    /// `(n_inputs, output_clients)`, which no longer exists. The coordinator's
+    /// slot table refuses a slot with neither inputs nor outputs, so an
+    /// output-only slot of a program with dynamic outputs must be given its
+    /// output count, and a builder without one fails naming the fix rather than
+    /// reaching the coordinator as `EmptyClientSlot`.
     #[test]
     fn expected_clients_create_output_identities_for_dynamic_outputs() {
         let runner = test_runner(CompiledBinary::new())
             .expected_output_clients(2)
+            .client_output_count(0, 1)
+            .client_output_count(1, 1)
             .build()
             .expect("runner");
 
@@ -1495,13 +1857,35 @@ mod tests {
         );
         assert!(known_clients.iter().all(|client| client.values.is_empty()));
 
-        let (n_inputs, output_clients) = runner
-            .coordinator_client_io_binding(&[(0, vec![10]), (1, vec![11])])
-            .expect("binding");
-        assert_eq!(n_inputs, 0);
-        assert_eq!(output_clients, vec![vec![10], vec![11]]);
+        let table = runner.client_slot_table().expect("slot table");
+        assert_eq!(
+            table.slots(),
+            &[
+                ClientSlotSpec {
+                    input_count: 0,
+                    output_count: 1
+                },
+                ClientSlotSpec {
+                    input_count: 0,
+                    output_count: 1
+                },
+            ]
+        );
+
+        let error = test_runner(CompiledBinary::new())
+            .expected_output_clients(2)
+            .build()
+            .expect_err("an output-only slot without an output count is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("client_output_count(0, <count>)"),
+            "{error}"
+        );
     }
 
+    /// Retargeted with the test above: the slot table replaces the
+    /// `(n_inputs, output_clients)` binding it used to assert.
     #[test]
     fn expected_clients_union_keeps_manifest_inputs_and_output_only_slots() {
         let mut binary = CompiledBinary::new();
@@ -1514,6 +1898,7 @@ mod tests {
         let runner = test_runner(binary)
             .expected_output_clients(2)
             .client_input(0, [42])
+            .client_output_count(1, 1)
             .build()
             .expect("runner");
 
@@ -1528,10 +1913,111 @@ mod tests {
         assert_eq!(known_clients[0].values, vec!["42".to_owned()]);
         assert!(known_clients[1].values.is_empty());
 
-        let (n_inputs, output_clients) = runner
-            .coordinator_client_io_binding(&[(0, vec![10]), (1, vec![11])])
-            .expect("binding");
-        assert_eq!(n_inputs, 1);
-        assert_eq!(output_clients, vec![vec![10], vec![11]]);
+        let table = runner.client_slot_table().expect("slot table");
+        assert_eq!(
+            table.slots(),
+            &[
+                ClientSlotSpec {
+                    input_count: 1,
+                    output_count: 0
+                },
+                ClientSlotSpec {
+                    input_count: 0,
+                    output_count: 1
+                },
+            ]
+        );
+    }
+
+    fn manifest_with_input_slots(slots: &[u64]) -> CompiledBinary {
+        let mut binary = CompiledBinary::new();
+        binary.client_io_manifest.clients = slots
+            .iter()
+            .map(|&client_slot| ClientIoSchema {
+                client_slot,
+                inputs: vec![ShareType::default_secret_int()],
+                outputs: Vec::new(),
+            })
+            .collect();
+        binary
+    }
+
+    /// §9.F.4: under `Open` the runner knows no client, so a slot's input
+    /// count comes from the manifest, and a value handed to the runner — which
+    /// it would never submit — is refused rather than silently dropped.
+    #[test]
+    fn open_admission_takes_slot_inputs_from_the_manifest_and_refuses_runner_inputs() {
+        let runner = test_runner(manifest_with_input_slots(&[0, 1]))
+            .admission(LocalAdmission::Open)
+            .build()
+            .expect("open admission needs no runner inputs");
+        assert_eq!(
+            runner.client_slot_table().expect("slot table").slots(),
+            &[
+                ClientSlotSpec {
+                    input_count: 1,
+                    output_count: 0
+                },
+                ClientSlotSpec {
+                    input_count: 1,
+                    output_count: 0
+                },
+            ]
+        );
+
+        let error = test_runner(manifest_with_input_slots(&[0, 1]))
+            .admission(LocalAdmission::Open)
+            .client_input(0, [15])
+            .build()
+            .expect_err("runner inputs under open admission are refused");
+        assert!(
+            error.to_string().contains("LocalAdmission::Open"),
+            "{error}"
+        );
+
+        // The default is unchanged: pre-registered, and the manifest's input
+        // slots still need the runner's values.
+        assert_eq!(LocalAdmission::default(), LocalAdmission::PreRegistered);
+        let error = test_runner(manifest_with_input_slots(&[0, 1]))
+            .build()
+            .expect_err("pre-registered input slots need runner inputs");
+        assert!(
+            error.to_string().contains("provide local client inputs"),
+            "{error}"
+        );
+    }
+
+    /// `run()` starts only pre-registered clients, so under `Open` with client
+    /// slots nobody would bind them; it refuses before anything is started.
+    #[tokio::test]
+    async fn run_refuses_open_admission_with_client_slots() {
+        let error = test_runner(manifest_with_input_slots(&[0]))
+            .admission(LocalAdmission::Open)
+            .build()
+            .expect("runner")
+            .run()
+            .await
+            .expect_err("run() under open admission with slots is refused");
+        assert_eq!(
+            error.to_string(),
+            "invalid local coordinator runner configuration: run() starts only \
+             pre-registered clients; with LocalAdmission::Open use start() and run_offchain_client"
+        );
+    }
+
+    /// The coordinator refuses a deadline that is not later than its clock, so
+    /// a sub-second timeout still names the next whole second.
+    #[test]
+    fn open_admission_deadlines_are_the_timeout_rounded_up() {
+        let at = UnixSeconds(1_000);
+        for (timeout, expected) in [
+            (Duration::from_secs(180), 1_180),
+            (Duration::from_millis(1_500), 1_002),
+            (Duration::from_millis(1), 1_001),
+        ] {
+            let deadlines = open_admission_deadlines(at, timeout);
+            assert_eq!(deadlines.association, UnixSeconds(expected), "{timeout:?}");
+            assert_eq!(deadlines.input, UnixSeconds(expected), "{timeout:?}");
+        }
     }
 }

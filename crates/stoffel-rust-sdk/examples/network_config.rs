@@ -22,14 +22,15 @@ fn main() -> stoffel::Result<()> {
     let server = StoffelServer::builder(0)
         .network_deployment(&deployment)
         .build()?;
-    let client = StoffelClient::builder().network_config(&reparsed).build()?;
-
+    // Network configs describe the servers' deployment. A client never dials
+    // the node mesh: it reaches an execution through the coordinator, with an
+    // `OffChainClientConfig` (see the `client_server` example).
     println!(
-        "Configured party {} on {} with {} peer(s); client sees {} server(s)",
+        "Configured party {} on {} with {} peer(s); reparsed party {} config",
         server.party_id(),
         server.bind_addr(),
         server.peers().len(),
-        client.servers().len()
+        reparsed.party_id()
     );
     Ok(())
 }

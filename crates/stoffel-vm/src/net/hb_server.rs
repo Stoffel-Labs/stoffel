@@ -73,6 +73,12 @@ pub struct HoneyBadgerQuicServer<F: FftField + PrimeField> {
     pub channels: Sender<Vec<u8>>,
     /// Router shared by this server's receive loops and HB engine.
     pub open_message_router: Arc<crate::net::open_registry::OpenMessageRouter>,
+    /// Mesh control-plane router shared by this server's receive loops.
+    ///
+    /// Blocker B6: every loop that reads the framed stream must offer its
+    /// payloads here, or a mesh control frame reaches the HoneyBadger node as a
+    /// protocol message.
+    pub mesh_router: Arc<crate::net::mesh::MeshRouter>,
 }
 
 impl<F: FftField + PrimeField + 'static> HoneyBadgerQuicServer<F> {
@@ -136,7 +142,36 @@ impl<F: FftField + PrimeField + 'static> HoneyBadgerQuicServer<F> {
             node_id,
             channels,
             open_message_router: Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
+            mesh_router: Arc::new(crate::net::mesh::MeshRouter::new()),
         })
+    }
+
+    /// Pin the mesh control plane to the session roster. Must be called before
+    /// `start()`.
+    ///
+    /// Without this the server's [`crate::net::mesh::MeshRouter`] is
+    /// unpinned, which means any transport-authenticated peer can insert
+    /// arbitrary SPKIs into this node's peer book up to
+    /// [`crate::net::mesh::pex::DEFAULT_PEX_MAX_PEERS`]. Pinning makes an SPKI
+    /// outside the roster cost one set lookup and nothing else — under the
+    /// coordinator's node roster that is every SPKI that was never going to be
+    /// dialed.
+    ///
+    /// Fallible for the same reason [`Self::add_peer`] is: `start()` clones the
+    /// router `Arc` into the accept loop, so replacing it afterwards would
+    /// leave the live loops on the unpinned book with no error anywhere.
+    pub fn pin_mesh_to_roster(
+        &mut self,
+        roster: &crate::net::mesh::Roster,
+    ) -> Result<(), HoneyBadgerQuicServerError> {
+        if self.network_builder.is_none() {
+            return Err(HoneyBadgerQuicServerError::AlreadyStarted);
+        }
+        self.mesh_router = Arc::new(crate::net::mesh::MeshRouter::pinned_to(
+            roster.nodes().iter().cloned(),
+            crate::net::mesh::PexLimits::default(),
+        ));
+        Ok(())
     }
 
     /// Adds a peer node to connect to. Must be called before start().
@@ -185,6 +220,7 @@ impl<F: FftField + PrimeField + 'static> HoneyBadgerQuicServer<F> {
         let node_id = self.node_id;
         let tx = self.channels.clone();
         let open_message_router = self.open_message_router.clone();
+        let mesh_router = self.mesh_router.clone();
 
         let connection_task = tokio::spawn(async move {
             loop {
@@ -205,14 +241,32 @@ impl<F: FftField + PrimeField + 'static> HoneyBadgerQuicServer<F> {
                                 let txx = tx.clone();
                                 let conn_node_id = node_id;
                                 let open_message_router = open_message_router.clone();
+                                let mesh_router = mesh_router.clone();
 
                                 info!("[HB-QUIC] Node {} spawning message handler for connection {}", conn_node_id, connection.remote_address());
                                 tokio::spawn(async move {
+                                    // Fixed for the life of the connection: the
+                                    // SPKI the handshake proved, which is what
+                                    // binds a `PeerAnnounce` to its announcer.
+                                    let peer_key = connection.authenticated_peer_public_key();
                                     loop {
                                         match connection.receive().await {
                                             Ok(data) => {
                                                 let sender_id =
                                                     connection.remote_party_id().unwrap_or(crate::net::open_registry::UNKNOWN_SENDER_ID);
+                                                match mesh_router.try_handle_wire_message_from(
+                                                    sender_id, peer_key.as_ref(), &data,
+                                                ) {
+                                                    Ok(true) => continue,
+                                                    Err(e) => {
+                                                        warn!(
+                                                            "Node {} failed to handle mesh control frame from {}: {}",
+                                                            conn_node_id, sender_id, e
+                                                        );
+                                                        continue;
+                                                    }
+                                                    Ok(false) => {}
+                                                }
                                                 match open_message_router.try_handle_wire_message(
                                                     sender_id, &data,
                                                 ) {
@@ -313,10 +367,27 @@ impl<F: FftField + PrimeField + 'static> HoneyBadgerQuicServer<F> {
                         let pid_for_task = peer_id;
                         let txx = self.channels.clone();
                         let open_message_router = self.open_message_router.clone();
+                        let mesh_router = self.mesh_router.clone();
                         tokio::spawn(async move {
+                            let peer_key = connection.authenticated_peer_public_key();
                             loop {
                                 match connection.receive().await {
                                     Ok(data) => {
+                                        match mesh_router.try_handle_wire_message_from(
+                                            pid_for_task,
+                                            peer_key.as_ref(),
+                                            &data,
+                                        ) {
+                                            Ok(true) => continue,
+                                            Err(e) => {
+                                                warn!(
+                                                    "Failed to handle mesh control frame from peer {}: {}",
+                                                    pid_for_task, e
+                                                );
+                                                continue;
+                                            }
+                                            Ok(false) => {}
+                                        }
                                         match open_message_router
                                             .try_handle_wire_message(pid_for_task, &data)
                                         {
@@ -413,11 +484,17 @@ pub type FrHoneyBadgerQuicServer = HoneyBadgerQuicServer<Fr>;
 /// `HoneyBadgerQuicServer`.
 ///
 /// Returns a channel receiver that will receive all incoming messages.
+///
+/// `mesh_router` is required rather than optional (blocker B6): a loop that
+/// does not offer its payloads to the mesh control plane forwards control
+/// frames to the MPC engine, and an `Option` would make that omission a default
+/// rather than a decision.
 pub async fn spawn_receive_loops(
     net: Arc<QuicNetworkManager>,
     node_id: PartyId,
     n_parties: usize,
     open_message_router: Arc<crate::net::open_registry::OpenMessageRouter>,
+    mesh_router: Arc<crate::net::mesh::MeshRouter>,
 ) -> mpsc::UnboundedReceiver<(PartyId, Vec<u8>)> {
     // Unbounded so the socket readers never stall the QUIC receive path; see the
     // rationale on `spawn_receive_loops_split`.
@@ -452,6 +529,7 @@ pub async fn spawn_receive_loops(
                 let txx = scan_tx.clone();
                 let local_party_id = node_id;
                 let open_message_router = open_message_router.clone();
+                let mesh_router = mesh_router.clone();
                 tracing::info!(
                     party_id = local_party_id,
                     derived_id,
@@ -460,9 +538,28 @@ pub async fn spawn_receive_loops(
                 );
 
                 tokio::spawn(async move {
+                    let peer_key = connection.authenticated_peer_public_key();
                     loop {
                         match connection.receive().await {
                             Ok(data) => {
+                                match mesh_router.try_handle_wire_message_from(
+                                    sender_id,
+                                    peer_key.as_ref(),
+                                    &data,
+                                ) {
+                                    Ok(true) => continue,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            party_id = local_party_id,
+                                            sender_id,
+                                            error = %e,
+                                            "Failed to handle mesh control frame"
+                                        );
+                                        continue;
+                                    }
+                                    Ok(false) => {}
+                                }
+
                                 match open_message_router.try_handle_wire_message(sender_id, &data)
                                 {
                                     Ok(true) => continue,
@@ -575,6 +672,7 @@ pub async fn spawn_receive_loops_split(
     node_id: PartyId,
     n_parties: usize,
     open_message_router: Arc<crate::net::open_registry::OpenMessageRouter>,
+    mesh_router: Arc<crate::net::mesh::MeshRouter>,
 ) -> (
     mpsc::UnboundedReceiver<(PartyId, Vec<u8>)>,
     mpsc::UnboundedReceiver<(PartyId, Vec<u8>)>,
@@ -605,6 +703,7 @@ pub async fn spawn_receive_loops_split(
                 let txx = server_tx.clone();
                 let local_party_id = node_id;
                 let open_message_router = open_message_router.clone();
+                let mesh_router = mesh_router.clone();
                 tracing::info!(
                     party_id = local_party_id,
                     sender_id,
@@ -612,7 +711,17 @@ pub async fn spawn_receive_loops_split(
                 );
 
                 tokio::spawn(async move {
+                    let peer_key = connection.authenticated_peer_public_key();
                     while let Ok(data) = connection.receive().await {
+                        match mesh_router.try_handle_wire_message_from(
+                            sender_id,
+                            peer_key.as_ref(),
+                            &data,
+                        ) {
+                            Ok(true) => continue,
+                            Err(_) => continue,
+                            Ok(false) => {}
+                        }
                         match open_message_router.try_handle_wire_message(sender_id, &data) {
                             Ok(true) => continue,
                             Err(_) => continue,
@@ -701,6 +810,11 @@ mod tests {
     use crate::net::mpc::honeybadger_node_opts;
 
     async fn test_server() -> HoneyBadgerQuicServer<Fr> {
+        // Binding a QUIC endpoint needs a process-level rustls provider. These
+        // tests used to rely on some *other* test in the binary having
+        // installed one first, which made them fail whenever they were
+        // scheduled early enough to lose that race.
+        crate::tests::test_utils::init_crypto_provider();
         let (tx, _rx) = mpsc::channel(8);
         let bind_address = "127.0.0.1:0".parse().expect("valid local bind address");
         let opts = honeybadger_node_opts(4, 1, 0, 0, 0).expect("valid HB options");

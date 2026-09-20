@@ -69,6 +69,26 @@ impl Default for AvssQuicConfig {
     }
 }
 
+/// Errors raised by the AVSS QUIC server lifecycle wrapper.
+///
+/// Blocker B6: `add_peer` used to return `()` and no-op once `start()` had
+/// consumed the builder, so a peer learned after start — which is exactly what
+/// PEX produces — vanished without a word. `HoneyBadgerQuicServer::add_peer`
+/// has reported [`HoneyBadgerQuicServerError::AlreadyStarted`] for this all
+/// along (`net/hb_server.rs`); this is the AVSS half of the same contract.
+///
+/// [`HoneyBadgerQuicServerError::AlreadyStarted`]: crate::net::HoneyBadgerQuicServerError::AlreadyStarted
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum AvssQuicServerError {
+    #[error("cannot add peer {peer_id} at {address} after start() has been called")]
+    AlreadyStarted { peer_id: usize, address: SocketAddr },
+    /// `start()` has already cloned the mesh router into the live receive
+    /// loops, so replacing it now would leave them on the unpinned book.
+    #[error("cannot pin the mesh roster after start() has been called")]
+    MeshRosterAfterStart,
+}
+
 /// Errors for the AVSS public-key exchange envelope.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AvssPublicKeyEnvelopeError {
@@ -146,6 +166,13 @@ where
     pub config: AvssQuicConfig,
     /// Router shared by this server's receive loops and AVSS engine.
     pub open_message_router: Arc<crate::net::open_registry::OpenMessageRouter>,
+    /// Mesh control-plane router shared by this server's receive loops.
+    ///
+    /// Blocker B6: AVSS does not use `spawn_receive_loops_split` — it runs its
+    /// own per-connection loops — so without this a mesh control frame is
+    /// handed to `process_wrapped_message_with_network` as an AVSS protocol
+    /// message.
+    pub mesh_router: Arc<crate::net::mesh::MeshRouter>,
     /// Accept loop task handle
     accept_task: Option<JoinHandle<()>>,
     /// Cancellation token for graceful shutdown
@@ -311,6 +338,7 @@ where
             pk_map: None,
             config,
             open_message_router: Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
+            mesh_router: Arc::new(crate::net::mesh::MeshRouter::new()),
             accept_task: None,
             shutdown_token: CancellationToken::new(),
         }
@@ -339,15 +367,55 @@ where
             pk_map: None,
             config,
             open_message_router: Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
+            mesh_router: Arc::new(crate::net::mesh::MeshRouter::new()),
             accept_task: None,
             shutdown_token: CancellationToken::new(),
         }
     }
 
+    /// Pin the mesh control plane to the session roster. Must be called before
+    /// `start()`.
+    ///
+    /// The AVSS mirror of
+    /// [`HoneyBadgerQuicServer::pin_mesh_to_roster`][pin]: an unpinned
+    /// [`crate::net::mesh::MeshRouter`] lets any transport-authenticated peer
+    /// fill this node's peer book with SPKIs the session has never heard of.
+    ///
+    /// [pin]: crate::net::hb_server::HoneyBadgerQuicServer::pin_mesh_to_roster
+    pub fn pin_mesh_to_roster(
+        &mut self,
+        roster: &crate::net::mesh::Roster,
+    ) -> Result<(), AvssQuicServerError> {
+        if self.network_builder.is_none() {
+            return Err(AvssQuicServerError::MeshRosterAfterStart);
+        }
+        self.mesh_router = Arc::new(crate::net::mesh::MeshRouter::pinned_to(
+            roster.nodes().iter().cloned(),
+            crate::net::mesh::PexLimits::default(),
+        ));
+        Ok(())
+    }
+
     /// Add a peer before starting.
-    pub fn add_peer(&mut self, peer_id: usize, addr: std::net::SocketAddr) {
-        if let Some(ref mut mgr) = self.network_builder {
-            mgr.add_node_with_party_id(peer_id, addr);
+    ///
+    /// Fails once `start()` has taken the builder. Silently doing nothing —
+    /// what this did before Stage 4 — makes a PEX-learned peer disappear with
+    /// no error anywhere, and the run then fails much later as a party that
+    /// never connects.
+    pub fn add_peer(
+        &mut self,
+        peer_id: usize,
+        addr: std::net::SocketAddr,
+    ) -> Result<(), AvssQuicServerError> {
+        match self.network_builder.as_mut() {
+            Some(mgr) => {
+                mgr.add_node_with_party_id(peer_id, addr);
+                Ok(())
+            }
+            None => Err(AvssQuicServerError::AlreadyStarted {
+                peer_id,
+                address: addr,
+            }),
         }
     }
 
@@ -673,6 +741,7 @@ where
     ) -> Result<mpsc::Receiver<Vec<u8>>, String> {
         let net = self.network.as_ref().ok_or("Server not started")?.clone();
         let router = engine.open_message_router();
+        let mesh_router = self.mesh_router.clone();
 
         let (msg_tx, msg_rx) = mpsc::channel::<Vec<u8>>(1000);
 
@@ -689,8 +758,12 @@ where
             let net_clone = net.clone();
             let shutdown_token = self.shutdown_token.clone();
             let router = router.clone();
+            let mesh_router = mesh_router.clone();
 
             tokio::spawn(async move {
+                // Fixed for the life of the connection: the SPKI the handshake
+                // proved, which is what binds a `PeerAnnounce` to its announcer.
+                let peer_key = conn.authenticated_peer_public_key();
                 loop {
                     tokio::select! {
                         _ = shutdown_token.cancelled() => {
@@ -700,6 +773,20 @@ where
                         result = conn.receive() => {
                             match result {
                                 Ok(data) => {
+                                    match mesh_router.try_handle_wire_message_from(authenticated_sender_id, peer_key.as_ref(), &data) {
+                                        Ok(true) => {
+                                            continue;
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "[AVSS] Failed to handle mesh control frame from {}: {}",
+                                                authenticated_sender_id, e
+                                            );
+                                            continue;
+                                        }
+                                        Ok(false) => {}
+                                    }
+
                                     match router.try_handle_wire_message(authenticated_sender_id, &data) {
                                         Ok(true) => {
                                             continue;
@@ -792,6 +879,7 @@ where
     > {
         let net = self.network.as_ref().ok_or("Server not started")?.clone();
         let router = engine.open_message_router();
+        let mesh_router = self.mesh_router.clone();
 
         let (server_tx, server_rx) = mpsc::channel::<(usize, Vec<u8>)>(65536);
         let (client_tx, client_rx) = mpsc::channel::<(usize, Vec<u8>)>(4096);
@@ -810,14 +898,23 @@ where
             let net_clone = net.clone();
             let shutdown_token = self.shutdown_token.clone();
             let router = router.clone();
+            let mesh_router = mesh_router.clone();
 
             tokio::spawn(async move {
+                let peer_key = conn.authenticated_peer_public_key();
                 loop {
                     tokio::select! {
                         _ = shutdown_token.cancelled() => break,
                         result = conn.receive() => {
                             match result {
                                 Ok(data) => {
+                                    match mesh_router.try_handle_wire_message_from(authenticated_sender_id, peer_key.as_ref(), &data) {
+                                        // A refused mesh frame is still a mesh
+                                        // frame: it must not fall through to the
+                                        // AVSS engine.
+                                        Ok(true) | Err(_) => continue,
+                                        Ok(false) => {}
+                                    }
                                     if let Ok(true) = router.try_handle_wire_message(authenticated_sender_id, &data) {
                                         continue;
                                     }
@@ -913,6 +1010,91 @@ mod tests {
     use super::*;
     use ark_bls12_381::{Fr, G1Projective as G1};
     use ark_ec::PrimeGroup;
+
+    /// Blocker B6. `add_peer` used to return `()` and do nothing once `start()`
+    /// had taken the builder, so a peer learned after start — which is exactly
+    /// what PEX produces — disappeared with no error anywhere, and the run then
+    /// failed much later as a party that never connected.
+    #[tokio::test]
+    async fn adding_a_peer_after_start_is_an_error_rather_than_a_silent_no_op() {
+        crate::tests::test_utils::init_crypto_provider();
+
+        let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse loopback address");
+        let mut net = QuicNetworkManager::new();
+        net.listen(bind).await.expect("listen on loopback");
+
+        let mut server = AvssQuicServer::<Fr, G1>::with_keys(
+            0,
+            3,
+            1,
+            1,
+            net,
+            AvssQuicConfig::default(),
+            Fr::from(7u64),
+        );
+
+        let peer: SocketAddr = "127.0.0.1:9001".parse().expect("parse peer address");
+        server
+            .add_peer(1, peer)
+            .expect("a peer added before start() reaches the builder");
+
+        server.start().expect("start the server");
+
+        assert_eq!(
+            server.add_peer(2, peer),
+            Err(AvssQuicServerError::AlreadyStarted {
+                peer_id: 2,
+                address: peer,
+            })
+        );
+        server.stop();
+    }
+
+    /// Pinning has to happen before `start()` clones the router into the live
+    /// receive loops, or the loops keep the unpinned book and the roster is
+    /// enforced nowhere — the same silent-no-op shape `add_peer` used to have.
+    #[tokio::test]
+    async fn pinning_the_mesh_roster_after_start_is_an_error_rather_than_a_silent_no_op() {
+        crate::tests::test_utils::init_crypto_provider();
+
+        let roster = crate::net::mesh::Roster::from_node_keys(
+            vec![
+                stoffelnet::network_utils::NodePublicKey(vec![1u8; 32]),
+                stoffelnet::network_utils::NodePublicKey(vec![2u8; 32]),
+                stoffelnet::network_utils::NodePublicKey(vec![3u8; 32]),
+            ],
+            1,
+        )
+        .expect("a three-node roster");
+
+        let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse loopback address");
+        let mut net = QuicNetworkManager::new();
+        net.listen(bind).await.expect("listen on loopback");
+
+        let mut server = AvssQuicServer::<Fr, G1>::with_keys(
+            0,
+            3,
+            1,
+            1,
+            net,
+            AvssQuicConfig::default(),
+            Fr::from(7u64),
+        );
+
+        assert!(!server.mesh_router.is_pinned());
+        server
+            .pin_mesh_to_roster(&roster)
+            .expect("pinning before start()");
+        assert!(server.mesh_router.is_pinned());
+
+        server.start().expect("start the server");
+
+        assert_eq!(
+            server.pin_mesh_to_roster(&roster),
+            Err(AvssQuicServerError::MeshRosterAfterStart)
+        );
+        server.stop();
+    }
 
     #[test]
     fn test_decode_public_key_envelope_rejects_sender_mismatch() {

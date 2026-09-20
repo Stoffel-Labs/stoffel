@@ -26,6 +26,12 @@ RUN mkdir -p /build/.cargo && \
       'stoffel-vm-types = { path = "/StoffelVM/crates/stoffel-vm-types" }' \
       > /build/.cargo/config.toml
 
+# TEMPORARY — docs/design/bootnode-elimination.md §9.F.5. stoffel-mpc-coordinator 0.3.0 is
+# not published, so the workspace's [patch.crates-io] names a path on the build
+# host. The `coordinator` named build context is copied to exactly that path
+# before cargo resolves the workspace. Delete with the patch.
+COPY --from=coordinator . /Users/gabriel/RustroverProjects/stoffel-mpc-coordinator-roster-admission
+
 WORKDIR /build/coordinator-wrapper
 
 RUN cargo chef prepare --recipe-path recipe.json
@@ -37,6 +43,12 @@ WORKDIR /build
 COPY --from=planner /build/coordinator-wrapper/recipe.json /build/coordinator-wrapper/recipe.json
 COPY --from=planner /build/.cargo /build/.cargo
 COPY --from=planner /StoffelVM/crates/stoffel-vm-types /StoffelVM/crates/stoffel-vm-types
+
+# TEMPORARY — docs/design/bootnode-elimination.md §9.F.5. stoffel-mpc-coordinator 0.3.0 is
+# not published, so the workspace's [patch.crates-io] names a path on the build
+# host. The `coordinator` named build context is copied to exactly that path
+# before cargo resolves the workspace. Delete with the patch.
+COPY --from=coordinator . /Users/gabriel/RustroverProjects/stoffel-mpc-coordinator-roster-admission
 
 WORKDIR /build/coordinator-wrapper
 
@@ -74,6 +86,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY --from=builder /build/artifacts/stoffel-coordinator-docker /app/stoffel-coordinator
-COPY ids /app/ids
+# No identity material is baked in (docs/design/bootnode-elimination.md §9.F.0):
+# the coordinator's key arrives as a compose secret, certificates as per-file mounts.
 
 ENTRYPOINT ["/app/stoffel-coordinator"]

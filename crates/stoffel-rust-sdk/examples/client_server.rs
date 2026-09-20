@@ -24,18 +24,42 @@ fn main() -> stoffel::Result<()> {
 
     let server_builders = runtime.servers_for_deployment(&deployment);
     let server = server_builders[0].clone().build()?;
-    let client = runtime
-        .client_for_deployment(&deployment)
-        .client_id(7)
+    // A client reaches the execution through the coordinator only: it pins
+    // the coordinator's certificate, associates with the execution, and uses
+    // the slot, input range and outputs its admission names. Its node RPC
+    // addresses are hints; every leg is pinned to the coordinator's node
+    // roster. Here the coordinator certificate and the client identity are
+    // minted in place; a deployment reads its own.
+    let coordinator_cert = stoffel_mpc_coordinator_shared::self_signed_certs::server_cert();
+    let client_identity = stoffel_mpc_coordinator_shared::self_signed_certs::client_cert();
+    let client_config = OffChainClientConfig::builder()
+        .coordinator("127.0.0.1", 31415)
+        .coordinator_cert_der(coordinator_cert.cert.der().to_vec())
+        .execution_id_hex("0707070707070707070707070707070707070707070707070707070707070707")
+        .honeybadger()
+        .node_rpc_addresses([
+            "127.0.0.1:10000",
+            "127.0.0.1:10001",
+            "127.0.0.1:10002",
+            "127.0.0.1:10003",
+            "127.0.0.1:10004",
+        ])
+        .identity_der(
+            client_identity.cert.der().to_vec(),
+            client_identity.signing_key.serialize_der(),
+        )
         .build()?;
+    let client = runtime.client().offchain_io(client_config).build()?;
 
     println!(
-        "Configured party {} on {} with {} peer(s); client {} sees {} server(s)",
+        "Configured party {} on {} with {} peer(s); client configured for execution {}",
         server.party_id(),
         server.bind_addr(),
         server.peers().len(),
-        client.client_id(),
-        client.servers().len()
+        client
+            .offchain_io()
+            .map(|config| config.execution_id.to_string())
+            .unwrap_or_default()
     );
     Ok(())
 }

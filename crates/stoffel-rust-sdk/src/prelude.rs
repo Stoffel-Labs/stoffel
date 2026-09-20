@@ -17,8 +17,9 @@ pub use crate::config::{
 };
 pub use crate::consensus::{ConsensusGate, NodePublicKey, VerifiedOrdering};
 pub use crate::coordinator::{
-    Coordinator, OffChainCoordinator, OffChainCoordinatorClient, OffChainCoordinatorServer,
-    ShareBound,
+    ClientAdmission, ClientIndex, Coordinator, ExecutionId, NodeRoster, OffChainCoordinator,
+    OffChainCoordinatorClient, OffChainCoordinatorServer, OutputRights, RosterDigest, ShareBound,
+    SignedInvitation,
 };
 pub use crate::error::{
     ConsensusError, CoordinatorError, Error, ErrorCategory, NetworkError, Result,
@@ -35,8 +36,8 @@ pub use crate::program::{
 };
 pub use crate::runtime::{LocalNetworkBuilder, RuntimeSummary, StoffelRuntime};
 pub use crate::server::{
-    OffChainServerConfig, OffChainServerConfigBuilder, ServerBuilder, ServerState, ServerSummary,
-    StoffelServer,
+    OffChainServerConfig, OffChainServerConfigBuilder, ServerBuilder, ServerIdentity, ServerState,
+    ServerSummary, ServerTopology, StoffelServer,
 };
 pub use crate::types::{
     ClientId, ClientInputValue, ClientOutputValue, ClientValueType, FieldElement,
@@ -46,5 +47,6 @@ pub use crate::types::{
 pub use crate::vm::LocalClientOutput;
 pub use crate::FunctionType;
 pub use crate::LoadableProgram;
+pub use crate::LocalTopology;
 pub use crate::Stoffel;
 pub use stoffel_vm_types::core_types::ShareType;

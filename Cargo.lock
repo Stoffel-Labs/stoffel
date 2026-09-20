@@ -5687,9 +5687,8 @@ dependencies = [
 
 [[package]]
 name = "stoffel-mpc-coordinator-off-chain"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1c7858f0e6da81da3f26edc1d078cd3d69f8578bbaae01cfa737c6f8bdd1eab"
+version = "0.3.0"
+source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#272e4933c4aee6e8f33da7d1c877cb30881133cb"
 dependencies = [
  "ark-bls12-381",
  "ark-ff 0.5.0",
@@ -5702,6 +5701,7 @@ dependencies = [
  "rand 0.9.4",
  "rcgen",
  "serde",
+ "serde_json",
  "stoffel-mpc-coordinator-shared",
  "tokio",
  "tracing",
@@ -5709,16 +5709,17 @@ dependencies = [
 
 [[package]]
 name = "stoffel-mpc-coordinator-shared"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b32fe903439fde4c12bbb662341edd8265815d6b4978b92131985ebd5efb71d"
+version = "0.3.0"
+source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#272e4933c4aee6e8f33da7d1c877cb30881133cb"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
  "ark-ff 0.5.0",
  "ark-serialize 0.5.0",
  "async-trait",
+ "blake3",
  "futures-util",
+ "hex",
  "hpke",
  "hyper",
  "hyper-util",
@@ -5810,7 +5811,6 @@ dependencies = [
  "once_cell",
  "p256",
  "parking_lot 0.12.5",
- "quinn",
  "rand 0.9.4",
  "rcgen",
  "redb",
@@ -5820,6 +5820,8 @@ dependencies = [
  "serde",
  "sha2",
  "smallvec",
+ "stoffel-mpc-coordinator-off-chain",
+ "stoffel-mpc-coordinator-shared",
  "stoffel-vm-types",
  "stoffelcrypto",
  "stoffellang",
@@ -5832,7 +5834,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "turmoil",
- "uuid",
  "x509-parser 0.18.1",
 ]
 
@@ -5852,11 +5853,14 @@ dependencies = [
  "ark-std 0.5.0",
  "async-trait",
  "bincode",
+ "blake3",
  "futures",
  "hex",
  "libc",
+ "rcgen",
  "rustls",
  "serde",
+ "serde_json",
  "stoffel-mpc-coordinator-off-chain",
  "stoffel-mpc-coordinator-shared",
  "stoffel-vm",
@@ -5868,7 +5872,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "x509-parser 0.18.1",
 ]
 
 [[package]]

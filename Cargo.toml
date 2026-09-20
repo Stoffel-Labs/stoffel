@@ -13,3 +13,9 @@ resolver = "2"
 exclude = [
     "vendor/mpc-protocols-limit-test",
 ]
+
+# TEMPORARY — docs/design/bootnode-elimination.md §9.F.5. stoffel-mpc-coordinator 0.3.0 is
+# not published yet. Delete this table, and re-lock, as soon as it is.
+[patch.crates-io]
+stoffel-mpc-coordinator-shared = { git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "feature/no-bootnode" }
+stoffel-mpc-coordinator-off-chain = { git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "feature/no-bootnode" }
