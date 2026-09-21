@@ -2079,22 +2079,38 @@ fn validates_byzantine_threshold_configuration() {
 
 #[test]
 fn backend_specific_reconstruction_share_counts_are_explicit() -> stoffel::Result<()> {
-    assert_eq!(MpcConfig::minimum_parties_for_threshold(2)?, 9);
-    assert_eq!(MpcConfig::maximum_threshold_for_parties(5)?, 1);
-    assert_eq!(MpcConfig::maximum_threshold_for_parties(9)?, 2);
+    let avss = MpcBackend::Avss {
+        curve: Curve::Bls12_381,
+    };
+
+    // Static topology helpers are backend-aware: HoneyBadger deploys at 4t + 1,
+    // AVSS at 3t + 1.
+    assert_eq!(
+        MpcConfig::minimum_parties_for_threshold(MpcBackend::HoneyBadger, 2)?,
+        9
+    );
+    assert_eq!(MpcConfig::minimum_parties_for_threshold(avss, 2)?, 7);
+    assert_eq!(
+        MpcConfig::maximum_threshold_for_parties(MpcBackend::HoneyBadger, 5)?,
+        1
+    );
+    assert_eq!(
+        MpcConfig::maximum_threshold_for_parties(MpcBackend::HoneyBadger, 9)?,
+        2
+    );
+    assert_eq!(MpcConfig::maximum_threshold_for_parties(avss, 4)?, 1);
+    assert_eq!(MpcConfig::maximum_threshold_for_parties(avss, 7)?, 2);
     assert!(matches!(
-        MpcConfig::maximum_threshold_for_parties(3),
+        MpcConfig::maximum_threshold_for_parties(MpcBackend::HoneyBadger, 3),
+        Err(stoffel::Error::Configuration(_))
+    ));
+    assert!(matches!(
+        MpcConfig::maximum_threshold_for_parties(avss, 3),
         Err(stoffel::Error::Configuration(_))
     ));
 
     assert_eq!(MpcBackend::HoneyBadger.minimum_reconstruction_shares(2)?, 5);
-    assert_eq!(
-        MpcBackend::Avss {
-            curve: Curve::Bls12_381
-        }
-        .minimum_reconstruction_shares(2)?,
-        3
-    );
+    assert_eq!(avss.minimum_reconstruction_shares(2)?, 3);
 
     let honeybadger = MpcConfig::builder()
         .parties(9)
@@ -2105,16 +2121,26 @@ fn backend_specific_reconstruction_share_counts_are_explicit() -> stoffel::Resul
     assert_eq!(honeybadger.maximum_threshold()?, 2);
     assert_eq!(honeybadger.minimum_reconstruction_shares()?, 5);
 
-    let avss = NetworkConfig::builder()
+    let avss_config = MpcConfig::builder()
+        .parties(7)
+        .threshold(2)
+        .avss(Curve::Ed25519)
+        .build()?;
+    assert_eq!(avss_config.minimum_parties()?, 7);
+    assert_eq!(avss_config.maximum_threshold()?, 2);
+    assert_eq!(avss_config.minimum_reconstruction_shares()?, 3);
+
+    let avss_network = NetworkConfig::builder()
         .expected_parties(9)
         .threshold(2)
         .backend(MpcBackend::Avss {
             curve: Curve::Ed25519,
         })
         .build()?;
-    assert_eq!(avss.minimum_reconstruction_shares()?, 3);
+    assert_eq!(avss_network.minimum_reconstruction_shares()?, 3);
 
-    let topology_overflow = MpcConfig::minimum_parties_for_threshold(usize::MAX).unwrap_err();
+    let topology_overflow =
+        MpcConfig::minimum_parties_for_threshold(MpcBackend::HoneyBadger, usize::MAX).unwrap_err();
     assert!(matches!(
         topology_overflow,
         stoffel::Error::Configuration(_)
@@ -2124,6 +2150,121 @@ fn backend_specific_reconstruction_share_counts_are_explicit() -> stoffel::Resul
         .minimum_reconstruction_shares(usize::MAX)
         .unwrap_err();
     assert!(matches!(overflow, stoffel::Error::Configuration(_)));
+    Ok(())
+}
+
+#[test]
+fn network_config_validation_is_backend_aware() -> stoffel::Result<()> {
+    let avss = MpcBackend::Avss {
+        curve: Curve::Bls12_381,
+    };
+
+    // STO-1019: AVSS deploys at n = 3t + 1, so 4/1 and 7/2 must validate.
+    for (parties, threshold, port) in [(4_usize, 1_usize, 20500_u16), (7, 2, 20510)] {
+        NetworkConfig::builder()
+            .party_id(0)
+            .bind_address(format!("127.0.0.1:{port}"))
+            .expected_parties(parties)
+            .threshold(threshold)
+            .backend(avss)
+            .build()?;
+    }
+
+    // AVSS rejects below 3t + 1, and the error names the backend and its formula.
+    for (parties, threshold, port) in [(3_usize, 1_usize, 20520_u16), (6, 2, 20530)] {
+        let err = NetworkConfig::builder()
+            .party_id(0)
+            .bind_address(format!("127.0.0.1:{port}"))
+            .expected_parties(parties)
+            .threshold(threshold)
+            .backend(avss)
+            .build()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            stoffel::Error::Configuration(message)
+                if message.contains("avss requires parties (N) >= 3 * threshold (T) + 1")
+        ));
+    }
+
+    // HoneyBadger keeps its 4t + 1 deployment floor.
+    NetworkConfig::builder()
+        .party_id(0)
+        .bind_address("127.0.0.1:20540")
+        .expected_parties(5)
+        .threshold(1)
+        .honeybadger()
+        .build()?;
+    let hb_err = NetworkConfig::builder()
+        .party_id(0)
+        .bind_address("127.0.0.1:20550")
+        .expected_parties(4)
+        .threshold(1)
+        .honeybadger()
+        .build()
+        .unwrap_err();
+    assert!(matches!(
+        hb_err,
+        stoffel::Error::Configuration(message)
+            if message.contains("honeybadger requires parties (N) >= 4 * threshold (T) + 1")
+    ));
+    Ok(())
+}
+
+#[test]
+fn offchain_client_config_validation_is_backend_aware() -> stoffel::Result<()> {
+    fn avss_config(parties: usize, threshold: usize) -> stoffel::Result<OffChainClientConfig> {
+        // `build()` runs `OffChainClientConfig::validate` internally.
+        OffChainClientConfig::builder()
+            .coordinator("127.0.0.1", 19000)
+            .timestamp(1)
+            .parties(parties)
+            .threshold(threshold)
+            .avss(Curve::Bls12_381)
+            .node_rpc_address("127.0.0.1:19100")
+            .identity_der(vec![1], vec![2])
+            .build()
+    }
+
+    // STO-1019: AVSS (n=4, t=1) and (n=7, t=2) validate through OffChainClientConfig.
+    avss_config(4, 1)?.validate()?;
+    avss_config(7, 2)?.validate()?;
+
+    // AVSS below 3t + 1 is rejected with a backend-named formula.
+    for (parties, threshold) in [(3_usize, 1_usize), (6, 2)] {
+        let err = avss_config(parties, threshold).unwrap_err();
+        assert!(matches!(
+            err,
+            stoffel::Error::Configuration(message)
+                if message.contains("avss requires parties (N) >= 3 * threshold (T) + 1")
+        ));
+    }
+
+    // HoneyBadger accepts n = 4t + 1 and rejects below it.
+    OffChainClientConfig::builder()
+        .coordinator("127.0.0.1", 19000)
+        .timestamp(1)
+        .parties(5)
+        .threshold(1)
+        .honeybadger()
+        .node_rpc_address("127.0.0.1:19100")
+        .identity_der(vec![1], vec![2])
+        .build()?;
+    let hb_err = OffChainClientConfig::builder()
+        .coordinator("127.0.0.1", 19000)
+        .timestamp(1)
+        .parties(4)
+        .threshold(1)
+        .honeybadger()
+        .node_rpc_address("127.0.0.1:19100")
+        .identity_der(vec![1], vec![2])
+        .build()
+        .unwrap_err();
+    assert!(matches!(
+        hb_err,
+        stoffel::Error::Configuration(message)
+            if message.contains("honeybadger requires parties (N) >= 4 * threshold (T) + 1")
+    ));
     Ok(())
 }
 
@@ -2467,18 +2608,22 @@ fn offchain_client_config_defaults_to_five_party_topology() -> stoffel::Result<(
     assert_eq!(config.threshold, 1);
     assert_eq!(config.backend, MpcBackend::HoneyBadger);
 
+    // HoneyBadger deploys at 4t + 1, so 4 parties are rejected and the error
+    // names the selected backend and its formula.
     let invalid_topology = OffChainClientConfig::builder()
         .coordinator("127.0.0.1", 19000)
         .timestamp(1)
         .parties(4)
         .threshold(1)
+        .honeybadger()
         .node_rpc_addresses(["127.0.0.1:19100"])
         .identity_der(vec![1], vec![2])
         .build()
         .unwrap_err();
     assert!(matches!(
         invalid_topology,
-        stoffel::Error::Configuration(message) if message.contains("at least 5")
+        stoffel::Error::Configuration(message)
+            if message.contains("honeybadger requires parties (N) >= 4 * threshold (T) + 1")
     ));
 
     let zero_threshold = OffChainClientConfig::builder()
@@ -2554,6 +2699,7 @@ fn offchain_client_config_reports_actionable_validation_errors() {
         .unwrap_err();
     assert!(matches!(unsupported_curve, stoffel::Error::Unsupported(_)));
 
+    // HoneyBadger t = 2 needs 9 parties; 5 is rejected with a backend-named formula.
     let invalid_threshold = OffChainClientConfig::builder()
         .coordinator("127.0.0.1", 19000)
         .timestamp(1)
@@ -2564,7 +2710,11 @@ fn offchain_client_config_reports_actionable_validation_errors() {
         .identity_der(vec![1], vec![2])
         .build()
         .unwrap_err();
-    assert!(matches!(invalid_threshold, stoffel::Error::Unsupported(_)));
+    assert!(matches!(
+        invalid_threshold,
+        stoffel::Error::Configuration(message)
+            if message.contains("honeybadger requires parties (N) >= 4 * threshold (T) + 1")
+    ));
 
     let missing_rpc = OffChainClientConfig::builder()
         .coordinator("127.0.0.1", 19000)
@@ -2960,7 +3110,8 @@ fn mpc_config_and_backend_round_trip_as_readable_config() -> stoffel::Result<()>
     let summary = reparsed.summary()?;
     assert_eq!(summary.parties, 9);
     assert_eq!(summary.threshold, 2);
-    assert_eq!(summary.minimum_parties, 9);
+    // AVSS deploys at 3t + 1, so the minimum party count for t = 2 is 7 (not 9).
+    assert_eq!(summary.minimum_parties, 7);
     assert_eq!(summary.maximum_threshold, 2);
     assert_eq!(summary.minimum_reconstruction_shares, 3);
     assert!(toml::to_string(&summary)?.contains("backend = \"avss:ed25519\""));
