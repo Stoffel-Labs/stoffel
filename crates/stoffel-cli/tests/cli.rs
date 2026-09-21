@@ -577,7 +577,9 @@ fn run_recompiles_when_project_config_is_newer_than_bytecode() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("invalid Byzantine threshold"));
+        .stderr(predicate::str::contains(
+            "honeybadger requires parties (N) >= 4 * threshold (T) + 1",
+        ));
 }
 
 #[test]
@@ -3045,8 +3047,8 @@ fn build_invalid_mpc_flags_report_configuration_context() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("failed to compile or configure"))
-        .stderr(predicate::str::contains("parties must be at least 5"))
-        .stderr(predicate::str::contains("4 * threshold + 1"));
+        .stderr(predicate::str::contains("honeybadger requires parties"))
+        .stderr(predicate::str::contains("4 * threshold (T) + 1"));
 }
 
 #[test]
@@ -3100,7 +3102,9 @@ fn project_config_rejects_invalid_mpc_values_before_running() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("invalid [mpc] config"))
-        .stderr(predicate::str::contains("parties must be at least 5"));
+        .stderr(predicate::str::contains(
+            "honeybadger requires parties (N) >= 4 * threshold (T) + 1",
+        ));
 }
 
 #[test]
