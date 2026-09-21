@@ -109,3 +109,27 @@ services:
       STOFFEL_BOOTSTRAP_ADDRESS: node-0:19200
     ports:
       - "19404:19404"
+
+  input-ready:
+    build:
+      context: ..
+      dockerfile: scripts/Dockerfile
+    command: ["stoffel-coordinator", "wait-ready"]
+    environment:
+      STOFFEL_COORDINATOR_ADDRESS: coordinator:19300
+    volumes:
+      - ../deploy/local:/app/deploy/local:ro
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      node-0:
+        condition: service_healthy
+      node-1:
+        condition: service_healthy
+      node-2:
+        condition: service_healthy
+      node-3:
+        condition: service_healthy
+      node-4:
+        condition: service_healthy
+    restart: "no"

@@ -21,7 +21,7 @@ fn local_mpc_guard() -> MutexGuard<'static, ()> {
 
 const LOCAL_MPC_TEST_TIMEOUT_SECS: &str = "120";
 
-/// Overwrites the scaffolded `src/main.stoffel` with a deterministic two-argument
+/// Overwrites the scaffolded `src/main.stfl` with a deterministic two-argument
 /// addition program so named-input run flows have a stable, cleartext-safe
 /// `main(a, b)` to exercise. The default `init` template uses ClientStore IO,
 /// which neither accepts named inputs nor runs without an MPC
@@ -29,7 +29,7 @@ const LOCAL_MPC_TEST_TIMEOUT_SECS: &str = "120";
 /// program after `init` (and before any `build`).
 fn write_addition_program(project_dir: &std::path::Path) {
     fs::write(
-        project_dir.join("src/main.stoffel"),
+        project_dir.join("src/main.stfl"),
         "def main(a: int64, b: int64) -> int64:\n  return a + b\n",
     )
     .unwrap();
@@ -80,12 +80,12 @@ fn init_creates_default_project() {
         .stdout(predicate::str::contains("Created Stoffel project"));
 
     assert!(temp.path().join("hello/Stoffel.toml").exists());
-    assert!(temp.path().join("hello/src/main.stoffel").exists());
+    assert!(temp.path().join("hello/src/main.stfl").exists());
     assert!(temp.path().join("hello/Cargo.toml").exists());
     assert!(temp.path().join("hello/build.rs").exists());
     assert!(temp.path().join("hello/src/main.rs").exists());
     assert!(!temp.path().join("hello/src/stoffel_bindings.rs").exists());
-    let program = fs::read_to_string(temp.path().join("hello/src/main.stoffel")).unwrap();
+    let program = fs::read_to_string(temp.path().join("hello/src/main.stfl")).unwrap();
     assert!(program.contains("ClientStore.take_share(0, 0)"));
     assert!(program.contains("MpcOutput.send_to_client(0, [doubled])"));
     assert!(!program.contains(".open()"));
@@ -101,21 +101,18 @@ fn init_creates_default_project() {
     let src = temp.path().join("hello/src");
     for file in [
         "client.rs",
-        "deployment.rs",
         "server.rs",
         "coordinator.rs",
         "main.rs",
-        "main.stoffel",
+        "main.stfl",
     ] {
         assert!(src.join(file).exists(), "missing src/{file}");
     }
-    let main_rs = fs::read_to_string(src.join("main.rs")).unwrap();
-    assert!(main_rs.contains("coordinator::start().await"));
-    assert!(main_rs.contains("server::start_all().await"));
-    assert!(!main_rs.contains("client::"));
+    assert!(!src.join("main.stoffel").exists());
+    assert!(!src.join("deployment.rs").exists());
     let client_rs = fs::read_to_string(src.join("client.rs")).unwrap();
     assert!(client_rs.contains("async fn main()"));
-    assert!(client_rs.contains("deployment::client()"));
+    assert!(client_rs.contains("app::client()"));
     assert!(client_rs.contains(".run_typed("));
     for implementation_detail in [
         "Deserialize",
@@ -131,19 +128,23 @@ fn init_creates_default_project() {
         );
     }
     assert!(client_rs.lines().count() < 25);
-    let deployment_rs = fs::read_to_string(src.join("deployment.rs")).unwrap();
-    assert!(deployment_rs.contains("stoffel_bindings.rs"));
+    let main_rs = fs::read_to_string(src.join("main.rs")).unwrap();
+    assert!(main_rs.contains("stoffel_bindings.rs"));
     assert!(
-        deployment_rs.contains("stoffel_bindings::ProgramManifest")
-            || deployment_rs.contains("bindings::ProgramManifest")
+        main_rs.contains("stoffel_bindings::ProgramManifest")
+            || main_rs.contains("bindings::ProgramManifest")
     );
-    assert!(deployment_rs.contains("Stoffel::load_file"));
-    assert!(deployment_rs.contains("client_for_deployment"));
-    assert!(deployment_rs.contains("offchain_client_config(0)"));
+    assert!(main_rs.contains("Stoffel::load_file"));
+    assert!(main_rs.contains("client_for_deployment"));
+    assert!(main_rs.contains("offchain_client_config(0)"));
     let server_rs = fs::read_to_string(src.join("server.rs")).unwrap();
     assert!(server_rs.contains("config.parties"));
     assert!(server_rs.contains(".server(party_id)"));
-    let generated_rust = format!("{main_rs}\n{client_rs}\n{deployment_rs}\n{server_rs}");
+    let coordinator_rs = fs::read_to_string(src.join("coordinator.rs")).unwrap();
+    assert!(coordinator_rs.contains("Some(\"wait-ready\")"));
+    assert!(coordinator_rs.contains("wait_for_round(Round::InputMaskReservation)"));
+    assert!(coordinator_rs.contains("STOFFEL_READY_TIMEOUT_SECS"));
+    let generated_rust = format!("{main_rs}\n{client_rs}\n{server_rs}\n{coordinator_rs}");
     for prohibited in [
         "execute_local",
         "exec_local",
@@ -156,10 +157,18 @@ fn init_creates_default_project() {
             "generated Rust uses {prohibited}"
         );
     }
-    assert!(temp.path().join("hello/tests/test_double.stoffel").exists());
+    assert!(temp.path().join("hello/tests/test_double.stfl").exists());
+    assert!(!temp.path().join("hello/tests/test_double.stoffel").exists());
     assert!(temp.path().join("hello/tests/topology.rs").exists());
     assert!(temp.path().join("hello/scripts/run-local.sh").exists());
+    let run_local = fs::read_to_string(temp.path().join("hello/scripts/run-local.sh")).unwrap();
+    let wait_ready = run_local.find("stoffel-coordinator\" wait-ready").unwrap();
+    let ready_message = run_local.find("ready for client input").unwrap();
+    assert!(wait_ready < ready_message);
     assert!(temp.path().join("hello/scripts/run-client.sh").exists());
+    let run_client = fs::read_to_string(temp.path().join("hello/scripts/run-client.sh")).unwrap();
+    assert!(run_client.contains("stoffel-coordinator -- wait-ready"));
+    assert!(run_client.contains("stoffel-client"));
     assert!(temp
         .path()
         .join("hello/scripts/docker-compose.yml")
@@ -177,7 +186,10 @@ fn init_creates_default_project() {
     for source in ["client.rs", "server.rs", "coordinator.rs", "main.rs"] {
         assert!(readme.contains(source), "README does not explain {source}");
     }
+    assert!(!readme.contains("deployment.rs"));
     assert!(readme.contains("scripts/docker-compose.yml"));
+    assert!(readme.contains("input-ready"));
+    assert!(readme.contains("open port"));
     assert!(readme.contains("https://docs.stoffelmpc.com"));
     assert!(!readme.contains("--input a=40 --input b=2"));
     assert!(readme.contains("stoffel build"));
@@ -276,7 +288,7 @@ fn init_default_project_runs_with_separate_services() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app");
-    let cargo_target = std::env::var_os("CARGO_TARGET_DIR")
+    let cargo_target = std::env::var_os("STOFFEL_GENERATED_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| project.join("target"));
     Command::cargo_bin("stoffel")
@@ -300,8 +312,12 @@ fn init_default_project_runs_with_separate_services() {
         .unwrap()
         .success());
     let runner = std::env::var_os("STOFFEL_RUN_BIN").expect("set STOFFEL_RUN_BIN");
-    let mut services = StdCommand::new(cargo_target.join("debug/stoffel-services"))
+    let stoffel = assert_cmd::cargo::cargo_bin("stoffel");
+    let mut services = StdCommand::new("sh")
+        .arg(project.join("scripts/run-local.sh"))
         .current_dir(&project)
+        .env("CARGO_TARGET_DIR", &cargo_target)
+        .env("STOFFEL_BIN", stoffel)
         .env("STOFFEL_RUN_BIN", runner)
         .env("STOFFEL_AUTH_TOKEN", "stoffel-local-example")
         .stdout(Stdio::piped())
@@ -320,12 +336,17 @@ fn init_default_project_runs_with_separate_services() {
             break;
         }
     }
-    let output = StdCommand::new(cargo_target.join("debug/stoffel-client"))
+    let output = StdCommand::new("sh")
+        .arg(project.join("scripts/run-client.sh"))
         .current_dir(&project)
         .arg("42")
+        .env("CARGO_TARGET_DIR", &cargo_target)
+        .env("STOFFEL_READY_TIMEOUT_SECS", LOCAL_MPC_TEST_TIMEOUT_SECS)
         .output()
         .unwrap();
-    let _ = services.kill();
+    let _ = StdCommand::new("kill")
+        .arg(services.id().to_string())
+        .status();
     let _ = services.wait();
     assert!(
         output.status.success(),
@@ -449,7 +470,7 @@ fn run_accepts_numeric_bits_for_secret_bool_list_inputs() {
         .assert()
         .success();
     fs::write(
-        temp.path().join("src/main.stoffel"),
+        temp.path().join("src/main.stfl"),
         "def main(a: list[secret bool]) -> bool:\n  return a[0].reveal()\n",
     )
     .unwrap();
@@ -634,7 +655,7 @@ fn run_recompiles_when_project_source_is_newer_than_bytecode() {
 
     thread::sleep(Duration::from_secs(1));
     fs::write(
-        project.join("src/main.stoffel"),
+        project.join("src/main.stfl"),
         "def main(a: int64, b: int64) -> int64:\n  var sum = a + b\n  var sum2 = sum + b\n  return sum2\n",
     )
     .unwrap();
@@ -683,7 +704,7 @@ fn run_ignores_stray_bytecode_when_project_source_is_newer() {
 
     thread::sleep(Duration::from_secs(1));
     fs::write(
-        project.join("src/main.stoffel"),
+        project.join("src/main.stfl"),
         "def main(a: int64, b: int64) -> int64:\n  return 100\n",
     )
     .unwrap();
@@ -836,7 +857,7 @@ fn dev_once_explains_input_mistakes() {
         .assert()
         .success();
     fs::write(
-        project.join("src/main.stoffel"),
+        project.join("src/main.stfl"),
         "def main(a: secret int64, b: secret int64) -> secret int64:\n  return a + b\n",
     )
     .unwrap();
@@ -866,7 +887,7 @@ fn dev_once_explains_input_mistakes() {
         .stderr(predicate::str::contains("function '' not found").not());
 
     fs::write(
-        project.join("src/main.stoffel"),
+        project.join("src/main.stfl"),
         "def helper() -> int64:\n  return 1\n",
     )
     .unwrap();
@@ -1627,7 +1648,7 @@ fn run_validates_entry_and_inputs_before_timeout() {
         .stderr(predicate::str::contains("Available source functions: main"));
 
     fs::write(
-        temp.path().join("src/main.stoffel"),
+        temp.path().join("src/main.stfl"),
         "def add(a: int64, b: int64) -> int64:\n  return a + b\n",
     )
     .unwrap();
@@ -1962,7 +1983,7 @@ fn run_rejects_flat_list_for_nested_list_input() {
         .assert()
         .success();
     fs::write(
-        temp.path().join("src/main.stoffel"),
+        temp.path().join("src/main.stfl"),
         "def main(a: list[list[int64]], a_rows: int64, a_cols: int64) -> int64:\n  return a[0][0]\n",
     )
     .unwrap();
@@ -2144,7 +2165,7 @@ fn run_network_validates_config_path_before_parsing() {
         .arg(temp.path())
         .arg("--network")
         .arg("--config")
-        .arg(temp.path().join("src/main.stoffel"))
+        .arg(temp.path().join("src/main.stfl"))
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -2577,7 +2598,7 @@ fn disassemble_rejects_source_files_with_actionable_error() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .current_dir(temp.path())
-        .args(["compile", "--disassemble", "src/main.stoffel"])
+        .args(["compile", "--disassemble", "src/main.stfl"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -2812,7 +2833,7 @@ fn build_and_check_do_not_ignore_explicit_empty_source_directories() {
                 "no .stfl source files found under",
             ))
             .stderr(predicate::str::contains("pass project directory"))
-            .stderr(predicate::str::contains("src/main.stoffel").not());
+            .stderr(predicate::str::contains("src/main.stfl").not());
     }
 }
 
@@ -2858,7 +2879,7 @@ fn build_missing_configured_source_reports_path() {
         .arg("--force")
         .assert()
         .success();
-    fs::remove_file(temp.path().join("src/main.stoffel")).unwrap();
+    fs::remove_file(temp.path().join("src/main.stfl")).unwrap();
 
     for command in ["build", "check"] {
         Command::cargo_bin("stoffel")
@@ -2868,7 +2889,7 @@ fn build_missing_configured_source_reports_path() {
             .assert()
             .failure()
             .stderr(predicate::str::contains(
-                "configured build.source src/main.stoffel does not exist",
+                "configured build.source src/main.stfl does not exist",
             ))
             .stderr(predicate::str::contains("IO error").not());
     }
@@ -2887,7 +2908,7 @@ fn build_respects_configured_source_directory_paths() {
     let config = fs::read_to_string(temp.path().join("Stoffel.toml")).unwrap();
     fs::write(
         temp.path().join("Stoffel.toml"),
-        config.replace("source = \"src/main.stoffel\"", "source = \"programs\""),
+        config.replace("source = \"src/main.stfl\"", "source = \"programs\""),
     )
     .unwrap();
 
@@ -2900,7 +2921,7 @@ fn build_respects_configured_source_directory_paths() {
         .stderr(predicate::str::contains(
             "configured build.source programs does not exist",
         ))
-        .stderr(predicate::str::contains("src/main.stoffel").not());
+        .stderr(predicate::str::contains("src/main.stfl").not());
 
     fs::create_dir_all(temp.path().join("programs")).unwrap();
     Command::cargo_bin("stoffel")
@@ -2912,7 +2933,7 @@ fn build_respects_configured_source_directory_paths() {
         .stderr(predicate::str::contains(
             "no .stfl source files found under configured build.source programs",
         ))
-        .stderr(predicate::str::contains("src/main.stoffel").not());
+        .stderr(predicate::str::contains("src/main.stfl").not());
 
     fs::write(
         temp.path().join("programs/app.stfl"),
@@ -2926,7 +2947,7 @@ fn build_respects_configured_source_directory_paths() {
         .assert()
         .success()
         .stdout(predicate::str::contains("programs/app.stfl"))
-        .stdout(predicate::str::contains("src/main.stoffel").not());
+        .stdout(predicate::str::contains("src/main.stfl").not());
 }
 
 #[test]
@@ -2947,10 +2968,7 @@ fn build_accepts_uppercase_configured_source_extension() {
     let config = fs::read_to_string(temp.path().join("Stoffel.toml")).unwrap();
     fs::write(
         temp.path().join("Stoffel.toml"),
-        config.replace(
-            "source = \"src/main.stoffel\"",
-            "source = \"src/upper.STFL\"",
-        ),
+        config.replace("source = \"src/main.stfl\"", "source = \"src/upper.STFL\""),
     )
     .unwrap();
 
@@ -2976,7 +2994,10 @@ fn build_rejects_configured_source_with_wrong_extension() {
     let config = fs::read_to_string(temp.path().join("Stoffel.toml")).unwrap();
     fs::write(
         temp.path().join("Stoffel.toml"),
-        config.replace("source = \"src/main.stoffel\"", "source = \"src/main.txt\""),
+        config.replace(
+            "source = \"src/main.stfl\"",
+            "source = \"src/main.stoffel\"",
+        ),
     )
     .unwrap();
 
@@ -2987,7 +3008,7 @@ fn build_rejects_configured_source_with_wrong_extension() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "invalid build.source src/main.txt",
+            "invalid build.source src/main.stoffel",
         ))
         .stderr(predicate::str::contains(
             "expected a .stfl source file or source directory",
@@ -3014,7 +3035,7 @@ fn build_rejects_unsafe_configured_source_paths() {
         fs::write(
             temp.path().join("Stoffel.toml"),
             config.replace(
-                "source = \"src/main.stoffel\"",
+                "source = \"src/main.stfl\"",
                 &format!("source = \"{source}\""),
             ),
         )
@@ -3033,7 +3054,7 @@ fn build_rejects_unsafe_configured_source_paths() {
     fs::write(
         temp.path().join("Stoffel.toml"),
         config.replace(
-            "source = \"src/main.stoffel\"",
+            "source = \"src/main.stfl\"",
             &format!("source = \"{}\"", absolute_source.display()),
         ),
     )
@@ -3411,7 +3432,7 @@ fn run_broken_source_reports_command_and_path_context() {
         .arg("--force")
         .assert()
         .success();
-    fs::write(temp.path().join("src/main.stoffel"), "def main(\n").unwrap();
+    fs::write(temp.path().join("src/main.stfl"), "def main(\n").unwrap();
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -3628,12 +3649,12 @@ fn explicit_missing_path_reports_missing_path() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("build")
-        .arg(temp.path().join("app/src/mian.stoffel"))
+        .arg(temp.path().join("app/src/mian.stfl"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("mian.stoffel does not exist"))
+        .stderr(predicate::str::contains("mian.stfl does not exist"))
         .stderr(predicate::str::contains("did you mean"))
-        .stderr(predicate::str::contains("main.stoffel"));
+        .stderr(predicate::str::contains("main.stfl"));
 }
 
 #[test]
@@ -3776,7 +3797,7 @@ fn init_supports_declared_templates_and_library_mode() {
             assert!(program.contains("secret int64"));
         }
         if name != "rust" {
-            let program = fs::read_to_string(path.join("src/main.stoffel")).unwrap();
+            let program = fs::read_to_string(path.join("src/main.stfl")).unwrap();
             assert!(program.contains("ClientStore.take_share(0, 0)"));
         }
     }
@@ -4088,7 +4109,7 @@ fn project_config_rejects_unknown_fields_instead_of_hiding_typos() {
         ),
     ] {
         let config = if replacement.starts_with("sorce") {
-            original.replace("source = \"src/main.stoffel\"", replacement)
+            original.replace("source = \"src/main.stfl\"", replacement)
         } else if replacement.starts_with("threshhold") {
             original.replace("threshold = 1", replacement)
         } else {
@@ -4135,7 +4156,7 @@ fn project_config_unknown_field_errors_suggest_common_config_names() {
             "did you mean [mpc].instance_id?",
         ),
         (
-            original.replace("source = \"src/main.stoffel\"", "main = \"src/main.stfl\""),
+            original.replace("source = \"src/main.stfl\"", "main = \"src/main.stfl\""),
             "unknown field `main`",
             "did you mean [build].source?",
         ),
@@ -4328,7 +4349,7 @@ fn test_rejects_parameterized_programs_with_run_guidance() {
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("test")
-        .arg(temp.path().join("src/main.stoffel"))
+        .arg(temp.path().join("src/main.stfl"))
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -4682,7 +4703,7 @@ fn status_reports_project_health() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            temp.path().join("src/main.stoffel").display().to_string(),
+            temp.path().join("src/main.stfl").display().to_string(),
         ))
         .stdout(predicate::str::contains("README.md").not());
 }
@@ -4730,7 +4751,7 @@ fn status_compile_failures_suggest_check_after_fixing_source() {
         .arg("--force")
         .assert()
         .success();
-    fs::write(temp.path().join("src/main.stoffel"), "def main(\n").unwrap();
+    fs::write(temp.path().join("src/main.stfl"), "def main(\n").unwrap();
 
     Command::cargo_bin("stoffel")
         .unwrap()

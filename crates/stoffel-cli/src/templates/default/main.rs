@@ -1,23 +1,74 @@
-mod coordinator;
-mod server;
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
+use stoffel::prelude::{NetworkDeployment, Stoffel, StoffelClient};
 
-/// Starts the local MPC infrastructure only. The participant client is a
-/// separate binary so application code never lives inside the service process.
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    coordinator::prepare_local()?;
-    let _coordinator = coordinator::start().await?;
-    let servers = server::start_all().await?;
+#[allow(dead_code, unused_mut, unused_variables)]
+pub mod bindings {
+    include!(concat!(env!("OUT_DIR"), "/stoffel_bindings.rs"));
+}
 
-    // Node RPC sockets open before preprocessing completes. Give the local
-    // fixture time to enter the client-input round before advertising it.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Deployment {
+    program: PathBuf,
+    coordinator_host: String,
+    coordinator_port: u16,
+    timestamp: u64,
+    parties: usize,
+    threshold: usize,
+    servers: Vec<String>,
+    node_rpc_addresses: Vec<String>,
+    client_cert: PathBuf,
+    client_key: PathBuf,
+}
 
-    println!("Local Stoffel MPC services are ready.");
-    println!("In another terminal run: cargo run --bin stoffel-client");
-    println!("Press Ctrl-C here after the client receives its result.");
+impl Deployment {
+    fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut config: Self = serde_json::from_slice(&std::fs::read(path)?)?;
+        if config.servers.len() != config.parties
+            || config.node_rpc_addresses.len() != config.parties
+        {
+            return Err("deployment address counts must match mpc.parties".into());
+        }
+        let root = path.parent().unwrap_or(Path::new("."));
+        config.program = root.join(config.program);
+        config.client_cert = root.join(config.client_cert);
+        config.client_key = root.join(config.client_key);
+        Ok(config)
+    }
+}
 
-    tokio::signal::ctrl_c().await?;
-    server::shutdown_all(servers).await?;
-    Ok(())
+/// Builds an ephemeral application client for the configured long-lived services.
+pub fn client() -> Result<StoffelClient, Box<dyn std::error::Error>> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let config_path = std::env::var_os("STOFFEL_DEPLOYMENT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("deploy/local/deployment.json")
+        });
+    let config = Deployment::load(&config_path)?;
+    let runtime = Stoffel::load_file(&config.program)?
+        .manifest::<bindings::ProgramManifest>()
+        .parties(config.parties)
+        .threshold(config.threshold)
+        .build()?;
+    let network = NetworkDeployment::builder(config.servers)
+        .expected_clients(1)
+        .threshold(config.threshold)
+        .honeybadger()
+        .build()?;
+    let offchain = runtime
+        .offchain_client_config(0)?
+        .coordinator(config.coordinator_host, config.coordinator_port)
+        .timestamp(config.timestamp)
+        .node_rpc_addresses(config.node_rpc_addresses)
+        .identity_files(config.client_cert, config.client_key)
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+
+    Ok(runtime
+        .client_for_deployment(&network)
+        .client_id(0)
+        .offchain_io(offchain)
+        .build()?)
 }

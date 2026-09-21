@@ -2278,9 +2278,7 @@ fn is_bytecode_path(path: &Path) -> bool {
 fn is_source_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("stfl") || extension.eq_ignore_ascii_case("stoffel")
-        })
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("stfl"))
 }
 
 fn apply_inputs(mut builder: Stoffel, inputs: &[InputArg]) -> Stoffel {

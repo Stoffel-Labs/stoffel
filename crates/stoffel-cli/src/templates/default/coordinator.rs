@@ -2,11 +2,12 @@ use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use stoffel::coordinator::OffChainCoordinatorServer;
+use std::time::{Duration, Instant};
+use stoffel::coordinator::{Coordinator, OffChainCoordinatorServer, Round};
 use stoffel_mpc_coordinator_off_chain::tests::fake_coord::{
     HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
+    HoneyBadgerOffChainCoordinatorClient,
 };
-
 use x509_parser::parse_x509_certificate;
 
 pub type LocalCoordinator = OffChainCoordinatorServer<HoneyBadgerCoordinatorConnection>;
@@ -189,6 +190,90 @@ pub async fn start() -> Result<LocalCoordinator, Box<dyn std::error::Error>> {
     .await?)
 }
 
+fn coordinator_endpoint(
+    deployment: &DeploymentFile,
+) -> Result<(String, u16), Box<dyn std::error::Error>> {
+    if let Ok(address) = std::env::var("STOFFEL_COORDINATOR_ADDRESS") {
+        let (host, port) = address
+            .rsplit_once(':')
+            .ok_or("STOFFEL_COORDINATOR_ADDRESS must use host:port")?;
+        return Ok((host.to_owned(), port.parse()?));
+    }
+    Ok((
+        deployment.coordinator_host.clone(),
+        deployment.coordinator_port,
+    ))
+}
+
+async fn wait_ready() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = deployment_dir();
+    let deployment: DeploymentFile =
+        serde_json::from_slice(&std::fs::read(dir.join("deployment.json"))?)?;
+    let (host, port) = coordinator_endpoint(&deployment)?;
+    let timeout_secs = std::env::var("STOFFEL_READY_TIMEOUT_SECS")
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()?
+        .unwrap_or(180);
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let cert = std::fs::read(dir.join(&deployment.client_cert))?;
+    let key = std::fs::read(dir.join(&deployment.client_key))?;
+    let client = loop {
+        match HoneyBadgerOffChainCoordinatorClient::start_rpc_client(
+            &host,
+            port,
+            deployment.threshold as u64,
+            deployment.parties as u64,
+            1,
+            cert.clone(),
+            key.clone(),
+        )
+        .await
+        {
+            Ok(client) => break client,
+            Err(error) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let _ = error;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "coordinator at {host}:{port} was not reachable within {timeout_secs}s: {error}"
+                )
+                .into());
+            }
+        }
+    };
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "MPC network did not become input-ready within {timeout_secs}s; check party 0 and node logs. Party 0 must complete preprocessing before clients submit input."
+            )
+            .into());
+        }
+
+        // Party 0 resets the coordinator immediately before preprocessing, which
+        // clears subscriptions created during Idle. Resubscribe periodically so
+        // readiness works whether this process starts before or after that reset.
+        let attempt = tokio::time::timeout(
+            remaining.min(Duration::from_secs(2)),
+            client.wait_for_round(Round::InputMaskReservation),
+        )
+        .await;
+        match attempt {
+            Ok(result) => {
+                result?;
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    println!("MPC network is ready for client input");
+    Ok(())
+}
+
+
 #[allow(dead_code)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -203,7 +288,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("Coordinator started; press Ctrl-C to stop");
             tokio::signal::ctrl_c().await?;
         }
-        _ => return Err("usage: stoffel-coordinator <prepare|serve>".into()),
+        Some("wait-ready") => wait_ready().await?,
+        _ => return Err("usage: stoffel-coordinator <prepare|serve|wait-ready>".into()),
     }
     Ok(())
 }

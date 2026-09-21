@@ -419,9 +419,7 @@ fn nearest_stoffel_source(path: &Path) -> Option<PathBuf> {
 fn is_stoffel_source_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("stfl") || extension.eq_ignore_ascii_case("stoffel")
-        })
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("stfl"))
 }
 
 fn levenshtein(left: &str, right: &str) -> usize {
@@ -444,8 +442,8 @@ fn init_stoffel_project(path: &Path) -> Result<()> {
     let name = project_name(path);
     write_new(path.join(CONFIG_FILE), &default_config_text(name.clone()))?;
     write_new(
-        path.join("src/main.stoffel"),
-        include_str!("templates/default/main.stoffel"),
+        path.join("src/main.stfl"),
+        include_str!("templates/default/main.stfl"),
     )?;
     write_new(path.join("Cargo.toml"), &default_cargo_toml_text(&name))?;
     write_new(
@@ -455,18 +453,14 @@ fn init_stoffel_project(path: &Path) -> Result<()> {
     for (file, contents) in [
         ("src/main.rs", include_str!("templates/default/main.rs")),
         ("src/client.rs", include_str!("templates/default/client.rs")),
-        (
-            "src/deployment.rs",
-            include_str!("templates/default/deployment.rs"),
-        ),
         ("src/server.rs", include_str!("templates/default/server.rs")),
         (
             "src/coordinator.rs",
             include_str!("templates/default/coordinator.rs"),
         ),
         (
-            "tests/test_double.stoffel",
-            include_str!("templates/default/test.stoffel"),
+            "tests/test_double.stfl",
+            include_str!("templates/default/test.stfl"),
         ),
         (
             "tests/topology.rs",
@@ -961,7 +955,7 @@ fn write_new(path: PathBuf, contents: &str) -> Result<()> {
 }
 
 fn default_config_text(name: String) -> String {
-    config_text(name, "src/main.stoffel")
+    config_text(name, "src/main.stfl")
 }
 
 fn default_readme_text(title: &str) -> String {
@@ -970,7 +964,7 @@ fn default_readme_text(title: &str) -> String {
 
 fn default_cargo_toml_text(name: &str) -> String {
     format!(
-        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"stoffel-services\"\npath = \"src/main.rs\"\n\n[[bin]]\nname = \"stoffel-client\"\npath = \"src/client.rs\"\n\n[[bin]]\nname = \"stoffel-server\"\npath = \"src/server.rs\"\n\n[[bin]]\nname = \"stoffel-coordinator\"\npath = \"src/coordinator.rs\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", version = \"=0.1.2\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"net\", \"rt-multi-thread\", \"signal\", \"time\"] }}\nserde = {{ version = \"1\", features = [\"derive\"] }}\nserde_json = \"1\"\ntoml = \"0.8\"\nrustls = {{ version = \"=0.23.41\", default-features = false, features = [\"ring\"] }}\nstoffel-mpc-coordinator-off-chain = \"=0.1.0\"\nblake3 = \"1\"\nx509-parser = \"0.18\"\nrcgen = \"0.14\"\n\n[build-dependencies]\nstoffel-bindgen = \"=0.1.2\"\n"
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\nautobins = false\ndefault-run = \"stoffel-client\"\n\n[[bin]]\nname = \"stoffel-client\"\npath = \"src/client.rs\"\n\n[[bin]]\nname = \"stoffel-server\"\npath = \"src/server.rs\"\n\n[[bin]]\nname = \"stoffel-coordinator\"\npath = \"src/coordinator.rs\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", version = \"=0.1.2\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"net\", \"rt-multi-thread\", \"signal\", \"time\"] }}\nserde = {{ version = \"1\", features = [\"derive\"] }}\nserde_json = \"1\"\ntoml = \"0.8\"\nrustls = {{ version = \"=0.23.41\", default-features = false, features = [\"ring\"] }}\nstoffel-mpc-coordinator-off-chain = \"=0.1.0\"\nblake3 = \"1\"\nx509-parser = \"0.18\"\nrcgen = \"0.14\"\n\n[build-dependencies]\nstoffel-bindgen = \"=0.1.2\"\n"
     )
 }
 
