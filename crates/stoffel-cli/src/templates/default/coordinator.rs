@@ -219,8 +219,21 @@ async fn wait_ready() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let cert = std::fs::read(dir.join(&deployment.client_cert))?;
     let key = std::fs::read(dir.join(&deployment.client_key))?;
-    let client = loop {
-        match HoneyBadgerOffChainCoordinatorClient::start_rpc_client(
+    let mut last_error = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            let detail = last_error
+                .as_deref()
+                .map(|error| format!(" Last coordinator error: {error}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "MPC network did not become input-ready within {timeout_secs}s; check party 0 and node logs. Party 0 must complete preprocessing before clients submit input.{detail}"
+            )
+            .into());
+        }
+
+        let client = match HoneyBadgerOffChainCoordinatorClient::start_rpc_client(
             &host,
             port,
             deployment.threshold as u64,
@@ -231,40 +244,27 @@ async fn wait_ready() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         {
-            Ok(client) => break client,
-            Err(error) if Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let _ = error;
-            }
+            Ok(client) => client,
             Err(error) => {
-                return Err(format!(
-                    "coordinator at {host}:{port} was not reachable within {timeout_secs}s: {error}"
-                )
-                .into());
+                last_error = Some(error.to_string());
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
             }
-        }
-    };
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(format!(
-                "MPC network did not become input-ready within {timeout_secs}s; check party 0 and node logs. Party 0 must complete preprocessing before clients submit input."
-            )
-            .into());
-        }
+        };
 
         // Party 0 resets the coordinator immediately before preprocessing, which
-        // clears subscriptions created during Idle. Resubscribe periodically so
-        // readiness works whether this process starts before or after that reset.
+        // clears subscriptions created during Idle. Reconnect and resubscribe on
+        // timeouts, closed subscriptions, and coordinator restarts.
         let attempt = tokio::time::timeout(
             remaining.min(Duration::from_secs(2)),
             client.wait_for_round(Round::InputMaskReservation),
         )
         .await;
         match attempt {
-            Ok(result) => {
-                result?;
-                break;
+            Ok(Ok(())) => break,
+            Ok(Err(error)) => {
+                last_error = Some(error.to_string());
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
             Err(_) => continue,
         }

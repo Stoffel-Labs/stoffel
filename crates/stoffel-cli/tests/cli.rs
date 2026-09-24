@@ -162,6 +162,9 @@ fn init_creates_default_project() {
     assert!(temp.path().join("hello/tests/topology.rs").exists());
     assert!(temp.path().join("hello/scripts/run-local.sh").exists());
     let run_local = fs::read_to_string(temp.path().join("hello/scripts/run-local.sh")).unwrap();
+    assert!(run_local.contains("command -v stoffel-run"));
+    assert!(run_local.contains("cargo install stoffel-vm-runner --version 0.1.2 --locked"));
+    assert!(run_local.contains("export STOFFEL_RUN_BIN"));
     let wait_ready = run_local.find("stoffel-coordinator\" wait-ready").unwrap();
     let ready_message = run_local.find("ready for client input").unwrap();
     assert!(wait_ready < ready_message);
@@ -195,6 +198,17 @@ fn init_creates_default_project() {
     assert!(readme.contains("stoffel build"));
     assert!(readme.contains("cargo build"));
     assert!(readme.contains("cargo run"));
+    assert!(readme.contains("cargo install stoffel-vm-runner"));
+
+    let missing_runner = StdCommand::new("sh")
+        .arg(temp.path().join("hello/scripts/run-local.sh"))
+        .current_dir(temp.path().join("hello"))
+        .env("STOFFEL_RUN_BIN", "/definitely/missing/stoffel-run")
+        .output()
+        .unwrap();
+    assert!(!missing_runner.status.success());
+    assert!(String::from_utf8_lossy(&missing_runner.stderr)
+        .contains("STOFFEL_RUN_BIN is not executable"));
 }
 
 #[test]
@@ -311,14 +325,21 @@ fn init_default_project_runs_with_separate_services() {
         .status()
         .unwrap()
         .success());
-    let runner = std::env::var_os("STOFFEL_RUN_BIN").expect("set STOFFEL_RUN_BIN");
+    let runner = PathBuf::from(std::env::var_os("STOFFEL_RUN_BIN").expect("set STOFFEL_RUN_BIN"));
+    let runner_dir = runner.parent().expect("stoffel-run has a parent directory");
+    let mut path_entries = vec![runner_dir.to_path_buf()];
+    path_entries.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let runner_path = std::env::join_paths(path_entries).unwrap();
     let stoffel = assert_cmd::cargo::cargo_bin("stoffel");
     let mut services = StdCommand::new("sh")
         .arg(project.join("scripts/run-local.sh"))
         .current_dir(&project)
         .env("CARGO_TARGET_DIR", &cargo_target)
         .env("STOFFEL_BIN", stoffel)
-        .env("STOFFEL_RUN_BIN", runner)
+        .env_remove("STOFFEL_RUN_BIN")
+        .env("PATH", runner_path)
         .env("STOFFEL_AUTH_TOKEN", "stoffel-local-example")
         .stdout(Stdio::piped())
         .spawn()

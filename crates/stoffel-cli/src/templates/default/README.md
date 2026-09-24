@@ -10,6 +10,12 @@ stoffel check
 
 ## Run the local MPC network
 
+Install the local MPC node runner once:
+
+```sh
+cargo install stoffel-vm-runner --version 0.1.2 --locked
+```
+
 Start the coordinator and the number of MPC nodes configured by `[mpc].parties` in `Stoffel.toml`:
 
 ```sh
@@ -17,6 +23,8 @@ Start the coordinator and the number of MPC nodes configured by `[mpc].parties` 
 ```
 
 The script validates and compiles `src/main.stfl`, builds the Rust binaries, starts the coordinator and MPC nodes, and waits for preprocessing to finish. It prints `Local Stoffel MPC services are ready for client input.` only after party 0 advances the coordinator to the input-mask reservation round. It does not run a client.
+
+The script finds `stoffel-run` on `PATH`. Framework contributors can instead select a local build explicitly with `STOFFEL_RUN_BIN=/path/to/stoffel-run ./scripts/run-local.sh`.
 
 ## Integrate the client
 
@@ -86,7 +94,7 @@ docker compose -f scripts/docker-compose.yml up --build
 
 The Compose stack runs one coordinator and five independently addressable MPC nodes. The `input-ready` service waits for preprocessing and exits successfully only when the coordinator can accept client input. Keep the client in your application and run `./scripts/run-client.sh 42` after Compose prints `MPC network is ready for client input`.
 
-If readiness times out, inspect the coordinator and node logs before starting a client. An open port only means that a process is listening; it does not mean the MPC network has finished preprocessing. Party 0 must remain running and complete the transition from `Idle` through preprocessing to input-mask reservation.
+If readiness times out, inspect the coordinator and node logs before starting a client. The readiness command reconnects across coordinator startup and preprocessing resets, but cannot make progress if party 0 exits. An open port only means that a process is listening; it does not mean the MPC network has finished preprocessing. Party 0 must remain running and complete the transition from `Idle` through preprocessing to input-mask reservation.
 
 For a real deployment, provide each service its own identity and persistent runtime environment, replace loopback addresses in the deployment configuration, and manage secrets with your deployment platform.
 

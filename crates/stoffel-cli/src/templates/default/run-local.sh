@@ -1,5 +1,24 @@
 #!/usr/bin/env sh
 set -eu
+
+if [ -n "${STOFFEL_RUN_BIN:-}" ]; then
+  runner=$STOFFEL_RUN_BIN
+elif command -v stoffel-run >/dev/null 2>&1; then
+  runner=$(command -v stoffel-run)
+else
+  printf '%s\n' \
+    "Missing stoffel-run, which runs the local MPC nodes." \
+    "Install the matching runner once:" \
+    "  cargo install stoffel-vm-runner --version 0.1.2 --locked" \
+    "Then rerun this script. You can also set STOFFEL_RUN_BIN to an existing stoffel-run binary." >&2
+  exit 1
+fi
+if [ ! -x "$runner" ]; then
+  printf '%s\n' "STOFFEL_RUN_BIN is not executable: $runner" >&2
+  exit 1
+fi
+export STOFFEL_RUN_BIN="$runner"
+
 stoffel_bin=${STOFFEL_BIN:-stoffel}
 "$stoffel_bin" check
 "$stoffel_bin" build --output artifacts/program.stflb
