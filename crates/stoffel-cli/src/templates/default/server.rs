@@ -27,34 +27,14 @@ fn env_or(name: &str, fallback: String) -> String {
     std::env::var(name).unwrap_or(fallback)
 }
 
-fn node_bind_address(party_id: usize) -> String {
-    env_or(
-        "STOFFEL_BIND_ADDRESS",
-        format!("127.0.0.1:{}", 19_200 + party_id.saturating_mul(2)),
-    )
-}
-
-fn node_rpc_address(party_id: usize) -> String {
-    env_or(
-        "STOFFEL_RPC_BIND_ADDRESS",
-        format!("127.0.0.1:{}", 19_400 + party_id),
-    )
-}
-
-fn node_mesh_address(party_id: usize) -> String {
-    let port = if party_id == 0 {
-        20_200
-    } else {
-        19_200 + party_id.saturating_mul(2)
-    };
-    format!("127.0.0.1:{port}")
-}
-
-fn coordinator_address() -> String {
-    env_or(
-        "STOFFEL_COORDINATOR_ADDRESS",
-        "127.0.0.1:19300".to_owned(),
-    )
+#[derive(Deserialize)]
+struct DeploymentAddresses {
+    coordinator_host: String,
+    coordinator_port: u16,
+    timestamp: u64,
+    node_bind_addresses: Vec<String>,
+    servers: Vec<String>,
+    node_rpc_addresses: Vec<String>,
 }
 
 fn identity_path(party_id: usize, suffix: &str) -> PathBuf {
@@ -65,20 +45,22 @@ fn client_certificate() -> PathBuf {
     project_root().join("deploy/local/client-0.cert.der")
 }
 
-fn deployment_timestamp() -> Result<u64, Box<dyn std::error::Error>> {
-    #[derive(Deserialize)]
-    struct DeploymentTimestamp {
-        timestamp: u64,
-    }
+fn deployment_addresses() -> Result<DeploymentAddresses, Box<dyn std::error::Error>> {
     let path = project_root().join("deploy/local/deployment.json");
-    let config: DeploymentTimestamp = serde_json::from_slice(&std::fs::read(path)?)?;
-    Ok(config.timestamp)
+    Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 
 pub async fn start_party(party_id: usize) -> Result<StoffelServer, Box<dyn std::error::Error>> {
     let config = settings()?;
+    let deployment = deployment_addresses()?;
     if party_id >= config.parties {
         return Err(format!("party {party_id} is outside mpc.parties={}", config.parties).into());
+    }
+    if deployment.node_bind_addresses.len() != config.parties
+        || deployment.servers.len() != config.parties
+        || deployment.node_rpc_addresses.len() != config.parties
+    {
+        return Err("deployment address counts must match mpc.parties".into());
     }
 
     let artifact = project_root().join("artifacts/program.stflb");
@@ -90,30 +72,42 @@ pub async fn start_party(party_id: usize) -> Result<StoffelServer, Box<dyn std::
         .threshold(config.threshold)
         .build()?;
     let offchain = OffChainServerConfig::builder()
-        .coordinator(coordinator_address())
-        .rpc_bind(node_rpc_address(party_id))
+        .coordinator(env_or(
+            "STOFFEL_COORDINATOR_ADDRESS",
+            format!(
+                "{}:{}",
+                deployment.coordinator_host, deployment.coordinator_port
+            ),
+        ))
+        .rpc_bind(env_or(
+            "STOFFEL_RPC_BIND_ADDRESS",
+            deployment.node_rpc_addresses[party_id].clone(),
+        ))
         .identity_files(
             identity_path(party_id, "cert"),
             identity_path(party_id, "key"),
         )
-        .timestamp(deployment_timestamp()?)
+        .timestamp(deployment.timestamp)
         .expected_client_cert(client_certificate())
         .build()?;
 
     let mut builder = runtime
         .server(party_id)
-        .bind(node_bind_address(party_id))
+        .bind(env_or(
+            "STOFFEL_BIND_ADDRESS",
+            deployment.node_bind_addresses[party_id].clone(),
+        ))
         .peers(
             (0..config.parties)
                 .filter(|peer_id| *peer_id != party_id)
-                .map(|peer_id| (peer_id, node_mesh_address(peer_id))),
+                .map(|peer_id| (peer_id, deployment.servers[peer_id].clone())),
         )
         .expected_clients(1)
         .offchain_coordinator(offchain);
     if party_id > 0 {
         builder = builder.bootstrap(env_or(
             "STOFFEL_BOOTSTRAP_ADDRESS",
-            "127.0.0.1:19200".to_owned(),
+            deployment.node_bind_addresses[0].clone(),
         ));
     }
     if let Some(path) = std::env::var_os("STOFFEL_RUN_BIN") {
@@ -135,9 +129,10 @@ pub async fn start_all() -> Result<Vec<StoffelServer>, Box<dyn std::error::Error
 }
 
 async fn wait_for_rpc_services(parties: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let deployment = deployment_addresses()?;
     let deadline = Instant::now() + Duration::from_secs(90);
     for party_id in 0..parties {
-        let address = node_rpc_address(party_id);
+        let address = &deployment.node_rpc_addresses[party_id];
         loop {
             if tokio::net::TcpStream::connect(&address).await.is_ok() {
                 break;

@@ -24,6 +24,7 @@ stoffel_bin=${STOFFEL_BIN:-stoffel}
 "$stoffel_bin" build --output artifacts/program.stflb
 cargo build --bins
 export STOFFEL_AUTH_TOKEN="${STOFFEL_AUTH_TOKEN:-stoffel-local-example}"
+export STOFFEL_AUTO_ADDRESSES=1
 target_dir=${CARGO_TARGET_DIR:-target}
 
 "$target_dir/debug/stoffel-coordinator" prepare

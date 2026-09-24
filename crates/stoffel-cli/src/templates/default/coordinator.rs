@@ -1,5 +1,7 @@
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::net::{TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,10 +33,83 @@ struct DeploymentFile {
     timestamp: u64,
     parties: usize,
     threshold: usize,
+    node_bind_addresses: Vec<String>,
     servers: Vec<String>,
     node_rpc_addresses: Vec<String>,
     client_cert: String,
     client_key: String,
+}
+
+type LocalAddresses = (u16, Vec<String>, Vec<String>, Vec<String>);
+
+fn local_addresses(parties: usize) -> Result<LocalAddresses, Box<dyn std::error::Error>> {
+    let host = "127.0.0.1";
+    let auto_select = std::env::var("STOFFEL_AUTO_ADDRESSES").as_deref() == Ok("1");
+    for base in 19_200u32..=64_000 {
+        let coordinator = base + 100;
+        let node_binds = (0..parties)
+            .map(|party| base + (party as u32).saturating_mul(2))
+            .collect::<Vec<_>>();
+        let servers = (0..parties)
+            .map(|party| {
+                if party == 0 {
+                    base + 1_000
+                } else {
+                    node_binds[party]
+                }
+            })
+            .collect::<Vec<_>>();
+        let node_rpcs = (0..parties)
+            .map(|party| base + 200 + party as u32)
+            .collect::<Vec<_>>();
+        let tcp_ports = std::iter::once(coordinator)
+            .chain(node_rpcs.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let udp_ports = node_binds
+            .iter()
+            .copied()
+            .chain(servers.iter().copied())
+            .collect::<BTreeSet<_>>();
+        if tcp_ports
+            .iter()
+            .chain(udp_ports.iter())
+            .any(|port| *port > u16::MAX as u32)
+        {
+            continue;
+        }
+        let available = !auto_select
+            || (tcp_ports
+                .iter()
+                .map(|port| TcpListener::bind((host, *port as u16)))
+                .collect::<Result<Vec<_>, _>>()
+                .is_ok()
+                && udp_ports
+                    .iter()
+                    .map(|port| UdpSocket::bind((host, *port as u16)))
+                    .collect::<Result<Vec<_>, _>>()
+                    .is_ok());
+        if available {
+            return Ok((
+                coordinator as u16,
+                node_binds
+                    .into_iter()
+                    .map(|port| format!("{host}:{port}"))
+                    .collect(),
+                servers
+                    .into_iter()
+                    .map(|port| format!("{host}:{port}"))
+                    .collect(),
+                node_rpcs
+                    .into_iter()
+                    .map(|port| format!("{host}:{port}"))
+                    .collect(),
+            ));
+        }
+        if !auto_select {
+            break;
+        }
+    }
+    Err("could not find available loopback addresses for the local MPC network".into())
 }
 
 fn project_root() -> PathBuf {
@@ -79,6 +154,8 @@ fn public_key(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 pub fn prepare_local() -> Result<(), Box<dyn std::error::Error>> {
     let config = settings()?;
     let dir = deployment_dir();
+    let (coordinator_port, node_bind_addresses, servers, node_rpc_addresses) =
+        local_addresses(config.parties)?;
     if dir.exists() {
         let required = std::iter::once("coordinator.cert.der".to_owned())
             .chain(std::iter::once("coordinator.key.der".to_owned()))
@@ -105,6 +182,17 @@ pub fn prepare_local() -> Result<(), Box<dyn std::error::Error>> {
         if deployment.parties != config.parties || deployment.threshold != config.threshold {
             return Err("Stoffel.toml changed after local identities were prepared; remove deploy/local and prepare again".into());
         }
+        let deployment = DeploymentFile {
+            coordinator_port,
+            node_bind_addresses,
+            servers,
+            node_rpc_addresses,
+            ..deployment
+        };
+        std::fs::write(
+            dir.join("deployment.json"),
+            serde_json::to_vec_pretty(&deployment)?,
+        )?;
         return Ok(());
     }
 
@@ -129,19 +217,13 @@ pub fn prepare_local() -> Result<(), Box<dyn std::error::Error>> {
     let deployment = DeploymentFile {
         program: "../../artifacts/program.stflb".to_owned(),
         coordinator_host: "127.0.0.1".to_owned(),
-        coordinator_port: 19_300,
+        coordinator_port,
         timestamp,
         parties: config.parties,
         threshold: config.threshold,
-        servers: (0..config.parties)
-            .map(|party| {
-                let port = if party == 0 { 20_200 } else { 19_200 + party * 2 };
-                format!("127.0.0.1:{port}")
-            })
-            .collect(),
-        node_rpc_addresses: (0..config.parties)
-            .map(|party| format!("127.0.0.1:{}", 19_400 + party))
-            .collect(),
+        node_bind_addresses,
+        servers,
+        node_rpc_addresses,
         client_cert: "client-0.cert.der".to_owned(),
         client_key: "client-0.key.der".to_owned(),
     };

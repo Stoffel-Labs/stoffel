@@ -24,6 +24,8 @@ Start the coordinator and the number of MPC nodes configured by `[mpc].parties` 
 
 The script validates and compiles `src/main.stfl`, builds the Rust binaries, starts the coordinator and MPC nodes, and waits for preprocessing to finish. It prints `Local Stoffel MPC services are ready for client input.` only after party 0 advances the coordinator to the input-mask reservation round. It does not run a client.
 
+Local addresses are selected together when the network starts. If a default port is already occupied, the script records another available address set in `deploy/local/deployment.json` and uses it for the coordinator, nodes, and clients.
+
 The script finds `stoffel-run` on `PATH`. Framework contributors can instead select a local build explicitly with `STOFFEL_RUN_BIN=/path/to/stoffel-run ./scripts/run-local.sh`.
 
 ## Integrate the client

@@ -165,6 +165,7 @@ fn init_creates_default_project() {
     assert!(run_local.contains("command -v stoffel-run"));
     assert!(run_local.contains("cargo install stoffel-vm-runner --version 0.1.2 --locked"));
     assert!(run_local.contains("export STOFFEL_RUN_BIN"));
+    assert!(run_local.contains("STOFFEL_AUTO_ADDRESSES=1"));
     let wait_ready = run_local.find("stoffel-coordinator\" wait-ready").unwrap();
     let ready_message = run_local.find("ready for client input").unwrap();
     assert!(wait_ready < ready_message);
@@ -295,7 +296,7 @@ fn init_force_preserves_ignore_rules_and_local_identities() {
 }
 
 /// Public-dependency consumer test: no path patches or local-MPC SDK calls.
-/// Requires the matching stoffel-run binary and free loopback ports 19200-20200.
+/// Requires the matching stoffel-run binary. Local ports are selected dynamically.
 #[test]
 #[ignore = "builds a public-dependency app and starts coordinator + nodes; set STOFFEL_RUN_BIN"]
 fn init_default_project_runs_with_separate_services() {
@@ -333,6 +334,10 @@ fn init_default_project_runs_with_separate_services() {
     ));
     let runner_path = std::env::join_paths(path_entries).unwrap();
     let stoffel = assert_cmd::cargo::cargo_bin("stoffel");
+    let occupied_default = std::net::TcpListener::bind("127.0.0.1:19300")
+        .expect("reserve the default coordinator address");
+    let occupied_default_node =
+        std::net::UdpSocket::bind("127.0.0.1:19200").expect("reserve the default node address");
     let mut services = StdCommand::new("sh")
         .arg(project.join("scripts/run-local.sh"))
         .current_dir(&project)
@@ -357,6 +362,11 @@ fn init_default_project_runs_with_separate_services() {
             break;
         }
     }
+    let deployment = fs::read_to_string(project.join("deploy/local/deployment.json")).unwrap();
+    assert!(!deployment.contains("\"coordinator_port\": 19300"));
+    assert!(deployment.contains("\"node_bind_addresses\""));
+    drop(occupied_default);
+    drop(occupied_default_node);
     let output = StdCommand::new("sh")
         .arg(project.join("scripts/run-client.sh"))
         .current_dir(&project)

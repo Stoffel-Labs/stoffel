@@ -16,6 +16,7 @@ struct Deployment {
     timestamp: u64,
     parties: usize,
     threshold: usize,
+    node_bind_addresses: Vec<String>,
     servers: Vec<String>,
     node_rpc_addresses: Vec<String>,
     client_cert: PathBuf,
@@ -25,7 +26,8 @@ struct Deployment {
 impl Deployment {
     fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let mut config: Self = serde_json::from_slice(&std::fs::read(path)?)?;
-        if config.servers.len() != config.parties
+        if config.node_bind_addresses.len() != config.parties
+            || config.servers.len() != config.parties
             || config.node_rpc_addresses.len() != config.parties
         {
             return Err("deployment address counts must match mpc.parties".into());
