@@ -54,11 +54,13 @@ assert_eq!(result, vec![Value::I64(100)]);
 - `execute_clear()` runs non-secret Stoffel programs through the embedded
   `stoffel-vm` and is intended for fast local development of clear logic.
 - `execute_local()` uses `stoffel-vm`'s real local coordinator runner for
-  local HoneyBadger and AVSS smoke runs. Build
-  `stoffel-run` first with `cargo build -p stoffel-vm-runner --bin stoffel-run`, or
-  set `STOFFEL_RUN_BIN` or `local_runner_path(...)`. Relative runner paths are
-  resolved from the process working directory first and then from the workspace
-  root, so `target/debug/stoffel-run` works for normal workspace runs. Named
+  local HoneyBadger and AVSS smoke runs. Each party runs as
+  `stoffel run-node`, so build the stoffel CLI first with
+  `cargo build -p stoffel-cli` (or `cargo install --path crates/stoffel-cli`), or
+  set `STOFFEL_RUN_BIN` or `local_runner_path(...)` to a stoffel binary. Relative
+  runner paths are resolved from the process working directory first and then
+  from the workspace root, so `target/debug/stoffel` works for normal workspace
+  runs. Named
   `with_inputs` values are adapted into local coordinator client input for
   source, file, and loaded-bytecode programs; source/file functions returning a
   `secret` value are opened by the generated wrapper so `execute_local()`
@@ -617,7 +619,6 @@ dependencies first:
 
 - `stoffellang`
 - `stoffel-vm`
-- `stoffel-vm-runner`
 - `stoffel-vm-types`
 - `stoffelnet`
 - `stoffelmpc-mpc`
@@ -654,10 +655,10 @@ cargo run -p stoffel-rust-sdk --example avss
 `NetworkDeployment` and writing `party-*.toml` files for operators.
 
 The local MPC examples use the real localhost coordinator/party runner. Build
-the VM runner first, then run them:
+the stoffel CLI first (each party runs as `stoffel run-node`), then run them:
 
 ```sh
-cargo build -p stoffel-vm-runner --bin stoffel-run
+cargo build -p stoffel-cli
 cargo run -p stoffel-rust-sdk --example quickstart_mpc
 cargo run -p stoffel-rust-sdk --example local_mpc_client_input
 cargo run -p stoffel-rust-sdk --example local_mpc_named_inputs

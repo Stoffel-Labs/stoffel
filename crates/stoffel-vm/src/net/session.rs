@@ -53,7 +53,7 @@ pub fn derive_instance_id(roster_digest: &[u8; 32], program_id: &[u8; 32], epoch
 /// The coordinator's `ExecutionId`, as the bytes the mesh agrees on.
 ///
 /// `stoffel-vm` does not depend on the coordinator crates, so the join carries
-/// the execution as its own newtype. `stoffel-vm-runner` converts with
+/// the execution as its own newtype. `stoffel::node` (the SDK) converts with
 /// `SessionExecutionId::from_bytes(*execution_id.as_bytes())`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
