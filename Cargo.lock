@@ -5747,13 +5747,26 @@ version = "0.1.2"
 dependencies = [
  "aes",
  "ark-bls12-381",
+ "ark-bn254",
+ "ark-curve25519",
+ "ark-ec",
+ "ark-ed25519",
  "ark-ff 0.5.0",
+ "ark-secp256k1",
+ "ark-secp256r1",
  "ark-serialize 0.5.0",
+ "ark-std 0.5.0",
+ "async-trait",
+ "bincode",
+ "blake3",
  "csv",
+ "futures",
  "futures-core",
+ "hex",
  "opentelemetry",
  "opentelemetry-stdout",
  "opentelemetry_sdk",
+ "rcgen",
  "rustls",
  "serde",
  "serde_json",
@@ -5761,7 +5774,6 @@ dependencies = [
  "stoffel-mpc-coordinator-off-chain",
  "stoffel-mpc-coordinator-shared",
  "stoffel-vm",
- "stoffel-vm-runner",
  "stoffel-vm-types",
  "stoffelcrypto",
  "stoffellang",
@@ -5774,6 +5786,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "trybuild",
+ "uuid",
 ]
 
 [[package]]
@@ -5835,43 +5848,6 @@ dependencies = [
  "tracing-subscriber",
  "turmoil",
  "x509-parser 0.18.1",
-]
-
-[[package]]
-name = "stoffel-vm-runner"
-version = "0.1.2"
-dependencies = [
- "ark-bls12-381",
- "ark-bn254",
- "ark-curve25519",
- "ark-ec",
- "ark-ed25519",
- "ark-ff 0.5.0",
- "ark-secp256k1",
- "ark-secp256r1",
- "ark-serialize 0.5.0",
- "ark-std 0.5.0",
- "async-trait",
- "bincode",
- "blake3",
- "futures",
- "hex",
- "libc",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "stoffel-mpc-coordinator-off-chain",
- "stoffel-mpc-coordinator-shared",
- "stoffel-vm",
- "stoffel-vm-types",
- "stoffelcrypto",
- "stoffellang",
- "stoffelnet",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]

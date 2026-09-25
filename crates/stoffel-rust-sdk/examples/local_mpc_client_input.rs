@@ -25,8 +25,8 @@ def main() -> int64:
         .await
     {
         Ok(result) => println!("Local MPC result: {}", result[0]),
-        Err(stoffel::Error::Unsupported(message)) if message.contains("stoffel-run") => {
-            println!("Build stoffel-run first to execute local MPC: {message}");
+        Err(stoffel::Error::Unsupported(message)) if message.contains("stoffel run-node") => {
+            println!("Build the stoffel CLI first (`cargo build -p stoffel-cli`) to execute local MPC: {message}");
         }
         Err(error) => return Err(error),
     }

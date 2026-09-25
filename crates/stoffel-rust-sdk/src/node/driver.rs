@@ -1,13 +1,23 @@
+use super::admissions::{
+    admission_agreement_digest, check_execution_summary, inputs_agreement_digest,
+    inputs_by_admission, outputs_by_admission, reservations_matching_admissions,
+    submissions_matching_admissions, MaskedInputMismatch, OutputRightsViolation,
+    ReservationMismatch, SummaryExpectations, SummaryMismatch,
+};
+use super::coordinator_client::{
+    CoordinatorClientConfig, CoordinatorClientError, CoordinatorEndpoint,
+};
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{BigInteger, PrimeField};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
 use std::io::BufReader;
 use std::net::SocketAddr;
-use std::process::exit;
+use std::process::{exit, ExitCode};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,15 +48,6 @@ use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 use stoffel_vm::runtime_hooks::{HookContext, HookEvent};
 use stoffel_vm::storage::preproc::LmdbPreprocStore;
 use stoffel_vm::storage::RedbLocalStorage;
-use stoffel_vm_runner::admissions::{
-    admission_agreement_digest, check_execution_summary, inputs_agreement_digest,
-    inputs_by_admission, outputs_by_admission, reservations_matching_admissions,
-    submissions_matching_admissions, MaskedInputMismatch, OutputRightsViolation,
-    ReservationMismatch, SummaryExpectations, SummaryMismatch,
-};
-use stoffel_vm_runner::coordinator_client::{
-    CoordinatorClientConfig, CoordinatorClientError, CoordinatorEndpoint,
-};
 use stoffel_vm_types::compiled_binary::{
     BinaryError, ClientIoManifest, CompiledBinary, MpcCurve, MPC_BACKEND_MANIFEST_FORMAT_VERSION,
     MPC_CURVE_MANIFEST_FORMAT_VERSION,
@@ -846,7 +847,7 @@ fn coordinated_client_roster(summary: &ExecutionSummary) -> Vec<ClientId> {
     (0..summary.client_slots.capacity() as usize).collect()
 }
 
-/// What `stoffel-run --client` was asked to do (`docs/design/bootnode-elimination.md` §9.E.2).
+/// What `stoffel run-node --client` was asked to do (`docs/design/bootnode-elimination.md` §9.E.2).
 ///
 /// It names no node and no other client: the nodes come from the coordinator's roster, and
 /// this client's slot, input range and output rights from its admission.
@@ -2982,33 +2983,372 @@ async fn run_avss_coordinated_party(
     }
 }
 
-// Use a Tokio runtime for async operations
-#[tokio::main]
-async fn main() {
+/// The key-value flags of `run_node`'s argv, as the second parsing pass reads them.
+pub(super) struct ValueFlags {
+    pub(super) bind_addr: Option<SocketAddr>,
+    // `--party-id` is no longer an identity: every party index is derived from
+    // the lexicographic order of the coordinator roster's DER SPKIs, and the runner has
+    // discarded any externally assigned id since before this migration started.
+    // It is not what selects party mode either — `--peers` is. What it still
+    // does is label this node's on-disk state: the `--local-store` /
+    // `--preproc-store` paths and the `party-N.redb` volumes the compose stacks
+    // mount are named by it. It is not the *key* to that state — that is
+    // `DurableIdentityDigest`, derived from this node's certificate — so a label
+    // that disagrees with the derived rank is reported after the join and the
+    // run continues on the derived index.
+    pub(super) party_id: Option<usize>,
+    pub(super) client_inputs: Option<String>,
+    pub(super) output_fixed_point_fractional_bits: Option<usize>,
+    pub(super) server_addrs: Vec<SocketAddr>,
+    pub(super) mpc_backend: Option<String>,
+    pub(super) mpc_curve: Option<String>,
+    pub(super) rpc_addr: Option<(String, u16)>,
+    pub(super) coord_addr: Option<(String, u16)>,
+    // `--coord-cert`: the coordinator certificate every coordinator connection
+    // pins. Resolved into a `CoordinatorPin` once the flags are parsed.
+    pub(super) coord_cert_path: Option<String>,
+    // `--expect-roster-digest`, `--expect-n-parties`, `--expect-threshold`:
+    // refusals of a coordinator roster other than the intended one (§9.D.2).
+    roster_expectations: RosterExpectations,
+    pub(super) key_der: Option<Vec<u8>>,
+    pub(super) cert_der: Option<Vec<u8>>,
+    // `--cert`'s path, kept so a refusal can name the file.
+    pub(super) cert_path: Option<String>,
+    // `--peers`: addresses to try first. Hints, not membership — see
+    // `SeedHints` and `docs/design/bootnode-elimination.md` §8. Membership is
+    // the coordinator's node roster (§9.D).
+    pub(super) peer_hints: Vec<SocketAddr>,
+    pub(super) eth_node_addr: Option<String>,
+    pub(super) wallet_sk_str: Option<String>,
+    pub(super) contract_addr: Option<String>,
+    pub(super) coordinator_client_slot: Option<ClientIndex>,
+    // `--invitation` and `--expect-program-hash`: a coordinator client's invitation, and the
+    // program it refuses to associate with any other one of (§9.E.2).
+    pub(super) invitation_path: Option<String>,
+    pub(super) expected_program_hash: Option<[u8; 32]>,
+    pub(super) preproc_store_path: Option<String>,
+    pub(super) local_store_path: Option<String>,
+    // `--epoch-store`: where this node's monotone instance_id epoch lives
+    // (blocker B5). See `stoffel_vm::net::mesh::epoch` for the path, the
+    // environment variable and the compose volume it belongs on.
+    pub(super) epoch_store_flag: Option<String>,
+    // `--execution-id`: which program invocation this process belongs to.
+    // Coordinator `0.2.0` keys every RPC on it — rounds, reserved indices,
+    // masked inputs and output shares are all per-execution — so it replaces
+    // `0.1.0`'s single implicit session and its `reset_coord` teardown. Required
+    // whenever `--off-chain-coord` is given; the all-zero value is reserved and
+    // rejected by the coordinator, so it is rejected here too.
+    pub(super) execution_id: Option<ExecutionId>,
+    pub(super) advertise_addr: Option<SocketAddr>,
+}
+
+/// The second parsing pass: every flag that takes a value, read in argv order
+/// (a later occurrence wins). Exits the process on a malformed value, as the
+/// standalone `stoffel-run` binary did.
+pub(super) fn parse_value_flags(args: &[String]) -> ValueFlags {
+    let mut flags = ValueFlags {
+        bind_addr: None,
+        party_id: None,
+        client_inputs: None,
+        output_fixed_point_fractional_bits: None,
+        server_addrs: Vec::new(),
+        mpc_backend: None,
+        mpc_curve: None,
+        rpc_addr: None,
+        coord_addr: None,
+        coord_cert_path: None,
+        roster_expectations: RosterExpectations::default(),
+        key_der: None,
+        cert_der: None,
+        cert_path: None,
+        peer_hints: Vec::new(),
+        eth_node_addr: None,
+        wallet_sk_str: None,
+        contract_addr: None,
+        coordinator_client_slot: None,
+        invitation_path: None,
+        expected_program_hash: None,
+        preproc_store_path: None,
+        local_store_path: None,
+        epoch_store_flag: None,
+        execution_id: None,
+        advertise_addr: None,
+    };
+    let mut args_iter = args.iter().cloned().peekable();
+    while let Some(a) = args_iter.next() {
+        match a.as_str() {
+            "--bind" => {
+                if let Some(v) = args_iter.next() {
+                    flags.bind_addr = Some(v.parse().expect("Invalid --bind addr"));
+                }
+            }
+            "--party-id" => {
+                if let Some(v) = args_iter.next() {
+                    flags.party_id = Some(v.parse().expect("Invalid --party-id"));
+                }
+            }
+            "--inputs" => {
+                if let Some(v) = args_iter.next() {
+                    flags.client_inputs = Some(v);
+                }
+            }
+            "--output-fixed-point-fractional-bits" => {
+                if let Some(v) = args_iter.next() {
+                    flags.output_fixed_point_fractional_bits = Some(
+                        v.parse()
+                            .expect("Invalid --output-fixed-point-fractional-bits"),
+                    );
+                }
+            }
+            "--servers" => {
+                if let Some(v) = args_iter.next() {
+                    flags.server_addrs = v
+                        .split(',')
+                        .filter_map(|s| {
+                            let s = s.trim();
+                            s.parse::<SocketAddr>().ok().or_else(|| {
+                                eprintln!("Warning: Invalid server address '{}', skipping", s);
+                                None
+                            })
+                        })
+                        .collect();
+                }
+            }
+            "--mpc-backend" => {
+                if let Some(v) = args_iter.next() {
+                    flags.mpc_backend = Some(v);
+                }
+            }
+            "--mpc-curve" => {
+                if let Some(v) = args_iter.next() {
+                    flags.mpc_curve = Some(v);
+                }
+            }
+            "--rpc-bind" => {
+                if let Some(v) = args_iter.next() {
+                    let parts: Vec<&str> = v.rsplitn(2, ':').collect();
+                    let port: u16 = parts[0].parse().expect("Invalid --rpc-bind port");
+                    let host = parts[1].to_string();
+                    flags.rpc_addr = Some((host, port));
+                }
+            }
+            "--off-chain-coord" => {
+                if let Some(v) = args_iter.next() {
+                    let parts: Vec<&str> = v.rsplitn(2, ':').collect();
+                    let port: u16 = parts[0].parse().expect("Invalid --off-chain-coord port");
+                    let host = parts[1].to_string();
+                    flags.coord_addr = Some((host, port));
+                }
+            }
+            "--coord-cert" => {
+                if let Some(v) = args_iter.next() {
+                    flags.coord_cert_path = Some(v);
+                }
+            }
+            "--on-chain-coord" => {
+                if let Some(v) = args_iter.next() {
+                    flags.contract_addr = Some(v);
+                }
+            }
+            "--eth-node" => {
+                if let Some(v) = args_iter.next() {
+                    flags.eth_node_addr = Some(v);
+                }
+            }
+            "--wallet-sk" => {
+                if let Some(v) = args_iter.next() {
+                    flags.wallet_sk_str = Some(v);
+                }
+            }
+            "--key" => {
+                if let Some(v) = args_iter.next() {
+                    flags.key_der = Some(std::fs::read(&v).expect("Failed to read --key file"));
+                }
+            }
+            "--cert" => {
+                if let Some(v) = args_iter.next() {
+                    flags.cert_der = Some(std::fs::read(&v).expect("Failed to read --cert file"));
+                    flags.cert_path = Some(v);
+                }
+            }
+            "--expect-roster-digest" => {
+                if let Some(v) = args_iter.next() {
+                    flags.roster_expectations.digest =
+                        Some(parse_expected_roster_digest(&v).unwrap_or_else(|message| {
+                            eprintln!("Error: {message}");
+                            exit(2);
+                        }));
+                }
+            }
+            "--expect-n-parties" => {
+                if let Some(v) = args_iter.next() {
+                    flags.roster_expectations.n_parties = Some(
+                        parse_expected_roster_size(RosterSizeFlag::NParties, &v).unwrap_or_else(
+                            |message| {
+                                eprintln!("Error: {message}");
+                                exit(2);
+                            },
+                        ),
+                    );
+                }
+            }
+            "--expect-threshold" => {
+                if let Some(v) = args_iter.next() {
+                    flags.roster_expectations.threshold = Some(
+                        parse_expected_roster_size(RosterSizeFlag::Threshold, &v).unwrap_or_else(
+                            |message| {
+                                eprintln!("Error: {message}");
+                                exit(2);
+                            },
+                        ),
+                    );
+                }
+            }
+            "--invitation" => {
+                if let Some(v) = args_iter.next() {
+                    flags.invitation_path = Some(v);
+                }
+            }
+            "--expect-program-hash" => {
+                if let Some(v) = args_iter.next() {
+                    flags.expected_program_hash =
+                        Some(parse_expected_program_hash(&v).unwrap_or_else(|message| {
+                            eprintln!("Error: {message}");
+                            exit(2);
+                        }));
+                }
+            }
+            "--client-slot" => {
+                if let Some(v) = args_iter.next() {
+                    flags.coordinator_client_slot =
+                        Some(ClientIndex(v.parse().unwrap_or_else(|_| {
+                            eprintln!("Error: --client-slot takes a slot number, got {v:?}");
+                            exit(2);
+                        })));
+                }
+            }
+            "--preproc-store" => {
+                if let Some(v) = args_iter.next() {
+                    flags.preproc_store_path = Some(v);
+                }
+            }
+            "--local-store" => {
+                if let Some(v) = args_iter.next() {
+                    flags.local_store_path = Some(v);
+                }
+            }
+            "--epoch-store" => {
+                if let Some(v) = args_iter.next() {
+                    flags.epoch_store_flag = Some(v);
+                }
+            }
+            "--execution-id" => {
+                if let Some(v) = args_iter.next() {
+                    let parsed = ExecutionId::from_str(v.trim()).unwrap_or_else(|error| {
+                        eprintln!("Error: invalid --execution-id: {error}");
+                        exit(2);
+                    });
+                    if parsed.is_zero() {
+                        eprintln!(
+                            "Error: --execution-id must not be all zeros; the coordinator \
+                             reserves that value and rejects it."
+                        );
+                        exit(2);
+                    }
+                    flags.execution_id = Some(parsed);
+                }
+            }
+            "--peers" => {
+                if let Some(v) = args_iter.next() {
+                    flags.peer_hints = v
+                        .split(',')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.parse().expect("Invalid --peers address"))
+                        .collect();
+                }
+            }
+            "--advertise" => {
+                if let Some(v) = args_iter.next() {
+                    flags.advertise_addr = Some(v.parse().expect("Invalid --advertise addr"));
+                }
+            }
+            _ => {}
+        }
+    }
+    flags
+}
+
+/// Exits the process once stdin reaches EOF or fails: the parent holds the
+/// write end for as long as it wants this node alive (see `run_node`).
+fn spawn_parent_stdin_watchdog() {
+    let spawned = std::thread::Builder::new()
+        .name("stoffel-parent-watchdog".to_owned())
+        .spawn(|| {
+            use std::io::Read;
+            let mut stdin = std::io::stdin().lock();
+            let mut buf = [0u8; 256];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            eprintln!("[watchdog] parent process closed stdin; shutting down");
+            std::process::exit(0);
+        });
+    if let Err(error) = spawned {
+        eprintln!("[watchdog] could not start the parent watchdog: {error}");
+    }
+}
+
+/// Runs one Stoffel node process: a party, a coordinator client, or a local
+/// no-MPC execution, as selected by `args`. This is `stoffel run-node`.
+///
+/// # This is a process entry point
+///
+/// `run_node` owns the whole process. It calls [`std::process::exit`] on usage
+/// errors, refused flags and failures (exit codes 1, 2, 3, 4, ...), prints to
+/// stdout/stderr, and, when `STOFFEL_DIE_WITH_PARENT` is set, installs a
+/// watchdog that exits the process once stdin reaches EOF. Do not call it from
+/// a process that has anything else to do; spawn `stoffel run-node` instead.
+///
+/// `args` are the node's arguments without the program name or the `run-node`
+/// token (what `std::env::args().skip(1)` used to be for the standalone
+/// `stoffel-run` binary). It must run on a multi-threaded Tokio runtime.
+pub async fn run_node(args: Vec<OsString>) -> ExitCode {
     // When spawned by the local coordinator runner, tie this process's lifetime
     // to its parent: if the parent (the test/CLI/SDK process) dies — including a
     // SIGKILL, where the parent's `kill_on_drop` cleanup cannot run — this party
     // would otherwise be re-parented to init/launchd and leak as an orphaned MPC
-    // process. Poll the parent PID and exit promptly once it changes.
+    // process. The parent spawns this process with a piped stdin and holds the
+    // write end for the child's whole lifetime, so stdin reaching EOF (or
+    // failing) means the parent is gone. Opt-in, because a hand-started node
+    // (a compose service, say) often has stdin at `/dev/null`, which is EOF
+    // immediately.
+    //
+    // A detached OS thread rather than a task on `tokio::io::stdin`: Tokio
+    // reads stdin on its blocking pool, and a runtime waits for its blocking
+    // pool when it shuts down, so a node that finished normally would hang
+    // until its parent closed stdin. A detached thread does not hold the
+    // process open once `main` returns.
     if std::env::var_os("STOFFEL_DIE_WITH_PARENT").is_some() {
-        // SAFETY: `getppid` is always safe to call and takes no arguments.
-        let original_parent = unsafe { libc::getppid() };
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                // SAFETY: see above.
-                let current = unsafe { libc::getppid() };
-                if current != original_parent || current <= 1 {
-                    eprintln!(
-                        "[watchdog] parent process exited (ppid {original_parent} -> {current}); shutting down"
-                    );
-                    std::process::exit(0);
-                }
-            }
-        });
+        spawn_parent_stdin_watchdog();
     }
 
-    let raw_args = env::args().skip(1).collect::<Vec<_>>();
+    let raw_args = match args
+        .into_iter()
+        .map(OsString::into_string)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(raw_args) => raw_args,
+        Err(arg) => {
+            eprintln!("Error: argument is not valid UTF-8: {arg:?}");
+            exit(2);
+        }
+    };
 
     if raw_args.is_empty() {
         print_usage_and_exit();
@@ -3032,61 +3372,6 @@ async fn main() {
     // passed is a no-op rather than an error. There is no designated party left
     // on this path at all.
     let mut as_client = false;
-    let mut bind_addr: Option<SocketAddr> = None;
-    // `--party-id` is no longer an identity: every party index is derived from
-    // the lexicographic order of the coordinator roster's DER SPKIs, and the runner has
-    // discarded any externally assigned id since before this migration started.
-    // It is not what selects party mode either — `--peers` is. What it still
-    // does is label this node's on-disk state: the `--local-store` /
-    // `--preproc-store` paths and the `party-N.redb` volumes the compose stacks
-    // mount are named by it. It is not the *key* to that state — that is
-    // `DurableIdentityDigest`, derived from this node's certificate — so a label
-    // that disagrees with the derived rank is reported after the join and the
-    // run continues on the derived index.
-    let mut party_id: Option<usize> = None;
-    let mut client_inputs: Option<String> = None;
-    let mut output_fixed_point_fractional_bits: Option<usize> = None;
-    let mut server_addrs: Vec<SocketAddr> = Vec::new();
-    let mut mpc_backend: Option<String> = None;
-    let mut mpc_curve: Option<String> = None;
-    let mut rpc_addr: Option<(String, u16)> = None;
-    let mut coord_addr: Option<(String, u16)> = None;
-    // `--coord-cert`: the coordinator certificate every coordinator connection
-    // pins. Resolved into a `CoordinatorPin` once the flags are parsed.
-    let mut coord_cert_path: Option<String> = None;
-    // `--expect-roster-digest`, `--expect-n-parties`, `--expect-threshold`:
-    // refusals of a coordinator roster other than the intended one (§9.D.2).
-    let mut roster_expectations = RosterExpectations::default();
-    let mut key_der: Option<Vec<u8>> = None;
-    let mut cert_der: Option<Vec<u8>> = None;
-    // `--cert`'s path, kept so a refusal can name the file.
-    let mut cert_path: Option<String> = None;
-    // `--peers`: addresses to try first. Hints, not membership — see
-    // `SeedHints` and `docs/design/bootnode-elimination.md` §8. Membership is
-    // the coordinator's node roster (§9.D).
-    let mut peer_hints: Vec<SocketAddr> = Vec::new();
-    let mut eth_node_addr: Option<String> = None;
-    let mut wallet_sk_str: Option<String> = None;
-    let mut contract_addr: Option<String> = None;
-    let mut coordinator_client_slot: Option<ClientIndex> = None;
-    // `--invitation` and `--expect-program-hash`: a coordinator client's invitation, and the
-    // program it refuses to associate with any other one of (§9.E.2).
-    let mut invitation_path: Option<String> = None;
-    let mut expected_program_hash: Option<[u8; 32]> = None;
-    let mut preproc_store_path: Option<String> = None;
-    let mut local_store_path: Option<String> = None;
-    // `--epoch-store`: where this node's monotone instance_id epoch lives
-    // (blocker B5). See `stoffel_vm::net::mesh::epoch` for the path, the
-    // environment variable and the compose volume it belongs on.
-    let mut epoch_store_flag: Option<String> = None;
-    // `--execution-id`: which program invocation this process belongs to.
-    // Coordinator `0.2.0` keys every RPC on it — rounds, reserved indices,
-    // masked inputs and output shares are all per-execution — so it replaces
-    // `0.1.0`'s single implicit session and its `reset_coord` teardown. Required
-    // whenever `--off-chain-coord` is given; the all-zero value is reserved and
-    // rejected by the coordinator, so it is rejected here too.
-    let mut execution_id: Option<ExecutionId> = None;
-    let mut advertise_addr: Option<SocketAddr> = None;
 
     for arg in &raw_args {
         if arg == "-h" || arg == "--help" {
@@ -3180,6 +3465,8 @@ async fn main() {
          a reachable `--advertise` address.",
     );
 
+    let all_args = raw_args.clone();
+
     // collect positional args (non-flags)
     let mut positional = raw_args
         .into_iter()
@@ -3191,207 +3478,34 @@ async fn main() {
     }
 
     // Parse key-value style flags
-    let mut args_iter = env::args().skip(1).peekable();
-    while let Some(a) = args_iter.next() {
-        match a.as_str() {
-            "--bind" => {
-                if let Some(v) = args_iter.next() {
-                    bind_addr = Some(v.parse().expect("Invalid --bind addr"));
-                }
-            }
-            "--party-id" => {
-                if let Some(v) = args_iter.next() {
-                    party_id = Some(v.parse().expect("Invalid --party-id"));
-                }
-            }
-            "--inputs" => {
-                if let Some(v) = args_iter.next() {
-                    client_inputs = Some(v);
-                }
-            }
-            "--output-fixed-point-fractional-bits" => {
-                if let Some(v) = args_iter.next() {
-                    output_fixed_point_fractional_bits = Some(
-                        v.parse()
-                            .expect("Invalid --output-fixed-point-fractional-bits"),
-                    );
-                }
-            }
-            "--servers" => {
-                if let Some(v) = args_iter.next() {
-                    server_addrs = v
-                        .split(',')
-                        .filter_map(|s| {
-                            let s = s.trim();
-                            s.parse::<SocketAddr>().ok().or_else(|| {
-                                eprintln!("Warning: Invalid server address '{}', skipping", s);
-                                None
-                            })
-                        })
-                        .collect();
-                }
-            }
-            "--mpc-backend" => {
-                if let Some(v) = args_iter.next() {
-                    mpc_backend = Some(v);
-                }
-            }
-            "--mpc-curve" => {
-                if let Some(v) = args_iter.next() {
-                    mpc_curve = Some(v);
-                }
-            }
-            "--rpc-bind" => {
-                if let Some(v) = args_iter.next() {
-                    let parts: Vec<&str> = v.rsplitn(2, ':').collect();
-                    let port: u16 = parts[0].parse().expect("Invalid --rpc-bind port");
-                    let host = parts[1].to_string();
-                    rpc_addr = Some((host, port));
-                }
-            }
-            "--off-chain-coord" => {
-                if let Some(v) = args_iter.next() {
-                    let parts: Vec<&str> = v.rsplitn(2, ':').collect();
-                    let port: u16 = parts[0].parse().expect("Invalid --off-chain-coord port");
-                    let host = parts[1].to_string();
-                    coord_addr = Some((host, port));
-                }
-            }
-            "--coord-cert" => {
-                if let Some(v) = args_iter.next() {
-                    coord_cert_path = Some(v);
-                }
-            }
-            "--on-chain-coord" => {
-                if let Some(v) = args_iter.next() {
-                    contract_addr = Some(v);
-                }
-            }
-            "--eth-node" => {
-                if let Some(v) = args_iter.next() {
-                    eth_node_addr = Some(v);
-                }
-            }
-            "--wallet-sk" => {
-                if let Some(v) = args_iter.next() {
-                    wallet_sk_str = Some(v);
-                }
-            }
-            "--key" => {
-                if let Some(v) = args_iter.next() {
-                    key_der = Some(std::fs::read(&v).expect("Failed to read --key file"));
-                }
-            }
-            "--cert" => {
-                if let Some(v) = args_iter.next() {
-                    cert_der = Some(std::fs::read(&v).expect("Failed to read --cert file"));
-                    cert_path = Some(v);
-                }
-            }
-            "--expect-roster-digest" => {
-                if let Some(v) = args_iter.next() {
-                    roster_expectations.digest =
-                        Some(parse_expected_roster_digest(&v).unwrap_or_else(|message| {
-                            eprintln!("Error: {message}");
-                            exit(2);
-                        }));
-                }
-            }
-            "--expect-n-parties" => {
-                if let Some(v) = args_iter.next() {
-                    roster_expectations.n_parties = Some(
-                        parse_expected_roster_size(RosterSizeFlag::NParties, &v).unwrap_or_else(
-                            |message| {
-                                eprintln!("Error: {message}");
-                                exit(2);
-                            },
-                        ),
-                    );
-                }
-            }
-            "--expect-threshold" => {
-                if let Some(v) = args_iter.next() {
-                    roster_expectations.threshold = Some(
-                        parse_expected_roster_size(RosterSizeFlag::Threshold, &v).unwrap_or_else(
-                            |message| {
-                                eprintln!("Error: {message}");
-                                exit(2);
-                            },
-                        ),
-                    );
-                }
-            }
-            "--invitation" => {
-                if let Some(v) = args_iter.next() {
-                    invitation_path = Some(v);
-                }
-            }
-            "--expect-program-hash" => {
-                if let Some(v) = args_iter.next() {
-                    expected_program_hash =
-                        Some(parse_expected_program_hash(&v).unwrap_or_else(|message| {
-                            eprintln!("Error: {message}");
-                            exit(2);
-                        }));
-                }
-            }
-            "--client-slot" => {
-                if let Some(v) = args_iter.next() {
-                    coordinator_client_slot = Some(ClientIndex(v.parse().unwrap_or_else(|_| {
-                        eprintln!("Error: --client-slot takes a slot number, got {v:?}");
-                        exit(2);
-                    })));
-                }
-            }
-            "--preproc-store" => {
-                if let Some(v) = args_iter.next() {
-                    preproc_store_path = Some(v);
-                }
-            }
-            "--local-store" => {
-                if let Some(v) = args_iter.next() {
-                    local_store_path = Some(v);
-                }
-            }
-            "--epoch-store" => {
-                if let Some(v) = args_iter.next() {
-                    epoch_store_flag = Some(v);
-                }
-            }
-            "--execution-id" => {
-                if let Some(v) = args_iter.next() {
-                    let parsed = ExecutionId::from_str(v.trim()).unwrap_or_else(|error| {
-                        eprintln!("Error: invalid --execution-id: {error}");
-                        exit(2);
-                    });
-                    if parsed.is_zero() {
-                        eprintln!(
-                            "Error: --execution-id must not be all zeros; the coordinator \
-                             reserves that value and rejects it."
-                        );
-                        exit(2);
-                    }
-                    execution_id = Some(parsed);
-                }
-            }
-            "--peers" => {
-                if let Some(v) = args_iter.next() {
-                    peer_hints = v
-                        .split(',')
-                        .map(|s| s.trim())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.parse().expect("Invalid --peers address"))
-                        .collect();
-                }
-            }
-            "--advertise" => {
-                if let Some(v) = args_iter.next() {
-                    advertise_addr = Some(v.parse().expect("Invalid --advertise addr"));
-                }
-            }
-            _ => {}
-        }
-    }
+    let ValueFlags {
+        bind_addr,
+        party_id,
+        client_inputs,
+        output_fixed_point_fractional_bits,
+        server_addrs,
+        mpc_backend,
+        mpc_curve,
+        rpc_addr,
+        coord_addr,
+        coord_cert_path,
+        roster_expectations,
+        key_der,
+        cert_der,
+        cert_path,
+        peer_hints,
+        eth_node_addr,
+        wallet_sk_str,
+        contract_addr,
+        coordinator_client_slot,
+        invitation_path,
+        expected_program_hash,
+        preproc_store_path,
+        local_store_path,
+        epoch_store_flag,
+        execution_id,
+        advertise_addr,
+    } = parse_value_flags(&all_args);
 
     let coordinator_output_format = match output_fixed_point_fractional_bits {
         Some(bits) => {
@@ -3642,7 +3756,7 @@ async fn main() {
             execution_id: coord_execution_id,
         })
         .await;
-        return;
+        return ExitCode::SUCCESS;
     }
 
     let path_opt = if !positional.is_empty() {
@@ -4522,7 +4636,7 @@ async fn main() {
                     {
                         error.exit();
                     }
-                    return;
+                    return ExitCode::SUCCESS;
                 }
 
                 macro_rules! setup_avss {
@@ -4671,6 +4785,7 @@ async fn main() {
             exit(4);
         }
     }
+    ExitCode::SUCCESS
 }
 
 fn print_usage_and_exit() -> ! {
@@ -4678,7 +4793,7 @@ fn print_usage_and_exit() -> ! {
         r#"Stoffel VM Runner
 
 Usage:
-  stoffel-run <path-to-compiled-binary> [entry_function] [flags]
+  stoffel run-node <path-to-compiled-binary> [entry_function] [flags]
 
 Flags:
   --trace-instr           Trace instructions before/after execution
@@ -4802,8 +4917,8 @@ Removed flags (each exits 2 naming its replacement):
 
 Examples:
   # Local execution (no MPC)
-  stoffel-run program.stfbin
-  stoffel-run program.stfbin main --trace-instr
+  stoffel run-node program.stfbin
+  stoffel run-node program.stfbin main --trace-instr
 
   # Multi-party execution (3 parties). The coordinator at 127.0.0.1:31415 serves
   # the node roster and drives execution $EXEC; --peers are hints, and
@@ -4811,13 +4926,13 @@ Examples:
   # other party: a first mesh forms out of dials alone, so an address nobody
   # holds is an edge that never forms.
   COORD="--off-chain-coord 127.0.0.1:31415 --coord-cert coordinator.crt --execution-id $EXEC"
-  stoffel-run program.stfbin main --party-id 0 --bind 127.0.0.1:9001 $COORD \
+  stoffel run-node program.stfbin main --party-id 0 --bind 127.0.0.1:9001 $COORD \
     --cert node0.crt --key node0.der --rpc-bind 127.0.0.1:10001 \
     --peers 127.0.0.1:9002,127.0.0.1:9003 --epoch-store /var/lib/stoffel/epochs-0
-  stoffel-run program.stfbin main --party-id 1 --bind 127.0.0.1:9002 $COORD \
+  stoffel run-node program.stfbin main --party-id 1 --bind 127.0.0.1:9002 $COORD \
     --cert node1.crt --key node1.der --rpc-bind 127.0.0.1:10002 \
     --peers 127.0.0.1:9001,127.0.0.1:9003 --epoch-store /var/lib/stoffel/epochs-1
-  stoffel-run program.stfbin main --party-id 2 --bind 127.0.0.1:9003 $COORD \
+  stoffel run-node program.stfbin main --party-id 2 --bind 127.0.0.1:9003 $COORD \
     --cert node2.crt --key node2.der --rpc-bind 127.0.0.1:10003 \
     --peers 127.0.0.1:9001,127.0.0.1:9002 --epoch-store /var/lib/stoffel/epochs-2
 
@@ -4825,7 +4940,7 @@ Examples:
   # admission, not this command line, decides the client's slot, input range and
   # outputs — fetch masks from the parties' node RPC listeners and submit masked
   # inputs. The client's certificate need not appear in any configuration.
-  stoffel-run --client --inputs 10,20 $COORD --cert client.crt --key client.der \
+  stoffel run-node --client --inputs 10,20 $COORD --cert client.crt --key client.der \
     --servers 127.0.0.1:10001,127.0.0.1:10002,127.0.0.1:10003
 "#
     );
@@ -5103,7 +5218,7 @@ mod tests {
     fn the_avss_party_receive_loop_offers_its_payloads_to_the_mesh_router() {
         // Assembled at runtime so this assertion does not match itself.
         let needle = format!("mesh_router.try_handle_{}", "wire_message_from(");
-        let source: String = include_str!("stoffel-run.rs")
+        let source: String = include_str!("driver.rs")
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect();
