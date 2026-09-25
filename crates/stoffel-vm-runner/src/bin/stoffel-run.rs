@@ -7328,28 +7328,30 @@ async fn run_standing_node(raw_args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("invalid --browser-rpc-bind: {error}"))?;
     let browser_tls_cert_chain_path = standing_flag_value(raw_args, "--browser-tls-cert-chain");
     let browser_tls_key_path = standing_flag_value(raw_args, "--browser-tls-key");
+    let webauthn_rp_id = standing_flag_value(raw_args, "--webauthn-rp-id");
     let browser_tls = match (
         browser_rpc_bind,
         browser_tls_cert_chain_path,
         browser_tls_key_path,
+        webauthn_rp_id,
     ) {
-        (Some(bind), Some(cert_chain_path), Some(key_path)) => {
+        (Some(bind), Some(cert_chain_path), Some(key_path), Some(rp_id)) => {
             let cert_chain_pem = fs::read(&cert_chain_path)
                 .map_err(|error| format!("read --browser-tls-cert-chain: {error}"))?;
             let key_pem = fs::read(&key_path)
                 .map_err(|error| format!("read --browser-tls-key: {error}"))?;
-            Some((bind, cert_chain_pem, key_pem))
+            Some((bind, cert_chain_pem, key_pem, rp_id))
         }
-        (None, None, None) => None,
+        (None, None, None, None) => None,
         _ => {
             return Err(
-                "--browser-rpc-bind, --browser-tls-cert-chain, and --browser-tls-key must be given together or not at all"
+                "--browser-rpc-bind, --browser-tls-cert-chain, --browser-tls-key, and --webauthn-rp-id must be given together or not at all"
                     .to_owned(),
             );
         }
     };
     let node_rpc = Arc::new(match browser_tls {
-        Some((browser_bind, browser_cert_chain_pem, browser_key_pem)) => {
+        Some((browser_bind, browser_cert_chain_pem, browser_key_pem, webauthn_rp_id)) => {
             OffChainNodeRPCServer::start_with_browser_tls(
                 &node_rpc_bind.ip().to_string(),
                 node_rpc_bind.port(),
@@ -7359,6 +7361,7 @@ async fn run_standing_node(raw_args: &[String]) -> Result<(), String> {
                 browser_bind.port(),
                 browser_cert_chain_pem,
                 browser_key_pem,
+                &webauthn_rp_id,
             )
             .await
             .map_err(|error| format!("start standing node RPC listeners: {error}"))?
