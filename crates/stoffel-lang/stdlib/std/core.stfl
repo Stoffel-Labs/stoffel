@@ -1,61 +1,698 @@
-builtin type int64
-builtin type int32
-builtin type int16
-builtin type int8
-builtin type uint64
-builtin type uint32
-builtin type uint16
-builtin type uint8
-builtin type string
-builtin type bool
-builtin type float
-builtin type fixed
-builtin type fixed32
-builtin type fixed64
-builtin type None
-builtin type void
-builtin type int = int64
-builtin type float64 = float
-builtin type f64 = float
-builtin type fix32 = fixed32
-builtin type fix64 = fixed64
-builtin type bytes = list[uint8]
-builtin type ByteArray = list[uint8]
-builtin opaque Object
-builtin opaque Closure
+"""Core language: primitive types, printing, lists, strings, closures and local storage.
+
+Every item here is a builtin that is always in scope. `import std.core` is
+accepted but optional: imports of `std.*` modules are no-ops.
+
+Call styles. Any function can be called with its first argument as a
+receiver (uniform function call syntax, UFCS): `xs.append(v)` is
+`append(xs, v)`, and `xs.len()` is `len(xs)`. Methods of a builtin object
+are called through the object, as in `LocalStorage.load(key)`.
+
+Syntax that lowers to builtins. Several language forms are sugar for the
+functions documented here:
+
+- `value in container` calls `contains(container, value)`.
+- `xs[start:stop:step]`, with any bound optional, calls `slice`.
+- The statement `assert condition, "message"` (message optional) calls
+  `assert`.
+- Each `{name}` placeholder in an f-string (a variable or a dotted field
+  access such as `{point.x}`) is formatted with `to_string`.
+- List comprehensions build their result with `append`.
+
+Indexing. `xs[i]` on a list or string accepts negative indexes counted from
+the end (`xs[-1]` is the last element), and an index out of range is a
+runtime error. Strings index and measure by Unicode character, not by byte.
+
+Types. Besides the names declared here, the compiler accepts the short
+spellings `i64`, `i32`, `i16`, `i8`, `u64`, `u32`, `u16` and `u8`. Prefix
+any scalar type with `secret` (for example `secret int64`) to hold a secret
+share of it; see `std.mpc`.
+
+Example:
+  var names: list[string] = ["carol", "alice", "bob"]
+  names.sort()
+  assert "alice" in names, "alice is missing"
+  var first = names[0]
+  var rest = names[1:]
+  print(f"first={first} rest={rest}")
+"""
+
+builtin type int64:
+  """Signed 64-bit integer; the default integer type.
+
+  Integer literals without a suffix are `int64` unless the context expects
+  another integer type. As `secret int64` it is a 64-bit secret integer.
+  """
+builtin type int32:
+  """Signed 32-bit integer."""
+builtin type int16:
+  """Signed 16-bit integer."""
+builtin type int8:
+  """Signed 8-bit integer."""
+builtin type uint64:
+  """Unsigned 64-bit integer."""
+builtin type uint32:
+  """Unsigned 32-bit integer."""
+builtin type uint16:
+  """Unsigned 16-bit integer."""
+builtin type uint8:
+  """Unsigned 8-bit integer; the element type of `bytes`."""
+builtin type string:
+  """Immutable Unicode text.
+
+  Indexing, slicing and `len` count Unicode characters, not bytes. Use
+  `Bytes.from_string` to get the UTF-8 encoding as `bytes`.
+  """
+builtin type bool:
+  """Boolean, written `True` or `False`.
+
+  At runtime `type` reports it as `"boolean"`. As `secret bool` it is a
+  1-bit secret share.
+  """
+builtin type float:
+  """64-bit IEEE 754 floating point number.
+
+  Floating point cannot be secret-shared; use `fixed` for fractional secret
+  values.
+  """
+builtin type fixed:
+  """Fixed-point number; the same type as `fixed64`.
+
+  Fixed-point is the fractional type that can be secret-shared. A clear
+  `fixed` value is held as a float at runtime. As `secret fixed` it is a
+  64-bit fixed-point share with 16 fractional bits.
+  """
+builtin type fixed32:
+  """32-bit fixed-point number.
+
+  A clear value is held as a float at runtime. As `secret fixed32` it is a
+  32-bit fixed-point share with 16 fractional bits.
+  """
+builtin type fixed64:
+  """64-bit fixed-point number; `fixed` is the same type.
+
+  A clear value is held as a float at runtime. As `secret fixed64` it is a
+  64-bit fixed-point share with 16 fractional bits.
+  """
+builtin type None:
+  """The type of the `None` value, which marks a missing result.
+
+  For example `LocalStorage.load` returns `None` for a missing key. At
+  runtime `type` reports it as `"nil"`.
+  """
+builtin type void:
+  """Return type of functions that produce no value.
+
+  A void call cannot be used as a value.
+  """
+builtin type int = int64:
+  """Alias of `int64`."""
+builtin type float64 = float:
+  """Alias of `float`."""
+builtin type f64 = float:
+  """Alias of `float`."""
+builtin type fix32 = fixed32:
+  """Alias of `fixed32`."""
+builtin type fix64 = fixed64:
+  """Alias of `fixed64`."""
+builtin type bytes = list[uint8]:
+  """Byte string; alias of `list[uint8]`.
+
+  Every list function applies to it. The `Bytes` and `Crypto` builtins
+  take and return `bytes`.
+  """
+builtin type ByteArray = list[uint8]:
+  """Alias of `list[uint8]`; the same type as `bytes`."""
+builtin opaque Object:
+  """A runtime value whose type is not known statically.
+
+  Builtins use it for results whose element type depends on runtime data,
+  such as the clear values returned by `Share.batch_open`. Assign it to a
+  variable with a concrete type annotation to use it.
+  """
+builtin opaque Closure:
+  """Handle to a function value created by `create_closure`.
+
+  A closure names a program function and carries the variables it
+  captured. Call it with `call_closure` or `call_closure_with_arg`.
+  At runtime `type` reports it as `"function"`.
+  """
 
 def print(*values) -> void {.builtin.}:
+  """Write values to the program output, separated by spaces, as one line.
+
+  Strings are written without quotes. Lists print as `[a, b]` and objects as
+  `{key: value}`, showing at most 16 entries and 3 levels of nesting. Other
+  values use their runtime form: `int64` values as plain numbers, other
+  integer widths with a suffix (`5i32`, `7u8`), floats with `f64`
+  (`1.5f64`), booleans as `true` or `false`, and `None` as `()`. A secret
+  value prints as `Share(<type>)`: printing never reveals it.
+
+  Args:
+    values: Any number of values of any type.
+
+  Example:
+    print("total:", 42)
+    print([1, 2, 3])
+  """
 def type[T](value: T) -> string {.builtin.}:
+  """Return the runtime type name of a value.
+
+  The names are the VM's: `"int64"`, `"int32"`, `"int16"`, `"int8"`,
+  `"uint64"`, `"uint32"`, `"uint16"`, `"uint8"`, `"float"`, `"boolean"`,
+  `"string"`, `"array"` (lists and `bytes`), `"object"` (objects and
+  dicts), `"function"` (closures), `"share"` (any secret value) and `"nil"`
+  (`None`). Clear `fixed` values report `"float"`.
+
+  Args:
+    value: The value to inspect.
+
+  Returns:
+    The runtime type name.
+
+  Example:
+    var name = type([1, 2])
+    assert name == "array"
+  """
 def create_closure(function_name: string) -> Closure {.builtin.}:
+  """Create a closure for a program function, capturing nothing.
+
+  Args:
+    function_name: Name of a function defined in the program. It must not
+      name a builtin.
+
+  Returns:
+    A closure that `call_closure` can invoke.
+
+  Raises:
+    An error when the closure is called, if `function_name` does not name
+    a program function.
+
+  Example:
+    var callback = create_closure("mark_complete")
+    call_closure(callback)
+
+  See Also:
+    `create_closure_with_upvalue`, `call_closure`
+  """
 def create_closure_with_upvalue(function_name: string, upvalue_name: string) -> Closure {.builtin: "create_closure".}:
+  """Create a closure that captures one variable by name.
+
+  The variable is looked up by name in the current call stack, innermost
+  frame first, and its current value is copied into the closure. Inside the
+  closure's function read it with `get_upvalue` and change it with
+  `set_upvalue`.
+
+  Args:
+    function_name: Name of a function defined in the program.
+    upvalue_name: Name of the variable to capture.
+
+  Returns:
+    A closure carrying the captured value.
+
+  Raises:
+    An error if no variable named `upvalue_name` is visible.
+
+  Example:
+    def create_counter(start: int64) -> Closure:
+      return create_closure_with_upvalue("increment_counter", "start")
+
+  See Also:
+    `get_upvalue`, `set_upvalue`, `call_closure_with_arg`
+  """
 def call_closure[T](closure: Closure) -> T {.builtin.}:
+  """Call a closure that takes no arguments.
+
+  Args:
+    closure: The closure to call.
+
+  Returns:
+    The value returned by the closure's function. Its type `T` comes from
+    the context, for example the annotation of the variable it is assigned
+    to.
+
+  Raises:
+    An error if `closure` is not a closure, its function does not exist,
+    or the function expects arguments.
+
+  Example:
+    var callback = create_closure("mark_complete")
+    call_closure(callback)
+  """
 def call_closure_with_arg[T, U](closure: Closure, value: T) -> U {.builtin: "call_closure".}:
+  """Call a closure with one argument.
+
+  Args:
+    closure: The closure to call.
+    value: The argument passed to the closure's function.
+
+  Returns:
+    The value returned by the closure's function.
+
+  Raises:
+    An error if `closure` is not a closure, its function does not exist,
+    or the function does not take exactly one argument.
+
+  Example:
+    var counter = create_counter(10)
+    var total: int64 = call_closure_with_arg(counter, 5)
+  """
 def get_upvalue[T](name: string) -> T {.builtin.}:
+  """Read a variable captured by the running closure.
+
+  Only works in a function that was invoked as a closure.
+
+  Args:
+    name: Name the variable was captured under.
+
+  Returns:
+    The captured value.
+
+  Raises:
+    An error if the running closure has no captured variable `name`.
+
+  Example:
+    var current = get_upvalue("start")
+  """
 def set_upvalue[T](name: string, value: T) -> void {.builtin.}:
+  """Replace a variable captured by the running closure.
+
+  The new value is written back to the closure itself, so later calls
+  through the same closure variable see it.
+
+  Args:
+    name: Name the variable was captured under.
+    value: The new value.
+
+  Raises:
+    An error if the running closure has no captured variable `name`.
+
+  Example:
+    set_upvalue("start", current + amount)
+  """
 def append[T](array: list[T], value: T) -> void {.builtin: "append".}:
+  """Add a value to the end of a list, in place.
+
+  Args:
+    array: The list to modify.
+    value: The value to add.
+
+  Example:
+    var xs: list[int64] = []
+    xs.append(4)
+  """
 def list[T](capacity: int64 = 0) -> list[T] {.builtin: "create_array".}:
+  """Create an empty list.
+
+  Args:
+    capacity: Number of elements to reserve space for. It is only a hint:
+      the list starts empty either way.
+
+  Returns:
+    A new empty list; its element type comes from the context.
+
+  Raises:
+    An error if `capacity` is negative.
+
+  Example:
+    var xs: list[int64] = list(16)
+  """
 def extend[T](array: list[T], values: list[T]) -> void {.builtin: "extend".}:
+  """Append every element of another list, in place.
+
+  Args:
+    array: The list to modify.
+    values: The elements to append, in order. It may be `array` itself.
+
+  Example:
+    var xs: list[int64] = [1, 2]
+    xs.extend([3, 4])
+  """
 def copy[T](array: list[T]) -> list[T] {.builtin: "copy".}:
+  """Return a shallow copy of a list.
+
+  The new list holds the same elements; nested lists and objects are shared,
+  not copied.
+
+  Args:
+    array: The list to copy.
+
+  Returns:
+    A new list with the same elements.
+  """
 def count[T](array: list[T], value: T) -> int64 {.builtin: "count".}:
+  """Count the elements equal to a value.
+
+  Lists compare by contents (element by element); other values by value.
+
+  Args:
+    array: The list to search.
+    value: The value to count.
+
+  Returns:
+    The number of equal elements.
+  """
 def index[T](array: list[T], value: T, start: int64 = 0, stop: int64 = 9223372036854775807) -> int64 {.builtin: "index".}:
+  """Return the position of the first element equal to a value.
+
+  Only positions in `start` up to (not including) `stop` are searched.
+  Negative bounds count from the end, and bounds beyond the list are clamped
+  to it. Lists compare by contents.
+
+  Args:
+    array: The list to search.
+    value: The value to find.
+    start: First position to search.
+    stop: Position to stop before; by default the end of the list.
+
+  Returns:
+    The zero-based position of the first match.
+
+  Raises:
+    An error with the message "value is not in list" when there is no
+    match.
+
+  Example:
+    var xs: list[int64] = [5, 7, 5]
+    assert xs.index(5, 1) == 2
+  """
 def pop[T](array: list[T], index: int64 = -1) -> T {.builtin: "pop".}:
+  """Remove and return the element at a position (default: the last).
+
+  Args:
+    array: The list to modify.
+    index: Position of the element; negative values count from the end.
+
+  Returns:
+    The removed element.
+
+  Raises:
+    An error if the list is empty or `index` is out of range.
+
+  Example:
+    var xs: list[int64] = [1, 2, 3]
+    var last = xs.pop()
+    var first = xs.pop(0)
+  """
 def remove[T](array: list[T], value: T) -> void {.builtin: "remove".}:
+  """Remove the first element equal to a value, in place.
+
+  Args:
+    array: The list to modify.
+    value: The value to remove. Lists compare by contents.
+
+  Raises:
+    An error with the message "value is not in list" when there is no
+    match.
+  """
 def insert[T](array: list[T], index: int64, value: T) -> void {.builtin: "insert".}:
+  """Insert a value before a position, in place.
+
+  As in Python, a negative `index` counts from the end, and an index past
+  either end inserts at that end instead of failing.
+
+  Args:
+    array: The list to modify.
+    index: Position to insert before.
+    value: The value to insert.
+
+  Example:
+    var xs: list[int64] = [1, 3]
+    xs.insert(1, 2)
+  """
 def clear[T](array: list[T]) -> void {.builtin: "clear".}:
+  """Remove every element of a list, in place.
+
+  Args:
+    array: The list to empty.
+  """
 def reverse[T](array: list[T]) -> void {.builtin: "reverse".}:
+  """Reverse the order of a list's elements, in place.
+
+  Args:
+    array: The list to reverse. Use `xs[::-1]` for a reversed copy instead.
+  """
 def sort[T](array: list[T]) -> void {.builtin: "sort".}:
+  """Sort a list in ascending order, in place.
+
+  The sort is stable. Numbers of any width compare by numeric value,
+  strings compare by their UTF-8 bytes, and `False` sorts before `True`.
+  It uses insertion sort, so it takes quadratic time on large lists.
+
+  Args:
+    array: The list to sort.
+
+  Raises:
+    An error if the list mixes values that cannot be compared (for example
+    strings and numbers), contains a float NaN, or contains secret values.
+    Sort secret values with an oblivious sorting network instead.
+
+  Example:
+    var xs: list[int64] = [3, 1, 2]
+    xs.sort()
+  """
 def delete[T](array: list[T], index: int64) -> void {.builtin: "delete".}:
+  """Remove the element at a position without returning it.
+
+  Args:
+    array: The list to modify.
+    index: Position of the element; negative values count from the end.
+
+  Raises:
+    An error if `index` is out of range.
+
+  See Also:
+    `pop`, `remove`
+  """
 def len[T](array: list[T]) -> int64 {.builtin: "len".}:
+  """Return the number of elements in a list, or of characters in a string.
+
+  The compiler also accepts a `string` argument, whose length is counted in
+  Unicode characters, not bytes.
+
+  Args:
+    array: A list or a string.
+
+  Returns:
+    The length.
+
+  Example:
+    assert len("héllo") == 5
+    assert [1, 2, 3].len() == 3
+  """
 def range(start: int64, stop: int64, step: int64 = 1) -> list[int64] {.builtin.}:
+  """Return the list of integers from `start` up to (not including) `stop`.
+
+  Unlike Python, both `start` and `stop` are required. A negative `step`
+  counts down, and a range that is empty for its step gives an empty list.
+  The whole list is built in memory.
+
+  Args:
+    start: First value.
+    stop: Bound that is never reached.
+    step: Distance between consecutive values; must not be zero.
+
+  Returns:
+    A new list of `int64` values.
+
+  Raises:
+    An error if `step` is zero.
+
+  Example:
+    assert range(10, 0, -3) == [10, 7, 4, 1]
+  """
 def slice[T](value: T, start: int64, stop: int64, step: int64 = 1) -> T {.builtin: "slice".}:
+  """Return part of a list or string, like a Python slice.
+
+  The expression `xs[start:stop:step]` calls this function, and any bound
+  can be left out there. Negative bounds count from the end, and bounds
+  beyond the value are clamped, so slicing never fails on range. With a
+  negative `step` the result runs backwards. When calling `slice`
+  directly, pass 9223372036854775807 (the largest `int64`) for a bound to
+  mean "omitted".
+
+  Args:
+    value: A list or string.
+    start: First position included.
+    stop: Position to stop before.
+    step: Distance between taken positions; must not be zero.
+
+  Returns:
+    A new list, or a new string, of the selected elements.
+
+  Raises:
+    An error if `step` is zero or `value` is not a list or string.
+
+  Example:
+    var xs: list[int64] = [0, 1, 2, 3, 4]
+    var middle = xs[1:4]
+    var reversed = xs[::-1]
+    var tail = "stoffel"[-3:]
+  """
 def contains[T, U](container: T, value: U) -> bool {.builtin: "contains".}:
+  """Test membership; the `in` operator calls this function.
+
+  For a string, tests whether `value` is a substring. For a list, whether
+  some element equals `value` (lists compare by contents). For a dict or
+  object, whether `value` is one of its keys.
+
+  Args:
+    container: A string, list, dict or object.
+    value: The value to look for. It must be a string when `container` is
+      a string.
+
+  Returns:
+    Whether `value` is in `container`.
+
+  Raises:
+    An error if `container` is not a string, list, dict or object, or if
+    `container` is a string and `value` is not.
+
+  Example:
+    assert 2 in [1, 2, 3]
+    assert "ell" in "hello"
+  """
 def to_string[T](value: T) -> string {.builtin: "to_string".}:
+  """Format any value as a string, exactly as `print` would show it.
+
+  f-strings call this for each `{name}` placeholder.
+
+  Args:
+    value: The value to format.
+
+  Returns:
+    The formatted text. Strings are returned unchanged.
+
+  Example:
+    var text = to_string([1, 2])
+    assert text == "[1, 2]"
+  """
 def assert(condition: bool, message: string = "assertion failed") -> void {.builtin: "assert".}:
+  """Stop the program with an error unless a condition is true.
+
+  Usually written as a statement: `assert condition` or
+  `assert condition, "message"`.
+
+  Args:
+    condition: The clear boolean to check. Reveal a secret condition first.
+    message: The error message used when the check fails.
+
+  Raises:
+    An error with `message` when `condition` is `False`, or an error if
+    `condition` is not a clear `bool` (for example a secret value).
+
+  Example:
+    assert total >= 0, "total must not be negative"
+  """
 
 builtin object LocalStorage:
+  """Persistent key-value storage private to this party.
+
+  Values survive between program runs on the same party, for example to
+  keep a long-lived key share generated once and used by many later runs.
+  Nothing stored here is sent to other parties. The host decides where the
+  data lives; the calls fail if the host configured no local storage.
+
+  Keys are strings (stored as their UTF-8 bytes) or `bytes`. Stored values
+  can be integers, floats, booleans, strings, `None`, secret shares, and
+  lists or objects built from those, up to 16 MiB encoded. Closures cannot
+  be stored.
+
+  A secret share is stored together with the MPC setup it belongs to
+  (protocol, curve, field, party identity, party count, threshold and the
+  key), and loading it under a different setup fails.
+
+  Example:
+    if not LocalStorage.exists("signing-key"):
+      var generated: secret int64 = Share.random_field()
+      discard LocalStorage.store("signing-key", generated)
+    var key: secret int64 = LocalStorage.load("signing-key")
+  """
   def store[T](key: string, value: T) -> bool {.builtin.}:
+    """Store a value under a key, replacing any previous value.
+
+    Args:
+      key: The key, a string or `bytes`.
+      value: The value to store.
+
+    Returns:
+      Always `True`; failures raise an error instead.
+
+    Raises:
+      An error if no local storage is configured, the value cannot be
+      stored (a closure, a cyclic structure, or over 16 MiB encoded), a
+      secret value is stored without a running MPC engine, or the storage
+      backend fails.
+
+    MPC:
+      Local; nothing is communicated or revealed.
+    """
   def load[T](key: string) -> T {.builtin.}:
+    """Load the value stored under a key.
+
+    Args:
+      key: The key, a string or `bytes`.
+
+    Returns:
+      The stored value, or `None` if the key does not exist. Its type
+      comes from the context, for example `var key: secret int64 =
+      LocalStorage.load(name)`.
+
+    Raises:
+      An error if no local storage is configured, the stored data is
+      corrupt, or a stored share belongs to a different MPC setup.
+
+    MPC:
+      Local; nothing is communicated or revealed.
+    """
   def load_share(key: string) -> Share {.builtin: "LocalStorage.load".}:
+    """Load a stored secret share; `LocalStorage.load` typed as `Share`.
+
+    Args:
+      key: The key, a string or `bytes`.
+
+    Returns:
+      The stored share, or `None` if the key does not exist.
+
+    Raises:
+      The same errors as `LocalStorage.load`.
+
+    MPC:
+      Local; nothing is communicated or revealed.
+    """
   def retrieve[T](key: string) -> T {.builtin.}:
+    """Load the value stored under a key; the same as `LocalStorage.load`.
+
+    Args:
+      key: The key, a string or `bytes`.
+
+    Returns:
+      The stored value, or `None` if the key does not exist.
+
+    Raises:
+      The same errors as `LocalStorage.load`.
+    """
   def delete(key: string) -> bool {.builtin.}:
+    """Delete the value stored under a key.
+
+    Args:
+      key: The key, a string or `bytes`.
+
+    Returns:
+      `True` if the key existed, `False` if there was nothing to delete.
+
+    Raises:
+      An error if no local storage is configured or the backend fails.
+    """
   def exists(key: string) -> bool {.builtin.}:
+    """Test whether a value is stored under a key.
+
+    Args:
+      key: The key, a string or `bytes`.
+
+    Returns:
+      Whether the key exists.
+
+    Raises:
+      An error if no local storage is configured or the backend fails.
+    """

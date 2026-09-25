@@ -51,6 +51,7 @@ pub mod compiler;
 pub mod config;
 pub mod consensus;
 pub mod coordinator;
+pub mod docs;
 pub mod error;
 pub mod input_file;
 pub mod networking;

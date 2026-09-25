@@ -1,80 +1,1255 @@
+"""Multi-party computation: secret shares, client I/O, public field arithmetic.
+
+Every item here is a builtin that is always in scope. `import std.mpc` is
+accepted but optional: imports of `std.*` modules are no-ops.
+
+Secret values. A variable declared `secret T` (for example
+`secret int64`, `secret bool` or `secret fix64`) holds this party's share
+of a value that no single party knows. The arithmetic operators on
+secret values (`+`, `-`, `*`) run the same protocol operations documented
+here, so most programs never call `Share.add` or `Share.mul` directly. The
+optimizer also merges independent multiplications and openings into
+`Share.batch_mul` and `Share.batch_open` where it can.
+
+Call styles. Methods of a builtin object are called through the object,
+as in `Share.mul(a, b)`. When the first parameter has the object's type,
+uniform function call syntax (UFCS) also allows the receiver form
+`a.mul(b)`; for example `x.reveal()` is `Share.reveal(x)`.
+
+Randomness. `Share.random()` has no fixed result type. It must appear
+where a secret integer or boolean type is expected (for example
+`var r: secret int32 = Share.random()`), and the compiler lowers it to
+`Share.random_int` with that type's bit width (1 for `secret bool`). Use
+`Share.random_field` for a value that is uniform over the whole field.
+
+Backends. The same program runs on the HoneyBadger backend
+(`honeybadger-mpc`) and the AVSS backend (`avss`). Operations that are
+local never communicate. Interactive operations exchange messages with
+the other parties, and the multiplication and randomness operations consume
+preprocessing material (Beaver triples, random shares), which the runtime
+generates ahead of time or on demand. Each item's MPC section says which
+applies. Use `Mpc.has_capability` to check for optional features before
+using them.
+
+Example:
+  var a: secret int64 = ClientStore.take_share(0, 0)
+  var b: secret int64 = ClientStore.take_share(1, 0)
+  var product: secret int64 = a * b
+  var larger: bool = reveal(a > b)
+  print(product.reveal())
+"""
+
 def reveal[T](value: secret T) -> T {.builtin: "Share.open".}:
+  """Open a secret value to every party.
+
+  This is the idiomatic way to publish a result. It works for any secret
+  type and returns the clear value with the matching clear type
+  (`secret bool` gives `bool`, `secret fix64` gives `fix64`, and so on).
+  With UFCS it can be written `value.reveal()`.
+
+  Args:
+    value: The secret value to reconstruct.
+
+  Returns:
+    The clear value. Every party receives the same result.
+
+  Raises:
+    An error if no MPC engine is configured or ready, or if too few
+    parties contribute their shares.
+
+  MPC:
+    Interactive: one opening. Every party sends its share to the others,
+    and the value becomes public to all parties. No preprocessing is
+    consumed. Only open values that are meant to become public.
+
+  Example:
+    var total: secret int64 = a + b
+    var result: int64 = reveal(total)
+
+  See Also:
+    `Share.open`, `Share.batch_open`, `Share.send_to_client`
+  """
 
 builtin object ClientStore:
+  """Secret inputs that external clients submitted to the computation.
+
+  Clients secret-share their inputs to the parties before the program runs.
+  The store is indexed by client (in the deterministic order of the client
+  roster) and by input position within that client's submission. The
+  compiler records each `take_share` and `sum_shares` call in the
+  program's client-input manifest, so use literal indexes or loop bounds
+  it can see where possible.
+
+  Loading an input is local: it only reads this party's already-received
+  share, and nothing is revealed.
+  """
   def take_share(client_id: int64, share_id: int64) -> Share {.builtin.}:
+    """Load a client's secret integer input.
+
+    The share keeps the type the client submitted it with. Untyped
+    inputs default to a 64-bit secret integer. Assign the result to a
+    `secret` integer variable, such as `secret int64`, or to `secret bool`
+    or `secret uintN` to declare a narrower input type in the manifest.
+
+    Args:
+      client_id: Zero-based position of the client in the client roster
+        (not its network client id).
+      share_id: Zero-based position of the input within that client's
+        submission.
+
+    Returns:
+      This party's share of the input.
+
+    Raises:
+      An error if there is no client at `client_id`, the client submitted
+      no input at `share_id`, or either index is negative.
+
+    MPC:
+      Local; no communication and no preprocessing.
+
+    Example:
+      var bid: secret int64 = ClientStore.take_share(0, 0)
+    """
   def take_share_bool(client_id: int64, share_id: int64) -> Share {.builtin.}:
+    """Load a client's secret boolean input as a 1-bit share.
+
+    Use it for inputs that feed the boolean gates (`not`, `and`, `xor`)
+    of `secret bool` values, which reject the default 64-bit integer
+    share that `ClientStore.take_share` returns.
+
+    Args:
+      client_id: Zero-based position of the client in the client roster.
+      share_id: Zero-based position of the input within that client's
+        submission.
+
+    Returns:
+      This party's share of the boolean input.
+
+    Raises:
+      An error if the input does not exist or was submitted with a
+      different share type.
+
+    MPC:
+      Local; no communication and no preprocessing.
+    """
   def take_share_fixed(client_id: int64, share_id: int64) -> Share {.builtin.}:
+    """Load a client's secret fixed-point input.
+
+    The input is read with the default fixed-point layout (64 total bits,
+    16 fractional bits).
+
+    Args:
+      client_id: Zero-based position of the client in the client roster.
+      share_id: Zero-based position of the input within that client's
+        submission.
+
+    Returns:
+      This party's share of the fixed-point input.
+
+    Raises:
+      An error if the input does not exist or was submitted with a
+      different share type.
+
+    MPC:
+      Local; no communication and no preprocessing.
+
+    Example:
+      var weight: secret fix64 = ClientStore.take_share_fixed(0, 0)
+    """
   def sum_shares(share_id: int64, client_count: int64) -> Share {.builtin.}:
+    """Sum one input position across the first `client_count` clients.
+
+    Equivalent to adding `ClientStore.take_share(c, share_id)` for every
+    client `c` from 0 to `client_count - 1`, in a single call. The
+    optimizer produces this call from such loops.
+
+    Args:
+      share_id: Zero-based input position to sum.
+      client_count: How many clients, starting from the first, contribute.
+        Zero or negative counts are treated as 1.
+
+    Returns:
+      A share of the sum, typed like the summed inputs (64-bit secret
+      integer when the inputs are untyped).
+
+    Raises:
+      An error if a contributing client has no input at `share_id`, or
+      the inputs have different share types.
+
+    MPC:
+      Local; share addition needs no communication or preprocessing.
+    """
   def sum_shares_bool(share_id: int64, client_count: int64) -> Share {.builtin.}:
+    """Sum one boolean input position across the first `client_count` clients.
+
+    The boolean counterpart of `ClientStore.sum_shares`; untyped inputs
+    are read as 1-bit shares. The sum is arithmetic, not XOR, and the
+    result keeps the 1-bit tag, so it is a valid boolean only when at most
+    one contribution is 1.
+
+    Args:
+      share_id: Zero-based input position to sum.
+      client_count: How many clients, starting from the first, contribute.
+        Zero or negative counts are treated as 1.
+
+    Returns:
+      A share of the sum of the boolean inputs.
+
+    Raises:
+      An error if a contributing client has no input at `share_id`, or
+      the inputs have different share types.
+
+    MPC:
+      Local; no communication and no preprocessing.
+    """
   def sum_shares_fixed(share_id: int64, client_count: int64) -> Share {.builtin.}:
+    """Sum one fixed-point input position across the first `client_count` clients.
+
+    The fixed-point counterpart of `ClientStore.sum_shares`; untyped
+    inputs use the default fixed-point layout (64 total bits, 16
+    fractional bits).
+
+    Args:
+      share_id: Zero-based input position to sum.
+      client_count: How many clients, starting from the first, contribute.
+        Zero or negative counts are treated as 1.
+
+    Returns:
+      A share of the fixed-point sum.
+
+    Raises:
+      An error if a contributing client has no input at `share_id`, or
+      the inputs have different share types.
+
+    MPC:
+      Local; no communication and no preprocessing.
+    """
   def get_number_clients() -> int64 {.builtin.}:
+    """Return the number of clients known to this computation.
+
+    This is the size of the client roster when one was configured, and
+    otherwise the number of clients that submitted inputs.
+
+    Returns:
+      The number of known clients; 0 outside an MPC session with clients.
+
+    MPC:
+      Local; reads runtime metadata only.
+    """
   def get_number_input_clients() -> int64 {.builtin.}:
+    """Return the number of clients that submitted input shares.
+
+    Returns:
+      The number of clients whose inputs are in the store.
+
+    MPC:
+      Local; reads runtime metadata only.
+    """
   def get_number_output_clients() -> int64 {.builtin.}:
+    """Return the number of clients that can receive outputs.
+
+    Every known client can receive outputs, so this currently equals
+    `ClientStore.get_number_clients`.
+
+    Returns:
+      The number of output-capable clients.
+
+    MPC:
+      Local; reads runtime metadata only.
+    """
 
 builtin object MpcOutput:
+  """Private outputs delivered to external clients.
+
+  Unlike `reveal`, which makes a value public to every party, outputs sent
+  here are reconstructed only by the receiving client.
+  """
   def send_to_client[T](client_id: int64, value: T) -> bool {.builtin.}:
+    """Send one share or a list of shares to a client for private reconstruction.
+
+    Every party sends its share(s) of `value` to the client, which
+    combines them to learn the clear value. The compiler records the call
+    in the program's client-output manifest.
+
+    Args:
+      client_id: The client that receives the output.
+      value: A `Share` (or `secret` value) or a non-empty `list[Share]`
+        whose elements all have the same share type.
+
+    Returns:
+      `true` once this party's shares have been handed to the client
+      output channel.
+
+    Raises:
+      An error if the backend has no client-output capability or is not
+      ready, if `value` is not a share or a list of shares, or if the list
+      is empty.
+
+    MPC:
+      Sends this party's shares to the client only. Nothing is revealed to
+      the other parties, and no preprocessing is consumed. Check
+      `Mpc.has_capability("client-output")` first when the program should
+      also run without client output.
+
+    Example:
+      if Mpc.has_capability("client-output"):
+        MpcOutput.send_to_client(0, output_shares)
+    """
 
 builtin object Share:
+  """This party's share of a secret value.
+
+  A share carries its type: a signed or unsigned secret integer of a given
+  bit width (1 bit for `secret bool`), or a secret fixed-point number with
+  a total and a fractional bit count. Values of `secret` types are shares,
+  so every method here also accepts them, and methods whose first
+  parameter is a `Share` can be called with UFCS, as in `a.mul(b)` or
+  `x.reveal()`.
+
+  Operations fall into three groups. Local operations (addition,
+  subtraction, negation, operations with public constants) need no
+  communication. Interactive operations (multiplication, opening) exchange
+  messages with the other parties. Randomness draws from the preprocessing
+  pool.
+  """
   def from_clear(value: int64) -> Share {.builtin.}:
+    """Create a share of a public value.
+
+    Every party must pass the same value; the result is a sharing of it
+    that the other `Share` operations can combine with secret values. The
+    share type follows the value: integers give a 64-bit secret integer,
+    floats give a default fixed-point share (64 total bits, 16 fractional
+    bits) and booleans give a 1-bit share.
+
+    Args:
+      value: The public value to share.
+
+    Returns:
+      A share of `value`.
+
+    Raises:
+      An error if the value cannot be shared (for example a string) or no
+      MPC engine is ready.
+
+    MPC:
+      Local: each party derives its share deterministically, with no
+      communication or preprocessing. The value is public, so this gives
+      it no secrecy.
+
+    See Also:
+      `Share.from_clear_int`, `Share.from_clear_uint`, `Share.from_clear_fixed`
+    """
   def from_clear_int(value: int64, bit_length: int64) -> Share {.builtin.}:
+    """Create a signed secret-integer share of a public value with a given width.
+
+    The compiler emits this call for a clear integer that flows into a
+    narrower `secret intN` value.
+
+    Args:
+      value: The public value to share. Every party must pass the same one.
+      bit_length: The width of the resulting secret integer, at least 1
+        (use 1 for a boolean).
+
+    Returns:
+      A secret-integer share of `value` tagged with `bit_length` bits.
+
+    Raises:
+      An error if `bit_length` is zero or negative, or no MPC engine is
+      ready.
+
+    MPC:
+      Local; no communication or preprocessing.
+    """
   def from_clear_uint(value: uint64, bit_length: int64) -> Share {.builtin.}:
+    """Create an unsigned secret-integer share of a public value with a given width.
+
+    Args:
+      value: The public value to share. Every party must pass the same one.
+      bit_length: The width of the resulting secret unsigned integer, at
+        least 1.
+
+    Returns:
+      An unsigned secret-integer share of `value` tagged with
+      `bit_length` bits.
+
+    Raises:
+      An error if `bit_length` is zero or negative, or no MPC engine is
+      ready.
+
+    MPC:
+      Local; no communication or preprocessing.
+    """
   def from_clear_fixed(value: fix64, total_bits: int64, frac_bits: int64) -> Share {.builtin.}:
+    """Create a secret fixed-point share of a public value with a given precision.
+
+    Args:
+      value: The public value to share. Every party must pass the same one.
+      total_bits: Total bit width of the fixed-point representation.
+      frac_bits: Number of fractional bits; must not exceed `total_bits`.
+
+    Returns:
+      A fixed-point share of `value` with the requested precision.
+
+    Raises:
+      An error if the precision is invalid, or no MPC engine is ready.
+
+    MPC:
+      Local; no communication or preprocessing.
+    """
   def add(share1: Share, share2: Share) -> Share {.builtin.}:
+    """Add two shares.
+
+    The `+` operator on secret values performs the same operation.
+
+    Args:
+      share1: The left operand.
+      share2: The right operand; must have the same share type as `share1`.
+
+    Returns:
+      A share of `share1 + share2`, with the operands' share type.
+
+    Raises:
+      An error if the share types differ.
+
+    MPC:
+      Local; no communication or preprocessing.
+    """
   def sub(share1: Share, share2: Share) -> Share {.builtin.}:
+    """Subtract one share from another.
+
+    Args:
+      share1: The left operand.
+      share2: The share to subtract; must have the same share type as
+        `share1`.
+
+    Returns:
+      A share of `share1 - share2`, with the operands' share type.
+
+    Raises:
+      An error if the share types differ.
+
+    MPC:
+      Local; no communication or preprocessing.
+    """
   def neg(share: Share) -> Share {.builtin.}:
+    """Negate a share.
+
+    Args:
+      share: The share to negate.
+
+    Returns:
+      A share of `-share`, with the same share type.
+
+    MPC:
+      Local; no communication or preprocessing.
+    """
   def add_constant[T](share: Share, value: T) -> Share {.builtin.}:
+    """Add a public constant to a share.
+
+    An integer constant keeps the share's type. A float constant makes the
+    result fixed-point: a fixed-point share keeps its precision, and an
+    integer share is first scaled into the default fixed-point layout
+    (64 total bits, 16 fractional bits).
+
+    Args:
+      share: The secret operand.
+      value: The public integer or float to add. Every party must pass the
+        same value.
+
+    Returns:
+      A share of `share + value`.
+
+    Raises:
+      An error if `value` is neither an integer nor a float.
+
+    MPC:
+      Local; no communication or preprocessing.
+    """
   def add_scalar[T](share: Share, value: T) -> Share {.builtin: "Share.add_constant".}:
+    """Deprecated name of `Share.add_constant`, kept for older programs.
+
+    Args:
+      share: The secret operand.
+      value: The public integer or float to add.
+
+    Returns:
+      A share of `share + value`.
+
+    Deprecated:
+      Use `Share.add_constant`.
+    """
   def mul_scalar[T](share: Share, scalar: T) -> Share {.builtin.}:
+    """Multiply a share by a public constant.
+
+    An integer scalar keeps the share's type. A float scalar makes the
+    result fixed-point. For an integer share this stays local (the scalar is
+    rounded to the default 16 fractional bits). For a fixed-point share the
+    product needs truncation, so the scalar is shared and multiplied with
+    the interactive fixed-point multiplication of `Share.mul`.
+
+    Args:
+      share: The secret operand.
+      scalar: The public integer or float factor. Every party must pass the
+        same value.
+
+    Returns:
+      A share of `share * scalar`.
+
+    Raises:
+      An error if `scalar` is neither an integer nor a float, or a float
+      scalar is out of range once scaled.
+
+    MPC:
+      Local for integer scalars and for float scalars on integer shares. A
+      float scalar on a fixed-point share is an interactive fixed-point
+      multiplication.
+    """
   def mul(share1: Share, share2: Share) -> Share {.builtin.}:
+    """Multiply two shares.
+
+    The `*` operator on secret values performs the same operation. Fixed-point
+    shares use a truncating multiplication, so the product keeps the
+    operands' precision.
+
+    Args:
+      share1: The left operand.
+      share2: The right operand; must have the same share type as `share1`.
+
+    Returns:
+      A share of `share1 * share2`, with the operands' share type.
+
+    Raises:
+      An error if the share types differ, no MPC engine is ready, or a
+      standing session has used up its preprocessing.
+
+    MPC:
+      Interactive: one Beaver-triple multiplication, which consumes one
+      triple and one opening of masked values. Nothing about the operands
+      is revealed. Fixed-point multiplication also consumes random bits and
+      a random integer for probabilistic truncation, which adds rounds.
+      Independent multiplications are cheaper as one `Share.batch_mul`.
+    """
   def batch_mul(lefts: list[Share], rights: list[Share]) -> list[Share] {.builtin.}:
+    """Multiply two lists of shares element by element in one batch.
+
+    Args:
+      lefts: The left operands.
+      rights: The right operands; same length and share type as `lefts`.
+
+    Returns:
+      A list whose element `i` is a share of `lefts[i] * rights[i]`. An
+      empty input gives an empty list.
+
+    Raises:
+      An error if the lists differ in length or share type, or no MPC
+      engine is ready.
+
+    MPC:
+      Interactive: consumes one Beaver triple per pair, but all pairs share
+      one multiplication round. Very large batches are split into chunks of
+      at most 128 * (threshold + 1) pairs on HoneyBadger, one round per
+      chunk.
+    """
   def open(share: Share) -> int64 {.builtin.}:
+    """Open a share to every party.
+
+    The declared result is `int64`, but the runtime value follows the share
+    type: `bool` for 1-bit shares, a sized integer for narrower integer
+    shares, and a float for fixed-point shares. Prefer `reveal`, whose
+    result type follows the secret type.
+
+    Args:
+      share: The share to reconstruct.
+
+    Returns:
+      The clear value, identical on every party.
+
+    Raises:
+      An error if no MPC engine is ready or too few parties contribute
+      their shares.
+
+    MPC:
+      Interactive: one opening round; the value becomes public to all
+      parties. No preprocessing is consumed. HoneyBadger waits for
+      3 * threshold + 1 shares so that it can correct faulty ones.
+    """
   def reveal[T](share: Share) -> T {.builtin: "Share.open".}:
+    """Open a share to every party, typed by context.
+
+    Alias of `Share.open` whose result type is inferred, usually written
+    with UFCS as `x.reveal()`.
+
+    Args:
+      share: The share to reconstruct.
+
+    Returns:
+      The clear value, identical on every party.
+
+    MPC:
+      Same as `Share.open`: one opening round, and the value becomes public.
+    """
   def open_fixed(share: Share) -> fix64 {.builtin: "Share.open".}:
+    """Open a fixed-point share to every party as a `fix64`.
+
+    Alias of `Share.open` for fixed-point shares.
+
+    Args:
+      share: The fixed-point share to reconstruct.
+
+    Returns:
+      The clear fixed-point value, identical on every party.
+
+    MPC:
+      Same as `Share.open`: one opening round, and the value becomes public.
+    """
   def send_to_client(share: Share, client_id: int64) -> bool {.builtin.}:
+    """Send one share to a client for private reconstruction.
+
+    The receiver form of `MpcOutput.send_to_client`, for a single share:
+    `x.send_to_client(0)`.
+
+    Args:
+      share: The share to deliver.
+      client_id: The client that receives the output.
+
+    Returns:
+      `true` once this party's share has been handed to the client output
+      channel.
+
+    Raises:
+      An error if the backend has no client-output capability or is not
+      ready.
+
+    MPC:
+      Sends this party's share to the client only; nothing is revealed to
+      the other parties and no preprocessing is consumed.
+    """
   def interpolate_local(shares: list[Share]) -> int64 {.builtin.}:
+    """Reconstruct a value locally from shares that this party already holds.
+
+    Use it when one party has collected shares from several parties (for
+    example, shares a client or an earlier protocol step handed to it). No
+    messages are exchanged.
+
+    Args:
+      shares: Shares of one value from different parties, all with the
+        same share type.
+
+    Returns:
+      The reconstructed clear value.
+
+    Raises:
+      An error if the list is empty, holds fewer than
+      2 * threshold + 1 shares, mixes share types, or mixes HoneyBadger
+      and AVSS share encodings. The 2 * threshold + 1 minimum is checked
+      before reconstruction on every backend, including AVSS.
+
+    MPC:
+      Local; no communication or preprocessing. The caller learns the
+      value.
+    """
   def get_type(share: Share) -> string {.builtin.}:
+    """Return the kind of a share.
+
+    Args:
+      share: The share to inspect.
+
+    Returns:
+      `"SecretInt"`, `"SecretUInt"` or `"SecretFixedPoint"`. Booleans are
+      1-bit secret integers, so they report `"SecretInt"`.
+
+    MPC:
+      Local; reads metadata only and reveals nothing about the value.
+    """
   def get_party_id(share: Share) -> int64 {.builtin.}:
+    """Return the id of the party that holds a share.
+
+    Args:
+      share: The share to inspect.
+
+    Returns:
+      The party id recorded on the share object, or this party's id for a
+      plain share value.
+
+    Raises:
+      An error if a share object lacks party metadata, or no MPC runtime
+      is configured.
+
+    MPC:
+      Local; reads metadata only.
+    """
   def batch_open(shares: list[Share]) -> list[Object] {.builtin.}:
+    """Open a list of shares to every party at once.
+
+    Each element's clear value follows its share type, as with
+    `Share.open`. Use `Share.batch_open_fixed` for a typed result list.
+
+    Args:
+      shares: The shares to reconstruct, all with the same share type.
+
+    Returns:
+      The clear values in input order; an empty input gives an empty list.
+
+    Raises:
+      An error if the shares mix share types or no MPC engine is ready.
+
+    MPC:
+      Interactive: all values are opened in one batched opening, so the
+      round cost does not grow with the list length. Every value becomes
+      public.
+    """
   def batch_open_field(shares: list[Share]) -> list[bytes] {.builtin.}:
+    """Open a list of shares to every party as raw field elements.
+
+    The batched form of `Share.open_field`.
+
+    Args:
+      shares: The shares to reconstruct, all with the same share type.
+
+    Returns:
+      Each value as a serialized field element, in input order.
+
+    Raises:
+      An error if the shares mix share types or the backend cannot open
+      field elements.
+
+    MPC:
+      Interactive: one batched opening; every value becomes public.
+    """
   def batch_open_exp(shares: list[Share], curve_name: string) -> list[bytes] {.builtin.}:
+    """Open a list of shares in the exponent with a curve's standard generator.
+
+    The batched form of `Share.open_exp`: for each secret `s` every party
+    learns the point `s * G`, not `s`.
+
+    Args:
+      shares: The shares to open, all with the same share type.
+      curve_name: The group, such as `"bls12-381-g1"`, `"bn254-g1"`,
+        `"secp256k1"` or `"p-256"`.
+
+    Returns:
+      Each point as compressed bytes, in input order.
+
+    Raises:
+      An error if `curve_name` is unknown or the backend does not support
+      that group. HoneyBadger only allows it with threshold 0; use the
+      AVSS backend for verifiable openings in the exponent.
+
+    MPC:
+      Interactive: one batched exchange of partial points. The points
+      become public; the secrets stay hidden.
+    """
   def batch_open_exp_custom(shares: list[Share], generators: list[bytes], curve_name: string) -> list[bytes] {.builtin.}:
+    """Open a list of shares in the exponent, each against its own generator.
+
+    For each `i`, every party learns `shares[i] * generators[i]`.
+
+    Args:
+      shares: The shares to open, all with the same share type.
+      generators: One compressed group element per share.
+      curve_name: The group the generators belong to; it must be the
+        backend's native group.
+
+    Returns:
+      Each point as compressed bytes, in input order.
+
+    Raises:
+      An error if the lists differ in length, a generator cannot be
+      decoded, or the backend does not support the group (HoneyBadger only
+      with threshold 0).
+
+    MPC:
+      Interactive: one batched exchange of partial points. The points
+      become public; the secrets stay hidden.
+    """
   def batch_open_fixed[T](shares: list[Share]) -> list[T] {.builtin: "Share.batch_open".}:
+    """Open a list of shares to every party, typed by context.
+
+    Alias of `Share.batch_open` whose element type is inferred from the
+    assignment, as in `var bits: list[bool] = Share.batch_open_fixed(xs)`.
+
+    Args:
+      shares: The shares to reconstruct, all with the same share type.
+
+    Returns:
+      The clear values in input order.
+
+    MPC:
+      Same as `Share.batch_open`: one batched opening; every value becomes
+      public.
+    """
   def open_exp(share: Share, curve_name: string) -> bytes {.builtin.}:
+    """Open a share in the exponent with a curve's standard generator.
+
+    Every party learns the point `s * G` for the secret `s`, but not `s`
+    itself (for example, to derive a public key from a shared secret key).
+
+    Args:
+      share: The share to open.
+      curve_name: The group, such as `"bls12-381-g1"`, `"bls12-381-g2"`,
+        `"bn254-g1"`, `"secp256k1"` or `"p-256"`.
+
+    Returns:
+      The point as compressed bytes.
+
+    Raises:
+      An error if `curve_name` is unknown or the backend does not support
+      that group. HoneyBadger only allows it with threshold 0; use the
+      AVSS backend for verifiable openings in the exponent.
+
+    MPC:
+      Interactive: one exchange of partial points. The point becomes
+      public; the secret stays hidden.
+    """
   def random() -> Share {.builtin.}:
+    """Create a share of a random secret integer or boolean.
+
+    It must be used where a secret integer or boolean type is expected, as
+    in `var r: secret int32 = Share.random()`. The compiler lowers it to
+    `Share.random_int` with that type's bit width, so the value is bounded;
+    use `Share.random_field` for full-field randomness.
+
+    Returns:
+      A share of a uniformly random value of the expected type. No party
+      learns the value.
+
+    Raises:
+      A compile error when there is no expected secret integer or boolean
+      type.
+
+    MPC:
+      Same as `Share.random_int`: consumes one preprocessed random integer.
+
+    Example:
+      var mask: secret int64 = Share.random()
+    """
   def random_field() -> Share {.builtin.}:
+    """Create a share of a value uniformly random over the whole field.
+
+    The result is tagged as a 64-bit secret integer, but its value is not
+    bounded to 64 bits. Use it for protocols that need full-field
+    randomness, such as masking before `Share.open_field`.
+
+    Returns:
+      A share of a random field element. No party learns the value.
+
+    MPC:
+      Consumes one preprocessed random share. With HoneyBadger this is
+      generated jointly ahead of time, or on demand when the pool is empty.
+    """
   def random_int(bit_length: int64) -> Share {.builtin.}:
+    """Create a share of a random integer bounded to a bit width.
+
+    Args:
+      bit_length: The width of the random integer, at least 1.
+
+    Returns:
+      A secret-integer share of a uniformly random `bit_length`-bit
+      value. No party learns the value.
+
+    Raises:
+      An error if `bit_length` is negative, or the backend cannot supply
+      bounded random integers.
+
+    MPC:
+      Consumes one preprocessed random integer (a PRandInt with HoneyBadger).
+    """
   def get_commitment(share: Share, index: int64) -> bytes {.builtin.}:
+    """Return one Feldman commitment attached to a share.
+
+    Only AVSS shares carry commitments to the sharing polynomial.
+
+    Args:
+      share: An AVSS share.
+      index: Zero-based index of the commitment.
+
+    Returns:
+      The commitment as compressed group-element bytes.
+
+    Raises:
+      An error if the share has no commitments (any non-AVSS share) or
+      `index` is out of range.
+
+    MPC:
+      Local; the commitments are public data.
+    """
   def commitment_count(share: Share) -> int64 {.builtin.}:
+    """Return how many Feldman commitments a share carries.
+
+    Args:
+      share: The share to inspect.
+
+    Returns:
+      The number of commitments; 0 for shares without commitments.
+
+    MPC:
+      Local; reads public metadata only.
+    """
   def has_commitments(share: Share) -> bool {.builtin.}:
+    """Return whether a share carries Feldman commitments.
+
+    Args:
+      share: The share to inspect.
+
+    Returns:
+      `true` for AVSS shares with commitments, otherwise `false`.
+
+    MPC:
+      Local; reads public metadata only.
+    """
   def mul_field(share: Share, field_bytes: bytes) -> Share {.builtin.}:
+    """Multiply a share by a public field element.
+
+    Unlike `Share.mul_scalar`, the factor is any element of the computation
+    field, such as the result of `Field.inverse`.
+
+    Args:
+      share: The secret operand.
+      field_bytes: A serialized field element, as produced by the `Field`
+        builtins or `Share.open_field`. Every party must pass the same one.
+
+    Returns:
+      A share of `share * field_bytes`, with the same share type tag.
+
+    Raises:
+      An error if `field_bytes` is not a valid field element.
+
+    MPC:
+      Local; no communication or preprocessing.
+    """
   def add_field(share: Share, field_bytes: bytes) -> Share {.builtin.}:
+    """Add a public field element to a share.
+
+    Args:
+      share: The secret operand.
+      field_bytes: A serialized field element, as produced by the `Field`
+        builtins or `Share.open_field`. Every party must pass the same one.
+
+    Returns:
+      A share of `share + field_bytes`, with the same share type tag.
+
+    Raises:
+      An error if `field_bytes` is not a valid field element.
+
+    MPC:
+      Local; no communication or preprocessing.
+    """
   def retag(share: Share, bit_length: int64) -> Share {.builtin.}:
+    """Reinterpret an integer share as a signed secret integer of another width.
+
+    This only changes the type tag; the shared value is not reduced. The
+    caller must make sure the value already fits: for example, retagging a
+    share known to hold 0 or 1 as a 1-bit `secret bool`. Narrowing a value
+    that does not fit leaves it out of range.
+
+    Args:
+      share: A signed or unsigned integer share.
+      bit_length: The new width, at least 1 (1 for booleans).
+
+    Returns:
+      The same share data tagged as a `bit_length`-bit secret integer.
+
+    Raises:
+      An error if `share` is a fixed-point share or `bit_length` is not
+      positive.
+
+    MPC:
+      Local; no communication or preprocessing.
+    """
   def open_field(share: Share) -> bytes {.builtin.}:
+    """Open a share to every party as a raw field element.
+
+    Unlike `Share.open`, the result is not decoded back to an integer or
+    fixed-point number, so it can feed the `Field` builtins.
+
+    Args:
+      share: The share to reconstruct.
+
+    Returns:
+      The value as a serialized field element, identical on every party.
+
+    Raises:
+      An error if no MPC engine is ready or the backend cannot open field
+      elements.
+
+    MPC:
+      Interactive: one opening round; the value becomes public.
+
+    Example:
+      var r = Share.random_field()
+      var r_squared = Share.open_field(Share.mul(r, r))
+    """
   def open_exp_custom(share: Share, generator_bytes: bytes) -> bytes {.builtin.}:
+    """Open a share in the exponent against a caller-supplied generator.
+
+    Every party learns `share * generator_bytes`, but not the secret.
+
+    Args:
+      share: The share to open.
+      generator_bytes: A compressed element of the backend's native group.
+
+    Returns:
+      The point as compressed bytes.
+
+    Raises:
+      An error if the generator cannot be decoded or the backend does not
+      support opening in the exponent (HoneyBadger only with threshold 0).
+
+    MPC:
+      Interactive: one exchange of partial points. The point becomes
+      public; the secret stays hidden.
+    """
 
 builtin object Field:
+  """Public arithmetic on elements of the computation field.
+
+  Field elements are passed as `bytes` holding a canonically serialized
+  element of the scalar field of the running backend's curve (see
+  `Mpc.field`). Every operation is local and deterministic, so all parties
+  compute the same result. These values are public: use them for clear
+  values produced by `Share.open_field`, and combine them with shares
+  through `Share.mul_field` and `Share.add_field`.
+
+  All `Field` builtins need a configured MPC runtime, because the field
+  depends on its curve.
+  """
   def from_int(value: int64) -> bytes {.builtin.}:
+    """Convert an integer to a field element.
+
+    Args:
+      value: The integer; negative values map to their additive inverse.
+
+    Returns:
+      The serialized field element.
+
+    Raises:
+      An error if no MPC runtime is configured.
+    """
   def zero() -> bytes {.builtin.}:
+    """Return the field element 0.
+
+    Returns:
+      The serialized additive identity.
+    """
   def one() -> bytes {.builtin.}:
+    """Return the field element 1.
+
+    Returns:
+      The serialized multiplicative identity.
+    """
   def is_zero(field_bytes: bytes) -> bool {.builtin.}:
+    """Return whether a field element is 0.
+
+    Args:
+      field_bytes: A serialized field element.
+
+    Returns:
+      `true` if the element is 0.
+
+    Raises:
+      An error if `field_bytes` is not a valid field element.
+    """
   def eq(a: bytes, b: bytes) -> bool {.builtin.}:
+    """Return whether two field elements are equal.
+
+    Args:
+      a: A serialized field element.
+      b: A serialized field element.
+
+    Returns:
+      `true` if both encode the same element.
+
+    Raises:
+      An error if either argument is not a valid field element.
+    """
   def add(a: bytes, b: bytes) -> bytes {.builtin.}:
+    """Add two field elements.
+
+    Args:
+      a: A serialized field element.
+      b: A serialized field element.
+
+    Returns:
+      The serialized sum `a + b`.
+
+    Raises:
+      An error if either argument is not a valid field element.
+    """
   def sub(a: bytes, b: bytes) -> bytes {.builtin.}:
+    """Subtract one field element from another.
+
+    Args:
+      a: A serialized field element.
+      b: The serialized field element to subtract.
+
+    Returns:
+      The serialized difference `a - b`.
+
+    Raises:
+      An error if either argument is not a valid field element.
+    """
   def mul(a: bytes, b: bytes) -> bytes {.builtin.}:
+    """Multiply two field elements.
+
+    Args:
+      a: A serialized field element.
+      b: A serialized field element.
+
+    Returns:
+      The serialized product `a * b`.
+
+    Raises:
+      An error if either argument is not a valid field element.
+    """
   def neg(a: bytes) -> bytes {.builtin.}:
+    """Negate a field element.
+
+    Args:
+      a: A serialized field element.
+
+    Returns:
+      The serialized additive inverse `-a`.
+
+    Raises:
+      An error if `a` is not a valid field element.
+    """
   def inverse(a: bytes) -> bytes {.builtin.}:
+    """Return the multiplicative inverse of a field element.
+
+    Args:
+      a: A serialized, non-zero field element.
+
+    Returns:
+      The serialized inverse of `a`.
+
+    Raises:
+      An error if `a` is 0 or not a valid field element.
+    """
   def sqrt(a: bytes) -> bytes {.builtin.}:
+    """Return the canonical square root of a field element.
+
+    Of the two roots `r` and `-r`, the one in the lower half of the field
+    (at most `(p - 1) / 2`) is returned, so every party picks the same root.
+
+    Args:
+      a: A serialized field element that is a quadratic residue.
+
+    Returns:
+      The serialized canonical square root.
+
+    Raises:
+      An error if `a` is not a quadratic residue or not a valid field
+      element.
+
+    Example:
+      var root = Field.sqrt(Field.from_int(4))
+    """
 
 builtin object Mpc:
+  """Information about the running MPC session, and party-local randomness.
+
+  Except for `Mpc.is_ready`, `Mpc.rand` and `Mpc.rand_int`, these builtins
+  raise an error when the program runs without an MPC runtime.
+  """
   def party_id() -> int64 {.builtin.}:
+    """Return this party's id.
+
+    Returns:
+      The zero-based id of the party running this copy of the program.
+    """
   def n_parties() -> int64 {.builtin.}:
+    """Return the number of computing parties.
+
+    Returns:
+      The number of parties in the session.
+    """
   def threshold() -> int64 {.builtin.}:
+    """Return the corruption threshold `t` of the session.
+
+    Returns:
+      The maximum number of corrupted parties the protocol tolerates.
+    """
   def is_ready() -> bool {.builtin.}:
+    """Return whether the MPC engine is ready to run protocol operations.
+
+    Returns:
+      `true` if an engine is configured and ready; `false` otherwise,
+      including when no MPC runtime is configured.
+    """
   def instance_id() -> uint64 {.builtin.}:
+    """Return the id of the current MPC instance.
+
+    Returns:
+      The instance id, which distinguishes separate executions.
+    """
   def protocol_name() -> string {.builtin.}:
+    """Return the name of the MPC backend.
+
+    Returns:
+      `"honeybadger-mpc"` or `"avss"`.
+    """
   def curve() -> string {.builtin.}:
+    """Return the name of the session's elliptic curve.
+
+    Returns:
+      One of `"bls12-381"`, `"bn254"`, `"curve25519"`, `"ed25519"`,
+      `"secp256k1"` or `"p-256"`.
+    """
   def field() -> string {.builtin.}:
+    """Return the name of the computation field.
+
+    The field is the scalar field of the session's curve; the `Field`
+    builtins and `Share.open_field` use it.
+
+    Returns:
+      One of `"bls12-381-fr"`, `"bn254-fr"`, `"curve25519-fr"`,
+      `"secp256k1-fr"` or `"p-256-fr"`.
+    """
   def has_capability(capability: string) -> bool {.builtin.}:
+    """Return whether the backend supports an optional capability.
+
+    Args:
+      capability: A capability name as listed by `Mpc.capabilities`, such
+        as `"multiplication"`, `"client-input"`, `"client-output"`,
+        `"open-in-exponent"`, `"randomness"`, `"field-open"` or
+        `"consensus"`.
+
+    Returns:
+      `true` if the capability is supported; `false` if it is not or the
+      name is unknown.
+
+    Example:
+      if Mpc.has_capability("client-output"):
+        MpcOutput.send_to_client(0, shares)
+    """
   def capabilities() -> list[string] {.builtin.}:
+    """Return the names of every capability the backend supports.
+
+    Returns:
+      The supported capability names, as accepted by `Mpc.has_capability`.
+    """
   def rand() -> bytes {.builtin.}:
+    """Return 32 random bytes drawn locally by this party.
+
+    Each party gets different bytes. This is not shared or joint
+    randomness; use `Share.random_field` or `Share.random_int` for secret
+    randomness that no party knows.
+
+    Returns:
+      32 bytes from this party's random number generator.
+    """
   def rand_int(bit_length: int64) -> uint64 {.builtin.}:
+    """Return a random unsigned integer drawn locally by this party.
+
+    Each party gets a different value; see `Mpc.rand`.
+
+    Args:
+      bit_length: The width of the result: 8, 16, 32 or 64.
+
+    Returns:
+      A uniformly random unsigned integer of that width (a `uint8`,
+      `uint16`, `uint32` or `uint64` value).
+
+    Raises:
+      An error if `bit_length` is not 8, 16, 32 or 64.
+    """

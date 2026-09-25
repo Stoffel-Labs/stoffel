@@ -47,6 +47,10 @@ fn write_stdout(args: fmt::Arguments<'_>, newline: bool) {
     }
 }
 
+// Declared after the BrokenPipe-safe `print!`/`println!` macros above:
+// `macro_rules!` scope is textual, so this module uses them instead of std's.
+mod doc;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "stoffel",
@@ -65,6 +69,9 @@ enum Command {
     Init(InitArgs),
     /// Validate source and project MPC settings without writing bytecode.
     Check(CheckArgs),
+    /// Generate HTML API documentation from .stfl docstrings.
+    #[command(visible_alias = "docs")]
+    Doc(doc::DocArgs),
     /// Write compiled bytecode for a project or source file.
     Compile(BuildArgs),
     /// Build project bytecode under target/.
@@ -664,6 +671,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Init(args) => init(args),
         Command::Check(args) => check(args),
+        Command::Doc(args) => doc::doc(args),
         Command::Compile(args) => build("stoffel compile", args),
         Command::Build(args) => build("stoffel build", args.to_build_args()),
         Command::Run(args) => run(args).await,
@@ -703,7 +711,7 @@ fn unknown_command(command: &str) -> Result<()> {
 fn closest_cli_command(command: &str) -> Option<&'static str> {
     const COMMANDS: &[&str] = &[
         "init", "new", "check", "compile", "build", "run", "exec", "execute", "dev", "test",
-        "status", "doctor", "clean", "update", "upgrade",
+        "status", "doctor", "clean", "update", "upgrade", "doc", "docs",
     ];
     COMMANDS
         .iter()
@@ -1501,13 +1509,71 @@ fn source_declares_function(file: &Path, entry: &str) -> Result<bool> {
 fn declared_function_list(file: &Path) -> Result<Vec<String>> {
     let raw = std::fs::read_to_string(file)
         .with_context(|| format!("failed to read {}", file.display()))?;
-    let mut functions = raw
-        .lines()
-        .filter_map(declared_function_name)
-        .collect::<Vec<_>>();
+    Ok(declared_function_names(&raw))
+}
+
+/// Names of the functions declared with `def` in `source`, sorted and
+/// deduplicated. Lines inside `"""docstrings"""` are documentation, so a
+/// `def` in a docstring example is never taken for a declaration.
+fn declared_function_names(source: &str) -> Vec<String> {
+    let mut state = SourceScanState::Code;
+    let mut functions = Vec::new();
+    for line in source.lines() {
+        let starts_in_code = state == SourceScanState::Code;
+        state = state.after_line(line);
+        if starts_in_code {
+            functions.extend(declared_function_name(line));
+        }
+    }
     functions.sort();
     functions.dedup();
-    Ok(functions)
+    functions
+}
+
+/// Where a line-by-line scan of StoffelLang source stands at a line break.
+/// Plain `"..."` strings and comments end with their line; only a
+/// `"""docstring"""` can continue onto the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceScanState {
+    Code,
+    DocString,
+}
+
+impl SourceScanState {
+    const TRIPLE_QUOTE: &'static str = "\"\"\"";
+
+    /// The state after scanning `line`, starting in `self`.
+    fn after_line(self, line: &str) -> Self {
+        let mut state = self;
+        let mut in_string = false;
+        let mut chars = line.chars();
+        loop {
+            let rest = chars.as_str();
+            let Some(character) = chars.next() else {
+                break;
+            };
+            match (state, in_string, character) {
+                (SourceScanState::Code, false, '#') => break,
+                (SourceScanState::Code, false, '"') | (SourceScanState::DocString, _, '"')
+                    if rest.starts_with(Self::TRIPLE_QUOTE) =>
+                {
+                    state = match state {
+                        SourceScanState::Code => SourceScanState::DocString,
+                        SourceScanState::DocString => SourceScanState::Code,
+                    };
+                    chars = rest[Self::TRIPLE_QUOTE.len()..].chars();
+                }
+                (SourceScanState::Code, false, '"') => in_string = true,
+                (SourceScanState::Code, true, '"') => in_string = false,
+                (SourceScanState::Code, true, '\\') | (SourceScanState::DocString, _, '\\') => {
+                    // Skip the escaped character.
+                    chars.next();
+                }
+                _ => {}
+            }
+        }
+        state
+    }
 }
 
 fn declared_function_name(line: &str) -> Option<String> {
@@ -3257,6 +3323,58 @@ fn parse_hex_bytes(raw: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_function_names_skip_defs_inside_docstrings() {
+        let source = r#""""Module docs.
+
+Example:
+  def main():
+    pass
+"""
+
+def helper(x: int64) -> int64:
+  """Doubles `x`.
+
+  Example:
+    def test_helper():
+      assert helper(1) == 2
+  """
+  return x * 2
+
+def main() -> int64:
+  """One-line docs with a def inside: def fake(): """
+  return helper(2)
+"#;
+        assert_eq!(declared_function_names(source), ["helper", "main"]);
+    }
+
+    #[test]
+    fn declared_function_names_ignore_triple_quotes_in_strings_and_comments() {
+        let source = r##"def first() -> string:
+  return "\"\"\"" # """ comment, not a docstring
+def second() -> string:
+  return "" + "a"
+def third() -> void:
+  print("# not a comment \"\"\"")
+def fourth() -> void:
+  pass
+"##;
+        assert_eq!(
+            declared_function_names(source),
+            ["first", "fourth", "second", "third"]
+        );
+    }
+
+    #[test]
+    fn source_scan_state_tracks_multi_line_docstrings() {
+        use SourceScanState::{Code, DocString};
+        assert_eq!(Code.after_line(r#"  """Summary."#), DocString);
+        assert_eq!(DocString.after_line("  def not_code():"), DocString);
+        assert_eq!(DocString.after_line(r#"  \""" still docs"#), DocString);
+        assert_eq!(DocString.after_line(r#"  """ "#), Code);
+        assert_eq!(Code.after_line(r#"  """One line.""" "#), Code);
+    }
 
     #[test]
     fn parse_value_accepts_bracketed_lists() {

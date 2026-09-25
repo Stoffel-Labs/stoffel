@@ -59,7 +59,8 @@ StoffelVM/
 │   │       ├── core_vm.rs       # VirtualMachine implementation
 │   │       ├── functions.rs     # VMFunction definition
 │   │       ├── activation.rs    # Call stack / activation records
-│   │       ├── stdlib.rs        # Built-in functions
+│   │       ├── standard_library.rs # General built-in functions
+│   │       ├── mpc_builtins.rs  # Share/Mpc/Rbc/Crypto/... builtins
 │   │       ├── hooks.rs         # Debug/instrumentation hooks
 │   │       ├── ffi.rs           # Rust FFI bridge
 │   │       └── net/             # MPC network integration
@@ -101,7 +102,7 @@ Result (Value)
 | Instruction | `instructions.rs` | VM instruction enum |
 | Value | `core_types.rs` | Runtime value types |
 | Activation | `activation.rs` | Call stack management |
-| StdLib | `stdlib.rs` | Built-in functions |
+| StdLib | `standard_library.rs`, `mpc_builtins.rs` | Built-in functions |
 | Hooks | `hooks.rs` | Debugging/instrumentation |
 | HoneyBadgerMpcEngine | `net/hb_engine.rs` | MPC protocol integration |
 
@@ -146,24 +147,22 @@ pub enum Value {
 
 ### Built-in Functions
 
+Language-level builtins are declared, with docstrings, in
+`crates/stoffel-lang/stdlib/std/*.stfl` (`std.core`, `std.mpc`, `std.crypto`,
+`std.protocols`, `std.avss`). That is the reference; browse it with
+`stoffel doc --std --open`, or check coverage with
+`stoffel doc --std --check --deny-missing`.
+
+VM-internal builtins have no `.stfl` declaration and are emitted by the
+compiler for object, field and list operations:
+
 | Function | Purpose |
 |----------|---------|
-| `print` | Console output |
 | `create_object` | Create key-value object |
-| `create_array` | Create array |
-| `get_field` | Access object/array field |
-| `set_field` | Set object/array field |
-| `array_length` | Get array length |
-| `array_push` | Append to array |
-| `create_closure` | Create closure |
-| `call_closure` | Invoke closure |
-| `get_upvalue` | Get captured variable |
-| `set_upvalue` | Set captured variable |
-| `type` | Get value type as string |
-| `to_string` | Convert any value to its string form |
-| `slice` | Pythonic slice of arrays/strings (negative bounds ok) |
-| `contains` | Membership test (backs the `in` operator) |
-| `assert` | Abort execution when a condition is false |
+| `get_field` / `set_field` | Read / write an object field or array element |
+| `get_or_create_array_field` | Read an array field, creating it on first use |
+| `array_length` / `array_push` | Array length / append |
+| `array_concat` / `array_repeat` / `array_equals` | List `+`, `*` and `==` |
 
 ## Key Files
 
@@ -241,9 +240,15 @@ MPC operations use `HoneyBadgerMpcEngine`:
 
 ### Adding a Built-in Function
 
-1. Add function in `stoffel-vm/src/stdlib.rs`
-2. Register in `register_stdlib()` function
-3. Document in README.md
+1. Declare it with a docstring in `crates/stoffel-lang/stdlib/std/*.stfl`
+   (`{.builtin.}` or `{.builtin: "vm_symbol".}`; Google-style `Args:`,
+   `Returns:`, `Raises:`, `Examples:` and, for MPC operations, `MPC:`)
+2. Implement and register it in the VM: general builtins in
+   `crates/stoffel-vm/src/standard_library.rs` (`FUNCTION_NAMES` + `register`),
+   MPC builtins in `crates/stoffel-vm/src/mpc_builtins.rs`
+   (`MPC_BUILTIN_FUNCTIONS` + the `mpc_builtins/` submodule)
+3. `stoffel doc --std --check --deny-missing` must pass (the stoffellang test
+   `stdlib_is_fully_documented_with_no_lint_findings` enforces it in CI)
 4. Add tests
 
 ### Modifying Value Types
@@ -302,5 +307,7 @@ cargo test -p stoffel-vm-types
 - [ ] Regenerate header files if applicable
 
 ### When Built-ins Change
-- [ ] Document in README.md
-- [ ] Update `docs/src/stoffel-vm/builtins.md`
+- [ ] Write or update the docstring in `crates/stoffel-lang/stdlib/std/*.stfl`;
+      `stoffel doc --std --check --deny-missing` must pass
+- [ ] Update the VM-internal builtins list in README.md if a builtin has no
+      `.stfl` declaration

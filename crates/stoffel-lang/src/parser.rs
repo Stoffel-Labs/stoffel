@@ -1,5 +1,6 @@
 use crate::ast::{AstNode, FieldDefinition, Parameter, Pragma, Value};
 use crate::errors::{CompilerError, CompilerResult, SourceLocation};
+use std::collections::HashMap;
 use std::iter::Peekable;
 use std::mem;
 use std::slice::Iter;
@@ -13,6 +14,156 @@ struct Parser<'a> {
     node_id_counter: usize, // Counter for assigning unique node IDs
     recover: bool,
     errors: Vec<CompilerError>,
+    docs: DocTable,
+}
+
+/// Docstrings collected while parsing, kept beside the AST instead of in it.
+///
+/// Item docstrings are keyed by the [`SourceLocation`] of the documented
+/// declaration's header, which is the `location` stored on its AST node:
+/// the `def` keyword for functions and builtin methods, the `builtin`
+/// keyword for `builtin object`/`builtin type`/`builtin opaque`, and the
+/// `object`/`enum`/`type` keyword for user type definitions.
+///
+/// The table is a parse-time artifact: the keys match the raw output of
+/// [`parse_with_docs`] / [`parse_recovering`] only, not ASTs rewritten by
+/// later compiler passes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DocTable {
+    module: Option<String>,
+    items: HashMap<SourceLocation, String>,
+}
+
+impl DocTable {
+    /// The module docstring: a docstring that is the first token of the file.
+    pub fn module_doc(&self) -> Option<&str> {
+        self.module.as_deref()
+    }
+
+    /// The docstring of the declaration whose header is at `owner`.
+    pub fn item_doc(&self, owner: &SourceLocation) -> Option<&str> {
+        self.items.get(owner).map(String::as_str)
+    }
+
+    /// Every item docstring with the location of its declaration header,
+    /// in no particular order.
+    pub fn item_docs(&self) -> impl Iterator<Item = (&SourceLocation, &str)> {
+        self.items
+            .iter()
+            .map(|(location, text)| (location, text.as_str()))
+    }
+
+    /// Number of item docstrings (the module docstring is not counted).
+    pub fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// True when the source had no docstrings at all.
+    pub fn is_empty(&self) -> bool {
+        self.module.is_none() && self.items.is_empty()
+    }
+}
+
+/// The kinds of indented block that follow a header's `:`. Each kind keeps
+/// its own diagnostics and recovery behaviour; they share one prologue,
+/// docstring hook and item loop in [`Parser::parse_indented_items`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    /// Statements of a `def`, `if`/`elif`/`else`, `while`, `for` or `case` body.
+    Statements,
+    /// `def ... {.builtin.}` declarations inside `builtin object X:`.
+    BuiltinObjectMethods,
+    /// `name: Type` fields inside `object X:`.
+    ObjectFields,
+    /// Members inside `enum X:`.
+    EnumMembers,
+}
+
+impl BlockKind {
+    /// Error for a header line not followed by a newline, or `None` when the
+    /// block only skips blank lines before its indent.
+    fn newline_error(self) -> Option<&'static str> {
+        match self {
+            BlockKind::Statements => Some("Expected newline after ':' before indented block"),
+            BlockKind::BuiltinObjectMethods => Some("Expected newline after builtin object header"),
+            BlockKind::EnumMembers => Some("Expected newline after ':' before enum members"),
+            BlockKind::ObjectFields => None,
+        }
+    }
+
+    /// Error for a missing closing dedent, or `None` when the dedent is
+    /// optional.
+    fn dedent_error(self) -> Option<&'static str> {
+        match self {
+            BlockKind::Statements => Some("Expected dedentation to end block"),
+            BlockKind::BuiltinObjectMethods => {
+                Some("Expected dedentation to end builtin object declaration")
+            }
+            BlockKind::EnumMembers => Some("Expected dedent after enum members"),
+            BlockKind::ObjectFields => None,
+        }
+    }
+
+    /// Whether the block lists declarations (fields, members, methods), where
+    /// a string literal can only be a mistyped docstring.
+    fn is_declaration_list(self) -> bool {
+        !matches!(self, BlockKind::Statements)
+    }
+
+    /// Whether a recovering parse records an error inside this block and
+    /// continues with the next item instead of abandoning the block.
+    fn recovers(self) -> bool {
+        matches!(self, BlockKind::Statements)
+    }
+}
+
+/// Whether [`Parser::open_block`] found the block's indent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockOpening {
+    Opened,
+    /// A recovering parse recorded a missing newline or indent; the block is
+    /// treated as empty.
+    Missing,
+}
+
+/// The declaration a docstring-only block belongs to; selects diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocBlockOwner {
+    /// `def ... {.builtin.}:` at top level or inside `builtin object`.
+    BuiltinFunction,
+    /// `builtin type`, `builtin opaque` or `type X = Y` followed by `:`.
+    TypeDeclaration,
+}
+
+impl DocBlockOwner {
+    fn non_docstring_error(self, location: SourceLocation) -> CompilerError {
+        let message = match self {
+            DocBlockOwner::BuiltinFunction => "builtin functions may only contain a docstring",
+            DocBlockOwner::TypeDeclaration => "type declarations may only contain a docstring",
+        };
+        CompilerError::syntax_error(message, location)
+            .with_hint("Write a single indented \"\"\"docstring\"\"\" here, or remove the block")
+    }
+}
+
+/// Error for a `"""docstring"""` in a position where docstrings are not
+/// allowed. Docstrings are documentation, never expressions or statements.
+fn stray_docstring_error(location: SourceLocation) -> CompilerError {
+    CompilerError::syntax_error(
+        "docstrings may only appear as the first item of a module, def, object, enum or type body",
+        location,
+    )
+    .with_hint("Use a \"...\" string literal for values, or a '#' comment for other notes")
+}
+
+/// Error for a `"..."` string where a docstring could go but only
+/// declarations are allowed.
+fn plain_string_doc_error(location: SourceLocation) -> CompilerError {
+    CompilerError::syntax_error(
+        "docstrings must use triple quotes: \"\"\"...\"\"\"",
+        location,
+    )
+    .with_hint("Write the docstring as \"\"\"Summary.\"\"\" on the first line of the block")
 }
 
 impl<'a> Parser<'a> {
@@ -30,6 +181,7 @@ impl<'a> Parser<'a> {
             node_id_counter: 0, // Initialize counter
             recover,
             errors: Vec::new(),
+            docs: DocTable::default(),
         }
     }
 
@@ -498,52 +650,323 @@ impl<'a> Parser<'a> {
         ]))
     }
 
-    fn parse_indented_block(&mut self) -> CompilerResult<AstNode> {
-        // Allow multiple newlines before the indented block starts
-        if let Err(error) = self.consume(
-            &TokenKind::Newline,
-            "Expected newline after ':' before indented block",
-        ) {
-            if self.recover {
-                self.errors.push(error);
-                self.synchronize_after_error(&self.last_location.clone());
-                return Ok(AstNode::Block(Vec::new()));
-            }
-            return Err(error);
-        }
+    fn skip_newlines(&mut self) {
         while self.check(&TokenKind::Newline) {
-            self.advance(); // Skip extra blank lines
+            self.advance();
         }
-        if let Err(error) = self.consume(&TokenKind::Indent, "Expected indentation for block") {
-            if self.recover {
+    }
+
+    /// Location of the current token when it is a docstring.
+    fn current_docstring_location(&self) -> Option<SourceLocation> {
+        match self.current_token_info {
+            Some(TokenInfo {
+                kind: TokenKind::DocString(_),
+                location,
+            }) => Some(location.clone()),
+            _ => None,
+        }
+    }
+
+    /// Location of the current token when it is a `"..."` string literal.
+    fn current_string_literal_location(&self) -> Option<SourceLocation> {
+        match self.current_token_info {
+            Some(TokenInfo {
+                kind: TokenKind::StringLiteral(_),
+                location,
+            }) => Some(location.clone()),
+            _ => None,
+        }
+    }
+
+    /// Records `error` and resynchronizes when a recovering parse may keep
+    /// going inside a block of `kind`; otherwise returns the error.
+    fn recover_in_block(&mut self, kind: BlockKind, error: CompilerError) -> CompilerResult<()> {
+        if self.recover && kind.recovers() {
+            let error_location = error.location.clone();
+            self.errors.push(error);
+            self.synchronize_after_error(&error_location);
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
+    /// Consumes the prologue of an indented block: the newline ending the
+    /// header line, any blank lines, and the indent.
+    fn open_block(&mut self, kind: BlockKind) -> CompilerResult<BlockOpening> {
+        match self.expect_block_start(kind) {
+            Ok(()) => Ok(BlockOpening::Opened),
+            Err(error) if self.recover && kind.recovers() => {
                 self.errors.push(error);
                 self.synchronize_after_error(&self.last_location.clone());
-                return Ok(AstNode::Block(Vec::new()));
+                Ok(BlockOpening::Missing)
             }
-            return Err(error);
+            Err(error) => Err(error),
         }
+    }
 
-        let mut statements = Vec::new();
-        while !self.check(&TokenKind::Dedent) && !self.check(&TokenKind::Eof) {
-            match self.parse_statement_or_declaration() {
-                Ok(statement) => statements.push(statement),
-                Err(error) if self.recover => {
-                    let error_location = error.location.clone();
-                    self.errors.push(error);
-                    self.synchronize_after_error(&error_location);
-                    continue;
-                }
-                Err(error) => return Err(error),
+    fn expect_block_start(&mut self, kind: BlockKind) -> CompilerResult<()> {
+        if let Some(message) = kind.newline_error() {
+            self.consume(&TokenKind::Newline, message)?;
+        }
+        self.skip_newlines();
+        match kind {
+            BlockKind::Statements => {
+                self.consume(&TokenKind::Indent, "Expected indentation for block")?;
             }
-            // Skip optional newlines within the block
-            while self.check(&TokenKind::Newline) {
+            BlockKind::BuiltinObjectMethods => {
+                self.consume(
+                    &TokenKind::Indent,
+                    "Expected indented method declarations after builtin object header",
+                )?;
+            }
+            BlockKind::EnumMembers => {
+                self.consume(&TokenKind::Indent, "Expected indented enum members")?;
+            }
+            BlockKind::ObjectFields => {
+                if !self.check(&TokenKind::Indent) {
+                    return Err(CompilerError::syntax_error(
+                        "Expected indented block with field definitions after object header",
+                        self.get_location(),
+                    ));
+                }
                 self.advance();
             }
         }
+        Ok(())
+    }
 
-        self.consume(&TokenKind::Dedent, "Expected dedentation to end block")?;
+    fn close_block(&mut self, kind: BlockKind) -> CompilerResult<()> {
+        match kind.dedent_error() {
+            Some(message) => {
+                self.consume(&TokenKind::Dedent, message)?;
+            }
+            None => {
+                if self.check(&TokenKind::Dedent) {
+                    self.advance();
+                }
+            }
+        }
+        Ok(())
+    }
 
+    /// Parses an indented block of items after a header's `:`.
+    ///
+    /// When `doc_owner` is set, a leading `"""docstring"""` documents the
+    /// declaration at that location. Any other docstring in the block is a
+    /// stray docstring error.
+    fn parse_indented_items<T>(
+        &mut self,
+        kind: BlockKind,
+        doc_owner: Option<&SourceLocation>,
+        mut parse_item: impl FnMut(&mut Self) -> CompilerResult<T>,
+    ) -> CompilerResult<Vec<T>> {
+        if self.open_block(kind)? == BlockOpening::Missing {
+            return Ok(Vec::new());
+        }
+        // Whether the first item is where the docstring would have gone.
+        let mut doc_slot_open = doc_owner.is_some() && self.current_docstring_location().is_none();
+        if let Some(owner) = doc_owner {
+            if let Err(error) = self.parse_leading_docstring(owner) {
+                self.recover_in_block(kind, error)?;
+            }
+        }
+
+        let mut items = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
+                break;
+            }
+            let plain_string_is_doc_attempt = kind.is_declaration_list() || doc_slot_open;
+            doc_slot_open = false;
+            let item = if let Some(location) = self.current_docstring_location() {
+                Err(stray_docstring_error(location))
+            } else if let Some(location) = self
+                .current_string_literal_location()
+                .filter(|_| plain_string_is_doc_attempt)
+            {
+                Err(plain_string_doc_error(location))
+            } else {
+                parse_item(self)
+            };
+            match item {
+                Ok(item) => items.push(item),
+                Err(error) => self.recover_in_block(kind, error)?,
+            }
+        }
+
+        self.close_block(kind)?;
+        Ok(items)
+    }
+
+    /// Parses an indented block of statements (`if`/`while`/`for`/`case`
+    /// bodies). Docstrings are not allowed here.
+    fn parse_indented_block(&mut self) -> CompilerResult<AstNode> {
+        let statements = self.parse_indented_items(
+            BlockKind::Statements,
+            None,
+            Self::parse_statement_or_declaration,
+        )?;
         Ok(AstNode::Block(statements))
+    }
+
+    /// Parses a user `def` body. A leading docstring documents the function
+    /// at `owner` and is not part of the body, so a docstring-only body is an
+    /// empty block.
+    fn parse_function_body(&mut self, owner: &SourceLocation) -> CompilerResult<AstNode> {
+        let statements = self.parse_indented_items(
+            BlockKind::Statements,
+            Some(owner),
+            Self::parse_statement_or_declaration,
+        )?;
+        Ok(AstNode::Block(statements))
+    }
+
+    /// Consumes a docstring followed by the end of its line (and any blank
+    /// lines), returning its text. Returns `None` when the current token is
+    /// not a docstring. The lexer already normalized the text.
+    fn take_docstring(&mut self) -> CompilerResult<Option<String>> {
+        let text = match self.current_token_info {
+            Some(TokenInfo {
+                kind: TokenKind::DocString(text),
+                ..
+            }) => text.clone(),
+            _ => return Ok(None),
+        };
+        self.advance();
+        if !self.check(&TokenKind::Newline)
+            && !self.check(&TokenKind::Dedent)
+            && !self.check(&TokenKind::Eof)
+        {
+            return Err(CompilerError::syntax_error(
+                "Expected a newline after the docstring",
+                self.get_location(),
+            )
+            .with_hint("A docstring must be alone on its line(s)"));
+        }
+        self.skip_newlines();
+        Ok(Some(text))
+    }
+
+    fn record_doc(&mut self, owner: &SourceLocation, text: String) -> CompilerResult<()> {
+        if self.docs.items.contains_key(owner) {
+            return Err(CompilerError::syntax_error(
+                "A declaration may only have one docstring",
+                owner.clone(),
+            ));
+        }
+        self.docs.items.insert(owner.clone(), text);
+        Ok(())
+    }
+
+    /// Takes an optional leading docstring documenting the declaration at
+    /// `owner`.
+    fn parse_leading_docstring(&mut self, owner: &SourceLocation) -> CompilerResult<()> {
+        match self.take_docstring()? {
+            Some(text) => self.record_doc(owner, text),
+            None => Ok(()),
+        }
+    }
+
+    /// Parses the optional docstring-only block after a builtin `def`
+    /// header: `:` then, on the following lines, an indented docstring.
+    /// Without an indented block the declaration is header-only, as before.
+    fn parse_optional_doc_block(&mut self, owner: &SourceLocation) -> CompilerResult<()> {
+        if !self.check(&TokenKind::Newline) {
+            return Ok(());
+        }
+        self.skip_newlines();
+        if !self.check(&TokenKind::Indent) {
+            return Ok(());
+        }
+        self.advance(); // consume Indent
+        self.parse_doc_block_body(owner, DocBlockOwner::BuiltinFunction)
+    }
+
+    /// Parses the docstring block required after the `:` that ends a
+    /// `builtin type`, `builtin opaque` or `type X = Y` declaration. The
+    /// `:` itself is already consumed.
+    fn parse_required_doc_block(&mut self, owner: &SourceLocation) -> CompilerResult<()> {
+        let opened = self
+            .consume(
+                &TokenKind::Newline,
+                "Expected a newline and an indented docstring after ':'.",
+            )
+            .and_then(|_| {
+                self.skip_newlines();
+                self.consume(
+                    &TokenKind::Indent,
+                    "Expected an indented docstring after ':'.",
+                )
+            });
+        match opened {
+            Ok(_) => self.parse_doc_block_body(owner, DocBlockOwner::TypeDeclaration),
+            Err(error) if self.recover => {
+                let error_location = error.location.clone();
+                self.errors.push(error);
+                self.synchronize_after_error(&error_location);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Parses the inside of a docstring-only block (its indent is already
+    /// consumed) through the closing dedent. A recovering parse records an
+    /// error and skips the rest of the block.
+    fn parse_doc_block_body(
+        &mut self,
+        owner: &SourceLocation,
+        block_owner: DocBlockOwner,
+    ) -> CompilerResult<()> {
+        match self.parse_doc_block_contents(owner, block_owner) {
+            Ok(()) => Ok(()),
+            Err(error) if self.recover => {
+                self.errors.push(error);
+                self.skip_to_block_end();
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn parse_doc_block_contents(
+        &mut self,
+        owner: &SourceLocation,
+        block_owner: DocBlockOwner,
+    ) -> CompilerResult<()> {
+        match self.take_docstring()? {
+            Some(text) => self.record_doc(owner, text)?,
+            None => return Err(block_owner.non_docstring_error(self.get_location())),
+        }
+        if let Some(location) = self.current_docstring_location() {
+            return Err(stray_docstring_error(location));
+        }
+        if !self.check(&TokenKind::Dedent) {
+            return Err(block_owner.non_docstring_error(self.get_location()));
+        }
+        self.advance(); // consume Dedent
+        Ok(())
+    }
+
+    /// Skips the rest of the current indented block, including its closing
+    /// dedent and any nested blocks.
+    fn skip_to_block_end(&mut self) {
+        let mut depth = 0usize;
+        while let Some(token) = self.current_token_info {
+            match token.kind {
+                TokenKind::Eof => break,
+                TokenKind::Indent => depth += 1,
+                TokenKind::Dedent if depth == 0 => {
+                    self.advance();
+                    break;
+                }
+                TokenKind::Dedent => depth -= 1,
+                _ => {}
+            }
+            self.advance();
+        }
     }
 
     // --- Parsing Functions ---
@@ -551,14 +974,33 @@ impl<'a> Parser<'a> {
     // Parses a full program (sequence of statements/declarations)
     fn parse_program(&mut self) -> CompilerResult<AstNode> {
         // --- Skip leading newlines ---
-        while self.check(&TokenKind::Newline) {
-            self.advance();
+        self.skip_newlines();
+        // A docstring as the first token documents the module.
+        match self.take_docstring() {
+            Ok(Some(text)) => self.docs.module = Some(text),
+            Ok(None) => {}
+            Err(error) if self.recover => {
+                let error_location = error.location.clone();
+                self.errors.push(error);
+                self.synchronize_after_error(&error_location);
+            }
+            Err(error) => return Err(error),
         }
-        // ---------------------------
+        // A `"..."` string as the first statement is a mistyped module
+        // docstring (string literals cannot start a statement).
+        let mut doc_slot_open = self.docs.module.is_none();
         let mut statements = Vec::new();
         while !self.check(&TokenKind::Eof) && !self.check(&TokenKind::Dedent) {
             // Stop at EOF or Dedent
-            match self.parse_statement_or_declaration() {
+            let statement = match self
+                .current_string_literal_location()
+                .filter(|_| doc_slot_open)
+            {
+                Some(location) => Err(plain_string_doc_error(location)),
+                None => self.parse_statement_or_declaration(),
+            };
+            doc_slot_open = false;
+            match statement {
                 Ok(statement) => statements.push(statement),
                 Err(error) if self.recover => {
                     let error_location = error.location.clone();
@@ -720,6 +1162,10 @@ impl<'a> Parser<'a> {
                 kind: TokenKind::Identifier(_),
                 ..
             }) => self.parse_expression_statement(),
+            Some(TokenInfo {
+                kind: TokenKind::DocString(_),
+                location,
+            }) => Err(stray_docstring_error(location.clone())),
             // Add cases for other statement starters
             _ => {
                 let (found_str, location) = match self.current_token_info {
@@ -892,14 +1338,15 @@ impl<'a> Parser<'a> {
         // Expect ':' to end the header line
         self.consume(&TokenKind::Colon, "Expected ':' after function header")?;
 
-        // For builtins, accept no body (empty block)
+        // Builtins have no body: just the header line, optionally followed
+        // by an indented docstring-only block.
         let is_builtin = Self::pragmas_include_builtin(&pragmas);
         let body = if is_builtin {
-            // Allow just a header line and no body for builtins
+            self.parse_optional_doc_block(&start_location)?;
             AstNode::Block(vec![])
         } else {
             // Parse function body after newline and indent
-            self.parse_indented_block()?
+            self.parse_function_body(&start_location)?
         };
 
         Ok(AstNode::FunctionDefinition {
@@ -930,40 +1377,11 @@ impl<'a> Parser<'a> {
                 _ => unreachable!(),
             };
             self.consume(&TokenKind::Colon, "Expected ':' after enum name")?;
-            self.consume(
-                &TokenKind::Newline,
-                "Expected newline after ':' before enum members",
+            let members = self.parse_indented_items(
+                BlockKind::EnumMembers,
+                Some(&location),
+                Self::parse_enum_member,
             )?;
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-            self.consume(&TokenKind::Indent, "Expected indented enum members")?;
-
-            let mut members = Vec::new();
-            while !self.check(&TokenKind::Dedent) && !self.check(&TokenKind::Eof) {
-                let member_token = self.consume(
-                    &TokenKind::Identifier("".to_string()),
-                    "Expected enum member name",
-                )?;
-                let member_name = match &member_token.kind {
-                    TokenKind::Identifier(n) => n.clone(),
-                    _ => unreachable!(),
-                };
-                let value = if self.check(&TokenKind::Assign) {
-                    self.advance();
-                    Some(Box::new(self.parse_expression()?))
-                } else {
-                    None
-                };
-                members.push(crate::ast::EnumMember {
-                    name: member_name,
-                    value,
-                });
-                while self.check(&TokenKind::Newline) {
-                    self.advance();
-                }
-            }
-            self.consume(&TokenKind::Dedent, "Expected dedent after enum members")?;
 
             if members.is_empty() {
                 return Err(CompilerError::syntax_error(
@@ -989,6 +1407,54 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parses one `Name [= value]` enum member line.
+    fn parse_enum_member(&mut self) -> CompilerResult<crate::ast::EnumMember> {
+        let member_token = self.consume(
+            &TokenKind::Identifier("".to_string()),
+            "Expected enum member name",
+        )?;
+        let member_name = match &member_token.kind {
+            TokenKind::Identifier(n) => n.clone(),
+            _ => unreachable!(),
+        };
+        let value = if self.check(&TokenKind::Assign) {
+            self.advance();
+            Some(Box::new(self.parse_expression()?))
+        } else {
+            None
+        };
+        Ok(crate::ast::EnumMember {
+            name: member_name,
+            value,
+        })
+    }
+
+    /// After a one-line type declaration: either the end of the line, or a
+    /// `:` followed by an indented docstring-only block documenting it.
+    fn parse_type_declaration_tail(
+        &mut self,
+        owner: &SourceLocation,
+        declaration: &str,
+    ) -> CompilerResult<()> {
+        if self.check(&TokenKind::Colon) {
+            self.advance(); // consume ':'
+            return self.parse_required_doc_block(owner);
+        }
+        if !self.check(&TokenKind::Newline)
+            && !self.check(&TokenKind::Eof)
+            && !self.check(&TokenKind::Dedent)
+        {
+            return Err(CompilerError::syntax_error(
+                format!(
+                    "Expected newline, EOF, dedent, or ':' followed by an indented docstring after {}, found {:?}",
+                    declaration, self.current_token_info
+                ),
+                self.get_location(),
+            ));
+        }
+        Ok(())
+    }
+
     fn parse_type_alias_definition(&mut self, location: SourceLocation) -> CompilerResult<AstNode> {
         let name_token = self.consume(
             &TokenKind::Identifier("".to_string()),
@@ -1004,19 +1470,7 @@ impl<'a> Parser<'a> {
 
         self.consume(&TokenKind::Assign, "Expected '=' after type alias name")?;
         let target_type = self.parse_type_annotation()?;
-
-        if !self.check(&TokenKind::Newline)
-            && !self.check(&TokenKind::Eof)
-            && !self.check(&TokenKind::Dedent)
-        {
-            return Err(CompilerError::syntax_error(
-                format!(
-                    "Expected newline, EOF, or dedent after type alias, found {:?}",
-                    self.current_token_info
-                ),
-                self.get_location(),
-            ));
-        }
+        self.parse_type_declaration_tail(&location, "type alias")?;
 
         Ok(AstNode::TypeAlias {
             name,
@@ -1083,19 +1537,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-
-        if !self.check(&TokenKind::Newline)
-            && !self.check(&TokenKind::Eof)
-            && !self.check(&TokenKind::Dedent)
-        {
-            return Err(CompilerError::syntax_error(
-                format!(
-                    "Expected newline, EOF, or dedent after builtin type definition, found {:?}",
-                    self.current_token_info
-                ),
-                self.get_location(),
-            ));
-        }
+        self.parse_type_declaration_tail(&location, "builtin type definition")?;
 
         Ok(AstNode::BuiltinTypeDefinition {
             name,
@@ -1125,7 +1567,7 @@ impl<'a> Parser<'a> {
             &TokenKind::Colon,
             "Expected ':' after builtin object header",
         )?;
-        let methods = self.parse_builtin_object_methods()?;
+        let methods = self.parse_builtin_object_methods(&location)?;
 
         Ok(AstNode::BuiltinObjectDefinition {
             name,
@@ -1134,57 +1576,14 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_builtin_object_methods(&mut self) -> CompilerResult<Vec<AstNode>> {
-        self.consume(
-            &TokenKind::Newline,
-            "Expected newline after builtin object header",
-        )?;
-        while self.check(&TokenKind::Newline) {
-            self.advance();
-        }
-        self.consume(
-            &TokenKind::Indent,
-            "Expected indented method declarations after builtin object header",
-        )?;
-
-        let mut methods = Vec::new();
-        while !self.check(&TokenKind::Dedent) && !self.check(&TokenKind::Eof) {
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-            if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
-                break;
-            }
-
-            if !self.check_keyword("def") {
-                return Err(CompilerError::syntax_error(
-                    "Expected builtin object method declaration starting with 'def'",
-                    self.get_location(),
-                ));
-            }
-
-            let method = self.parse_function_definition()?;
-            match &method {
-                AstNode::FunctionDefinition { pragmas, .. }
-                    if Self::pragmas_include_builtin(pragmas) => {}
-                AstNode::FunctionDefinition { location, .. } => {
-                    return Err(CompilerError::syntax_error(
-                        "Builtin object methods must use the {.builtin.} pragma",
-                        location.clone(),
-                    ));
-                }
-                _ => unreachable!(),
-            }
-            methods.push(method);
-
-            if self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-        }
-
-        self.consume(
-            &TokenKind::Dedent,
-            "Expected dedentation to end builtin object declaration",
+    fn parse_builtin_object_methods(
+        &mut self,
+        owner: &SourceLocation,
+    ) -> CompilerResult<Vec<AstNode>> {
+        let methods = self.parse_indented_items(
+            BlockKind::BuiltinObjectMethods,
+            Some(owner),
+            Self::parse_builtin_object_method,
         )?;
 
         if methods.is_empty() {
@@ -1195,6 +1594,30 @@ impl<'a> Parser<'a> {
         }
 
         Ok(methods)
+    }
+
+    /// Parses one `def ... {.builtin.}` declaration inside `builtin object`.
+    fn parse_builtin_object_method(&mut self) -> CompilerResult<AstNode> {
+        if !self.check_keyword("def") {
+            return Err(CompilerError::syntax_error(
+                "Expected builtin object method declaration starting with 'def'",
+                self.get_location(),
+            ));
+        }
+
+        let method = self.parse_function_definition()?;
+        match &method {
+            AstNode::FunctionDefinition { pragmas, .. }
+                if Self::pragmas_include_builtin(pragmas) =>
+            {
+                Ok(method)
+            }
+            AstNode::FunctionDefinition { location, .. } => Err(CompilerError::syntax_error(
+                "Builtin object methods must use the {.builtin.} pragma",
+                location.clone(),
+            )),
+            _ => unreachable!(),
+        }
     }
 
     /// Parses an object definition.
@@ -1234,7 +1657,7 @@ impl<'a> Parser<'a> {
         self.consume(&TokenKind::Colon, "Expected ':' after object header")?;
 
         // Parse the indented block of field definitions
-        let fields = self.parse_object_fields()?;
+        let fields = self.parse_object_fields(&location)?;
 
         Ok(AstNode::ObjectDefinition {
             name,
@@ -1245,78 +1668,18 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Parses the fields inside an object definition.
+    /// Parses the fields inside an object definition, after an optional
+    /// docstring documenting the object at `owner`.
     /// Each field is: field_name: Type
-    fn parse_object_fields(&mut self) -> CompilerResult<Vec<FieldDefinition>> {
-        let mut fields = Vec::new();
-
-        // Consume any newlines before the block
-        while self.check(&TokenKind::Newline) {
-            self.advance();
-        }
-
-        // Expect indent to start the block
-        if !self.check(&TokenKind::Indent) {
-            return Err(CompilerError::syntax_error(
-                "Expected indented block with field definitions after object header",
-                self.get_location(),
-            ));
-        }
-        self.advance(); // Consume Indent
-
-        // Parse field definitions until we see Dedent
-        loop {
-            // Skip any extra newlines
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-
-            // Check for end of block
-            if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
-                break;
-            }
-
-            if self.check_keyword("secret") {
-                return Err(CompilerError::syntax_error(
-                    "The 'secret' descriptor is only valid in type annotations",
-                    self.get_location(),
-                )
-                .with_hint("Use 'field_name: secret <type>' instead"));
-            }
-
-            // Parse field name
-            let field_name_token = self.consume(
-                &TokenKind::Identifier("".to_string()),
-                "Expected field name",
-            )?;
-            let field_name = match field_name_token {
-                TokenInfo {
-                    kind: TokenKind::Identifier(n),
-                    ..
-                } => n.clone(),
-                _ => unreachable!(),
-            };
-
-            // Expect ':' followed by type annotation
-            self.consume(&TokenKind::Colon, "Expected ':' after field name")?;
-            let field_type = self.parse_type_annotation()?;
-
-            fields.push(FieldDefinition {
-                name: field_name,
-                type_annotation: Box::new(field_type),
-                is_secret: false,
-            });
-
-            // Consume newline after field definition
-            if self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-        }
-
-        // Consume the Dedent
-        if self.check(&TokenKind::Dedent) {
-            self.advance();
-        }
+    fn parse_object_fields(
+        &mut self,
+        owner: &SourceLocation,
+    ) -> CompilerResult<Vec<FieldDefinition>> {
+        let fields = self.parse_indented_items(
+            BlockKind::ObjectFields,
+            Some(owner),
+            Self::parse_object_field,
+        )?;
 
         if fields.is_empty() {
             return Err(CompilerError::syntax_error(
@@ -1326,6 +1689,39 @@ impl<'a> Parser<'a> {
         }
 
         Ok(fields)
+    }
+
+    /// Parses one `field_name: Type` line of an object definition.
+    fn parse_object_field(&mut self) -> CompilerResult<FieldDefinition> {
+        if self.check_keyword("secret") {
+            return Err(CompilerError::syntax_error(
+                "The 'secret' descriptor is only valid in type annotations",
+                self.get_location(),
+            )
+            .with_hint("Use 'field_name: secret <type>' instead"));
+        }
+
+        let field_name_token = self.consume(
+            &TokenKind::Identifier("".to_string()),
+            "Expected field name",
+        )?;
+        let field_name = match field_name_token {
+            TokenInfo {
+                kind: TokenKind::Identifier(n),
+                ..
+            } => n.clone(),
+            _ => unreachable!(),
+        };
+
+        // Expect ':' followed by type annotation
+        self.consume(&TokenKind::Colon, "Expected ':' after field name")?;
+        let field_type = self.parse_type_annotation()?;
+
+        Ok(FieldDefinition {
+            name: field_name,
+            type_annotation: Box::new(field_type),
+            is_secret: false,
+        })
     }
 
     fn parse_if_statement_or_expression(&mut self) -> CompilerResult<AstNode> {
@@ -1663,6 +2059,7 @@ impl<'a> Parser<'a> {
                 value: Value::String(s.clone()),
                 location: token_info.location.clone(),
             }),
+            TokenKind::DocString(_) => Err(stray_docstring_error(token_info.location.clone())),
             TokenKind::BoolLiteral(b) => Ok(AstNode::Literal {
                 value: Value::Bool(*b),
                 location: token_info.location.clone(),
@@ -1676,6 +2073,22 @@ impl<'a> Parser<'a> {
                 token_info.location.clone(),
             )
             .with_hint("Define a named function with 'def' and pass its name to create_closure")),
+            TokenKind::Identifier(name)
+                if matches!(name.as_str(), "f" | "F")
+                    && matches!(
+                        self.current_token_info,
+                        Some(TokenInfo {
+                            kind: TokenKind::DocString(_),
+                            ..
+                        })
+                    ) =>
+            {
+                Err(CompilerError::syntax_error(
+                    "f-strings cannot use triple quotes: docstrings are not expressions",
+                    token_info.location.clone(),
+                )
+                .with_hint("Write the f-string on one line with single double quotes: f\"...\""))
+            }
             TokenKind::Identifier(name)
                 if matches!(name.as_str(), "f" | "F")
                     && matches!(
@@ -2419,7 +2832,23 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Parses a token stream into an AST, stopping at the first error.
+///
+/// Docstrings are accepted in their documented positions and dropped; use
+/// [`parse_with_docs`] to keep them.
 pub fn parse(tokens: &[TokenInfo], filename: &str) -> CompilerResult<AstNode> {
+    parse_with_docs(tokens, filename).map(|(ast, _docs)| ast)
+}
+
+/// Parses a token stream into an AST plus the docstrings found in it,
+/// stopping at the first error.
+///
+/// The AST is identical to the one [`parse`] returns: docstrings live only
+/// in the [`DocTable`].
+pub fn parse_with_docs(
+    tokens: &[TokenInfo],
+    filename: &str,
+) -> CompilerResult<(AstNode, DocTable)> {
     let mut parser = Parser::new(tokens, filename, false);
     // The top-level parsing function (e.g., parse_program or parse_module)
     let root_node = parser.parse_program()?;
@@ -2436,7 +2865,7 @@ pub fn parse(tokens: &[TokenInfo], filename: &str) -> CompilerResult<AstNode> {
             location,
         ))
     } else {
-        Ok(root_node)
+        Ok((root_node, parser.docs))
     }
 }
 
@@ -2444,6 +2873,9 @@ pub fn parse(tokens: &[TokenInfo], filename: &str) -> CompilerResult<AstNode> {
 pub struct ParseOutput {
     pub ast: AstNode,
     pub errors: Vec<CompilerError>,
+    /// Docstrings collected during the parse. With errors present, entries
+    /// may be missing for declarations the parser skipped while recovering.
+    pub docs: DocTable,
 }
 
 pub fn parse_recovering(tokens: &[TokenInfo], filename: &str) -> ParseOutput {
@@ -2473,5 +2905,6 @@ pub fn parse_recovering(tokens: &[TokenInfo], filename: &str) -> ParseOutput {
     ParseOutput {
         ast: root_node,
         errors: parser.errors,
+        docs: parser.docs,
     }
 }

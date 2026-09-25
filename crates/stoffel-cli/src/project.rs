@@ -255,11 +255,7 @@ impl Project {
     }
 
     pub fn source_files_under(&self, dir: &Path) -> Result<Vec<PathBuf>> {
-        let dir = absolutize(dir)?;
-        let mut files = Vec::new();
-        collect_stfl_files(&dir, &mut files)?;
-        files.sort();
-        Ok(files)
+        stfl_files_under(&absolutize(dir)?)
     }
 
     pub fn watch_files(&self) -> Result<Vec<PathBuf>> {
@@ -270,7 +266,9 @@ impl Project {
         Ok(files)
     }
 
-    fn source_dir(&self) -> PathBuf {
+    /// The directory holding the project's `.stfl` sources; module names are
+    /// relative to it (`src/utils/math.stfl` is module `utils.math`).
+    pub fn source_dir(&self) -> PathBuf {
         if self.configured_source_is_dir() {
             self.root.join(&self.config.build.source)
         } else {
@@ -905,6 +903,15 @@ fn validate_target_dir(
     Ok(())
 }
 
+/// Every `.stfl` file under `dir`, recursively, in sorted order. Unlike
+/// [`Project::source_files`], this needs no `Stoffel.toml`.
+pub(crate) fn stfl_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_stfl_files(dir, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
 fn collect_stfl_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
@@ -1096,7 +1103,7 @@ fn project_name(path: &Path) -> String {
     }
 }
 
-fn absolutize(path: &Path) -> Result<PathBuf> {
+pub(crate) fn absolutize(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
     } else {

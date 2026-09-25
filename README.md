@@ -143,6 +143,7 @@ then rebuilds and reruns whenever a `.stfl` file or project config changes. Use
 stoffel test
 stoffel test --test selected --verbose
 stoffel status --verbose
+stoffel doc
 stoffel clean
 stoffel clean --all
 stoffel update --check
@@ -150,11 +151,34 @@ stoffel update
 ```
 
 `status` validates project config, checks detected dependency managers, compiles
-configured sources, and reports local MPC network configuration. `clean` removes
+configured sources, and reports local MPC network configuration. `doc` generates
+HTML API documentation (see [below](#generate-api-documentation)). `clean` removes
 the project `target/` directory and Stoffel build cache; `--all` also removes
 known ecosystem caches such as `node_modules`, Foundry cache/output, and Python
 test caches. `update` checks for CLI/project dependency updates and runs detected
 project dependency update commands; use `--check` to inspect without changing files.
+
+### Generate API documentation
+
+```bash
+stoffel doc                          # current project -> target/doc
+stoffel doc --std --open             # the embedded standard library
+stoffel doc src/lib.stfl -o site     # loose files or directories, no Stoffel.toml needed
+stoffel doc --check --deny-missing   # coverage and doc lint only; writes nothing
+stoffel doc --std --format markdown -o docs/reference/stdlib   # Mintlify MDX pages
+```
+
+`stoffel doc` (alias `docs`) renders static, self-contained HTML (with client-side
+search) from `"""docstrings"""` on modules, `def`s, objects, enums and types.
+`--format markdown` (aliases `md`, `mdx`, `mintlify`) writes Mintlify-compatible
+`.mdx` pages instead: `overview.mdx`, one page per module nested by its dotted
+name (`std/mpc.mdx`), and a `navigation.json` group to paste into `docs.json`.
+Links are root-relative; the base path is detected from the nearest `docs.json`
+(or `mint.json`) above the output directory, or set with `--base-path`.
+Docstrings use Google-style sections (`Args:`, `Returns:`, `Examples:`, `Note:`,
+`See Also:`, `Deprecated:`) plus a Stoffel-specific `MPC:` section for rounds,
+triples and what gets revealed. Names starting with `_` are private and hidden
+unless `--include-private` is passed. `stoffel clean` removes `target/doc`.
 
 ## StoffelLang
 
@@ -371,25 +395,25 @@ Value::Share(ShareType, ShareData) — secret-shared value for MPC
 
 ### Standard Library Builtins
 
-General runtime builtins registered by default:
+The language-level builtins (`print`, list and string helpers, closures,
+`ClientStore`, `MpcOutput`, `LocalStorage`, `Share`, `Field`, `Mpc`, `Rbc`,
+`Crypto`, `Bytes` and `Avss`) are declared with docstrings in
+`crates/stoffel-lang/stdlib/std/*.stfl`. Browse the generated reference with:
 
-- `print` / `type`: print values; get a value's type as a string
-- `create_object` / `create_array`: create an object or array
-- `get_field` / `set_field`: get/set a field on an object or array
-- `array_length` / `array_push`: length of an array; append values
-- `create_closure` / `call_closure`: create and invoke closures
-- `get_upvalue` / `set_upvalue`: read/update captured upvalues
-- `ClientStore.*`: client slot counts and `take_share` / `take_share_fixed`
-- `MpcOutput.send_to_client`: send a share result to a client
+```bash
+stoffel doc --std --open
+```
 
-MPC-focused, module-style builtins:
+**VM-internal builtins.** The VM also registers a few builtins that have no
+`.stfl` declaration, so they do not appear in `stoffel doc --std`. The compiler
+emits them for object, field and list operations; programs do not call them by
+name:
 
-- `Share.*`: clear-to-share conversion, arithmetic on shares, opening, random share generation, client output, local interpolation, and commitment inspection
-- `Mpc.*`: runtime MPC metadata such as party id, threshold, instance id, readiness, and randomness helpers
-- `Rbc.*`: reliable broadcast helpers
-- `Crypto.*`: hashing and curve/field conversion helpers
-- `Bytes.*`: byte-array helpers
-- `Avss.*`: AVSS-specific helper functions
+- `create_object`: create an empty object
+- `get_field` / `set_field`: read or write an object field or array element
+- `get_or_create_array_field`: read an array field, creating it on first use
+- `array_length` / `array_push`: array length and append
+- `array_concat` / `array_repeat` / `array_equals`: list `+`, `*` and `==`
 
 ### Compiled Bytecode
 
