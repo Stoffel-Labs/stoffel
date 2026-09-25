@@ -1,3 +1,5 @@
+# Builds deployable coordinator/node infrastructure around the already compiled
+# artifacts/program.stflb. Participant application clients are built separately.
 FROM rust:1.88-bookworm AS build
 ARG STOFFEL_VERSION=0.1.2
 WORKDIR /app

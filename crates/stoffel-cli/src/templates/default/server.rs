@@ -1,3 +1,9 @@
+//! Long-lived MPC node process.
+//!
+//! Application feature logic does not belong here. Nodes load the compiled
+//! program and deployment configuration, then serve participant clients.
+//! Guide: https://docs.stoffelmpc.com/developer-skills/stoffel-app-network-and-offchain-integration
+
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -67,6 +73,7 @@ pub async fn start_party(party_id: usize) -> Result<StoffelServer, Box<dyn std::
     if !artifact.exists() {
         return Err("missing artifacts/program.stflb; run `stoffel build --output artifacts/program.stflb` first".into());
     }
+    // INTEGRATION STEP 5: every node loads the same artifact as the client.
     let runtime = Stoffel::load_file(&artifact)?
         .parties(config.parties)
         .threshold(config.threshold)

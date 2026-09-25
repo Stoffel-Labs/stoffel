@@ -1,3 +1,10 @@
+//! Off-chain coordinator and local deployment preparation.
+//!
+//! This is infrastructure, not an application endpoint for participant plaintext.
+//! Production operators should replace local identities/addresses with managed
+//! deployment configuration and follow the deployment runbook:
+//! https://docs.stoffelmpc.com/developer-skills/stoffel-deployment-runbook
+
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -152,6 +159,8 @@ fn public_key(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 }
 
 pub fn prepare_local() -> Result<(), Box<dyn std::error::Error>> {
+    // INTEGRATION STEP 5: create local-only identities and one coherent address set.
+    // Production identities and endpoints belong to the deployment platform.
     let config = settings()?;
     let dir = deployment_dir();
     let (coordinator_port, node_bind_addresses, servers, node_rpc_addresses) =

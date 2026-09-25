@@ -955,7 +955,10 @@ fn write_new(path: PathBuf, contents: &str) -> Result<()> {
 }
 
 fn default_config_text(name: String) -> String {
-    config_text(name, "src/main.stfl")
+    format!(
+        "# App build contract. Keep this file aligned with the bytecode and service topology.\n# Guide: https://docs.stoffelmpc.com/getting-started/basic-usage\n{}",
+        config_text(name, "src/main.stfl")
+    )
 }
 
 fn default_readme_text(title: &str) -> String {

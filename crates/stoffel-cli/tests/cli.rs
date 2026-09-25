@@ -80,6 +80,8 @@ fn init_creates_default_project() {
         .stdout(predicate::str::contains("Created Stoffel project"));
 
     assert!(temp.path().join("hello/Stoffel.toml").exists());
+    let config = fs::read_to_string(temp.path().join("hello/Stoffel.toml")).unwrap();
+    assert!(config.contains("docs.stoffelmpc.com/getting-started/basic-usage"));
     assert!(temp.path().join("hello/src/main.stfl").exists());
     assert!(temp.path().join("hello/Cargo.toml").exists());
     assert!(temp.path().join("hello/build.rs").exists());
@@ -114,6 +116,8 @@ fn init_creates_default_project() {
     assert!(client_rs.contains("async fn main()"));
     assert!(client_rs.contains("app::client()"));
     assert!(client_rs.contains(".run_typed("));
+    assert!(client_rs.contains("INTEGRATION STEP 4"));
+    assert!(client_rs.contains("run_private_feature"));
     for implementation_detail in [
         "Deserialize",
         "NetworkDeployment",
@@ -127,7 +131,7 @@ fn init_creates_default_project() {
             "client.rs exposes configuration detail {implementation_detail}"
         );
     }
-    assert!(client_rs.lines().count() < 25);
+    assert!(client_rs.lines().count() < 45);
     let main_rs = fs::read_to_string(src.join("main.rs")).unwrap();
     assert!(main_rs.contains("stoffel_bindings.rs"));
     assert!(
@@ -137,6 +141,8 @@ fn init_creates_default_project() {
     assert!(main_rs.contains("Stoffel::load_file"));
     assert!(main_rs.contains("client_for_deployment"));
     assert!(main_rs.contains("offchain_client_config(0)"));
+    assert!(main_rs.contains("INTEGRATION STEP 3"));
+    assert!(main_rs.contains("participant-owned application process"));
     let server_rs = fs::read_to_string(src.join("server.rs")).unwrap();
     assert!(server_rs.contains("config.parties"));
     assert!(server_rs.contains(".server(party_id)"));
@@ -171,6 +177,7 @@ fn init_creates_default_project() {
     assert!(wait_ready < ready_message);
     assert!(temp.path().join("hello/scripts/run-client.sh").exists());
     let run_client = fs::read_to_string(temp.path().join("hello/scripts/run-client.sh")).unwrap();
+    assert!(run_client.contains("participant-owned client"));
     assert!(run_client.contains("stoffel-coordinator -- wait-ready"));
     assert!(run_client.contains("stoffel-client"));
     assert!(temp
@@ -188,7 +195,7 @@ fn init_creates_default_project() {
     let readme = fs::read_to_string(temp.path().join("hello/README.md")).unwrap();
     assert!(readme.starts_with("# hello\n"));
     assert!(readme.contains("stoffel check"));
-    assert!(readme.contains("## Compile the Stoffel program"));
+    assert!(readme.contains("### 2. Compile the Stoffel program"));
     assert!(readme.contains("stoffel build --output artifacts/program.stflb"));
     for source in ["client.rs", "server.rs", "coordinator.rs", "main.rs"] {
         assert!(readme.contains(source), "README does not explain {source}");
@@ -199,8 +206,12 @@ fn init_creates_default_project() {
     assert!(readme.contains("open port"));
     assert!(readme.contains("https://docs.stoffelmpc.com"));
     assert!(readme.contains("runnable base project"));
-    assert!(readme.contains("Build your application from this template"));
-    assert!(readme.contains("participant-owned clients"));
+    assert!(readme.contains("Integrate Stoffel into your own app"));
+    assert!(readme.contains("Move the client boundary into participant-owned code"));
+    assert!(readme.contains("rust-sdk/app-integration"));
+    assert!(readme.contains("stoffel-typed-client-io-bindings"));
+    assert!(readme.contains("stoffel-app-network-and-offchain-integration"));
+    assert!(readme.contains("stoffel-deployment-runbook"));
     assert!(!readme.contains("--input a=40 --input b=2"));
     assert!(readme.contains("stoffel build"));
     assert!(readme.contains("cargo build"));

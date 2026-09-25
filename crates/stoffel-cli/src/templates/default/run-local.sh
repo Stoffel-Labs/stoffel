@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
+# Local infrastructure launcher: build the shared contract, start the coordinator
+# and MPC nodes, then wait for protocol readiness. The participant client remains
+# a separate application process; see README.md for the integration sequence.
 if [ -n "${STOFFEL_RUN_BIN:-}" ]; then
   runner=$STOFFEL_RUN_BIN
 elif command -v stoffel-run >/dev/null 2>&1; then
@@ -20,6 +23,7 @@ fi
 export STOFFEL_RUN_BIN="$runner"
 
 stoffel_bin=${STOFFEL_BIN:-stoffel}
+# Keep source, bytecode, generated Rust types, and service binaries in sync.
 "$stoffel_bin" check
 "$stoffel_bin" build --output artifacts/program.stflb
 cargo build --bins
@@ -41,6 +45,7 @@ while [ "$party" -lt "$parties" ]; do
 done
 
 printf '%s\n' "Waiting for MPC preprocessing to finish..."
+# Process health is not enough: clients submit only after input masks are ready.
 "$target_dir/debug/stoffel-coordinator" wait-ready
 printf '%s\n' "Local Stoffel MPC services are ready for client input."
 printf '%s\n' "In another terminal run: cargo run -- 42"

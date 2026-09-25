@@ -1,3 +1,5 @@
+// This is a fast configuration guard, not an end-to-end MPC test. The README
+// shows how to verify the coordinator, nodes, and participant client together.
 #[test]
 fn configured_topology_has_a_valid_threshold() {
     let config: toml::Value = toml::from_str(include_str!("../Stoffel.toml")).unwrap();

@@ -1,3 +1,5 @@
+# This fast logic test does not start the MPC services. Add focused test
+# functions here, then use the README's service/client flow for network proof.
 def main() -> int64:
   var input = 21
   var doubled = input * 2

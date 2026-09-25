@@ -1,3 +1,5 @@
+# Self-managed local service topology. The participant client is intentionally
+# separate; see README.md and https://docs.stoffelmpc.com/deployment/docker-local-network.
 x-node: &node
   build:
     context: ..
