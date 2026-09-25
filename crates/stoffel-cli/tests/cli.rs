@@ -186,6 +186,7 @@ fn init_creates_default_project() {
     let ignore = fs::read_to_string(temp.path().join("hello/.gitignore")).unwrap();
     assert!(ignore.contains("/deploy/local/"));
     let readme = fs::read_to_string(temp.path().join("hello/README.md")).unwrap();
+    assert!(readme.starts_with("# hello\n"));
     assert!(readme.contains("stoffel check"));
     for source in ["client.rs", "server.rs", "coordinator.rs", "main.rs"] {
         assert!(readme.contains(source), "README does not explain {source}");

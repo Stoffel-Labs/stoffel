@@ -482,10 +482,10 @@ fn init_stoffel_project(path: &Path) -> Result<()> {
             "scripts/Dockerfile",
             include_str!("templates/default/Dockerfile"),
         ),
-        ("README.md", include_str!("templates/default/README.md")),
     ] {
         write_new(path.join(file), contents)?;
     }
+    write_new(path.join("README.md"), &default_readme_text(&name))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
