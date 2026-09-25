@@ -10,6 +10,20 @@ The included program doubles one private integer and returns the authorized outp
 stoffel check
 ```
 
+## Compile the Stoffel program
+
+Compile `src/main.stfl` into the bytecode artifact used by the Rust application:
+
+```sh
+stoffel build --output artifacts/program.stflb
+```
+
+Then build the Rust application. Its `build.rs` generates typed bindings from that exact bytecode:
+
+```sh
+cargo build
+```
+
 ## Run the local MPC network
 
 Start the coordinator and the number of MPC nodes configured by `[mpc].parties` in `Stoffel.toml`:
@@ -41,14 +55,6 @@ Doubled result: 84
 ```
 
 `src/client.rs` is the application entrypoint. Its short `main` function gets a configured `StoffelClient`, submits typed private input with `run_typed`, receives the typed result, and exits. `src/main.rs` holds the project-level SDK and deployment configuration so application code stays focused on inputs and outputs. The coordinator and MPC nodes continue running and can accept independently started clients.
-
-## Build bytecode
-
-```sh
-stoffel build --output artifacts/program.stflb
-```
-
-`cargo build` then generates typed Rust bindings from that exact bytecode through `build.rs`.
 
 ## Project structure
 
