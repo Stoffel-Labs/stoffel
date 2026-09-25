@@ -3,20 +3,19 @@
 #
 #   curl -fsSL https://get.stoffelmpc.com | sh
 #   curl -fsSL https://get.stoffelmpc.com | sh -s -- --version 0.1.0
-#   curl -fsSL https://get.stoffelmpc.com | sh -s -- --runner-only
+#
+# The stoffel binary is the only component: it also runs MPC parties
+# (`stoffel run-node`), so there is no separate runner to install.
 #
 # Env overrides:
 #   STOFFEL_VERSION       pin a version (same as --version)
 #   STOFFEL_INSTALL_DIR   install location (default: ~/.local/bin)
-#   STOFFEL_COMPONENT     install "cli" (default) or "runner"
 set -eu
 
 REPO="Stoffel-Labs/stoffel"
 BIN="stoffel"
-RUNNER="stoffel-run"
 INSTALL_DIR="${STOFFEL_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${STOFFEL_VERSION:-}"
-COMPONENT="${STOFFEL_COMPONENT:-cli}"
 
 err()  { echo "stoffel-install: error: $*" >&2; exit 1; }
 info() { echo "stoffel-install: $*"; }
@@ -26,17 +25,11 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --version)   VERSION="${2:-}"; shift 2 ;;
     --version=*) VERSION="${1#--version=}"; shift ;;
-    --runner-only) COMPONENT="runner"; shift ;;
-    --component)   COMPONENT="${2:-}"; shift 2 ;;
-    --component=*) COMPONENT="${1#--component=}"; shift ;;
+    --runner-only|--component|--component=*)
+      err "$1 was removed: the stoffel binary runs MPC parties itself as 'stoffel run-node'; install it without this flag" ;;
     *) err "unknown argument: $1" ;;
   esac
 done
-
-case "$COMPONENT" in
-  cli|runner) ;;
-  *) err "unsupported component '$COMPONENT' (expected 'cli' or 'runner')" ;;
-esac
 
 # --- downloader (curl or wget) ---
 if command -v curl >/dev/null 2>&1; then
@@ -64,21 +57,13 @@ esac
 TARGET="${arch_part}-${os_part}"
 
 # --- resolve release tag/version ---
-case "$COMPONENT" in
-  cli)
-    prefix="cli-v"
-    archive_name="stoffel"
-    ;;
-  runner)
-    prefix="stoffel-run-v"
-    archive_name="$RUNNER"
-    ;;
-esac
+prefix="cli-v"
+archive_name="$BIN"
 
 if [ -n "$VERSION" ]; then
   TAG="${prefix}${VERSION}"
 else
-  info "resolving latest ${COMPONENT} release..."
+  info "resolving latest release..."
   TAG="$(dlout "https://api.github.com/repos/${REPO}/releases" 2>/dev/null \
     | grep '"tag_name"' \
     | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/' \
@@ -89,7 +74,7 @@ fi
 
 TARBALL="${archive_name}-${VERSION}-${TARGET}.tar.gz"
 BASE="https://github.com/${REPO}/releases/download/${TAG}"
-info "installing ${COMPONENT} ${VERSION} (${TARGET})"
+info "installing ${BIN} ${VERSION} (${TARGET})"
 
 # --- temp workspace ---
 tmp="$(mktemp -d)"
@@ -118,34 +103,16 @@ stage="${archive_name}-${VERSION}-${TARGET}"
 
 mkdir -p "$INSTALL_DIR"
 
-# install_binary <name> <required:0|1>
-install_binary() {
-  name="$1"; required="$2"
-  src="${stage}/${name}"
-  [ -f "$src" ] || src="$(find . -type f -name "$name" | head -n 1)"
-  if [ -z "${src:-}" ] || [ ! -f "$src" ]; then
-    if [ "$required" -eq 1 ]; then
-      err "binary '${name}' not found in archive"
-    fi
-    info "note: '${name}' not bundled in this release; skipping"
-    return 0
-  fi
-  install -m 0755 "$src" "$INSTALL_DIR/${name}" 2>/dev/null \
-    || { cp "$src" "$INSTALL_DIR/${name}" && chmod 0755 "$INSTALL_DIR/${name}"; }
-  info "installed to ${INSTALL_DIR}/${name}"
-}
-
-# The CLI is required; the runner powers local MPC execution (`stoffel run`,
-# `stoffel dev`). `stoffel` discovers `stoffel-run` as a sibling on disk.
-case "$COMPONENT" in
-  cli)
-    install_binary "$BIN" 1
-    install_binary "$RUNNER" 1
-    ;;
-  runner)
-    install_binary "$RUNNER" 1
-    ;;
-esac
+# The stoffel binary is the whole install: `stoffel run`, `stoffel dev` and
+# node operators run each MPC party through its `run-node` subcommand.
+src="${stage}/${BIN}"
+[ -f "$src" ] || src="$(find . -type f -name "$BIN" | head -n 1)"
+if [ -z "${src:-}" ] || [ ! -f "$src" ]; then
+  err "binary '${BIN}' not found in archive"
+fi
+install -m 0755 "$src" "$INSTALL_DIR/${BIN}" 2>/dev/null \
+  || { cp "$src" "$INSTALL_DIR/${BIN}" && chmod 0755 "$INSTALL_DIR/${BIN}"; }
+info "installed to ${INSTALL_DIR}/${BIN}"
 
 # --- PATH hint ---
 case ":${PATH}:" in
@@ -159,28 +126,7 @@ case ":${PATH}:" in
 esac
 
 # --- confirm ---
-case "$COMPONENT" in
-  cli)
-    if "$INSTALL_DIR/${BIN}" --version >/dev/null 2>&1; then
-      info "$("$INSTALL_DIR/${BIN}" --version)"
-    fi
-    info "done — run '${BIN} --help' to get started"
-    ;;
-  runner)
-    if "$INSTALL_DIR/${RUNNER}" --help >/dev/null 2>&1; then
-      info "${RUNNER} installed"
-    elif runner_check_output="$("$INSTALL_DIR/${RUNNER}" 2>&1)"; then
-      info "${RUNNER} installed"
-    else
-      status=$?
-      # With no arguments, stoffel-run prints usage and exits 1. That still
-      # proves the installed binary starts without requiring a positional $1.
-      if [ "$status" -eq 1 ] && printf '%s\n' "$runner_check_output" | grep -q "Stoffel VM Runner"; then
-        info "${RUNNER} installed"
-      else
-        err "${RUNNER} failed to start after install (exit ${status})"
-      fi
-    fi
-    info "done — run '${RUNNER} --help' to get started"
-    ;;
-esac
+if "$INSTALL_DIR/${BIN}" --version >/dev/null 2>&1; then
+  info "$("$INSTALL_DIR/${BIN}" --version)"
+fi
+info "done — run '${BIN} --help' to get started"

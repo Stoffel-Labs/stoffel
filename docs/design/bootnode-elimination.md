@@ -6,6 +6,16 @@ few places where the code deliberately differs are listed there.
 Branch: `claude/bootnode-elimination-mesh-146b80` (VM),
 `claude/coordinator-roster-admission` (`stoffel-mpc-coordinator`).
 
+> **Note (later rename).** This document is a historical record and still uses the names
+> of the time. The `stoffel-run` binary is now `stoffel run-node`, a subcommand of the
+> `stoffel` CLI (`crates/stoffel-cli`), with the same flags. The `stoffel-vm-runner` crate
+> was removed: its code now lives in `crates/stoffel-rust-sdk/src/node/`
+> (`bin/stoffel-run.rs` became `node/driver.rs`; `local_runner.rs`,
+> `coordinator_client.rs` and `admissions.rs` kept their names), and its tests moved to
+> `crates/stoffel-cli/tests/run_node_*.rs` and
+> `crates/stoffel-rust-sdk/tests/deployment_key_material.rs`. Line numbers cited below
+> refer to the old files.
+
 Rule applied throughout: functionality that genuinely needs a trusted party moves to the
 **coordinator**; everything else becomes **mesh** behavior in the VM nodes. Nothing is
 kept under a new name.

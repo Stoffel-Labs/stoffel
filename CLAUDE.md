@@ -29,11 +29,11 @@ cargo test
 cargo test -p stoffel-vm
 cargo test -p stoffel-vm-types
 
-# Build the CLI runner
-cargo build --release -p stoffel-vm
+# Build the stoffel CLI (it also runs MPC parties as `stoffel run-node`)
+cargo build --release -p stoffel-cli
 
 # Run a compiled program
-./target/release/stoffel-run path/to/program.stfbin [entry_function]
+./target/release/stoffel run-node path/to/program.stfbin [entry_function]
 
 # Format and lint
 cargo fmt
@@ -54,7 +54,6 @@ StoffelVM/
 │   ├── stoffel-vm/              # VM runtime crate
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       ├── main.rs          # CLI entry point (stoffel-run)
 │   │       ├── lib.rs           # Library exports
 │   │       ├── core_vm.rs       # VirtualMachine implementation
 │   │       ├── functions.rs     # VMFunction definition
@@ -271,7 +270,7 @@ cargo test -p stoffel-vm
 cargo test -p stoffel-vm-types
 
 # Test with a compiled program
-./target/release/stoffel-run examples/hello_world.stfbin
+./target/release/stoffel run-node examples/hello_world.stfbin
 ```
 
 ## Dependencies

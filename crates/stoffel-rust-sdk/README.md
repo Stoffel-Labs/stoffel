@@ -26,8 +26,9 @@ assert_eq!(result[0].as_i64(), Some(100));
 ```
 
 For local MPC smoke runs, use the same builder and call `execute_local().await`.
-This starts real localhost VM parties through `stoffel-vm`'s local coordinator
-runner when a built `stoffel-run` binary is available:
+This starts real localhost VM parties (`stoffel run-node` processes) through the
+SDK's local coordinator runner (`stoffel::node`) when a built `stoffel` CLI binary
+is available:
 
 ```rust
 use stoffel::prelude::*;
@@ -39,7 +40,7 @@ let result = Stoffel::compile(
 .parties(5)
 .threshold(1)
 .honeybadger()
-.local_runner_path("target/debug/stoffel-run")
+.local_runner_path("target/debug/stoffel")
 .with_inputs(&[("a", 42_i64), ("b", 58_i64)])
 .execute_local()
 .await?;
@@ -53,7 +54,7 @@ assert_eq!(result, vec![Value::I64(100)]);
 
 - `execute_clear()` runs non-secret Stoffel programs through the embedded
   `stoffel-vm` and is intended for fast local development of clear logic.
-- `execute_local()` uses `stoffel-vm`'s real local coordinator runner for
+- `execute_local()` uses the SDK's real local coordinator runner for
   local HoneyBadger and AVSS smoke runs. Each party runs as
   `stoffel run-node`, so build the stoffel CLI first with
   `cargo build -p stoffel-cli` (or `cargo install --path crates/stoffel-cli`), or
@@ -82,7 +83,7 @@ assert_eq!(result, vec![Value::I64(100)]);
   let result = runtime
       .local_network()
       .entry("main")
-      .runner_path("target/debug/stoffel-run")
+      .runner_path("target/debug/stoffel")
       .timeout(Duration::from_secs(180))
       .run()
       .await?;
@@ -121,12 +122,12 @@ assert_eq!(result, vec![Value::I64(100)]);
   cannot reconstruct at is refused as `Error::Unsupported` before associating.
   Server launch for those programs uses `ServerBuilder::offchain_coordinator(...)`
   to pass the coordinator address and certificate, node RPC bind address and
-  party identity files through to `stoffel-run`; no client identity reaches a
+  party identity files through to `stoffel run-node`; no client identity reaches a
   server.
 - AVSS protocol operations are owned by `stoffel-vm` and `mpc-protocols`.
   The SDK exposes the intended API boundary but does not implement an in-memory
   AVSS substitute. Local BLS12-381 AVSS programs delegate through the real
-  `stoffel-run` coordinator path:
+  `stoffel run-node` coordinator path:
 
   ```rust
   use stoffel::prelude::*;
@@ -134,7 +135,7 @@ assert_eq!(result, vec![Value::I64(100)]);
   # async fn example() -> stoffel::Result<()> {
   let result = Stoffel::compile("def main() -> int64:\n  return 7")?
       .avss(Curve::Bls12_381)
-      .local_runner_path("target/debug/stoffel-run")
+      .local_runner_path("target/debug/stoffel")
       .execute_local()
       .await?;
   # let _ = result;

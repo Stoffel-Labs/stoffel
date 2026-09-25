@@ -22,7 +22,7 @@
 # its own.
 #
 # STOFFEL_PEERS is restated per party: it is what a party dials, and one that
-# lost it here would have nothing to form a session from — stoffel-run refuses
+# lost it here would have nothing to form a session from — stoffel run-node refuses
 # an empty seed list by name. The per-party address lists are the base stack's
 # defaults.
 

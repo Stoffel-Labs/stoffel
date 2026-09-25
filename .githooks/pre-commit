@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-runner_bin="stoffel-run"
-runner_package="stoffel-vm-runner"
+# MPC parties run as `stoffel run-node`, a subcommand of the CLI binary.
+runner_bin="stoffel"
+runner_package="stoffel-cli"
 ci_workflow=".github/workflows/ci.yml"
 
-published_package_pattern="stoffel-vm|stoffel-vm-types|stoffel-vm-runner|stoffellang|stoffel-rust-sdk|stoffel-bindgen|stoffelcrypto|stoffelnet|stoffel-mpc-coordinator-shared|stoffel-mpc-coordinator-off-chain"
+published_package_pattern="stoffel-vm|stoffel-vm-types|stoffellang|stoffel-rust-sdk|stoffel-bindgen|stoffelcrypto|stoffelnet|stoffel-mpc-coordinator-shared|stoffel-mpc-coordinator-off-chain"
 stale_package_refs="$(mktemp)"
 trap 'rm -f "$stale_package_refs"' EXIT
 
@@ -26,7 +27,8 @@ git grep -n -E "(package[[:space:]]*=[[:space:]]*\"(${published_package_pattern}
     '^(crates/stoffel-cli/Cargo.toml|crates/stoffel-rust-sdk/Cargo.toml|crates/stoffel-lang/examples/mpc_aes128_cbc_client_io/Cargo.toml|crates/stoffel-cli/tests/cli.rs):' \
   >>"$stale_package_refs" || true
 
-git grep -n -E "(-p|--package)[[:space:]]+stoffel-vm[[:space:]]+--bin[[:space:]]+${runner_bin}" -- \
+# stoffel-vm-runner and its stoffel-run binary were removed; nothing may build them.
+git grep -n -E "(-p|--package)[[:space:]]+stoffel-vm(-runner)?[[:space:]]+--bin[[:space:]]+stoffel-run" -- \
   ':!target' \
   ':!.git' \
   ':!.githooks/pre-commit' >>"$stale_package_refs" || true

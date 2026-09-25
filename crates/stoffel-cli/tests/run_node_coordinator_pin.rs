@@ -48,7 +48,7 @@ fn ids_dir() -> PathBuf {
 
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "stoffel-run-node-coordinator-pin-{name}-{}",
+        "stoffel-node-coordinator-pin-{name}-{}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create scratch dir");

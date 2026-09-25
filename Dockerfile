@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.4
 # Multi-stage Dockerfile for StoffelVM
-# Builds the stoffel-run binary and packages it for distributed MPC execution
+# Builds the stoffel CLI binary and packages it for distributed MPC execution;
+# each container runs one party or client as `stoffel run-node`
 #
 # Example:
 #   docker build -t stoffelvm:latest .
@@ -42,8 +43,8 @@ COPY --from=coordinator . /Users/gabriel/RustroverProjects/stoffel-mpc-coordinat
 # Build the release binary
 # Note: If using private repos with SSH, run with: docker build --ssh default .
 RUN --mount=type=ssh \
-    cargo build --release --package stoffel-vm-runner --bin stoffel-run && \
-    strip target/release/stoffel-run
+    cargo build --release --package stoffel-cli --bin stoffel && \
+    strip target/release/stoffel
 
 # Compile the AES-128 secret-bit circuit example into VM bytecode for compose runs.
 RUN cargo build --release --package stoffellang && \
@@ -76,7 +77,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy the binary from builder
-COPY --from=builder /build/target/release/stoffel-run /app/stoffel-run
+COPY --from=builder /build/target/release/stoffel /app/stoffel
 
 # Copy the test bytecode files
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/matrix_average_fixed_point.stflb /app/programs/matrix_average_fixed_point.stflb

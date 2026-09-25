@@ -114,7 +114,7 @@ x-client-common: &client-common
     STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-2222222222222222222222222222222222222222222222222222222222222222}"
     # No roster is set on this client, or on any container: the client's node
     # legs are pinned to the node roster the pinned coordinator serves
-    # (docs/design/bootnode-elimination.md §9.E.1), and stoffel-run refuses
+    # (docs/design/bootnode-elimination.md §9.E.1), and stoffel run-node refuses
     # --roster by name. STOFFEL_EXPECT_ROSTER_DIGEST, when set, refuses any
     # other roster.
     STOFFEL_EXPECT_ROSTER_DIGEST: ${STOFFEL_EXPECT_ROSTER_DIGEST-}

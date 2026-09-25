@@ -28,9 +28,9 @@
 //! asserts the invariant over the real constants rather than over copies of
 //! their spellings.
 //!
-//! The barrier tags therefore live here rather than in `stoffel-run.rs`, which
-//! is a binary the library cannot see into: the runner now uses these
-//! constants, so the test covers the bytes production actually sends.
+//! The barrier tags therefore live here rather than in the node driver
+//! (`stoffel-rust-sdk`'s `node/driver.rs`), which this library cannot see
+//! into: the runner now uses these constants, so the test covers the bytes production actually sends.
 //!
 //! # Why a barrier is *not* a [`MeshMessage`]
 //!
@@ -67,7 +67,7 @@ pub const MESH_READY_PREFIX: &[u8] = b"STOFFEL_MESH_READY_V1";
 
 /// The HoneyBadger preprocessing barrier tag.
 ///
-/// Moved out of `stoffel-run.rs` so the disjointness invariant can be stated
+/// Moved out of the node driver so the disjointness invariant can be stated
 /// over the constant production sends. Spelled exactly as the runner spelled
 /// it, so migrating that site onto
 /// [`crate::net::mesh::barrier::MeshBarrier`] leaves the bytes on the wire

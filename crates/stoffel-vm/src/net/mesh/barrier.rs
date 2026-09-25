@@ -7,9 +7,10 @@
 //!
 //! # `MeshBarrier` generalizes one pattern that already worked
 //!
-//! `stoffel-run.rs` reached "every party finished preprocessing" by hand: a
-//! constant prefix, an `if raw_msg.starts_with(..)` arm inside the message
-//! pump that diverted matching frames into an `mpsc`, a broadcast of
+//! The node driver (`stoffel-rust-sdk`'s `node/driver.rs`) reached "every
+//! party finished preprocessing" by hand: a constant prefix, an
+//! `if raw_msg.starts_with(..)` arm inside the message pump that diverted
+//! matching frames into an `mpsc`, a broadcast of
 //! `prefix || instance_id.to_le_bytes()`, and a `HashSet` of distinct senders
 //! under a `tokio::time::timeout`. That is the bootnode's
 //! `SessionAnnounce`/`SessionAck` pair rebuilt correctly — peer-to-peer,

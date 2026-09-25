@@ -21,16 +21,19 @@ because both entrypoints route their output through a shared helper.
 
 The Rust harness feeds the NIST SP 800-38A plaintext/ciphertext and key as
 secret client inputs, runs both entrypoints in the local 5-party runner, and
-reconstructs only the **client-received** output shares:
+reconstructs only the **client-received** output shares. Each party runs as
+`stoffel run-node`, so build the stoffel CLI first
+(`cargo build --release -p stoffel-cli` from the repository root):
 
 ```sh
-STOFFEL_RUN_BIN=../../../../target/release/stoffel-run cargo run --release
+STOFFEL_RUN_BIN=../../../../target/release/stoffel cargo run --release
 ```
 
 From the repository root, the same example can be run with:
 
 ```sh
-STOFFEL_RUN_BIN=target/release/stoffel-run \
+cargo build --release -p stoffel-cli
+STOFFEL_RUN_BIN=target/release/stoffel \
   cargo run --release --manifest-path crates/stoffel-lang/examples/mpc_aes128_cbc_client_io/Cargo.toml
 ```
 

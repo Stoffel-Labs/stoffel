@@ -4986,7 +4986,7 @@ mod tests {
             .map(|byte| NodePublicKey(vec![byte; 32]))
             .collect();
         let dir = std::env::temp_dir().join(format!(
-            "stoffel-run-epochs-{}-{}",
+            "stoffel-node-epochs-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

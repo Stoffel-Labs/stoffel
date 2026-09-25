@@ -42,8 +42,9 @@ emit_bits() {
 ARGS="$(emit_bits 0 "$PLAINTEXT_HEX")$(emit_bits 1 "$KEY_HEX")"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
-RUNNER="${STOFFEL_RUN_BIN:-$REPO_ROOT/target/release/stoffel-run}"
 STOFFEL="${STOFFEL_BIN:-$REPO_ROOT/target/release/stoffel}"
+# Parties run as `<stoffel> run-node`; by default the same stoffel binary.
+RUNNER="${STOFFEL_RUN_BIN:-$STOFFEL}"
 
 # shellcheck disable=SC2086
 STOFFEL_RUN_BIN="$RUNNER" "$STOFFEL" run "$(dirname "$0")" \

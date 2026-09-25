@@ -34,7 +34,8 @@ runs the program in the local 5-party simulator, and reconstructs the
 `obtain_outputs`, not a public reveal), asserting it equals `"HELLO STOFFEL VM"`:
 
 ```sh
-STOFFEL_RUN_BIN=target/release/stoffel-run \
+cargo build --release -p stoffel-cli
+STOFFEL_RUN_BIN=target/release/stoffel \
   cargo run --release -p stoffel-rust-sdk --example aes_secure_decrypt
 ```
 
