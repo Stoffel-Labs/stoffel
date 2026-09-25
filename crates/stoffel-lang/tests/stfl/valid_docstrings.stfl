@@ -1,0 +1,58 @@
+"""Docstrings in every user-code position.
+
+A module docstring followed by `def main` must not become top-level code.
+
+Example:
+  def main():
+    pass
+"""
+
+# Tests: module, object, enum, type alias and def (including nested def)
+# docstrings. Docstrings never change the bytecode; see
+# docstring_equivalence_tests.rs, which compares this file with its
+# docstrings stripped.
+
+type Score = int64:
+  """A score in points."""
+
+object Point:
+  """A point on the integer grid.
+
+  Fields are public.
+  """
+  x: int64
+  y: int64
+
+enum Color:
+  """Primary colors."""
+  Red
+  Green
+  Blue
+
+def announce(label: string) -> void:
+  """Print `label`; void functions document like any other."""
+  print(label)
+
+def manhattan(point: Point) -> Score:
+  """Manhattan distance of `point` from the origin.
+
+  Args:
+    point: The point to measure.
+
+  Returns:
+    The sum of the absolute coordinates.
+  """
+  def absolute(value: int64) -> int64:
+    """Absolute value of a clear integer."""
+    if value < 0:
+      return 0 - value
+    return value
+  return absolute(point.x) + absolute(point.y)
+
+def main() -> int64:
+  """Entry point."""
+  announce("distance")
+  var p = Point(x: 3, y: -4)
+  var distance = manhattan(p)
+  print(distance)
+  return distance

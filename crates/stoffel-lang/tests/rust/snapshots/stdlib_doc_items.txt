@@ -1,0 +1,162 @@
+module std.core (std/core.stfl)
+  builtin type int64 :: type int64
+  builtin type int32 :: type int32
+  builtin type int16 :: type int16
+  builtin type int8 :: type int8
+  builtin type uint64 :: type uint64
+  builtin type uint32 :: type uint32
+  builtin type uint16 :: type uint16
+  builtin type uint8 :: type uint8
+  builtin type string :: type string
+  builtin type bool :: type bool
+  builtin type float :: type float
+  builtin type fixed :: type fixed
+  builtin type fixed32 :: type fixed32
+  builtin type fixed64 :: type fixed64
+  builtin type None :: type None
+  builtin type void :: type void
+  builtin type int :: type int = int64 [alias of type int64]
+  builtin type float64 :: type float64 = float [alias of type float]
+  builtin type f64 :: type f64 = float [alias of type float]
+  builtin type fix32 :: type fix32 = fixed32 [alias of type fixed32]
+  builtin type fix64 :: type fix64 = fixed64 [alias of type fixed64]
+  builtin type bytes :: type bytes = list[uint8] [alias of type list[uint8]]
+  builtin type ByteArray :: type ByteArray = list[uint8] [alias of type list[uint8]]
+  opaque type Object :: opaque Object
+  opaque type Closure :: opaque Closure
+  builtin function print :: print(*values) -> void [vm print]
+  builtin function type :: type[T](value: T) -> string [vm type]
+  builtin function create_closure :: create_closure(function_name: string) -> Closure [vm create_closure]
+  builtin function create_closure_with_upvalue :: create_closure_with_upvalue(function_name: string, upvalue_name: string) -> Closure [vm create_closure] [alias of create_closure]
+  builtin function call_closure :: call_closure[T](closure: Closure) -> T [vm call_closure]
+  builtin function call_closure_with_arg :: call_closure_with_arg[T, U](closure: Closure, value: T) -> U [vm call_closure] [alias of call_closure]
+  builtin function get_upvalue :: get_upvalue[T](name: string) -> T [vm get_upvalue]
+  builtin function set_upvalue :: set_upvalue[T](name: string, value: T) -> void [vm set_upvalue]
+  builtin function append :: append[T](array: list[T], value: T) -> void [vm append]
+  builtin function list :: list[T](capacity: int64 = 0) -> list[T] [vm create_array] [alias of VM builtin create_array]
+  builtin function extend :: extend[T](array: list[T], values: list[T]) -> void [vm extend]
+  builtin function copy :: copy[T](array: list[T]) -> list[T] [vm copy]
+  builtin function count :: count[T](array: list[T], value: T) -> int64 [vm count]
+  builtin function index :: index[T](array: list[T], value: T, start: int64 = 0, stop: int64 = 9223372036854775807) -> int64 [vm index]
+  builtin function pop :: pop[T](array: list[T], index: int64 = -1) -> T [vm pop]
+  builtin function remove :: remove[T](array: list[T], value: T) -> void [vm remove]
+  builtin function insert :: insert[T](array: list[T], index: int64, value: T) -> void [vm insert]
+  builtin function clear :: clear[T](array: list[T]) -> void [vm clear]
+  builtin function reverse :: reverse[T](array: list[T]) -> void [vm reverse]
+  builtin function sort :: sort[T](array: list[T]) -> void [vm sort]
+  builtin function delete :: delete[T](array: list[T], index: int64) -> void [vm delete]
+  builtin function len :: len[T](array: list[T]) -> int64 [vm len]
+  builtin function range :: range(start: int64, stop: int64, step: int64 = 1) -> list[int64] [vm range]
+  builtin function slice :: slice[T](value: T, start: int64, stop: int64, step: int64 = 1) -> T [vm slice]
+  builtin function contains :: contains[T, U](container: T, value: U) -> bool [vm contains]
+  builtin function to_string :: to_string[T](value: T) -> string [vm to_string]
+  builtin function assert :: assert(condition: bool, message: string = "assertion failed") -> void [vm assert]
+  builtin object LocalStorage :: object LocalStorage
+    method LocalStorage.store :: store[T](key: string, value: T) -> bool [vm LocalStorage.store]
+    method LocalStorage.load :: load[T](key: string) -> T [vm LocalStorage.load]
+    method LocalStorage.load_share :: load_share(key: string) -> Share [vm LocalStorage.load] [alias of LocalStorage.load]
+    method LocalStorage.retrieve :: retrieve[T](key: string) -> T [vm LocalStorage.retrieve]
+    method LocalStorage.delete :: delete(key: string) -> bool [vm LocalStorage.delete]
+    method LocalStorage.exists :: exists(key: string) -> bool [vm LocalStorage.exists]
+module std.mpc (std/mpc.stfl)
+  builtin function reveal :: reveal[T](value: secret T) -> T [vm Share.open] [alias of Share.open]
+  builtin object ClientStore :: object ClientStore
+    method ClientStore.take_share :: take_share(client_id: int64, share_id: int64) -> Share [vm ClientStore.take_share]
+    method ClientStore.take_share_bool :: take_share_bool(client_id: int64, share_id: int64) -> Share [vm ClientStore.take_share_bool]
+    method ClientStore.take_share_fixed :: take_share_fixed(client_id: int64, share_id: int64) -> Share [vm ClientStore.take_share_fixed]
+    method ClientStore.sum_shares :: sum_shares(share_id: int64, client_count: int64) -> Share [vm ClientStore.sum_shares]
+    method ClientStore.sum_shares_bool :: sum_shares_bool(share_id: int64, client_count: int64) -> Share [vm ClientStore.sum_shares_bool]
+    method ClientStore.sum_shares_fixed :: sum_shares_fixed(share_id: int64, client_count: int64) -> Share [vm ClientStore.sum_shares_fixed]
+    method ClientStore.get_number_clients :: get_number_clients() -> int64 [vm ClientStore.get_number_clients]
+    method ClientStore.get_number_input_clients :: get_number_input_clients() -> int64 [vm ClientStore.get_number_input_clients]
+    method ClientStore.get_number_output_clients :: get_number_output_clients() -> int64 [vm ClientStore.get_number_output_clients]
+  builtin object MpcOutput :: object MpcOutput
+    method MpcOutput.send_to_client :: send_to_client[T](client_id: int64, value: T) -> bool [vm MpcOutput.send_to_client]
+  builtin object Share :: object Share
+    method Share.from_clear :: from_clear(value: int64) -> Share [vm Share.from_clear]
+    method Share.from_clear_int :: from_clear_int(value: int64, bit_length: int64) -> Share [vm Share.from_clear_int]
+    method Share.from_clear_uint :: from_clear_uint(value: uint64, bit_length: int64) -> Share [vm Share.from_clear_uint]
+    method Share.from_clear_fixed :: from_clear_fixed(value: fix64, total_bits: int64, frac_bits: int64) -> Share [vm Share.from_clear_fixed]
+    method Share.add :: add(share1: Share, share2: Share) -> Share [vm Share.add] [receiver]
+    method Share.sub :: sub(share1: Share, share2: Share) -> Share [vm Share.sub] [receiver]
+    method Share.neg :: neg(share: Share) -> Share [vm Share.neg] [receiver]
+    method Share.add_constant :: add_constant[T](share: Share, value: T) -> Share [vm Share.add_constant] [receiver]
+    method Share.add_scalar :: add_scalar[T](share: Share, value: T) -> Share [vm Share.add_constant] [alias of Share.add_constant] [receiver]
+    method Share.mul_scalar :: mul_scalar[T](share: Share, scalar: T) -> Share [vm Share.mul_scalar] [receiver]
+    method Share.mul :: mul(share1: Share, share2: Share) -> Share [vm Share.mul] [receiver]
+    method Share.batch_mul :: batch_mul(lefts: list[Share], rights: list[Share]) -> list[Share] [vm Share.batch_mul]
+    method Share.open :: open(share: Share) -> int64 [vm Share.open] [receiver]
+    method Share.reveal :: reveal[T](share: Share) -> T [vm Share.open] [alias of Share.open] [receiver]
+    method Share.open_fixed :: open_fixed(share: Share) -> fix64 [vm Share.open] [alias of Share.open] [receiver]
+    method Share.send_to_client :: send_to_client(share: Share, client_id: int64) -> bool [vm Share.send_to_client] [receiver]
+    method Share.interpolate_local :: interpolate_local(shares: list[Share]) -> int64 [vm Share.interpolate_local]
+    method Share.get_type :: get_type(share: Share) -> string [vm Share.get_type] [receiver]
+    method Share.get_party_id :: get_party_id(share: Share) -> int64 [vm Share.get_party_id] [receiver]
+    method Share.batch_open :: batch_open(shares: list[Share]) -> list[Object] [vm Share.batch_open]
+    method Share.batch_open_field :: batch_open_field(shares: list[Share]) -> list[bytes] [vm Share.batch_open_field]
+    method Share.batch_open_exp :: batch_open_exp(shares: list[Share], curve_name: string) -> list[bytes] [vm Share.batch_open_exp]
+    method Share.batch_open_exp_custom :: batch_open_exp_custom(shares: list[Share], generators: list[bytes], curve_name: string) -> list[bytes] [vm Share.batch_open_exp_custom]
+    method Share.batch_open_fixed :: batch_open_fixed[T](shares: list[Share]) -> list[T] [vm Share.batch_open] [alias of Share.batch_open]
+    method Share.open_exp :: open_exp(share: Share, curve_name: string) -> bytes [vm Share.open_exp] [receiver]
+    method Share.random :: random() -> Share [vm Share.random]
+    method Share.random_field :: random_field() -> Share [vm Share.random_field]
+    method Share.random_int :: random_int(bit_length: int64) -> Share [vm Share.random_int]
+    method Share.get_commitment :: get_commitment(share: Share, index: int64) -> bytes [vm Share.get_commitment] [receiver]
+    method Share.commitment_count :: commitment_count(share: Share) -> int64 [vm Share.commitment_count] [receiver]
+    method Share.has_commitments :: has_commitments(share: Share) -> bool [vm Share.has_commitments] [receiver]
+    method Share.mul_field :: mul_field(share: Share, field_bytes: bytes) -> Share [vm Share.mul_field] [receiver]
+    method Share.add_field :: add_field(share: Share, field_bytes: bytes) -> Share [vm Share.add_field] [receiver]
+    method Share.retag :: retag(share: Share, bit_length: int64) -> Share [vm Share.retag] [receiver]
+    method Share.open_field :: open_field(share: Share) -> bytes [vm Share.open_field] [receiver]
+    method Share.open_exp_custom :: open_exp_custom(share: Share, generator_bytes: bytes) -> bytes [vm Share.open_exp_custom] [receiver]
+  builtin object Field :: object Field
+    method Field.from_int :: from_int(value: int64) -> bytes [vm Field.from_int]
+    method Field.zero :: zero() -> bytes [vm Field.zero]
+    method Field.one :: one() -> bytes [vm Field.one]
+    method Field.is_zero :: is_zero(field_bytes: bytes) -> bool [vm Field.is_zero]
+    method Field.eq :: eq(a: bytes, b: bytes) -> bool [vm Field.eq]
+    method Field.add :: add(a: bytes, b: bytes) -> bytes [vm Field.add]
+    method Field.sub :: sub(a: bytes, b: bytes) -> bytes [vm Field.sub]
+    method Field.mul :: mul(a: bytes, b: bytes) -> bytes [vm Field.mul]
+    method Field.neg :: neg(a: bytes) -> bytes [vm Field.neg]
+    method Field.inverse :: inverse(a: bytes) -> bytes [vm Field.inverse]
+    method Field.sqrt :: sqrt(a: bytes) -> bytes [vm Field.sqrt]
+  builtin object Mpc :: object Mpc
+    method Mpc.party_id :: party_id() -> int64 [vm Mpc.party_id]
+    method Mpc.n_parties :: n_parties() -> int64 [vm Mpc.n_parties]
+    method Mpc.threshold :: threshold() -> int64 [vm Mpc.threshold]
+    method Mpc.is_ready :: is_ready() -> bool [vm Mpc.is_ready]
+    method Mpc.instance_id :: instance_id() -> uint64 [vm Mpc.instance_id]
+    method Mpc.protocol_name :: protocol_name() -> string [vm Mpc.protocol_name]
+    method Mpc.curve :: curve() -> string [vm Mpc.curve]
+    method Mpc.field :: field() -> string [vm Mpc.field]
+    method Mpc.has_capability :: has_capability(capability: string) -> bool [vm Mpc.has_capability]
+    method Mpc.capabilities :: capabilities() -> list[string] [vm Mpc.capabilities]
+    method Mpc.rand :: rand() -> bytes [vm Mpc.rand]
+    method Mpc.rand_int :: rand_int(bit_length: int64) -> uint64 [vm Mpc.rand_int]
+module std.protocols (std/protocols.stfl)
+  opaque type RbcResult :: opaque RbcResult
+  builtin object Rbc :: object Rbc
+    method Rbc.broadcast :: broadcast(message: string) -> int64 [vm Rbc.broadcast]
+    method Rbc.receive :: receive(from_party: int64, timeout_ms: int64) -> string [vm Rbc.receive]
+    method Rbc.receive_any :: receive_any(timeout_ms: int64) -> RbcResult [vm Rbc.receive_any]
+module std.crypto (std/crypto.stfl)
+  builtin object Bytes :: object Bytes
+    method Bytes.concat :: concat(left: bytes, right: bytes) -> bytes [vm Bytes.concat]
+    method Bytes.from_string :: from_string(value: string) -> bytes [vm Bytes.from_string]
+  builtin object Crypto :: object Crypto
+    method Crypto.sha256 :: sha256(message: bytes) -> bytes [vm Crypto.sha256]
+    method Crypto.sha512 :: sha512(message: bytes) -> bytes [vm Crypto.sha512]
+    method Crypto.hash_to_field :: hash_to_field(message: bytes, curve_name: string) -> bytes [vm Crypto.hash_to_field]
+    method Crypto.field_inv :: field_inv(field_bytes: bytes, curve_name: string) -> bytes [vm Crypto.field_inv]
+    method Crypto.point_x_to_field :: point_x_to_field(point_bytes: bytes, curve_name: string) -> bytes [vm Crypto.point_x_to_field]
+    method Crypto.field_to_scalar_bytes :: field_to_scalar_bytes(field_bytes: bytes, curve_name: string) -> bytes [vm Crypto.field_to_scalar_bytes]
+    method Crypto.point_to_sec1 :: point_to_sec1(point_bytes: bytes, curve_name: string) -> bytes [vm Crypto.point_to_sec1]
+    method Crypto.hash_to_g1 :: hash_to_g1(message: bytes) -> bytes [vm Crypto.hash_to_g1]
+module std.avss (std/avss.stfl)
+  opaque type AvssShare :: opaque AvssShare
+  builtin object Avss :: object Avss
+    method Avss.get_commitment :: get_commitment(share: AvssShare, index: int64) -> bytes [vm Avss.get_commitment]
+    method Avss.get_key_name :: get_key_name(share: AvssShare) -> string [vm Avss.get_key_name]
+    method Avss.commitment_count :: commitment_count(share: AvssShare) -> int64 [vm Avss.commitment_count]
+    method Avss.is_avss_share :: is_avss_share[T](value: T) -> bool [vm Avss.is_avss_share]

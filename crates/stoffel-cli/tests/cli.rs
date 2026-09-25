@@ -5264,3 +5264,552 @@ fn utility_help_lists_status_clean_update_options() {
             "Project directory or .stfl source file to watch",
         ));
 }
+
+const DOCUMENTED_PROGRAM: &str = r#""""Arithmetic helpers for the demo project."""
+
+def add(a: int64, b: int64) -> int64:
+  """Add two numbers.
+
+  Args:
+    a: Left operand.
+    b: Right operand.
+  """
+  return a + b
+
+def main() -> int64:
+  """Entry point of the demo."""
+  return add(1, 2)
+"#;
+
+fn init_documented_project() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    fs::write(temp.path().join("src/main.stfl"), DOCUMENTED_PROGRAM).unwrap();
+    temp
+}
+
+fn stoffel_doc(dir: &std::path::Path) -> Command {
+    let mut command = Command::cargo_bin("stoffel").unwrap();
+    command
+        .current_dir(dir)
+        .env("STOFFEL_NO_OPEN", "1")
+        .arg("doc");
+    command
+}
+
+#[test]
+fn help_lists_the_doc_command() {
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Generate HTML API documentation from .stfl docstrings",
+        ))
+        .stdout(predicate::str::contains("deploy").not())
+        .stdout(predicate::str::contains("publish").not());
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["doc", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--std"))
+        .stdout(predicate::str::contains("--deny-missing"))
+        .stdout(predicate::str::contains("--include-private"))
+        .stdout(predicate::str::contains("publish").not());
+}
+
+#[test]
+fn typoed_doc_command_suggests_doc() {
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("doq")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Did you mean `stoffel doc`?"))
+        .stderr(predicate::str::contains("publish").not())
+        .stderr(predicate::str::contains("deploy").not());
+}
+
+#[test]
+fn doc_generates_project_docs_under_target() {
+    let project = init_documented_project();
+    stoffel_doc(project.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Documented 2/2 items (0 undocumented) from 1 file",
+        ))
+        .stdout(predicate::str::contains("index.html"));
+
+    let doc_dir = project.path().join("target/doc");
+    let index = fs::read_to_string(doc_dir.join("index.html")).unwrap();
+    assert!(index.contains("Arithmetic helpers for the demo project."));
+    assert!(index.contains("main.html"));
+    let page = fs::read_to_string(doc_dir.join("main.html")).unwrap();
+    assert!(page.contains("Add two numbers."), "{page}");
+    assert!(page.contains("id=\"fn.add\""));
+    assert!(page.contains("Left operand."));
+    assert!(page.contains("&gt;"), "signature arrows are escaped");
+    assert!(page.contains(">add</span>(<span class=\"pa\">a</span>"));
+    let search = fs::read_to_string(doc_dir.join("search-index.js")).unwrap();
+    assert!(search.contains("\"u\":\"main.html#fn.add\""));
+}
+
+#[test]
+fn doc_documents_loose_files_without_a_project() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("lib.stfl"),
+        "\"\"\"Loose helpers.\"\"\"\n\ndef twice(x: int64) -> int64:\n  \"\"\"Double `x`.\"\"\"\n  return x * 2\n",
+    )
+    .unwrap();
+    stoffel_doc(temp.path())
+        .args(["lib.stfl", "-o", "site"])
+        .assert()
+        .success();
+    let page = fs::read_to_string(temp.path().join("site/lib.html")).unwrap();
+    assert!(page.contains("Double <code>x</code>."), "{page}");
+    assert!(temp.path().join("site/index.html").exists());
+    assert!(!temp.path().join("target").exists());
+}
+
+#[test]
+fn doc_without_project_or_paths_explains_inputs() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "pass a .stfl file or directory, or use --std",
+        ));
+}
+
+#[test]
+fn doc_std_writes_every_stdlib_module() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "-o", "stddocs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from 5 files"));
+    let out = temp.path().join("stddocs");
+    assert!(out.join("index.html").exists());
+    for module in [
+        "std.core",
+        "std.mpc",
+        "std.protocols",
+        "std.crypto",
+        "std.avss",
+    ] {
+        assert!(
+            out.join(format!("{module}.html")).exists(),
+            "missing {module}.html"
+        );
+    }
+    let mpc = fs::read_to_string(out.join("std.mpc.html")).unwrap();
+    assert!(mpc.contains("id=\"obj.Share.mul\""));
+    assert!(mpc.contains("Always in scope."));
+    let search = fs::read_to_string(out.join("search-index.js")).unwrap();
+    assert!(search.contains("\"p\":\"Share.mul\""));
+}
+
+#[test]
+fn doc_std_is_fully_documented() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "--check", "--deny-missing"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(0 undocumented) from 5 files"));
+    assert!(!temp.path().join("target").exists());
+}
+
+#[test]
+fn doc_rejects_output_in_project_root_or_sources() {
+    let project = init_documented_project();
+    stoffel_doc(project.path())
+        .args(["-o", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing to write documentation"));
+    stoffel_doc(project.path())
+        .args(["-o", "src/docs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("under src/"));
+    stoffel_doc(project.path())
+        .args(["-o", "target/../docs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("parent-directory"));
+    assert!(!project.path().join("src/docs").exists());
+    assert!(!project.path().join("index.html").exists());
+    assert!(!project.path().join("docs").exists());
+}
+
+#[test]
+fn doc_supports_a_root_level_build_source() {
+    let project = init_documented_project();
+    let root = project.path();
+    fs::rename(root.join("src/main.stfl"), root.join("main.stfl")).unwrap();
+    fs::remove_dir_all(root.join("src")).unwrap();
+    let config_path = root.join("Stoffel.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    assert!(config.contains("source = \"src/main.stfl\""), "{config}");
+    fs::write(
+        &config_path,
+        config.replace("source = \"src/main.stfl\"", "source = \"main.stfl\""),
+    )
+    .unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(root)
+        .arg("check")
+        .assert()
+        .success();
+
+    stoffel_doc(root).assert().success();
+    assert!(root.join("target/doc/main.html").exists());
+    stoffel_doc(root)
+        .args(["-o", "target/site"])
+        .assert()
+        .success();
+    assert!(root.join("target/site/index.html").exists());
+    stoffel_doc(root)
+        .args(["--std", "-o", "target/std"])
+        .assert()
+        .success();
+    stoffel_doc(root)
+        .arg("main.stfl")
+        .args(["-o", "site"])
+        .assert()
+        .success();
+    assert!(root.join("site/main.html").exists());
+    stoffel_doc(root)
+        .args(["-o", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing to write documentation"));
+    assert!(!root.join("index.html").exists());
+}
+
+#[test]
+fn doc_parse_errors_fail_without_writing() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("broken.stfl"), "def main(:\n  pass\n").unwrap();
+    stoffel_doc(temp.path())
+        .args(["broken.stfl", "-o", "site"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("broken.stfl"))
+        .stderr(predicate::str::contains("failed to extract docs"));
+    assert!(!temp.path().join("site").exists());
+}
+
+#[test]
+fn doc_check_reports_without_writing() {
+    let project = init_documented_project();
+    stoffel_doc(project.path())
+        .arg("--check")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Documented 2/2 items"))
+        .stdout(predicate::str::contains("no files written"));
+    assert!(!project.path().join("target/doc").exists());
+}
+
+#[test]
+fn doc_deny_missing_fails_on_undocumented_items() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("lib.stfl"),
+        "def bare(x: int64) -> int64:\n  return x\n",
+    )
+    .unwrap();
+    stoffel_doc(temp.path())
+        .args(["lib.stfl", "--deny-missing", "-o", "site"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("(1 undocumented)"))
+        .stderr(predicate::str::contains("`bare` has no docstring"))
+        .stderr(predicate::str::contains("--deny-missing"));
+    assert!(!temp.path().join("site").exists());
+
+    // Without --deny-missing the same input documents fine.
+    stoffel_doc(temp.path())
+        .args(["lib.stfl", "-o", "site"])
+        .assert()
+        .success();
+
+    let project = init_documented_project();
+    stoffel_doc(project.path())
+        .args(["--check", "--deny-missing"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn doc_include_private_toggles_private_items() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("lib.stfl"),
+        "\"\"\"Lib.\"\"\"\n\ndef public_fn():\n  \"\"\"Public.\"\"\"\n  pass\n\ndef _helper():\n  \"\"\"Hidden helper.\"\"\"\n  pass\n",
+    )
+    .unwrap();
+    stoffel_doc(temp.path())
+        .args(["lib.stfl", "-o", "public"])
+        .assert()
+        .success();
+    let public = fs::read_to_string(temp.path().join("public/lib.html")).unwrap();
+    assert!(public.contains("public_fn"));
+    assert!(!public.contains("_helper"));
+    assert!(
+        !fs::read_to_string(temp.path().join("public/search-index.js"))
+            .unwrap()
+            .contains("_helper")
+    );
+
+    stoffel_doc(temp.path())
+        .args(["lib.stfl", "--include-private", "-o", "private"])
+        .assert()
+        .success();
+    let private = fs::read_to_string(temp.path().join("private/lib.html")).unwrap();
+    assert!(private.contains("id=\"fn._helper\""));
+    assert!(private.contains("Hidden helper."));
+}
+
+#[test]
+fn clean_removes_generated_docs() {
+    let project = init_documented_project();
+    stoffel_doc(project.path()).assert().success();
+    assert!(project.path().join("target/doc/index.html").exists());
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("clean")
+        .arg(project.path())
+        .assert()
+        .success();
+    assert!(!project.path().join("target/doc").exists());
+}
+
+#[test]
+fn doc_escapes_html_in_docstrings_and_signatures() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("xss.stfl"),
+        concat!(
+            "\"\"\"Module <script>alert('module')</script>.\"\"\"\n\n",
+            "def greet(name: string = \"\\\"><b>bold</b>\") -> string:\n",
+            "  \"\"\"Say hi <img src=x onerror=alert(1)>.\n\n",
+            "  See [link](javascript:alert(1)) and `<script>alert(2)</script>`.\n",
+            "  \"\"\"\n",
+            "  return name\n",
+        ),
+    )
+    .unwrap();
+    stoffel_doc(temp.path())
+        .args(["xss.stfl", "-o", "site"])
+        .assert()
+        .success();
+    for page in ["site/xss.html", "site/index.html"] {
+        let html = fs::read_to_string(temp.path().join(page)).unwrap();
+        assert!(!html.contains("<script>alert"), "{page}: {html}");
+        assert!(!html.contains("<img"), "{page}");
+        assert!(!html.contains("<b>bold"), "{page}");
+        assert!(!html.contains("href=\"javascript:"), "{page}");
+    }
+    let html = fs::read_to_string(temp.path().join("site/xss.html")).unwrap();
+    assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
+    assert!(html.contains("<code>&lt;script&gt;alert(2)&lt;/script&gt;</code>"));
+    assert!(html.contains("&quot;&gt;&lt;b&gt;bold&lt;/b&gt;"));
+    let search = fs::read_to_string(temp.path().join("site/search-index.js")).unwrap();
+    assert!(!search.contains("</script>"));
+    assert!(!search.contains("<img"));
+}
+
+#[test]
+fn doc_markdown_writes_mintlify_pages_for_the_stdlib() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("docs.json"), "{}").unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "--format", "markdown", "-o", "reference/stdlib"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Generated 6 Mintlify pages"))
+        .stdout(predicate::str::contains(
+            "Links use the base path /reference/stdlib",
+        ));
+    let out = temp.path().join("reference/stdlib");
+    assert!(!out.join("index.html").exists());
+    for page in [
+        "overview",
+        "std/core",
+        "std/mpc",
+        "std/protocols",
+        "std/crypto",
+        "std/avss",
+    ] {
+        let text = fs::read_to_string(out.join(format!("{page}.mdx")))
+            .unwrap_or_else(|error| panic!("missing {page}.mdx: {error}"));
+        assert!(text.starts_with("---\ntitle: "), "{page}: {text}");
+    }
+    let mpc = fs::read_to_string(out.join("std/mpc.mdx")).unwrap();
+    assert!(mpc.contains("#### `mul` {#obj-share-mul}"), "{mpc}");
+    assert!(mpc.contains("<ResponseField name=\"share1\" type=\"Share\">"));
+    assert!(mpc.contains("<Info>\n**MPC cost**"));
+    assert!(mpc.contains("](/reference/stdlib/std/mpc#obj-share-batch_mul)"));
+    let overview = fs::read_to_string(out.join("overview.mdx")).unwrap();
+    assert!(overview.contains("href=\"/reference/stdlib/std/core\""));
+    let navigation = fs::read_to_string(out.join("navigation.json")).unwrap();
+    assert!(
+        navigation.contains("\"reference/stdlib/overview\""),
+        "{navigation}"
+    );
+    assert!(
+        navigation.contains("\"reference/stdlib/std/mpc\""),
+        "{navigation}"
+    );
+}
+
+#[test]
+fn doc_markdown_base_path_can_be_set_explicitly() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args([
+            "--std",
+            "--format",
+            "md",
+            "-o",
+            "mdx",
+            "--base-path",
+            "/api/std/",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Links use the base path /api/std"));
+    let navigation = fs::read_to_string(temp.path().join("mdx/navigation.json")).unwrap();
+    assert!(navigation.contains("\"api/std/std/core\""), "{navigation}");
+    stoffel_doc(temp.path())
+        .args([
+            "--std",
+            "--format",
+            "md",
+            "-o",
+            "mdx",
+            "--base-path",
+            "../up",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid --base-path"));
+}
+
+#[test]
+fn doc_markdown_without_docs_json_links_from_the_root() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "--format", "markdown", "-o", "mdx"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No docs.json found above"));
+    let overview = fs::read_to_string(temp.path().join("mdx/overview.mdx")).unwrap();
+    assert!(overview.contains("href=\"/std/core\""), "{overview}");
+}
+
+#[test]
+fn doc_format_flags_are_checked() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "-o", "site", "--base-path", "docs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--base-path only applies to --format markdown",
+        ));
+    stoffel_doc(temp.path())
+        .args(["--std", "--format", "markdown", "-o", "mdx", "--open"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--open only applies to --format html",
+        ));
+    stoffel_doc(temp.path())
+        .args(["--std", "--format", "pdf"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value 'pdf'"));
+    assert!(!temp.path().join("site").exists());
+    assert!(!temp.path().join("mdx").exists());
+}
+
+#[test]
+fn doc_markdown_escapes_mdx_in_docstrings() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("xss.stfl"),
+        concat!(
+            "\"\"\"Module <script>alert('module')</script> {props}.\"\"\"\n\n",
+            "def greet(name: string = \"\\\"><b>bold</b>\") -> string:\n",
+            "  \"\"\"Say hi <img src=x onerror=alert(1)> {window.x}.\n\n",
+            "  See [link](javascript:alert(1)) and `<script>alert(2)</script>`.\n\n",
+            "  Args:\n",
+            "    name: Who to <greet>.\n",
+            "  \"\"\"\n",
+            "  return name\n",
+        ),
+    )
+    .unwrap();
+    stoffel_doc(temp.path())
+        .args(["xss.stfl", "--format", "markdown", "-o", "mdx"])
+        .assert()
+        .success();
+    let page = fs::read_to_string(temp.path().join("mdx/xss.mdx")).unwrap();
+    assert!(
+        page.contains("Say hi \\<img src=x onerror=alert(1)\\> \\{window.x\\}."),
+        "{page}"
+    );
+    assert!(page.contains("\\[link\\](javascript:alert(1))"), "{page}");
+    assert!(!page.contains("[link](javascript:"), "{page}");
+    assert!(page.contains("`<script>alert(2)</script>`"), "{page}");
+    assert!(
+        page.contains("default=\"&quot;\\&quot;><b>bold</b>&quot;\""),
+        "{page}"
+    );
+    let overview = fs::read_to_string(temp.path().join("mdx/overview.mdx")).unwrap();
+    assert!(
+        overview.contains("Module \\<script\\>alert('module')\\</script\\> \\{props\\}."),
+        "{overview}"
+    );
+}
+
+#[test]
+fn doc_open_is_skipped_when_no_open_is_set() {
+    let project = init_documented_project();
+    stoffel_doc(project.path())
+        .arg("--open")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Skipping --open because STOFFEL_NO_OPEN is set",
+        ));
+}
+
+#[test]
+fn doc_std_conflicts_with_paths() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "lib.stfl"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}

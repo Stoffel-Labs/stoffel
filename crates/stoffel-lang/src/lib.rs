@@ -13,6 +13,7 @@ mod client_io_planner;
 pub mod codegen;
 pub mod compiler;
 pub mod core_types;
+pub mod docs;
 pub mod errors;
 pub mod ffi;
 pub mod lexer;

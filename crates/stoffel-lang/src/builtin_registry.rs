@@ -108,8 +108,19 @@ pub fn resolve_builtin_type_name(name: &str) -> Option<SymbolType> {
     builtin_registry().resolve_type_name(name)
 }
 
+/// The embedded standard library declaration files, as
+/// `(virtual filename, source)` pairs (`("std/mpc.stfl", ...)`).
+pub fn stdlib_sources() -> &'static [(&'static str, &'static str)] {
+    BUILTIN_DECLARATIONS
+}
+
 fn build_builtin_registry() -> BuiltinRegistry {
-    let declarations = parse_declarations();
+    build_registry_from(BUILTIN_DECLARATIONS)
+}
+
+/// Builds a registry from `(virtual filename, source)` declaration files.
+fn build_registry_from(sources: &[(&str, &str)]) -> BuiltinRegistry {
+    let declarations = parse_declarations(sources);
     let mut registry = BuiltinRegistry::default();
 
     for node in &declarations {
@@ -245,10 +256,10 @@ fn build_builtin_registry() -> BuiltinRegistry {
     registry
 }
 
-fn parse_declarations() -> Vec<AstNode> {
+fn parse_declarations(sources: &[(&str, &str)]) -> Vec<AstNode> {
     let mut nodes = Vec::new();
 
-    for (filename, source) in BUILTIN_DECLARATIONS {
+    for (filename, source) in sources {
         let tokens = lexer::tokenize(source, filename).unwrap_or_else(|error| {
             panic!(
                 "Failed to tokenize builtin declarations '{}': {}",
@@ -278,13 +289,16 @@ fn collect_top_level_nodes(node: AstNode, nodes: &mut Vec<AstNode>) {
     }
 }
 
-fn has_builtin_pragma(pragmas: &[Pragma]) -> bool {
+/// True when the pragmas include `{.builtin.}` or `{.builtin: "symbol".}`.
+pub(crate) fn has_builtin_pragma(pragmas: &[Pragma]) -> bool {
     pragmas.iter().any(|pragma| match pragma {
         Pragma::Simple(name, _) | Pragma::KeyValue(name, _, _) => name == "builtin",
     })
 }
 
-fn builtin_vm_symbol(pragmas: &[Pragma]) -> Option<String> {
+/// The VM symbol written out in `{.builtin: "symbol".}`, if any. A bare
+/// `{.builtin.}` binds the declaration's own (qualified) name instead.
+pub(crate) fn builtin_vm_symbol(pragmas: &[Pragma]) -> Option<String> {
     pragmas.iter().find_map(|pragma| match pragma {
         Pragma::KeyValue(name, value, _) if name == "builtin" => match value.as_ref() {
             AstNode::Literal {
@@ -387,5 +401,121 @@ fn type_from_name(name: &str, registry: &BuiltinRegistry, type_params: &[String]
         _ => registry
             .resolve_type_name(name)
             .unwrap_or_else(|| SymbolType::TypeName(name.to_string())),
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/rust/support/docstring_injection.rs"]
+mod docstring_injection;
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::docstring_injection::{inject_docstrings, strip_docstrings};
+    use super::*;
+
+    /// Order-independent rendering of everything a registry holds.
+    #[derive(Debug, PartialEq)]
+    struct RegistrySnapshot {
+        functions: BTreeMap<String, String>,
+        objects: BTreeMap<String, BTreeMap<String, String>>,
+        type_aliases: BTreeMap<String, String>,
+        type_names: BTreeSet<String>,
+        object_type_names: BTreeSet<String>,
+    }
+
+    impl RegistrySnapshot {
+        fn of(registry: &BuiltinRegistry) -> Self {
+            RegistrySnapshot {
+                functions: registry
+                    .functions
+                    .iter()
+                    .map(|(name, info)| (name.clone(), format!("{info:?}")))
+                    .collect(),
+                objects: registry
+                    .objects
+                    .iter()
+                    .map(|(name, object)| {
+                        let methods = object
+                            .methods
+                            .iter()
+                            .map(|(method, info)| (method.clone(), format!("{info:?}")))
+                            .collect();
+                        (name.clone(), methods)
+                    })
+                    .collect(),
+                type_aliases: registry
+                    .type_aliases
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), format!("{ty:?}")))
+                    .collect(),
+                type_names: registry.type_names.iter().cloned().collect(),
+                object_type_names: registry.object_type_names.iter().cloned().collect(),
+            }
+        }
+    }
+
+    /// Number of documentable declarations in a declaration file: every
+    /// top-level declaration plus every builtin object method.
+    fn declaration_count(ast: &AstNode) -> usize {
+        let nodes = match ast {
+            AstNode::Block(nodes) => nodes.as_slice(),
+            node => std::slice::from_ref(node),
+        };
+        nodes
+            .iter()
+            .map(|node| match node {
+                AstNode::BuiltinObjectDefinition { methods, .. } => 1 + methods.len(),
+                _ => 1,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn stdlib_registry_builds() {
+        let registry = builtin_registry();
+        assert!(!registry.functions.is_empty());
+        assert!(registry.objects.contains_key("Share"));
+        assert!(registry.type_aliases.contains_key("bytes"));
+    }
+
+    /// Docstrings in every stdlib position must parse (the registry panics
+    /// on a parse error, which would break every compile) and must not
+    /// change a single registry entry. The stdlib's own docstrings are
+    /// stripped first so that every position gets exactly one injected
+    /// docstring of each shape.
+    #[test]
+    fn documented_stdlib_builds_an_identical_registry() {
+        let documented: Vec<(&str, String)> = BUILTIN_DECLARATIONS
+            .iter()
+            .map(|(filename, source)| {
+                (
+                    *filename,
+                    inject_docstrings(&strip_docstrings(source)).source,
+                )
+            })
+            .collect();
+
+        for (filename, source) in &documented {
+            let tokens = lexer::tokenize(source, filename).expect("documented stdlib lexes");
+            let (ast, docs) =
+                parser::parse_with_docs(&tokens, filename).expect("documented stdlib parses");
+            assert!(docs.module_doc().is_some(), "{filename}: no module doc");
+            assert_eq!(
+                docs.item_count(),
+                declaration_count(&ast),
+                "{filename}: not every declaration got a docstring"
+            );
+        }
+
+        let sources: Vec<(&str, &str)> = documented
+            .iter()
+            .map(|(filename, source)| (*filename, source.as_str()))
+            .collect();
+        assert_eq!(
+            RegistrySnapshot::of(&build_registry_from(&sources)),
+            RegistrySnapshot::of(builtin_registry())
+        );
     }
 }

@@ -1,7 +1,111 @@
-builtin opaque AvssShare
+"""Inspection of host-provided AVSS share objects.
+
+Every item here is a builtin that is always in scope. `import std.avss` is
+accepted but optional: imports of `std.*` modules are no-ops.
+
+An `AvssShare` is a record of one party's share of a key produced by
+asynchronous verifiable secret sharing (AVSS). It holds the key name, this
+party's share and the Feldman commitments to the sharing polynomial:
+commitment `i` is the i-th coefficient times the curve generator, so
+commitment 0 is the public key for the shared secret.
+
+These objects are created by the host application (for example through
+the Rust `VirtualMachine::create_avss_share_object` API) and usually reach
+a program through `LocalStorage.load`. Secret values created inside a
+program, including on the AVSS backend, are ordinary `Share` values
+instead; read their commitments with `Share.get_commitment`.
+
+All functions here are local reads: they never communicate, consume
+preprocessing or reveal the share.
+
+Example:
+  var maybe_share = LocalStorage.load("avss:last-share")
+  if Avss.is_avss_share(maybe_share):
+    var public_key = Avss.get_commitment(maybe_share, 0)
+"""
+
+builtin opaque AvssShare:
+  """A host-created AVSS share object: key name, share and commitments.
+
+  Pass it to the `Avss` functions. `Avss.is_avss_share` tells whether an
+  arbitrary value is one.
+  """
 
 builtin object Avss:
+  """Read the metadata of `AvssShare` objects.
+
+  See the module documentation for where these objects come from.
+  """
   def get_commitment(share: AvssShare, index: int64) -> bytes {.builtin.}:
+    """Return one Feldman commitment of an AVSS share.
+
+    Args:
+      share: The AVSS share object.
+      index: Which commitment to return, from 0 to
+        `Avss.commitment_count(share)` minus 1. Commitment 0 is the public
+        key of the shared secret.
+
+    Returns:
+      The commitment, a curve point in compressed canonical encoding.
+
+    Raises:
+      An error if `share` is not an AVSS share object, or `index` is
+      negative or out of range.
+
+    MPC:
+      Local; no communication and nothing revealed.
+
+    Example:
+      var public_key = Avss.get_commitment(share, 0)
+    """
   def get_key_name(share: AvssShare) -> string {.builtin.}:
+    """Return the name of the key an AVSS share belongs to.
+
+    Args:
+      share: The AVSS share object.
+
+    Returns:
+      The key name the host assigned when creating the share.
+
+    Raises:
+      An error if `share` is not an AVSS share object.
+
+    MPC:
+      Local; no communication and nothing revealed.
+    """
   def commitment_count(share: AvssShare) -> int64 {.builtin.}:
+    """Return how many commitments an AVSS share carries.
+
+    For a sharing polynomial of degree `t` there are `t + 1` commitments.
+
+    Args:
+      share: The AVSS share object.
+
+    Returns:
+      The number of commitments.
+
+    Raises:
+      An error if `share` is not an AVSS share object.
+
+    MPC:
+      Local; no communication and nothing revealed.
+    """
   def is_avss_share[T](value: T) -> bool {.builtin.}:
+    """Test whether a value is an AVSS share object.
+
+    Only host-created `AvssShare` objects qualify; secret `Share` values,
+    including those made on the AVSS backend, return `False`.
+
+    Args:
+      value: Any value.
+
+    Returns:
+      Whether `value` is an AVSS share object.
+
+    MPC:
+      Local; no communication and nothing revealed.
+
+    Example:
+      var maybe_share = LocalStorage.load("avss:last-share")
+      var usable = Avss.is_avss_share(maybe_share)
+    """
