@@ -203,7 +203,8 @@ fn init_creates_default_project() {
     assert!(readme.contains("stoffel build"));
     assert!(readme.contains("cargo build"));
     assert!(readme.contains("cargo run"));
-    assert!(readme.contains("cargo install stoffel-vm-runner"));
+    assert!(!readme.contains("stoffel-vm-runner"));
+    assert!(!readme.contains("STOFFEL_RUN_BIN"));
 
     let missing_runner = StdCommand::new("sh")
         .arg(temp.path().join("hello/scripts/run-local.sh"))

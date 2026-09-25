@@ -4,8 +4,6 @@ This is a runnable base project for building a Stoffel application. It gives you
 
 The included program doubles one private integer and returns the authorized output to the submitting client. Replace that small example with your application logic while keeping the same separation between clients and long-lived MPC infrastructure.
 
-If this is your first Stoffel project, keep the [Stoffel documentation](https://docs.stoffelmpc.com) open alongside this README. The docs cover StoffelLang, the Rust SDK, MPC concepts, and deployment configuration in more depth.
-
 ## Validate the Stoffel program
 
 ```sh
@@ -13,12 +11,6 @@ stoffel check
 ```
 
 ## Run the local MPC network
-
-Install the local MPC node runner once:
-
-```sh
-cargo install stoffel-vm-runner --version 0.1.2 --locked
-```
 
 Start the coordinator and the number of MPC nodes configured by `[mpc].parties` in `Stoffel.toml`:
 
@@ -30,7 +22,7 @@ The script validates and compiles `src/main.stfl`, builds the Rust binaries, sta
 
 Local addresses are selected together when the network starts. If a default port is already occupied, the script records another available address set in `deploy/local/deployment.json` and uses it for the coordinator, nodes, and clients.
 
-The script finds `stoffel-run` on `PATH`. Framework contributors can instead select a local build explicitly with `STOFFEL_RUN_BIN=/path/to/stoffel-run ./scripts/run-local.sh`.
+For a deeper guide to local MPC, StoffelLang, Rust SDK integration, and deployment configuration, see the [Stoffel documentation](https://docs.stoffelmpc.com).
 
 ## Run the sample client
 
