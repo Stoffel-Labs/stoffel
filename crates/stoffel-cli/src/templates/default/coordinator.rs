@@ -33,7 +33,6 @@ struct DeploymentFile {
     timestamp: u64,
     parties: usize,
     threshold: usize,
-    #[serde(default)]
     node_bind_addresses: Vec<String>,
     servers: Vec<String>,
     node_rpc_addresses: Vec<String>,

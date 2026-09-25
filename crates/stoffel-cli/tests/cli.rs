@@ -144,7 +144,6 @@ fn init_creates_default_project() {
     assert!(coordinator_rs.contains("Some(\"wait-ready\")"));
     assert!(coordinator_rs.contains("wait_for_round(Round::InputMaskReservation)"));
     assert!(coordinator_rs.contains("STOFFEL_READY_TIMEOUT_SECS"));
-    assert!(coordinator_rs.contains("#[serde(default)]\n    node_bind_addresses"));
     let generated_rust = format!("{main_rs}\n{client_rs}\n{server_rs}\n{coordinator_rs}");
     for prohibited in [
         "execute_local",
