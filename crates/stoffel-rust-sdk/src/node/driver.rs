@@ -3375,7 +3375,7 @@ pub async fn run_node(args: Vec<OsString>) -> ExitCode {
 
     for arg in &raw_args {
         if arg == "-h" || arg == "--help" {
-            print_usage_and_exit();
+            print_help_and_exit();
         } else if arg == "--trace-instr" {
             trace_instr = true;
         } else if arg == "--trace-regs" {
@@ -4788,9 +4788,19 @@ pub async fn run_node(args: Vec<OsString>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Explicit `--help`/`-h`: the usage on stdout, exit 0.
+fn print_help_and_exit() -> ! {
+    println!("{USAGE}");
+    exit(0);
+}
+
+/// A usage error (no program path, say): the usage on stderr, exit 1.
 fn print_usage_and_exit() -> ! {
-    eprintln!(
-        r#"Stoffel VM Runner
+    eprintln!("{USAGE}");
+    exit(1);
+}
+
+const USAGE: &str = r#"Stoffel VM Runner
 
 Usage:
   stoffel run-node <path-to-compiled-binary> [entry_function] [flags]
@@ -4942,10 +4952,7 @@ Examples:
   # inputs. The client's certificate need not appear in any configuration.
   stoffel run-node --client --inputs 10,20 $COORD --cert client.crt --key client.der \
     --servers 127.0.0.1:10001,127.0.0.1:10002,127.0.0.1:10003
-"#
-    );
-    exit(1);
-}
+"#;
 
 #[cfg(test)]
 mod tests {

@@ -2105,7 +2105,7 @@ fn run_rejects_mixed_local_and_network_only_options() {
             "--config",
             "network.toml",
             "--runner",
-            "stoffel-run",
+            "stoffel",
         ])
         .assert()
         .failure()
@@ -2113,6 +2113,43 @@ fn run_rejects_mixed_local_and_network_only_options() {
             "--runner only applies to local simulation",
         ))
         .stderr(predicate::str::contains("failed to parse").not());
+}
+
+/// `stoffel run-node` is a listed subcommand that forwards its arguments
+/// untouched to the node driver, so the driver (not clap) answers `--help` and
+/// refuses unknown flags.
+#[test]
+fn run_node_forwards_raw_arguments_to_the_node_driver() {
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("run-node"))
+        .stdout(predicate::str::contains("Run one MPC party"));
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["run-node", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Stoffel VM Runner"))
+        .stdout(predicate::str::contains(
+            "stoffel run-node <path-to-compiled-binary>",
+        ))
+        .stdout(predicate::str::contains("--mpc-curve"));
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["run-node", "--bogus-flag"])
+        .assert()
+        .failure();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("run-node")
+        .assert()
+        .failure();
 }
 
 #[test]
@@ -2126,7 +2163,7 @@ fn run_dev_and_test_validate_explicit_runner_paths_early() {
         .assert()
         .success();
 
-    let missing_runner = temp.path().join("missing-stoffel-run");
+    let missing_runner = temp.path().join("missing-stoffel");
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("run")
@@ -2138,6 +2175,9 @@ fn run_dev_and_test_validate_explicit_runner_paths_early() {
         .failure()
         .stderr(predicate::str::contains("--runner path"))
         .stderr(predicate::str::contains("does not exist"))
+        .stderr(predicate::str::contains("built stoffel executable"))
+        .stderr(predicate::str::contains("stoffel run-node"))
+        .stderr(predicate::str::contains("stoffel-run").not())
         .stderr(predicate::str::contains("Unsupported SDK operation").not());
 
     Command::cargo_bin("stoffel")
@@ -4249,7 +4289,7 @@ fn test_rejects_run_only_flags_with_actionable_guidance() {
         .unwrap()
         .arg("test")
         .arg(temp.path())
-        .args(["--runner", "stoffel-run"])
+        .args(["--runner", "stoffel"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
