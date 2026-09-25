@@ -195,6 +195,9 @@ fn init_creates_default_project() {
     assert!(readme.contains("input-ready"));
     assert!(readme.contains("open port"));
     assert!(readme.contains("https://docs.stoffelmpc.com"));
+    assert!(readme.contains("runnable base project"));
+    assert!(readme.contains("Build your application from this template"));
+    assert!(readme.contains("participant-owned clients"));
     assert!(!readme.contains("--input a=40 --input b=2"));
     assert!(readme.contains("stoffel build"));
     assert!(readme.contains("cargo build"));

@@ -1,6 +1,10 @@
 # Stoffel app
 
-This project is a complete Stoffel application: a private program, an ephemeral Rust client, and independently run services for its MPC network.
+This is a runnable base project for building a Stoffel application. It gives you a private program, generated typed bindings, an ephemeral Rust client, and independently run coordinator and MPC services.
+
+The included program doubles one private integer and returns the authorized output to the submitting client. Replace that small example with your application logic while keeping the same separation between clients and long-lived MPC infrastructure.
+
+If this is your first Stoffel project, keep the [Stoffel documentation](https://docs.stoffelmpc.com) open alongside this README. The docs cover StoffelLang, the Rust SDK, MPC concepts, and deployment configuration in more depth.
 
 ## Validate the Stoffel program
 
@@ -28,7 +32,7 @@ Local addresses are selected together when the network starts. If a default port
 
 The script finds `stoffel-run` on `PATH`. Framework contributors can instead select a local build explicitly with `STOFFEL_RUN_BIN=/path/to/stoffel-run ./scripts/run-local.sh`.
 
-## Integrate the client
+## Run the sample client
 
 In a second terminal, send the sample private input:
 
@@ -77,6 +81,19 @@ stoffel build --output artifacts/program.stflb
 
 The application client, coordinator, and MPC nodes are separate processes. Private input goes from the participant-owned client directly to the MPC network; starting or stopping a client does not control the service lifecycle.
 
+## Build your application from this template
+
+Use this project as the starting point rather than treating the doubling example as a fixed application:
+
+1. Write the private computation in `src/main.stfl`.
+2. Run `stoffel check` and rebuild `artifacts/program.stflb`.
+3. Run `cargo build` to regenerate typed Rust bindings from that bytecode.
+4. Replace the sample input and output handling in `src/client.rs` with your application types and workflow.
+5. Adjust `[mpc]` in `Stoffel.toml` and the deployment configuration for your topology.
+6. Keep private values in participant-owned clients. The application client should submit directly to the MPC network, while coordinator and MPC nodes remain independently operated services.
+
+For the full language, SDK, and deployment guides, continue with the [Stoffel documentation](https://docs.stoffelmpc.com).
+
 ## Run the tests
 
 ```sh
@@ -99,7 +116,3 @@ The Compose stack runs one coordinator and five independently addressable MPC no
 If readiness times out, inspect the coordinator and node logs before starting a client. The readiness command reconnects across coordinator startup and preprocessing resets, but cannot make progress if party 0 exits. An open port only means that a process is listening; it does not mean the MPC network has finished preprocessing. Party 0 must remain running and complete the transition from `Idle` through preprocessing to input-mask reservation.
 
 For a real deployment, provide each service its own identity and persistent runtime environment, replace loopback addresses in the deployment configuration, and manage secrets with your deployment platform.
-
-## Learn more
-
-Read the [Stoffel documentation](https://docs.stoffelmpc.com) for language guides, Rust SDK integration, MPC concepts, and deployment guidance.
