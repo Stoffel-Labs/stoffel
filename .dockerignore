@@ -32,6 +32,9 @@ callgrind.out.*
 !.env.example
 .docker-cache/
 .cargo/config.toml
+# CI checks the unpublished coordinator out here and passes it as the separate
+# `coordinator` named build context (TEMPORARY, bootnode-elimination.md §9.F.5).
+.coordinator-context/
 
 # OS files
 .DS_Store
