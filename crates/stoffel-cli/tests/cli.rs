@@ -111,6 +111,28 @@ fn init_creates_default_project() {
     assert!(readme.contains("cargo run"));
 }
 
+/// The `[patch.crates-io]` table of a manifest, header included, up to the next
+/// table header; empty when the manifest has none.
+fn patch_crates_io_table(manifest: &str) -> String {
+    let mut table = String::new();
+    let mut inside = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed == "[patch.crates-io]";
+        }
+        if inside {
+            table.push_str(line);
+            table.push('\n');
+        }
+    }
+    if table.is_empty() {
+        table
+    } else {
+        format!("\n{table}")
+    }
+}
+
 #[test]
 fn init_default_project_builds_with_cargo_and_sdk_bindings() {
     let _guard = local_mpc_guard();
@@ -147,6 +169,19 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
                 bindgen_path.display()
             ),
         );
+    // The project builds against the workspace's crates, so it must resolve their
+    // dependencies the way the workspace does: carry over the workspace's
+    // `[patch.crates-io]` table (today the temporary override for the unpublished
+    // stoffel-mpc-coordinator 0.3.0). Once that table is deleted, nothing is
+    // carried and the project resolves from crates.io alone.
+    let workspace_manifest = fs::read_to_string(
+        crates_dir
+            .parent()
+            .expect("crates/ lives under the workspace root")
+            .join("Cargo.toml"),
+    )
+    .unwrap();
+    let cargo_toml = cargo_toml + &patch_crates_io_table(&workspace_manifest);
     fs::write(&cargo_toml_path, cargo_toml).unwrap();
 
     StdCommand::new("cargo")
