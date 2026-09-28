@@ -4305,6 +4305,7 @@ async fn execute_local_uses_real_local_coordinator_runner() -> stoffel::Result<(
     let result = Stoffel::compile("def main() -> int64:\n  return 7")?
         .parties(5)
         .threshold(1)
+        .local_runner_path(workspace_stoffel())
         .execute_local()
         .await?;
 
@@ -4484,6 +4485,7 @@ async fn execute_local_adapts_prd_secret_int_quickstart() -> stoffel::Result<()>
         .parties(5)
         .threshold(1)
         .with_inputs(&[("a", 42_i64), ("b", 58_i64)])
+        .local_runner_path(workspace_stoffel())
         .execute_local()
         .await?;
 
@@ -4503,6 +4505,7 @@ async fn execute_local_adapts_loaded_secret_int_bytecode() -> stoffel::Result<()
         .parties(5)
         .threshold(1)
         .with_inputs(&[("a", 42_i64), ("b", 58_i64)])
+        .local_runner_path(workspace_stoffel())
         .execute_local()
         .await?;
 
@@ -4523,6 +4526,7 @@ def add_client_values(a: Share, b: Share) -> int64:
     .parties(5)
     .threshold(1)
     .with_inputs(&[("a", 42_i64), ("b", 58_i64)])
+    .local_runner_path(workspace_stoffel())
     .execute_local_function("add_client_values")
     .await?;
 
@@ -4544,6 +4548,7 @@ def main() -> int64:
     .parties(5)
     .threshold(1)
     .with_client_input(0, &[42_i64])
+    .local_runner_path(workspace_stoffel())
     .execute_local()
     .await?;
 
@@ -4564,6 +4569,7 @@ def main() -> int64:
     .parties(5)
     .threshold(1)
     .with_client_input(0, &[55_i64])
+    .local_runner_path(workspace_stoffel())
     .build()?;
 
     assert_eq!(runtime.execute_local().await?, vec![Value::I64(55)]);
@@ -4614,6 +4620,7 @@ def main() -> int64:
     .threshold(1)
     .with_client_input(0, &[40_i64])
     .with_client_input(1, &[2_i64])
+    .local_runner_path(workspace_stoffel())
     .execute_local()
     .await?;
 

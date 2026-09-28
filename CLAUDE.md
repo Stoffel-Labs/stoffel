@@ -7,8 +7,12 @@ This file provides guidance to Claude Code when working with the StoffelVM repos
 `StoffelVM` is a register-based virtual machine optimized for Multi-Party Computation (MPC). It executes bytecode compiled from StoffelLang, supporting both basic types (integers, booleans, strings) and complex types (objects, arrays, closures, foreign objects).
 
 **Workspace crates:**
-- `stoffel-vm` - The VM runtime and CLI
+- `stoffel-vm` - The VM runtime library
 - `stoffel-vm-types` - Shared types (instructions, values, binary format)
+- `stoffel-cli` - The `stoffel` binary, including `stoffel run-node` (one MPC party, client, or local run)
+- `stoffel-rust-sdk` - The Rust SDK (lib crate `stoffel`); `stoffel::node` holds the node driver and local coordinator runner
+- `stoffellang` (crates/stoffel-lang) - The StoffelLang compiler
+- `stoffel-bindgen` - Build-time Rust binding generation for Stoffel programs
 
 **Primary consumers:** Stoffel CLI, all SDKs
 **Bytecode source:** Stoffel-Lang compiler

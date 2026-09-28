@@ -3296,7 +3296,17 @@ fn spawn_parent_stdin_watchdog() {
                     Err(_) => break,
                 }
             }
-            eprintln!("[watchdog] parent process closed stdin; shutting down");
+            // Never `eprintln!` here: when the parent dies, the read end of a
+            // piped stderr dies with it, the write fails with EPIPE (Rust
+            // ignores SIGPIPE), and `eprintln!` panics — unwinding this thread
+            // before `exit` and orphaning the node this watchdog exists to stop.
+            {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[watchdog] parent process closed stdin; shutting down"
+                );
+            }
             std::process::exit(0);
         });
     if let Err(error) = spawned {
