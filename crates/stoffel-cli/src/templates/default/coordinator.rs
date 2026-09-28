@@ -1,8 +1,8 @@
-//! Off-chain coordinator and local deployment preparation.
+//! Off-chain coordinator and development deployment preparation.
 //!
 //! This is infrastructure, not an application endpoint for participant plaintext.
-//! Production operators should replace local identities/addresses with managed
-//! deployment configuration and follow the deployment runbook:
+//! Operator-managed deployments should replace generated development identities
+//! and loopback endpoints with managed configuration and follow the deployment runbook:
 //! https://docs.stoffelmpc.com/developer-skills/stoffel-deployment-runbook
 
 use blake3::Hasher;
@@ -19,7 +19,7 @@ use stoffel_mpc_coordinator_off_chain::tests::fake_coord::{
 };
 use x509_parser::parse_x509_certificate;
 
-pub type LocalCoordinator = OffChainCoordinatorServer<HoneyBadgerCoordinatorConnection>;
+pub type DevelopmentCoordinator = OffChainCoordinatorServer<HoneyBadgerCoordinatorConnection>;
 
 #[derive(Deserialize)]
 struct ProjectConfig {
@@ -47,9 +47,11 @@ struct DeploymentFile {
     client_key: String,
 }
 
-type LocalAddresses = (u16, Vec<String>, Vec<String>, Vec<String>);
+type DevelopmentAddresses = (u16, Vec<String>, Vec<String>, Vec<String>);
 
-fn local_addresses(parties: usize) -> Result<LocalAddresses, Box<dyn std::error::Error>> {
+fn development_addresses(
+    parties: usize,
+) -> Result<DevelopmentAddresses, Box<dyn std::error::Error>> {
     let host = "127.0.0.1";
     let auto_select = std::env::var("STOFFEL_AUTO_ADDRESSES").as_deref() == Ok("1");
     for base in 19_200u32..=64_000 {
@@ -116,7 +118,7 @@ fn local_addresses(parties: usize) -> Result<LocalAddresses, Box<dyn std::error:
             break;
         }
     }
-    Err("could not find available loopback addresses for the local MPC network".into())
+    Err("could not find available loopback endpoints for the development deployment".into())
 }
 
 fn project_root() -> PathBuf {
@@ -158,13 +160,13 @@ fn public_key(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     Ok(certificate.public_key().subject_public_key.data.to_vec())
 }
 
-pub fn prepare_local() -> Result<(), Box<dyn std::error::Error>> {
-    // INTEGRATION STEP 5: create local-only identities and one coherent address set.
-    // Production identities and endpoints belong to the deployment platform.
+pub fn prepare_development() -> Result<(), Box<dyn std::error::Error>> {
+    // INTEGRATION STEP 5: create development identities and one coherent set of
+    // loopback endpoints. Production provisioning belongs to the deployment platform.
     let config = settings()?;
     let dir = deployment_dir();
     let (coordinator_port, node_bind_addresses, servers, node_rpc_addresses) =
-        local_addresses(config.parties)?;
+        development_addresses(config.parties)?;
     if dir.exists() {
         let required = std::iter::once("coordinator.cert.der".to_owned())
             .chain(std::iter::once("coordinator.key.der".to_owned()))
@@ -189,7 +191,7 @@ pub fn prepare_local() -> Result<(), Box<dyn std::error::Error>> {
         let deployment: DeploymentFile =
             serde_json::from_slice(&std::fs::read(dir.join("deployment.json"))?)?;
         if deployment.parties != config.parties || deployment.threshold != config.threshold {
-            return Err("Stoffel.toml changed after local identities were prepared; remove deploy/local and prepare again".into());
+            return Err("Stoffel.toml changed after development identities were prepared; remove deploy/local and prepare again".into());
         }
         let deployment = DeploymentFile {
             coordinator_port,
@@ -243,7 +245,7 @@ pub fn prepare_local() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub async fn start() -> Result<LocalCoordinator, Box<dyn std::error::Error>> {
+pub async fn start() -> Result<DevelopmentCoordinator, Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let config = settings()?;
     let dir = deployment_dir();
@@ -270,7 +272,7 @@ pub async fn start() -> Result<LocalCoordinator, Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| deployment.coordinator_host.clone());
     let cert = std::fs::read(dir.join("coordinator.cert.der"))?;
     let key = std::fs::read(dir.join("coordinator.key.der"))?;
-    Ok(LocalCoordinator::start_coord(
+    Ok(DevelopmentCoordinator::start_coord(
         state,
         &host,
         deployment.coordinator_port,
@@ -370,11 +372,11 @@ async fn wait_ready() -> Result<(), Box<dyn std::error::Error>> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("prepare") => {
-            prepare_local()?;
-            println!("Prepared deploy/local identities and deployment.json");
+            prepare_development()?;
+            println!("Prepared development identities and deploy/local/deployment.json");
         }
         Some("serve") => {
-            prepare_local()?;
+            prepare_development()?;
             let _coordinator = start().await?;
             eprintln!("Coordinator started; press Ctrl-C to stop");
             tokio::signal::ctrl_c().await?;

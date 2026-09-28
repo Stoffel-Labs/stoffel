@@ -17,9 +17,9 @@ pub mod bindings {
 
 /// App-facing deployment inputs needed to connect a participant client.
 ///
-/// Local development writes this shape to deploy/local/deployment.json. In a
-/// deployed app, supply equivalent endpoints and identity paths through your
-/// deployment/configuration system.
+/// The single-host development deployment writes this shape to
+/// deploy/local/deployment.json. In an operator-managed environment, supply
+/// equivalent endpoints and identity paths through your deployment system.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Deployment {

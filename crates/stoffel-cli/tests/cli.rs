@@ -173,7 +173,7 @@ fn init_creates_default_project() {
     assert!(run_local.contains("export STOFFEL_RUN_BIN"));
     assert!(run_local.contains("STOFFEL_AUTO_ADDRESSES=1"));
     let wait_ready = run_local.find("stoffel-coordinator\" wait-ready").unwrap();
-    let ready_message = run_local.find("ready for client input").unwrap();
+    let ready_message = run_local.find("ready for participant input").unwrap();
     assert!(wait_ready < ready_message);
     assert!(temp.path().join("hello/scripts/run-client.sh").exists());
     let run_client = fs::read_to_string(temp.path().join("hello/scripts/run-client.sh")).unwrap();
@@ -206,7 +206,11 @@ fn init_creates_default_project() {
     assert!(readme.contains("open port"));
     assert!(readme.contains("https://docs.stoffelmpc.com"));
     assert!(readme.contains("runnable base project"));
-    assert!(readme.contains("Integrate Stoffel into your own app"));
+    assert!(readme.contains("## Integrate Stoffel into your own app"));
+    assert!(readme.contains("single-host development deployment"));
+    assert!(readme.contains("It is not a separate in-process or simulated execution model"));
+    assert!(readme.contains("operator-managed production deployment"));
+    assert!(!readme.contains("For a real deployment"));
     assert!(readme.contains("Move the client boundary into participant-owned code"));
     assert!(readme.contains("rust-sdk/app-integration"));
     assert!(readme.contains("stoffel-typed-client-io-bindings"));
@@ -376,7 +380,7 @@ fn init_default_project_runs_with_separate_services() {
             0,
             "services exited early"
         );
-        if line.contains("Local Stoffel MPC services are ready") {
+        if line.contains("Development Stoffel deployment is ready") {
             break;
         }
     }

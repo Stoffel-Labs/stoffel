@@ -1,16 +1,16 @@
 #!/usr/bin/env sh
 set -eu
 
-# Local infrastructure launcher: build the shared contract, start the coordinator
-# and MPC nodes, then wait for protocol readiness. The participant client remains
-# a separate application process; see README.md for the integration sequence.
+# Single-host development launcher: build the shared contract, start the coordinator
+# and MPC nodes as separate processes, then wait for protocol readiness. The
+# participant client remains separate; see README.md for the integration sequence.
 if [ -n "${STOFFEL_RUN_BIN:-}" ]; then
   runner=$STOFFEL_RUN_BIN
 elif command -v stoffel-run >/dev/null 2>&1; then
   runner=$(command -v stoffel-run)
 else
   printf '%s\n' \
-    "Missing stoffel-run, which runs the local MPC nodes." \
+    "Missing stoffel-run, which runs the development MPC node processes." \
     "Install the matching runner once:" \
     "  cargo install stoffel-vm-runner --version 0.1.2 --locked" \
     "Then rerun this script. You can also set STOFFEL_RUN_BIN to an existing stoffel-run binary." >&2
@@ -47,6 +47,6 @@ done
 printf '%s\n' "Waiting for MPC preprocessing to finish..."
 # Process health is not enough: clients submit only after input masks are ready.
 "$target_dir/debug/stoffel-coordinator" wait-ready
-printf '%s\n' "Local Stoffel MPC services are ready for client input."
+printf '%s\n' "Development Stoffel deployment is ready for participant input."
 printf '%s\n' "In another terminal run: cargo run -- 42"
 wait

@@ -4,6 +4,8 @@ This is a runnable base project for integrating Stoffel into a Rust application.
 
 The included example doubles one private integer and returns the authorized output to the submitting client. Replace that example with your application logic while preserving the separation between participant clients and long-lived MPC infrastructure.
 
+The generated environment is a **single-host development deployment**: the coordinator, MPC parties, and participant client remain separate processes and trust roles even though they can all run on one development machine. It is not a separate in-process or simulated execution model. Moving to an operator-managed deployment changes endpoints, identities, secrets, persistence, and process supervision rather than the application boundary.
+
 ## How Stoffel fits into your application
 
 ```text
@@ -48,15 +50,15 @@ Cargo runs `build.rs`, which reads `artifacts/program.stflb` and generates `Prog
 
 Read [Typed client IO bindings](https://docs.stoffelmpc.com/developer-skills/stoffel-typed-client-io-bindings) for multi-client programs, ordered fields, and manifest-backed validation.
 
-### 4. Start the local MPC services
+### 4. Start the development deployment
 
 ```sh
 ./scripts/run-local.sh
 ```
 
-The script repeats validation and compilation, builds the Rust binaries, starts the coordinator and the number of MPC nodes configured by `[mpc].parties`, and waits for preprocessing. It prints `Local Stoffel MPC services are ready for client input.` only after the network reaches its input-ready round. It does not run a client.
+The script repeats validation and compilation, builds the Rust binaries, and starts the coordinator and the number of MPC nodes configured by `[mpc].parties` as separate processes on one development host. It prints `Development Stoffel deployment is ready for participant input.` only after the network reaches its input-ready round. It does not run a client.
 
-Local addresses are selected as one coherent set. If a default port is occupied, the script writes another available set to `deploy/local/deployment.json`, which the coordinator, nodes, and clients all consume.
+Loopback endpoints are selected as one coherent set. If a default port is occupied, the script writes another available set to `deploy/local/deployment.json`, which the coordinator, nodes, and clients all consume. Here, `local` names the generated development environment; it does not indicate a different Stoffel execution model.
 
 Read [Network and off-chain integration](https://docs.stoffelmpc.com/developer-skills/stoffel-app-network-and-offchain-integration) to understand the coordinator, node, and participant-client configuration.
 
@@ -129,8 +131,8 @@ Do not route participant plaintext through an application backend just to reach 
 
 - `src/main.rs` contains the reusable client-side artifact, manifest, deployment, and identity wiring.
 - `src/server.rs` is the MPC node process. Application feature code should not be added there.
-- `src/coordinator.rs` prepares local identities and runs the off-chain coordinator. Treat it as deployment infrastructure, not the application's private-input endpoint.
-- `deploy/local/deployment.json` is generated local configuration. Production configuration and identities should come from your deployment platform.
+- `src/coordinator.rs` prepares development identities and runs the off-chain coordinator. Treat it as deployment infrastructure, not the application's private-input endpoint.
+- `deploy/local/deployment.json` is the generated development deployment configuration. Operator-managed environments should supply equivalent endpoints and identities through their deployment platform.
 
 If another team operates the MPC services, your app may need only the bytecode, generated bindings, participant-client integration, and their deployment configuration. If you operate the services, use the [deployment runbook](https://docs.stoffelmpc.com/developer-skills/stoffel-deployment-runbook).
 
@@ -148,10 +150,10 @@ Deploy the same `artifacts/program.stflb` used to generate the client bindings. 
 | `src/main.rs` | Shared Rust integration module | Deployment source, client slot, and app-specific wrapper organization |
 | `src/client.rs` | Participant-client example | Domain input validation and input/output mapping |
 | `src/server.rs` | Long-lived MPC node | Deployment/operator configuration only |
-| `src/coordinator.rs` | Coordinator and local setup | Deployment/operator configuration only |
+| `src/coordinator.rs` | Coordinator and development provisioning | Deployment/operator configuration only |
 | `artifacts/program.stflb` | Compiled app contract | Regenerate from `src/main.stfl`; do not edit |
-| `deploy/local/` | Generated local identities/config | Regenerate locally; do not commit identities |
-| `scripts/run-local.sh` | Local service launcher | Extend only for local operations |
+| `deploy/local/` | Generated development identities/config | Regenerate for development; do not commit identities |
+| `scripts/run-local.sh` | Single-host development launcher | Extend only for development operations |
 | `scripts/run-client.sh` | Sample client launcher | Replace with your app's participant-client entrypoint |
 
 ## Development loop
@@ -166,7 +168,7 @@ stoffel test
 cargo test
 ```
 
-Then restart the local MPC services and rerun the participant client. This catches StoffelLang errors, stale bytecode, stale generated types, Rust integration errors, and topology regressions separately.
+Then restart the development MPC services and rerun the participant client. This catches StoffelLang errors, stale bytecode, stale generated types, Rust integration errors, and topology regressions separately.
 
 What each layer proves:
 
@@ -176,7 +178,7 @@ What each layer proves:
 
 ## Run with Docker Compose
 
-Build the program and prepare local development identities once:
+Build the program and prepare generated development identities once:
 
 ```sh
 stoffel build --output artifacts/program.stflb
@@ -188,4 +190,4 @@ The Compose stack runs one coordinator and five independently addressable MPC no
 
 An open port only means a process is listening. If readiness times out, inspect the coordinator and node logs. Party 0 must remain running and advance the coordinator through preprocessing to input-mask reservation.
 
-For a real deployment, provide each service its own identity and persistent runtime environment, replace loopback addresses, manage secrets with your deployment platform, and follow the [Stoffel deployment runbook](https://docs.stoffelmpc.com/developer-skills/stoffel-deployment-runbook). For the container topology, see [Docker local network](https://docs.stoffelmpc.com/deployment/docker-local-network).
+For an operator-managed production deployment, provide each service its own identity and persistent runtime environment, replace loopback endpoints, manage secrets with your deployment platform, and follow the [Stoffel deployment runbook](https://docs.stoffelmpc.com/developer-skills/stoffel-deployment-runbook). For the container topology, see the [Docker network deployment guide](https://docs.stoffelmpc.com/deployment/docker-local-network).
