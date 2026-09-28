@@ -25,9 +25,9 @@ use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelnet::transports::quic::QuicNetworkManager;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStdin, Command};
 
-use crate::coordinator_client::{
+use super::coordinator_client::{
     CoordinatorClientConfig, CoordinatorClientError, CoordinatorEndpoint,
 };
 use stoffel_vm::net::program_id_from_bytes;
@@ -326,7 +326,7 @@ impl LocalCoordinatorRunner {
     fn validate(&self) -> LocalCoordinatorRunnerResult<()> {
         if !self.runner_path.exists() {
             return Err(LocalCoordinatorRunnerError::Configuration(format!(
-                "stoffel-run binary does not exist at {}",
+                "stoffel binary (for `stoffel run-node`) does not exist at {}",
                 self.runner_path.display()
             )));
         }
@@ -590,13 +590,13 @@ impl LocalCoordinatorRunner {
         Ok(ClientSlotTable::new(slots))
     }
 
-    /// The `stoffel-run` argv of one party, bar the program's own process
+    /// The `stoffel run-node` argv of one party, bar the program's own process
     /// settings.
     ///
     /// Membership, `n` and `t` are the in-process coordinator's node roster,
     /// which the party fetches once over the link `--coord-cert` pins
     /// (`docs/design/bootnode-elimination.md` §9.D.1, §9.F.4), so no `--roster`,
-    /// `--n-parties` or `--threshold` is emitted — `stoffel-run` refuses each by
+    /// `--n-parties` or `--threshold` is emitted — `stoffel run-node` refuses each by
     /// name. No client identity, count or slot reaches a party either, under
     /// either admission policy (§3, §9.F.4): a coordinated party takes the slot
     /// table and the admitted clients from the coordinator, and clients reach it
@@ -608,7 +608,7 @@ impl LocalCoordinatorRunner {
             self.entry.clone().into(),
             "--mpc-backend".into(),
             self.backend.name().into(),
-            "--curve".into(),
+            "--mpc-curve".into(),
             self.curve_config.name().into(),
             "--off-chain-coord".into(),
             format!("127.0.0.1:{}", context.coord_port).into(),
@@ -632,22 +632,30 @@ impl LocalCoordinatorRunner {
         name: &str,
         context: SpawnPartyContext<'_>,
         node_rpc_addrs: &mut Vec<SocketAddr>,
-    ) -> LocalCoordinatorRunnerResult<(String, Child)> {
+    ) -> LocalCoordinatorRunnerResult<PartyProcess> {
         let rpc_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, reserve_port()?));
         node_rpc_addrs.push(rpc_addr);
         let mut command = Command::new(&self.runner_path);
         command
+            .arg(RUN_NODE_SUBCOMMAND)
             .args(self.party_args(&context, rpc_addr))
             // Tie each spawned party to this runner's lifetime: `kill_on_drop`
             // handles a graceful drop, and the parent-death watchdog (keyed off
             // this env var) covers the case where the runner is force-killed
             // (SIGKILL) and cannot run drop cleanup, preventing orphaned parties.
+            // The watchdog exits the party once its stdin reaches EOF, so stdin
+            // is piped and its write end is held in `PartyProcess` for as long
+            // as the child lives; the OS closes it when this process dies.
             .env("STOFFEL_DIE_WITH_PARENT", "1")
             .kill_on_drop(true)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let child = command.spawn()?;
+        let mut child = command.spawn()?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            LocalCoordinatorRunnerError::Configuration("child stdin was not piped".to_owned())
+        })?;
         // Profiler attachment hooks. External `sample`/`ps` can't reliably discover
         // these short-lived child processes (PID races; TEE-buffered markers arrive
         // after the fast online window), so the runner attaches from spawn instead.
@@ -679,8 +687,25 @@ impl LocalCoordinatorRunner {
                 }
             }
         }
-        Ok((name.to_owned(), child))
+        Ok(PartyProcess {
+            name: name.to_owned(),
+            child,
+            _stdin: stdin,
+        })
     }
+}
+
+/// The subcommand of the `stoffel` binary that runs one party.
+pub(crate) const RUN_NODE_SUBCOMMAND: &str = "run-node";
+
+/// One spawned party. `_stdin` is the write end of the party's stdin: the
+/// party's die-with-parent watchdog exits once stdin reaches EOF, so it is
+/// kept open for exactly as long as the `Child` is. (Tokio's `Child::wait`
+/// closes a stdin it still holds, which is why it is taken out of the child.)
+struct PartyProcess {
+    name: String,
+    child: Child,
+    _stdin: ChildStdin,
 }
 
 #[derive(Debug, Clone)]
@@ -921,7 +946,7 @@ pub struct LocalClientRun {
 /// are killed before the coordinator stops, the run directory goes after both,
 /// and the lock is released last, so a dropped run never overlaps the next one.
 pub struct RunningLocalCoordinator {
-    parties: Vec<(String, Child)>,
+    parties: Vec<PartyProcess>,
     pre_registered_clients: Vec<LocalClientIdentity>,
     endpoint: LocalClientEndpoint,
     timeout: Duration,
@@ -959,7 +984,7 @@ impl RunningLocalCoordinator {
         let party_outputs_future = futures::future::join_all(
             parties
                 .into_iter()
-                .map(|(name, child)| wait_for_child(name, child, timeout)),
+                .map(|party| wait_for_child(party, timeout)),
         );
 
         tokio::pin!(client_results_future);
@@ -1031,7 +1056,7 @@ fn client_identity_of(cert_der: &[u8]) -> LocalCoordinatorRunnerResult<ClientIde
 }
 
 /// §9.E.1 for one client against a running local coordinator
-/// ([`crate::coordinator_client`]): pins the run's coordinator, checks the
+/// ([`crate::node::coordinator_client`]): pins the run's coordinator, checks the
 /// execution's summary, associates with `request`, reserves, fetches masks for
 /// and submits exactly the admitted input range, and — with output rights —
 /// reconstructs its outputs from one signed item per node.
@@ -1210,7 +1235,7 @@ enum PartyRole {
 }
 
 impl PartyRole {
-    /// The `stoffel-run` flags this role contributes, in emission order.
+    /// The `stoffel run-node` flags this role contributes, in emission order.
     ///
     /// Split out from the spawn so that the flag set is assertable without
     /// starting five processes and a coordinator.
@@ -1404,10 +1429,16 @@ fn write_client_identities(
 }
 
 async fn wait_for_child(
-    name: String,
-    mut child: Child,
+    party: PartyProcess,
     timeout: Duration,
 ) -> LocalCoordinatorRunnerResult<LocalPartyOutput> {
+    // `_stdin` stays bound until this function returns, so the party's
+    // die-with-parent watchdog does not see EOF while it is being waited on.
+    let PartyProcess {
+        name,
+        mut child,
+        _stdin,
+    } = party;
     let stdout_pipe = child.stdout.take().ok_or_else(|| {
         LocalCoordinatorRunnerError::Configuration("child stdout was not piped".to_owned())
     })?;
@@ -1722,6 +1753,93 @@ mod tests {
         );
     }
 
+    /// The party argv this runner emits is the argv `run_node` parses: both
+    /// live in this crate, so the builder and the parser are checked against
+    /// each other rather than against a hand-kept flag list. A non-default
+    /// curve is what caught the `--curve` / `--mpc-curve` mismatch, where the
+    /// driver silently fell back to the default curve.
+    #[test]
+    fn party_argv_round_trips_through_the_run_node_parser() {
+        let dir = TempRunDir::new().expect("create run dir");
+        let identities: Vec<NodeIdentity> = (0..3)
+            .map(|index| mesh_identity(dir.path(), index))
+            .collect();
+        // The parser reads `--cert` and `--key` from disk.
+        for identity in &identities {
+            std::fs::write(&identity.cert_path, b"cert").expect("write cert");
+            std::fs::write(&identity.key_path, b"key").expect("write key");
+        }
+        let layout = MeshLayout::reserve(dir.path(), &identities).expect("reserve mesh layout");
+        let curve = MpcCurveConfig::Bn254;
+        assert_ne!(
+            curve,
+            MpcCurveConfig::default(),
+            "the curve must not be the default"
+        );
+
+        let runner = test_runner(CompiledBinary::new())
+            .backend(MpcBackendKind::Avss)
+            .curve(curve)
+            .build()
+            .expect("runner");
+        let coord_cert_path = dir.path().join("coordinator.crt");
+        let execution_id = ExecutionId::from_bytes([7u8; 32]);
+        let rpc_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 10001));
+        let argv: Vec<String> = runner
+            .party_args(
+                &SpawnPartyContext {
+                    program_path: &dir.path().join("program.stflb"),
+                    identity: &identities[1],
+                    role: layout.role_for(1),
+                    coord_port: 31415,
+                    coord_cert_path: &coord_cert_path,
+                    execution_id,
+                },
+                rpc_addr,
+            )
+            .into_iter()
+            .map(|arg| arg.into_string().expect("utf-8 argv"))
+            .collect();
+
+        let flags = super::super::driver::parse_value_flags(&argv);
+        let parsed_curve: MpcCurveConfig = flags
+            .mpc_curve
+            .as_deref()
+            .expect("the driver parses the curve the runner emits")
+            .parse()
+            .expect("a curve name the driver accepts");
+        assert_eq!(parsed_curve, curve);
+        let parsed_backend: MpcBackendKind = flags
+            .mpc_backend
+            .as_deref()
+            .expect("the driver parses the backend the runner emits")
+            .parse()
+            .expect("a backend name the driver accepts");
+        assert_eq!(parsed_backend, MpcBackendKind::Avss);
+        assert_eq!(
+            flags.coord_addr,
+            Some(("127.0.0.1".to_owned(), 31415)),
+            "the coordinator address"
+        );
+        assert_eq!(flags.execution_id, Some(execution_id));
+        assert_eq!(
+            flags.rpc_addr,
+            Some(("127.0.0.1".to_owned(), 10001)),
+            "the RPC listener"
+        );
+        assert_eq!(flags.coord_cert_path.as_deref(), coord_cert_path.to_str());
+        assert_eq!(flags.cert_path.as_deref(), identities[1].cert_path.to_str());
+        assert_eq!(flags.cert_der.as_deref(), Some(&b"cert"[..]));
+        assert_eq!(flags.key_der.as_deref(), Some(&b"key"[..]));
+        assert_eq!(flags.party_id, Some(1));
+        assert_eq!(flags.bind_addr, Some(layout.binds[1]));
+        assert_eq!(flags.peer_hints, vec![layout.binds[0], layout.binds[2]]);
+        assert_eq!(
+            flags.epoch_store_flag.as_deref(),
+            Some(layout.epoch_stores[1].display().to_string().as_str())
+        );
+    }
+
     /// No party drives the coordinator's rounds any more.
     ///
     /// This case is the record of Stage 9: it used to assert that exactly one
@@ -1803,7 +1921,7 @@ mod tests {
     /// The `bind_port + 1000` convention this replaced existed only because a
     /// leader ran a bootnode on one port and its own party listener on the
     /// other. Stage 8 removed it from all four of its homes at once
-    /// (`docs/design/bootnode-elimination.md` §7): here, in `stoffel-run`, in
+    /// (`docs/design/bootnode-elimination.md` §7): here, in `stoffel run-node`, in
     /// `docker/entrypoint.sh` and in the `Dockerfile`'s `EXPOSE`. Removing it
     /// from some and not others makes a party advertise a port nothing listens
     /// on, which is a hang rather than an error.

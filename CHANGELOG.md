@@ -4,10 +4,23 @@ All notable changes to the Stoffel crates are tracked here.
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the standalone `stoffel-run` binary. MPC parties and clients now run as `stoffel run-node`, a subcommand of the `stoffel` CLI that takes the same arguments (`stoffel run-node --help` prints the usage). There is no compatibility shim: replace `stoffel-run <args>` with `stoffel run-node <args>`.
+- Removed the `stoffel-vm-runner` crate. Its code (the local coordinator runner, the coordinator client, admissions and the node driver) moved into `stoffel-rust-sdk` as the `stoffel::node` module, and `stoffel-vm-runner` is no longer published.
+- Removed the `stoffel-run` and `stoffel-vm-runner` release workflows. CLI release archives contain only the `stoffel` binary, and `install.sh` installs only `stoffel` (`--runner-only` and `--component` now fail by name).
+
 ### Changed
 
+- `STOFFEL_RUN_BIN`, `--runner`, `local_runner_path(...)` and `runner_path(...)` now name a `stoffel` CLI binary, which is spawned as `stoffel run-node` for each party. The SDK resolves it in order: explicit path, `STOFFEL_RUN_BIN`, `stoffel` next to the current executable, `stoffel` on `PATH`, then the workspace `target/{debug,release}/stoffel`. The CLI passes its own executable by default.
+- Docker images ship `/app/stoffel` and the entrypoint runs `stoffel run-node`.
+- The die-with-parent watchdog (`STOFFEL_DIE_WITH_PARENT`) now exits when stdin reaches EOF instead of polling the parent PID, so the SDK no longer needs `unsafe` or `libc`.
 - Bumped `stoffelcrypto` (mpc-protocols) to `0.1.1` and `stoffelnet` to `0.1.1` across the workspace and coordinator wrapper. `stoffelmpc-network` follows to `0.1.1` via the lockfile. `stoffel-mpc-coordinator-shared` and `stoffel-mpc-coordinator-off-chain` remain on `0.1.0`.
 - Adapted the AVSS engine to the `stoffelcrypto` 0.1.1 API: `verify_feldman` now takes an `expected_id`, and the AVSS share store values carry a receive timestamp alongside the shares. Existing verification semantics are preserved by binding shares to their own embedded evaluation id.
+
+### Fixed
+
+- The local coordinator runner passed `--curve` to its parties, which the node driver does not parse, so the requested MPC curve never reached the parties. It now passes `--mpc-curve`, covered by a round-trip test of the party argv through the driver's parser.
 
 ## [0.1.2] - 2026-09-03
 

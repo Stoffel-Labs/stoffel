@@ -111,6 +111,28 @@ fn init_creates_default_project() {
     assert!(readme.contains("cargo run"));
 }
 
+/// The `[patch.crates-io]` table of a manifest, header included, up to the next
+/// table header; empty when the manifest has none.
+fn patch_crates_io_table(manifest: &str) -> String {
+    let mut table = String::new();
+    let mut inside = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed == "[patch.crates-io]";
+        }
+        if inside {
+            table.push_str(line);
+            table.push('\n');
+        }
+    }
+    if table.is_empty() {
+        table
+    } else {
+        format!("\n{table}")
+    }
+}
+
 #[test]
 fn init_default_project_builds_with_cargo_and_sdk_bindings() {
     let _guard = local_mpc_guard();
@@ -147,6 +169,19 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
                 bindgen_path.display()
             ),
         );
+    // The project builds against the workspace's crates, so it must resolve their
+    // dependencies the way the workspace does: carry over the workspace's
+    // `[patch.crates-io]` table (today the temporary override for the unpublished
+    // stoffel-mpc-coordinator 0.3.0). Once that table is deleted, nothing is
+    // carried and the project resolves from crates.io alone.
+    let workspace_manifest = fs::read_to_string(
+        crates_dir
+            .parent()
+            .expect("crates/ lives under the workspace root")
+            .join("Cargo.toml"),
+    )
+    .unwrap();
+    let cargo_toml = cargo_toml + &patch_crates_io_table(&workspace_manifest);
     fs::write(&cargo_toml_path, cargo_toml).unwrap();
 
     StdCommand::new("cargo")
@@ -2105,7 +2140,7 @@ fn run_rejects_mixed_local_and_network_only_options() {
             "--config",
             "network.toml",
             "--runner",
-            "stoffel-run",
+            "stoffel",
         ])
         .assert()
         .failure()
@@ -2113,6 +2148,43 @@ fn run_rejects_mixed_local_and_network_only_options() {
             "--runner only applies to local simulation",
         ))
         .stderr(predicate::str::contains("failed to parse").not());
+}
+
+/// `stoffel run-node` is a listed subcommand that forwards its arguments
+/// untouched to the node driver, so the driver (not clap) answers `--help` and
+/// refuses unknown flags.
+#[test]
+fn run_node_forwards_raw_arguments_to_the_node_driver() {
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("run-node"))
+        .stdout(predicate::str::contains("Run one MPC party"));
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["run-node", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Stoffel VM Runner"))
+        .stdout(predicate::str::contains(
+            "stoffel run-node <path-to-compiled-binary>",
+        ))
+        .stdout(predicate::str::contains("--mpc-curve"));
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["run-node", "--bogus-flag"])
+        .assert()
+        .failure();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("run-node")
+        .assert()
+        .failure();
 }
 
 #[test]
@@ -2126,7 +2198,7 @@ fn run_dev_and_test_validate_explicit_runner_paths_early() {
         .assert()
         .success();
 
-    let missing_runner = temp.path().join("missing-stoffel-run");
+    let missing_runner = temp.path().join("missing-stoffel");
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("run")
@@ -2138,6 +2210,9 @@ fn run_dev_and_test_validate_explicit_runner_paths_early() {
         .failure()
         .stderr(predicate::str::contains("--runner path"))
         .stderr(predicate::str::contains("does not exist"))
+        .stderr(predicate::str::contains("built stoffel executable"))
+        .stderr(predicate::str::contains("stoffel run-node"))
+        .stderr(predicate::str::contains("stoffel-run").not())
         .stderr(predicate::str::contains("Unsupported SDK operation").not());
 
     Command::cargo_bin("stoffel")
@@ -4249,7 +4324,7 @@ fn test_rejects_run_only_flags_with_actionable_guidance() {
         .unwrap()
         .arg("test")
         .arg(temp.path())
-        .args(["--runner", "stoffel-run"])
+        .args(["--runner", "stoffel"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(

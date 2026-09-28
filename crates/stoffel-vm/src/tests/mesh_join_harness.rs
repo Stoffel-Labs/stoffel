@@ -46,7 +46,7 @@
 //!
 //! **Every roster here is the coordinator's.** The coordinator is the only
 //! roster authority (design doc §8, §9 rule 1), so the harness obtains each
-//! roster the way `stoffel-run` does (§9.D.1 steps 2-5): it serves the node
+//! roster the way `stoffel run-node` does (§9.D.1 steps 2-5): it serves the node
 //! certificates from an in-process coordinator, every node fetches the roster
 //! once over a link pinned to that coordinator's certificate and authenticated
 //! with its own, and builds its [`Roster`] with [`Roster::from_coordinator`] —
@@ -288,7 +288,7 @@ pub(crate) fn generate_identities(n: usize) -> Vec<NodeIdentity> {
 /// Serve `identities` as an in-process coordinator's node roster, and return
 /// the [`Roster`] each node builds from what it fetched, in identity order.
 ///
-/// Design doc §9.D.1 steps 2-5, as `stoffel-run` runs them: the coordinator
+/// Design doc §9.D.1 steps 2-5, as `stoffel run-node` runs them: the coordinator
 /// holds a `NodeRoster` of the node certificates and `t`; each node opens one
 /// `CoordinatorLink` pinned to the coordinator's certificate and authenticated
 /// with its own, which fetches and verifies the roster exactly once; the node

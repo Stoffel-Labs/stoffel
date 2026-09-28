@@ -7,8 +7,12 @@ This file provides guidance to Claude Code when working with the StoffelVM repos
 `StoffelVM` is a register-based virtual machine optimized for Multi-Party Computation (MPC). It executes bytecode compiled from StoffelLang, supporting both basic types (integers, booleans, strings) and complex types (objects, arrays, closures, foreign objects).
 
 **Workspace crates:**
-- `stoffel-vm` - The VM runtime and CLI
+- `stoffel-vm` - The VM runtime library
 - `stoffel-vm-types` - Shared types (instructions, values, binary format)
+- `stoffel-cli` - The `stoffel` binary, including `stoffel run-node` (one MPC party, client, or local run)
+- `stoffel-rust-sdk` - The Rust SDK (lib crate `stoffel`); `stoffel::node` holds the node driver and local coordinator runner
+- `stoffellang` (crates/stoffel-lang) - The StoffelLang compiler
+- `stoffel-bindgen` - Build-time Rust binding generation for Stoffel programs
 
 **Primary consumers:** Stoffel CLI, all SDKs
 **Bytecode source:** Stoffel-Lang compiler
@@ -29,11 +33,11 @@ cargo test
 cargo test -p stoffel-vm
 cargo test -p stoffel-vm-types
 
-# Build the CLI runner
-cargo build --release -p stoffel-vm
+# Build the stoffel CLI (it also runs MPC parties as `stoffel run-node`)
+cargo build --release -p stoffel-cli
 
 # Run a compiled program
-./target/release/stoffel-run path/to/program.stfbin [entry_function]
+./target/release/stoffel run-node path/to/program.stfbin [entry_function]
 
 # Format and lint
 cargo fmt
@@ -54,7 +58,6 @@ StoffelVM/
 │   ├── stoffel-vm/              # VM runtime crate
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       ├── main.rs          # CLI entry point (stoffel-run)
 │   │       ├── lib.rs           # Library exports
 │   │       ├── core_vm.rs       # VirtualMachine implementation
 │   │       ├── functions.rs     # VMFunction definition
@@ -271,7 +274,7 @@ cargo test -p stoffel-vm
 cargo test -p stoffel-vm-types
 
 # Test with a compiled program
-./target/release/stoffel-run examples/hello_world.stfbin
+./target/release/stoffel run-node examples/hello_world.stfbin
 ```
 
 ## Dependencies

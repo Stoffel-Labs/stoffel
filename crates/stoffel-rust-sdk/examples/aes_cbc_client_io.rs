@@ -8,7 +8,7 @@
 //!
 //! Run:
 //!   cargo run --release -p stoffel-rust-sdk --example aes_cbc_client_io
-//! (set STOFFEL_RUN_BIN to a built `stoffel-run` if it is not auto-discovered).
+//! (set STOFFEL_RUN_BIN to a built `stoffel` CLI binary if it is not auto-discovered).
 
 use stoffel::prelude::*;
 

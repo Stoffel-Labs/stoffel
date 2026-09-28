@@ -32,7 +32,8 @@ that ciphertext as the **clear** `ciphertext` input and the key as the secret
 text):
 
 ```sh
-STOFFEL_RUN_BIN=target/release/stoffel-run \
+cargo build --release -p stoffel-cli
+STOFFEL_RUN_BIN=target/release/stoffel \
   cargo run --release -p stoffel-rust-sdk --example aes_transcipher
 ```
 

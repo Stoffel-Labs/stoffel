@@ -39,7 +39,7 @@ WORKLOAD_CONTAINERS=(
 # Which topology this run exercises (docs/design/bootnode-elimination.md). There
 # is one: the compose stack writes STOFFEL_PEERS as
 # ${STOFFEL_PEERS-<the other four addresses>}, and clearing it no longer selects
-# a second path — stoffel-run refuses an empty seed list by name. The banner
+# a second path — stoffel run-node refuses an empty seed list by name. The banner
 # stays because an overridden peer list is worth saying out loud in a result.
 if [ -n "${STOFFEL_PEERS+set}" ] && [ -z "${STOFFEL_PEERS}" ]; then
     echo "ERROR: STOFFEL_PEERS is empty. The bootnode was removed; a party forms its" >&2
@@ -154,7 +154,7 @@ assert_topology() {
 
 # No container carries a roster of its own: every party's membership and every
 # client's node legs are pinned to the node roster the pinned coordinator
-# serves (docs/design/bootnode-elimination.md §9.D, §9.E.1), and stoffel-run
+# serves (docs/design/bootnode-elimination.md §9.D, §9.E.1), and stoffel run-node
 # refuses --roster by name.
 
 # No preprocessing item serves two executions (§9.C.9 part 4): the override no
@@ -179,7 +179,7 @@ assert_every_party_returned() {
 }
 
 # Each party's session instance_id, one per line in party order, from the line
-# stoffel-run prints once the mesh has agreed its session.
+# stoffel run-node prints once the mesh has agreed its session.
 instance_ids() {
     local party
     local id

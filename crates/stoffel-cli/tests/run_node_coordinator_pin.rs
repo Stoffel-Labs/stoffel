@@ -1,4 +1,4 @@
-//! `stoffel-run`'s coordinator pin (`--coord-cert`) and the node roster it
+//! `stoffel run-node`'s coordinator pin (`--coord-cert`) and the node roster it
 //! fetches, exercised through the binary.
 //!
 //! `docs/design/bootnode-elimination.md` §9.A and §9.D: a coordinator connection
@@ -28,6 +28,18 @@ use stoffel_mpc_coordinator_shared::{
 };
 use stoffel_vm_types::compiled_binary::utils::save_to_file;
 
+/// The `stoffel` binary under test. Every node and client below is
+/// `stoffel run-node`.
+const STOFFEL_BIN: &str = env!("CARGO_BIN_EXE_stoffel");
+
+/// A `stoffel run-node` command: the `stoffel` binary with the `run-node`
+/// subcommand already in its argv, so callers append only driver flags.
+fn run_node_command() -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(STOFFEL_BIN);
+    command.arg("run-node");
+    command
+}
+
 const EXECUTION_ID: &str = "0707070707070707070707070707070707070707070707070707070707070707";
 
 fn ids_dir() -> PathBuf {
@@ -36,19 +48,19 @@ fn ids_dir() -> PathBuf {
 
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "stoffel-run-coordinator-pin-{name}-{}",
+        "stoffel-node-coordinator-pin-{name}-{}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create scratch dir");
     dir
 }
 
-/// Runs `stoffel-run` as a client with `extra` flags, bounded so a regression that
+/// Runs `stoffel run-node` as a client with `extra` flags, bounded so a regression that
 /// connects instead of refusing cannot hang the suite. `--execution-id` is passed
 /// exactly when `extra` names a coordinator, since it is refused without one.
 async fn run_client(extra: &[&str]) -> Output {
     let ids = ids_dir();
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_stoffel-run"));
+    let mut command = run_node_command();
     command
         .arg("--client")
         .arg("--inputs")
@@ -64,8 +76,8 @@ async fn run_client(extra: &[&str]) -> Output {
     }
     tokio::time::timeout(Duration::from_secs(60), command.output())
         .await
-        .expect("stoffel-run must refuse promptly, not connect and wait")
-        .expect("spawn stoffel-run")
+        .expect("stoffel run-node must refuse promptly, not connect and wait")
+        .expect("spawn stoffel run-node")
 }
 
 fn stderr(output: &Output) -> String {
@@ -368,15 +380,15 @@ async fn removed_flags_fail_by_name_with_hints_that_name_no_removed_flag() {
     }
 }
 
-/// Runs `stoffel-run` with `base` then `extra`, bounded so a regression that
+/// Runs `stoffel run-node` with `base` then `extra`, bounded so a regression that
 /// connects instead of refusing cannot hang the suite.
 async fn run_stoffel(base: &[String], extra: &[&str]) -> Output {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_stoffel-run"));
+    let mut command = run_node_command();
     command.args(base).args(extra).kill_on_drop(true);
     tokio::time::timeout(Duration::from_secs(60), command.output())
         .await
-        .expect("stoffel-run must refuse promptly, not connect and wait")
-        .expect("spawn stoffel-run")
+        .expect("stoffel run-node must refuse promptly, not connect and wait")
+        .expect("spawn stoffel run-node")
 }
 
 /// §9.E.3: a client reaches an execution only through the coordinator. Without
@@ -529,20 +541,20 @@ impl RosterCoordinator {
     }
 }
 
-/// Runs `stoffel-run` until its stderr has shown every line of `needles`, then
+/// Runs `stoffel run-node` until its stderr has shown every line of `needles`, then
 /// kills it and returns what it printed. For a party that gets past every
 /// refusal and would otherwise wait out its discovery budget.
 async fn run_until_logged(base: &[String], extra: &[&str], needles: &[&str]) -> String {
     use tokio::io::AsyncBufReadExt;
 
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_stoffel-run"))
+    let mut child = run_node_command()
         .args(base)
         .args(extra)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn stoffel-run");
+        .expect("spawn stoffel run-node");
     let mut lines = tokio::io::BufReader::new(child.stderr.take().expect("piped stderr")).lines();
     let mut seen = String::new();
     let complete = tokio::time::timeout(Duration::from_secs(60), async {
@@ -559,7 +571,7 @@ async fn run_until_logged(base: &[String], extra: &[&str], needles: &[&str]) -> 
     let _ = child.kill().await;
     assert!(
         matches!(complete, Ok(true)),
-        "stoffel-run never logged {needles:?}: {seen}"
+        "stoffel run-node never logged {needles:?}: {seen}"
     );
     seen
 }
@@ -786,7 +798,7 @@ impl OpenCoordinator {
         }
     }
 
-    /// A `stoffel-run` client of this coordinator with `extra` flags. Its node
+    /// A `stoffel run-node` client of this coordinator with `extra` flags. Its node
     /// RPC address is one nobody answers at: every case here stops before a
     /// node leg is opened.
     async fn run_client(&self, extra: &[&str]) -> Output {
@@ -873,7 +885,7 @@ async fn a_client_refuses_what_it_was_not_asked_to_join_before_associating() {
     // `run_client` passes `--inputs 1`; a second value does not fit the slot.
     let output = {
         let ids = ids_dir();
-        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_stoffel-run"));
+        let mut command = run_node_command();
         command
             .args(["--client", "--inputs", "1,2", "--cert"])
             .arg(ids.join("clients/cert0.crt"))
@@ -885,8 +897,8 @@ async fn a_client_refuses_what_it_was_not_asked_to_join_before_associating() {
             .kill_on_drop(true);
         tokio::time::timeout(Duration::from_secs(60), command.output())
             .await
-            .expect("stoffel-run must refuse promptly")
-            .expect("spawn stoffel-run")
+            .expect("stoffel run-node must refuse promptly")
+            .expect("spawn stoffel run-node")
     };
     let stderr_text = stderr(&output);
     assert_eq!(output.status.code(), Some(2), "{stderr_text}");

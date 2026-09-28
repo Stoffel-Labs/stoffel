@@ -3,8 +3,9 @@
 # fpdiv_const/trunc exec counters past a u8 wrap.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
-RUNNER="${STOFFEL_RUN_BIN:-$REPO_ROOT/target/release/stoffel-run}"
 STOFFEL="${STOFFEL_BIN:-$REPO_ROOT/target/release/stoffel}"
+# Parties run as `<stoffel> run-node`; by default the same stoffel binary.
+RUNNER="${STOFFEL_RUN_BIN:-$STOFFEL}"
 STOFFEL_RUN_BIN="$RUNNER" "$STOFFEL" run "$(dirname "$0")" \
   --local --runner "$RUNNER" --timeout-secs 1100 \
   --client-input 0=1000000000

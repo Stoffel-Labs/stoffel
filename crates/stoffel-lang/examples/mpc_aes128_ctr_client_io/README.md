@@ -24,7 +24,8 @@ inputs, runs the program in the local 5-party simulator, and reconstructs the
 not a public reveal), asserting it equals the NIST vector `C0 = 874d6191b620e3261bef6864990db6ce`:
 
 ```sh
-STOFFEL_RUN_BIN=target/release/stoffel-run \
+cargo build --release -p stoffel-cli
+STOFFEL_RUN_BIN=target/release/stoffel \
   cargo run --release -p stoffel-rust-sdk --example aes_ctr_client_io
 ```
 

@@ -21,11 +21,12 @@
 //!
 //! The seventh is the one the blocker's own wording hides: the production AVSS
 //! *party* path does not go through `AvssQuicServer` at all.
-//! `stoffel-run.rs::setup_avss_party_for_curve` spawns its own per-peer loop
+//! The node driver's `setup_avss_party_for_curve` (`stoffel-rust-sdk`'s
+//! `node/driver.rs`) spawns its own per-peer loop
 //! over `net.get_all_server_connections()`. It is a party-to-party loop, not a
 //! client or coordinator one, so it must install the router like the other six;
 //! `every_receive_loop_offers_its_payloads_to_the_mesh_router` covers the six in
-//! this crate and `stoffel-run.rs`'s own
+//! this crate and the node driver's own
 //! `the_avss_party_receive_loop_offers_its_payloads_to_the_mesh_router` covers
 //! the seventh, because a library test cannot `include_str!` across a crate
 //! boundary without breaking `cargo publish`.

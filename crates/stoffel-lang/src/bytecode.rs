@@ -242,12 +242,17 @@ fn collect_reachable_calls(
     worklist: &mut Vec<String>,
 ) {
     for instruction in instructions {
-        if let Instruction::CALL(function_name) = instruction {
-            if function_chunks.contains_key(function_name)
-                && reachable.insert(function_name.clone())
-            {
-                worklist.push(function_name.clone());
-            }
+        // A direct call, or a function named by a string constant: closures
+        // (`create_closure("f", ...)`) reference their target only by name,
+        // loaded into a register and passed to the builtin, so a function
+        // reached that way has no CALL site of its own.
+        let referenced = match instruction {
+            Instruction::CALL(function_name) => function_name,
+            Instruction::LDI(_, Value::String(function_name)) => function_name,
+            _ => continue,
+        };
+        if function_chunks.contains_key(referenced) && reachable.insert(referenced.clone()) {
+            worklist.push(referenced.clone());
         }
     }
 }

@@ -4739,3 +4739,91 @@ def main(a: list[secret int64], b: list[secret int64]) -> int64:
     );
     assert!(demand.dynamic);
 }
+
+// ===========================================
+// Closures reference their target and upvalues by name
+// ===========================================
+
+const CLOSURE_COUNTER_SOURCE: &str = r#"
+def increment_counter(amount: int64) -> int64:
+  var saved_amount = amount
+  var current = get_upvalue("start")
+  var updated = current + saved_amount
+  discard set_upvalue("start", updated)
+  return updated
+
+def create_counter(start: int64) -> Closure:
+  return create_closure_with_upvalue("increment_counter", "start")
+
+def main() -> int64:
+  var counter = create_counter(10)
+  var first = call_closure_with_arg(counter, 5)
+  var second = call_closure_with_arg(counter, 7)
+  return first + second
+"#;
+
+fn options_at_level(level: u8) -> CompilerOptions {
+    CompilerOptions {
+        optimize: level > 0,
+        optimization_level: level,
+        ..default_options()
+    }
+}
+
+/// A closure names its target function only as a string constant passed to
+/// `create_closure`; there is no CALL to it anywhere. Unreachable-function
+/// pruning must still keep it, at every optimization level, or the closure call
+/// fails at run time with `Function increment_counter not found`.
+#[test]
+fn closure_target_named_only_by_string_survives_pruning_at_every_level() {
+    for level in 0..=3 {
+        let program = compile(
+            CLOSURE_COUNTER_SOURCE,
+            "test.stfl",
+            &options_at_level(level),
+        )
+        .unwrap_or_else(|error| panic!("-O{level}: closure counter should compile: {error:?}"));
+        assert!(
+            program.function_chunks.contains_key("increment_counter"),
+            "-O{level}: the closure target was pruned; kept: {:?}",
+            program.function_chunks.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+/// `create_closure_with_upvalue("f", "start")` captures the caller's local
+/// `start` by name. Inlining `create_counter` into `main` would move that local
+/// into `main`'s frame under another name (`Could not find upvalue start`), so
+/// the function capturing it must keep its own frame at every level: the only
+/// chunk that calls `create_closure` is `create_counter` itself.
+#[test]
+fn function_capturing_an_upvalue_by_name_is_not_inlined() {
+    for level in 0..=3 {
+        let program = compile(
+            CLOSURE_COUNTER_SOURCE,
+            "test.stfl",
+            &options_at_level(level),
+        )
+        .unwrap_or_else(|error| panic!("-O{level}: closure counter should compile: {error:?}"));
+        let creates_closure = |instructions: &[Instruction]| {
+            instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::CALL(name) if name == "create_closure"))
+        };
+        let callers: Vec<&String> = program
+            .function_chunks
+            .iter()
+            .filter(|(_, chunk)| creates_closure(&chunk.instructions))
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            callers,
+            vec!["create_counter"],
+            "-O{level}: create_counter must keep its own frame"
+        );
+        assert!(
+            !creates_closure(&program.main_chunk.instructions),
+            "-O{level}: create_counter was inlined into main"
+        );
+    }
+}

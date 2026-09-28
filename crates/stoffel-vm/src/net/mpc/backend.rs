@@ -138,7 +138,7 @@ impl MpcBackendKind {
     /// Whether this backend supports standalone client input mode.
     ///
     /// Both HoneyBadger and AVSS support a separate client role
-    /// (`stoffel-run --client`) where external clients submit secret inputs
+    /// (`stoffel run-node --client`) where external clients submit secret inputs
     /// to the MPC parties.
     pub fn supports_client_input(&self) -> bool {
         self.has_capability(MpcCapability::ClientInput)

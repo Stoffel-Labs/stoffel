@@ -46,7 +46,7 @@
 //! The store is a directory, not a file (LMDB keeps a data and a lock file in
 //! it). Resolution order, in [`epoch_store_path`]:
 //!
-//! 1. `--epoch-store <dir>` on `stoffel-run`;
+//! 1. `--epoch-store <dir>` on `stoffel run-node`;
 //! 2. the `STOFFEL_EPOCH_STORE` environment variable (what `docker/entrypoint.sh`
 //!    turns into the flag);
 //! 3. `$HOME/.stoffel/epochs`, matching

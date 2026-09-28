@@ -1,12 +1,13 @@
 mod project;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, ExitCode};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
@@ -82,9 +83,25 @@ enum Command {
     /// Check or update the CLI and project dependencies.
     #[command(visible_alias = "upgrade")]
     Update(UpdateArgs),
+    /// Run one MPC party (used by stoffel run --local and by node operators).
+    #[command(disable_help_flag = true)]
+    RunNode(RunNodeArgs),
     /// Preserve planned and unknown commands for targeted diagnostics.
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+/// Raw arguments for `stoffel run-node`. They are forwarded untouched to
+/// [`stoffel::node::run_node`], which owns their parsing, `--help` included.
+#[derive(Debug, Args)]
+struct RunNodeArgs {
+    #[arg(
+        value_name = "NODE_ARGS",
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        num_args = 0..
+    )]
+    args: Vec<OsString>,
 }
 
 #[derive(Debug, Args)]
@@ -337,7 +354,8 @@ struct RunArgs {
         allow_hyphen_values = true
     )]
     connect_timeout_ms: u64,
-    /// Path to the stoffel-run helper binary. Only used with --local.
+    /// Path to the stoffel binary whose `run-node` subcommand runs each local
+    /// party. Defaults to this stoffel executable. Only used with --local.
     #[arg(long)]
     runner: Option<PathBuf>,
     /// Form the local MPC network as a roster-pinned mesh. This is the only
@@ -447,7 +465,8 @@ struct DevArgs {
     /// Load local ClientStore inputs from a .json, .csv, or .txt file.
     #[arg(long = "client-input-file", value_name = "FILE")]
     client_input_files: Vec<PathBuf>,
-    /// Path to the stoffel-run helper binary. Only used with --local.
+    /// Path to the stoffel binary whose `run-node` subcommand runs each local
+    /// party. Defaults to this stoffel executable. Only used with --local.
     #[arg(long)]
     runner: Option<PathBuf>,
     /// Form the local MPC network as a roster-pinned mesh. This is the only
@@ -511,7 +530,8 @@ struct TestArgs {
     /// Print each selected test and its result.
     #[arg(long, short)]
     verbose: bool,
-    /// Path to the stoffel-run helper binary. Only used with --local.
+    /// Path to the stoffel binary whose `run-node` subcommand runs each local
+    /// party. Defaults to this stoffel executable. Only used with --local.
     #[arg(long)]
     runner: Option<PathBuf>,
     /// Form the local MPC network as a roster-pinned mesh. This is the only
@@ -672,8 +692,17 @@ fn comma_separated_assignment_name(value: &str) -> Option<&str> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    match Cli::parse().command {
+async fn main() -> Result<ExitCode> {
+    let command = Cli::parse().command;
+    if let Command::RunNode(args) = command {
+        // A process entry point: `run_node` exits the process itself on errors.
+        return Ok(stoffel::node::run_node(args.args).await);
+    }
+    dispatch(command).await.map(|()| ExitCode::SUCCESS)
+}
+
+async fn dispatch(command: Command) -> Result<()> {
+    match command {
         Command::Init(args) => init(args),
         Command::Check(args) => check(args),
         Command::Compile(args) => build("stoffel compile", args),
@@ -685,6 +714,7 @@ async fn main() -> Result<()> {
         Command::Clean(args) => clean(args),
         Command::Update(args) => update(args),
         Command::External(args) => external_command(args),
+        Command::RunNode(_) => unreachable!("run-node is dispatched before dispatch"),
     }
 }
 
@@ -715,7 +745,7 @@ fn unknown_command(command: &str) -> Result<()> {
 fn closest_cli_command(command: &str) -> Option<&'static str> {
     const COMMANDS: &[&str] = &[
         "init", "new", "check", "compile", "build", "run", "exec", "execute", "dev", "test",
-        "status", "doctor", "clean", "update", "upgrade",
+        "status", "doctor", "clean", "update", "upgrade", "run-node",
     ];
     COMMANDS
         .iter()
@@ -915,7 +945,7 @@ async fn run(args: RunArgs) -> Result<()> {
     for (slot, count) in &args.client_output_counts {
         builder = builder.client_output_count(*slot, *count);
     }
-    if let Some(path) = args.runner {
+    if let Some(path) = local_runner_path(args.runner.as_deref()) {
         builder = builder.local_runner_path(path);
     }
     builder = builder.local_topology(local_topology());
@@ -1106,38 +1136,48 @@ fn validate_dev_args(args: &DevArgs) -> Result<()> {
     Ok(())
 }
 
+/// The stoffel binary that local parties run as `<binary> run-node ...`: the
+/// explicit `--runner`, else this very executable (which has `run-node`), so
+/// the CLI never needs binary discovery. `None` only if the OS cannot report
+/// the current executable, in which case the SDK's resolver takes over.
+fn local_runner_path(explicit: Option<&Path>) -> Option<PathBuf> {
+    explicit
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_exe().ok())
+}
+
 fn validate_runner_path(path: &Path) -> Result<()> {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             anyhow::bail!(
-                "--runner path {} does not exist. Pass the built stoffel-run executable path, or remove --runner to use the default local simulator runner.",
+                "--runner path {} does not exist. Pass the path to a built stoffel executable (it runs each party as `stoffel run-node`), or remove --runner to use this stoffel executable.",
                 path.display()
             );
         }
         Err(error) => {
             anyhow::bail!(
-                "could not read --runner path {}: {error}. Pass the built stoffel-run executable path, or remove --runner to use the default local simulator runner.",
+                "could not read --runner path {}: {error}. Pass the path to a built stoffel executable (it runs each party as `stoffel run-node`), or remove --runner to use this stoffel executable.",
                 path.display()
             );
         }
     };
     if metadata.is_dir() {
         anyhow::bail!(
-            "--runner path {} is a directory. Pass the stoffel-run executable file, not its parent directory.",
+            "--runner path {} is a directory. Pass the stoffel executable file, not its parent directory.",
             path.display()
         );
     }
     if !metadata.is_file() {
         anyhow::bail!(
-            "--runner path {} is not a regular executable file. Pass the built stoffel-run executable path.",
+            "--runner path {} is not a regular executable file. Pass the path to a built stoffel executable.",
             path.display()
         );
     }
     #[cfg(unix)]
     if metadata.permissions().mode() & 0o111 == 0 {
         anyhow::bail!(
-            "--runner path {} is not executable. Run `chmod +x {}` or pass the built stoffel-run executable path.",
+            "--runner path {} is not executable. Run `chmod +x {}` or pass the path to a built stoffel executable.",
             path.display(),
             path.display()
         );
@@ -1282,7 +1322,7 @@ fn prepare_dev_run(args: &DevArgs) -> Result<Stoffel> {
         &inputs,
         &client_inputs,
     )?;
-    if let Some(path) = &args.runner {
+    if let Some(path) = local_runner_path(args.runner.as_deref()) {
         builder = builder.local_runner_path(path);
     }
     let runtime = builder
@@ -1302,7 +1342,7 @@ fn prepare_dev_run(args: &DevArgs) -> Result<Stoffel> {
         &inputs,
         &client_inputs,
     )?;
-    if let Some(path) = &args.runner {
+    if let Some(path) = local_runner_path(args.runner.as_deref()) {
         builder = builder.local_runner_path(path);
     }
     Ok(builder.local_topology(local_topology()))
@@ -1364,7 +1404,7 @@ async fn test(args: TestArgs) -> Result<()> {
         let mut runtime = builder.build()?;
         validate_test_entry_has_no_parameters(runtime.program(), entry, file)?;
         let result = if args.local {
-            if let Some(path) = &args.runner {
+            if let Some(path) = local_runner_path(args.runner.as_deref()) {
                 runtime = runtime.local_runner_path(path);
             }
             runtime = runtime.local_topology(local_topology());

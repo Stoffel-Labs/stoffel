@@ -6,8 +6,8 @@
 //! associates, and from then on operates only within the input range and output rights its
 //! admission names. Its identity need not have been known to anyone before it associates.
 //!
-//! Every client surface runs this flow — `stoffel-run --client` on both backends,
-//! [`crate::run_offchain_client`], and the Rust SDK's client — so the order of the steps and
+//! Every client surface runs this flow — `stoffel run-node --client` on both backends,
+//! [`crate::node::run_offchain_client`], and the Rust SDK's client — so the order of the steps and
 //! what each refuses are decided here and nowhere else:
 //!
 //! 1. **Pinned coordinator, roster once** ([`CoordinatorClientConfig::connect`]): the served
@@ -82,7 +82,7 @@ pub struct CoordinatorClientRun<V> {
     pub outputs: Vec<V>,
 }
 
-/// Why a coordinator-mediated client stopped. [`Self::exit_code`] is `stoffel-run`'s exit
+/// Why a coordinator-mediated client stopped. [`Self::exit_code`] is `stoffel run-node`'s exit
 /// status for it (§9.D.3, §9.E.1): 2 for a refusal this client makes of what it was asked to
 /// join, 13 for everything the coordinator or a node did.
 #[derive(Debug, thiserror::Error)]

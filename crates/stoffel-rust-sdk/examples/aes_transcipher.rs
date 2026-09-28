@@ -13,7 +13,7 @@
 //!
 //! Run:
 //!   cargo run --release -p stoffel-rust-sdk --example aes_transcipher
-//! (set STOFFEL_RUN_BIN to a built `stoffel-run` if it is not auto-discovered).
+//! (set STOFFEL_RUN_BIN to a built `stoffel` CLI binary if it is not auto-discovered).
 
 use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
 use aes::Aes128;

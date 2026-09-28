@@ -218,7 +218,7 @@ cargo test test_name
 
 # Verify binary output with VM
 ./target/release/stoffellang -b tests/example.stfl
-stoffel-run tests/example.stflb
+stoffel run-node tests/example.stflb
 ```
 
 ## Dependencies
