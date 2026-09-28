@@ -565,14 +565,9 @@ def main() -> int64:
     );
 }
 
-/// §9.E.1 step 5, this repository's own cover for the client-leg pin
-/// (docs/design/bootnode-elimination.md §9.H): a client's node RPC addresses
-/// are hints, and every leg is pinned to a member of the roster the pinned
-/// coordinator served. A node RPC listener presenting a certificate minted
-/// here — no roster member — is refused as `ServerPinMismatch`, not believed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "starts a real localhost coordinator, MPC party mesh, and an impostor node RPC listener"]
-async fn a_local_client_refuses_a_node_rpc_listener_outside_the_served_roster() {
+/// Compiles the one-slot program the node-leg pin tests run: the admitted
+/// client's single input, opened.
+fn one_slot_client_binary(name: &str) -> CompiledBinary {
     let source = r#"
 def main() -> int64:
   var share = ClientStore.take_share(0, 0)
@@ -583,29 +578,25 @@ def main() -> int64:
         mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
         ..Default::default()
     };
-    let compiled = stoffellang::compile(source, "<local-runner-impostor-leg-e2e>", &options)
-        .expect("compile the one-slot client program");
-    let binary = stoffellang::convert_to_binary(&compiled);
-    let timeout = Duration::from_secs(120);
+    let compiled =
+        stoffellang::compile(source, name, &options).expect("compile the one-slot client program");
+    stoffellang::convert_to_binary(&compiled)
+}
 
-    let running = LocalCoordinatorRunner::builder(STOFFEL_BIN, binary)
-        .parties(5)
-        .threshold(1)
-        .timeout(timeout)
-        .admission(LocalAdmission::Open)
-        .build()
-        .expect("local runner config")
-        .start()
-        .await
-        .expect("start the open-admission run");
-
+/// Starts a node RPC listener presenting a freshly minted certificate: no
+/// member of any roster. Returns the port and the server (kept alive by the
+/// caller).
+async fn start_impostor_node_rpc() -> (
+    u16,
+    stoffel_mpc_coordinator_off_chain::node_rpc::NodeRPCServer,
+) {
     let impostor = rcgen::generate_simple_self_signed(vec!["impostor-node".to_owned()])
         .expect("mint an impostor certificate");
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
         .expect("reserve a port")
         .port();
-    let _impostor = stoffel_mpc_coordinator_off_chain::node_rpc::NodeRPCServer::start(
+    let server = stoffel_mpc_coordinator_off_chain::node_rpc::NodeRPCServer::start(
         "127.0.0.1",
         port,
         impostor.cert.der().to_vec(),
@@ -613,15 +604,54 @@ def main() -> int64:
     )
     .await
     .expect("start the impostor node RPC listener");
+    (port, server)
+}
 
-    let mut endpoint = running.client_endpoint().clone();
-    endpoint.node_rpc_addresses[0] = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+fn client_identity() -> (Vec<u8>, Vec<u8>) {
     let client = rcgen::generate_simple_self_signed(vec!["client".to_owned()])
         .expect("mint a client certificate");
-    let refused = run_offchain_client(
-        &endpoint,
+    (
         client.cert.der().to_vec(),
         client.signing_key.serialize_der(),
+    )
+}
+
+/// §9.E.1 step 5, this repository's own cover for the client-leg pin
+/// (docs/design/bootnode-elimination.md §9.H): a client's node RPC addresses
+/// are hints, and every leg is pinned to a member of the roster the pinned
+/// coordinator served. When every address answers with a key outside that
+/// roster, no leg is admitted and the client refuses the run: an impostor is
+/// never believed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "starts a real localhost coordinator, MPC party mesh, and impostor node RPC listeners"]
+async fn a_local_client_refuses_a_node_rpc_listener_outside_the_served_roster() {
+    let timeout = Duration::from_secs(120);
+    let running = LocalCoordinatorRunner::builder(
+        STOFFEL_BIN,
+        one_slot_client_binary("<local-runner-impostor-legs-e2e>"),
+    )
+    .parties(5)
+    .threshold(1)
+    .timeout(timeout)
+    .admission(LocalAdmission::Open)
+    .build()
+    .expect("local runner config")
+    .start()
+    .await
+    .expect("start the open-admission run");
+
+    let mut endpoint = running.client_endpoint().clone();
+    let mut impostors = Vec::new();
+    for address in endpoint.node_rpc_addresses.iter_mut() {
+        let (port, server) = start_impostor_node_rpc().await;
+        *address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        impostors.push(server);
+    }
+    let (cert, key) = client_identity();
+    let refused = run_offchain_client(
+        &endpoint,
+        cert,
+        key,
         AssociationRequest {
             slot: None,
             invitation: None,
@@ -630,18 +660,74 @@ def main() -> int64:
         timeout,
     )
     .await
-    .expect_err("a leg answered by a key outside the roster is refused");
-    assert!(
-        matches!(
-            refused,
-            LocalCoordinatorRunnerError::Client(CoordinatorClientError::NodeRpc(
-                CoordinatorError::ServerPinMismatch { .. }
-            ))
-        ),
-        "{refused:?}"
-    );
+    .expect_err("a client whose every node leg is outside the roster is refused");
+    match &refused {
+        LocalCoordinatorRunnerError::Client(CoordinatorClientError::NodeRpc(
+            CoordinatorError::ConnectError(message),
+        )) => {
+            assert!(
+                message.contains("no node RPC leg connected"),
+                "no impostor leg is admitted: {message}"
+            );
+            // Refused by the roster pin, each one — not merely unreachable.
+            assert_eq!(
+                message
+                    .matches("presented a key its pin does not admit")
+                    .count(),
+                impostors.len(),
+                "every leg is refused by the roster pin: {message}"
+            );
+        }
+        other => panic!("expected every impostor leg to be refused, got {other:?}"),
+    }
     // The run is abandoned: dropping it kills every party.
     drop(running);
+}
+
+/// The other half of the client-leg pin contract: a single node RPC listener
+/// outside the roster is dropped, not fatal (the coordinator's
+/// `connect_roster_legs`; otherwise any one address could deny every client its
+/// masks). The impostor gets no leg, the client reconstructs its mask from the
+/// roster members it did reach, and the run completes with the client's input.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "starts a real localhost coordinator, MPC party mesh, and an impostor node RPC listener"]
+async fn a_local_client_drops_an_impostor_leg_and_completes_from_roster_members() {
+    let timeout = Duration::from_secs(180);
+    let running = LocalCoordinatorRunner::builder(
+        STOFFEL_BIN,
+        one_slot_client_binary("<local-runner-impostor-leg-e2e>"),
+    )
+    .parties(5)
+    .threshold(1)
+    .timeout(timeout)
+    .admission(LocalAdmission::Open)
+    .build()
+    .expect("local runner config")
+    .start()
+    .await
+    .expect("start the open-admission run");
+
+    let mut endpoint = running.client_endpoint().clone();
+    let (port, _impostor) = start_impostor_node_rpc().await;
+    endpoint.node_rpc_addresses[0] = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let (cert, key) = client_identity();
+    let inputs = ["42".to_owned()];
+    let client = run_offchain_client(
+        &endpoint,
+        cert,
+        key,
+        AssociationRequest {
+            slot: None,
+            invitation: None,
+        },
+        &inputs,
+        timeout,
+    );
+    let (output, client) = tokio::join!(running.finish(), client);
+    let client = client.expect("one impostor leg does not take the client down");
+    assert_eq!(client.admission.client_index, ClientIndex(0));
+    let output = output.expect("the run completes from the roster members' masks");
+    assert_eq!(output.consistent_returned_values().unwrap(), vec!["42"]);
 }
 
 /// The same open-admission contract through the `stoffel run-node` client, which is
