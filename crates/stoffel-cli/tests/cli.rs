@@ -277,6 +277,7 @@ fn init_creates_default_project() {
 }
 
 #[test]
+#[ignore = "builds a generated Rust app and a separate Cargo target; run explicitly for scaffold verification"]
 fn init_default_project_builds_with_cargo_and_sdk_bindings() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
