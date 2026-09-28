@@ -216,16 +216,24 @@ jobs:
     needs: [build-and-test]
 
     # TEMPORARY — docs/design/bootnode-elimination.md §9.F.5, §9.I. The images
-    # build against the unpublished stoffel-mpc-coordinator 0.3.0, which both
-    # workspaces reach through a [patch.crates-io] path on a developer machine,
-    # copied into the build from a BuildKit named context called `coordinator`.
-    # No `build-contexts:` entry can point a GitHub runner at that path, so
-    # `COPY --from=coordinator` resolves `coordinator` as an image reference and
-    # this job fails by construction until 0.3.0 is published. Delete this note
-    # with the patch; do not "fix" the job by dropping the COPY.
+    # build against the unpublished stoffel-mpc-coordinator 0.3.0, copied into
+    # the build from a BuildKit named context called `coordinator`
+    # (`COPY --from=coordinator` in the Dockerfile). The coordinator repository
+    # is public, so this job checks it out at the revision Cargo.lock pins and
+    # passes it as that context; without it `coordinator` resolves as an image
+    # reference and the build fails. Delete the checkout, both `build-contexts:`
+    # entries and this note with the patch; do not drop the COPY instead.
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Check out the coordinator build context
+        uses: actions/checkout@v4
+        with:
+          repository: Stoffel-Labs/stoffel-mpc-coordinator
+          # The revision Cargo.lock pins for the feature/no-bootnode [patch.crates-io] entries.
+          ref: 272e4933c4aee6e8f33da7d1c877cb30881133cb
+          path: .coordinator-context
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -234,6 +242,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          build-contexts: coordinator=.coordinator-context
           push: false
           tags: stoffelvm:test
           cache-from: type=gha
@@ -252,6 +261,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          build-contexts: coordinator=.coordinator-context
           push: true
           tags: |
             ghcr.io/stoffel-labs/stoffelvm:latest
