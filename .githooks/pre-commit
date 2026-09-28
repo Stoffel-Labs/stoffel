@@ -8,14 +8,39 @@ ci_workflow=".github/workflows/ci.yml"
 
 published_package_pattern="stoffel-vm|stoffel-vm-types|stoffellang|stoffel-rust-sdk|stoffel-bindgen|stoffelcrypto|stoffelnet|stoffel-mpc-coordinator-shared|stoffel-mpc-coordinator-off-chain"
 stale_package_refs="$(mktemp)"
-trap 'rm -f "$stale_package_refs"' EXIT
+
+# A `[patch.crates-io]` table is never part of a published manifest, so a git
+# override there cannot leak into a release. It is still only tolerated when the
+# table is explicitly marked temporary: its header must directly follow a comment
+# block containing "TEMPORARY" (e.g. docs/design/bootnode-elimination.md §9.F.5, the
+# unpublished stoffel-mpc-coordinator 0.3.0). Those lines are listed, not
+# rejected, so the override stays visible until it is deleted.
+temporary_patch_lines="$(mktemp)"
+trap 'rm -f "$stale_package_refs" "$temporary_patch_lines"' EXIT
+git ls-files -- '*.toml' ':!target' | while read -r manifest; do
+  awk -v file="$manifest" '
+    /^[[:space:]]*\[/ {
+      in_temporary_patch = ($0 ~ /^[[:space:]]*\[patch\.crates-io\][[:space:]]*$/ && temporary_comment)
+    }
+    in_temporary_patch && !/^[[:space:]]*(\[|#|$)/ { print file ":" FNR ":" $0 }
+    # Whether the comment block directly above the current line says TEMPORARY.
+    /^[[:space:]]*#/ { temporary_comment = temporary_comment || /TEMPORARY/; next }
+    { temporary_comment = 0 }
+  ' "$manifest"
+done >"$temporary_patch_lines"
 
 git grep -n -E "(git|branch|rev|tag)[[:space:]]*=[[:space:]]*\"" -- \
   '*.toml' '*.rs' '*.sh' '*.yml' '*.yaml' \
   ':!target' \
   ':!.git' \
   ':!.githooks/pre-commit' |
-  grep -E "$published_package_pattern|StoffelVM|Stoffel-Labs/stoffel" >>"$stale_package_refs" || true
+  grep -E "$published_package_pattern|StoffelVM|Stoffel-Labs/stoffel" |
+  grep -v -x -F -f "$temporary_patch_lines" >>"$stale_package_refs" || true
+
+if [ -s "$temporary_patch_lines" ]; then
+  echo "note: temporary [patch.crates-io] overrides still present (delete them once published):" >&2
+  sed 's/^/  /' "$temporary_patch_lines" >&2
+fi
 
 git grep -n -E "(package[[:space:]]*=[[:space:]]*\"(${published_package_pattern})\"[^}]*path[[:space:]]*=|(${published_package_pattern})[[:space:]]*=[[:space:]]*\\{[^}]*path[[:space:]]*=)" -- \
   '*.toml' '*.rs' '*.sh' '*.yml' '*.yaml' \
