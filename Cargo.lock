@@ -5679,6 +5679,7 @@ dependencies = [
  "clap",
  "predicates",
  "serde",
+ "serde_json",
  "stoffel-rust-sdk",
  "tempfile",
  "tokio",

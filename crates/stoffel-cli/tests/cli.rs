@@ -97,6 +97,18 @@ fn init_creates_default_project() {
     assert!(cargo_toml.contains("stoffel = { package = \"stoffel-rust-sdk\""));
     assert!(cargo_toml.contains("[build-dependencies]"));
     assert!(cargo_toml.contains("stoffel-bindgen"));
+    assert!(cargo_toml.contains("autobins = false"));
+    assert!(cargo_toml.contains("default-run = \"stoffel-client\""));
+    for binary in [
+        "name = \"stoffel-client\"",
+        "name = \"stoffel-server\"",
+        "name = \"stoffel-coordinator\"",
+    ] {
+        assert!(
+            cargo_toml.contains(binary),
+            "missing generated binary {binary}"
+        );
+    }
     let build_rs = fs::read_to_string(temp.path().join("hello/build.rs")).unwrap();
     assert!(build_rs.contains("stoffel_bindgen::generate_bindings("));
     assert!(build_rs.contains("artifacts/program.stflb"));
@@ -172,6 +184,16 @@ fn init_creates_default_project() {
     assert!(run_local.contains("cargo install stoffel-vm-runner --version 0.1.2 --locked"));
     assert!(run_local.contains("export STOFFEL_RUN_BIN"));
     assert!(run_local.contains("STOFFEL_AUTO_ADDRESSES=1"));
+    #[cfg(unix)]
+    assert_ne!(
+        fs::metadata(temp.path().join("hello/scripts/run-local.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111,
+        0,
+        "run-local.sh should be executable"
+    );
     let wait_ready = run_local.find("stoffel-coordinator\" wait-ready").unwrap();
     let ready_message = run_local.find("ready for participant input").unwrap();
     assert!(wait_ready < ready_message);
@@ -180,15 +202,35 @@ fn init_creates_default_project() {
     assert!(run_client.contains("participant-owned client"));
     assert!(run_client.contains("stoffel-coordinator -- wait-ready"));
     assert!(run_client.contains("stoffel-client"));
+    #[cfg(unix)]
+    assert_ne!(
+        fs::metadata(temp.path().join("hello/scripts/run-client.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111,
+        0,
+        "run-client.sh should be executable"
+    );
     assert!(temp
         .path()
         .join("hello/scripts/docker-compose.yml")
         .exists());
     let compose = fs::read_to_string(temp.path().join("hello/scripts/docker-compose.yml")).unwrap();
-    assert!(compose.contains("[\"stoffel-server\", \"0\"]"));
+    for party in 0..5 {
+        assert!(
+            compose.contains(&format!("[\"stoffel-server\", \"{party}\"]")),
+            "Compose is missing node {party}"
+        );
+    }
+    assert!(compose.contains("[\"stoffel-coordinator\", \"wait-ready\"]"));
     assert!(compose.contains("condition: service_healthy"));
     assert!(!compose.contains("--client-input-total"));
-    assert!(temp.path().join("hello/scripts/Dockerfile").exists());
+    let dockerfile = fs::read_to_string(temp.path().join("hello/scripts/Dockerfile")).unwrap();
+    assert!(dockerfile.contains("/app/artifacts/program.stflb"));
+    assert!(dockerfile.contains("stoffel-coordinator"));
+    assert!(dockerfile.contains("stoffel-server"));
+    assert!(!dockerfile.contains("stoffel-client"));
     assert!(!temp.path().join("hello/deploy/local").exists());
     let ignore = fs::read_to_string(temp.path().join("hello/.gitignore")).unwrap();
     assert!(ignore.contains("/deploy/local/"));
@@ -239,6 +281,9 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("hello");
+    let cargo_target = std::env::var_os("STOFFEL_GENERATED_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project.join("target"));
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("init")
@@ -272,6 +317,29 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
         );
     fs::write(&cargo_toml_path, cargo_toml).unwrap();
 
+    let missing_bytecode = StdCommand::new("cargo")
+        .arg("build")
+        .args(["--bins"])
+        .arg("--offline")
+        .current_dir(&project)
+        .env("CARGO_TARGET_DIR", &cargo_target)
+        .output()
+        .expect("cargo build without bytecode should run");
+    assert!(!missing_bytecode.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_bytecode.stderr)
+            .contains("build bytecode first: stoffel build --output artifacts/program.stflb"),
+        "missing-bytecode failure was not actionable:\n{}",
+        String::from_utf8_lossy(&missing_bytecode.stderr)
+    );
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(&project)
+        .arg("test")
+        .assert()
+        .success();
+
     Command::cargo_bin("stoffel")
         .unwrap()
         .current_dir(&project)
@@ -284,11 +352,139 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
         .args(["--bins"])
         .arg("--offline")
         .current_dir(&project)
+        .env("CARGO_TARGET_DIR", &cargo_target)
         .status()
         .expect("cargo build should run")
         .success()
         .then_some(())
         .expect("initialized default project should build with cargo");
+
+    assert!(StdCommand::new("cargo")
+        .arg("test")
+        .arg("--offline")
+        .current_dir(&project)
+        .env("CARGO_TARGET_DIR", &cargo_target)
+        .status()
+        .expect("generated Rust tests should run")
+        .success());
+
+    let coordinator = cargo_target.join("debug").join(format!(
+        "stoffel-coordinator{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    let occupied_coordinator = std::net::TcpListener::bind("127.0.0.1:19300")
+        .expect("reserve the default coordinator endpoint");
+    let occupied_node =
+        std::net::UdpSocket::bind("127.0.0.1:19200").expect("reserve the default node endpoint");
+    let prepared = StdCommand::new(&coordinator)
+        .arg("prepare")
+        .current_dir(temp.path())
+        .env("STOFFEL_AUTO_ADDRESSES", "1")
+        .output()
+        .expect("coordinator prepare should run outside the project directory");
+    assert!(
+        prepared.status.success(),
+        "coordinator preparation failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&prepared.stdout),
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+
+    let deployment_dir = project.join("deploy/local");
+    let deployment_path = deployment_dir.join("deployment.json");
+    let deployment: serde_json::Value =
+        serde_json::from_slice(&fs::read(&deployment_path).unwrap()).unwrap();
+    assert_eq!(deployment["program"], "../../artifacts/program.stflb");
+    assert_eq!(deployment["coordinator_host"], "127.0.0.1");
+    assert_eq!(deployment["parties"], 5);
+    assert_eq!(deployment["threshold"], 1);
+    assert_eq!(deployment["client_cert"], "client-0.cert.der");
+    assert_eq!(deployment["client_key"], "client-0.key.der");
+    assert_ne!(deployment["coordinator_port"], 19_300);
+    assert_ne!(deployment["node_bind_addresses"][0], "127.0.0.1:19200");
+    for field in ["node_bind_addresses", "servers", "node_rpc_addresses"] {
+        let addresses = deployment[field]
+            .as_array()
+            .unwrap_or_else(|| panic!("{field} should be an array"));
+        assert_eq!(addresses.len(), 5, "{field} should match mpc.parties");
+        assert!(addresses.iter().all(|address| address
+            .as_str()
+            .is_some_and(|address| address.starts_with("127.0.0.1:"))));
+    }
+    assert!(deployment["coordinator_port"].as_u64().is_some());
+    assert!(deployment["timestamp"].as_u64().is_some());
+    let node_binds = deployment["node_bind_addresses"].as_array().unwrap();
+    let servers = deployment["servers"].as_array().unwrap();
+    let node_rpcs = deployment["node_rpc_addresses"].as_array().unwrap();
+    assert_ne!(servers[0], node_binds[0]);
+    for party in 1..5 {
+        assert_eq!(servers[party], node_binds[party]);
+    }
+    for addresses in [node_binds, node_rpcs] {
+        assert_eq!(
+            addresses
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            5,
+            "development endpoints should be unique within each transport"
+        );
+    }
+    drop(occupied_coordinator);
+    drop(occupied_node);
+
+    for identity in ["coordinator", "client-0"] {
+        for suffix in ["cert", "key"] {
+            assert!(deployment_dir
+                .join(format!("{identity}.{suffix}.der"))
+                .is_file());
+        }
+    }
+    for party in 0..5 {
+        for suffix in ["cert", "key"] {
+            assert!(deployment_dir
+                .join(format!("node-{party}.{suffix}.der"))
+                .is_file());
+        }
+    }
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(&deployment_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+
+    let client_key = fs::read(deployment_dir.join("client-0.key.der")).unwrap();
+    assert!(StdCommand::new(&coordinator)
+        .arg("prepare")
+        .current_dir(temp.path())
+        .env("STOFFEL_AUTO_ADDRESSES", "1")
+        .status()
+        .expect("repeated coordinator prepare should run")
+        .success());
+    assert_eq!(
+        fs::read(deployment_dir.join("client-0.key.der")).unwrap(),
+        client_key,
+        "repeated preparation should preserve participant identity material"
+    );
+
+    let mut incomplete_deployment = deployment;
+    incomplete_deployment
+        .as_object_mut()
+        .unwrap()
+        .remove("node_bind_addresses");
+    fs::write(
+        &deployment_path,
+        serde_json::to_vec_pretty(&incomplete_deployment).unwrap(),
+    )
+    .unwrap();
+    let obsolete_schema = StdCommand::new(coordinator)
+        .arg("prepare")
+        .current_dir(temp.path())
+        .output()
+        .expect("coordinator should reject an incomplete deployment schema");
+    assert!(!obsolete_schema.status.success());
+    assert!(String::from_utf8_lossy(&obsolete_schema.stderr)
+        .contains("missing field `node_bind_addresses`"));
 }
 
 #[test]
@@ -3803,7 +3999,11 @@ fn init_supports_declared_templates_and_library_mode() {
         (
             "python",
             "requirements.txt",
-            &["stoffel-run", "python3 -m pip install -r requirements.txt"][..],
+            &[
+                "stoffel build --output artifacts/program.stflb",
+                "./scripts/run-local.sh",
+                "python3 -m pip install -r requirements.txt",
+            ][..],
         ),
         (
             "rust",
@@ -3817,12 +4017,21 @@ fn init_supports_declared_templates_and_library_mode() {
         (
             "solidity-foundry",
             "foundry.toml",
-            &["stoffel-run", "forge build"][..],
+            &[
+                "stoffel build --output artifacts/program.stflb",
+                "./scripts/run-local.sh",
+                "forge build",
+            ][..],
         ),
         (
             "solidity-hardhat",
             "hardhat.config.js",
-            &["stoffel-run", "npm install", "npx hardhat compile"][..],
+            &[
+                "stoffel build --output artifacts/program.stflb",
+                "./scripts/run-local.sh",
+                "npm install",
+                "npx hardhat compile",
+            ][..],
         ),
     ] {
         let path = temp.path().join(name);
@@ -3839,6 +4048,8 @@ fn init_supports_declared_templates_and_library_mode() {
                 "{name} README should contain `{marker}`"
             );
         }
+        assert!(!readme.contains("stoffel-vm-runner"));
+        assert!(!readme.contains("STOFFEL_RUN_BIN"));
         if name == "rust" {
             let cargo_toml = fs::read_to_string(path.join("Cargo.toml")).unwrap();
             assert!(cargo_toml.contains("tokio"));
