@@ -23,8 +23,7 @@ use p256::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use stoffel_vm_types::core_types::{FixedPointPrecision, ShareType};
@@ -33,7 +32,7 @@ use stoffel_vm_types::fixed_point_codec::{
 };
 use wasm_bindgen::prelude::*;
 
-const AUTH_DOMAIN: &[u8] = b"stoffel-browser-rpc-auth-v1";
+const AUTH_DOMAIN: &[u8] = b"stoffel-browser-rpc-auth";
 const OUTPUT_HPKE_DOMAIN: &[u8] = b"StoffelOutputShareEncryption";
 const MAX_PARTIES: usize = 32;
 const MAX_THRESHOLD: usize = 8;
@@ -79,7 +78,8 @@ export interface EncryptedOutputShare {
 
 export interface SignedBrowserRequest {
   public_key: Uint8Array;
-  nonce: number;
+  created: number;
+  nonce: Uint8Array;
   signature: Uint8Array;
   body: Uint8Array;
 }
@@ -115,8 +115,8 @@ pub enum ClientError {
     InvalidScalarType(String),
     #[error("client value is incompatible with its scalar type: {0}")]
     InvalidScalarValue(String),
-    #[error("request nonce overflowed for this execution")]
-    NonceOverflow,
+    #[error("failed to generate a random nonce")]
+    RandomGenerationFailed,
     #[error("JavaScript value conversion failed: {0}")]
     Js(String),
 }
@@ -130,7 +130,8 @@ impl From<ClientError> for JsValue {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignedBrowserRequest {
     pub public_key: Vec<u8>,
-    pub nonce: u64,
+    pub created: u64,
+    pub nonce: Vec<u8>,
     pub signature: Vec<u8>,
     pub body: Vec<u8>,
 }
@@ -234,15 +235,15 @@ struct ClientCore {
 #[wasm_bindgen]
 pub struct StoffelWasmClient {
     core: Rc<ClientCore>,
-    nonces: Rc<RefCell<HashMap<[u8; 32], u64>>>,
 }
 
 /// State belonging to one execution. Multiple handles from a client can be
-/// active concurrently; nonces advance independently for each execution.
+/// active concurrently and independently - there is no shared counter to
+/// keep in sync between them (each signed request carries its own random
+/// nonce plus a `created` timestamp; see `authentication_message`).
 #[wasm_bindgen]
 pub struct StoffelWasmExecution {
     core: Rc<ClientCore>,
-    nonces: Rc<RefCell<HashMap<[u8; 32], u64>>>,
     execution_id: [u8; 32],
 }
 
@@ -282,36 +283,14 @@ impl StoffelWasmClient {
         self.core.public_key.clone()
     }
 
-    /// Open (or resume) an execution. Opening two different IDs creates
-    /// independent request streams; reopening the same ID continues its nonce.
+    /// Open an execution handle. Each signed request it produces carries its
+    /// own random nonce and `created` timestamp (see `authentication_message`),
+    /// so unlike the old counter-based scheme there is nothing to resume after
+    /// a reload and no shared state for multiple open handles (e.g. several
+    /// tabs) to fall out of sync on - opening the same execution id twice
+    /// just yields two independent, equally valid handles.
     pub fn open_execution(&self, execution_id: &str) -> Result<StoffelWasmExecution, JsValue> {
         Ok(self.execution_handle(parse_execution_id(execution_id)?))
-    }
-
-    /// Resume an execution after a browser reload. `last_nonce` is the last
-    /// successfully created request saved by the caller. An already-open local
-    /// counter is never moved backward.
-    pub fn resume_execution(
-        &self,
-        execution_id: &str,
-        last_nonce: u64,
-    ) -> Result<StoffelWasmExecution, JsValue> {
-        let execution_id = parse_execution_id(execution_id)?;
-        self.nonces
-            .borrow_mut()
-            .entry(execution_id)
-            .and_modify(|current| *current = (*current).max(last_nonce))
-            .or_insert(last_nonce);
-        Ok(self.execution_handle(execution_id))
-    }
-
-    /// Release the local nonce counter after an execution is permanently
-    /// retired. Existing handles for that ID must not be used afterward.
-    pub fn forget_execution(&self, execution_id: &str) -> Result<(), JsValue> {
-        self.nonces
-            .borrow_mut()
-            .remove(&parse_execution_id(execution_id)?);
-        Ok(())
     }
 }
 
@@ -321,47 +300,25 @@ impl StoffelWasmExecution {
         hex::encode(self.execution_id)
     }
 
-    /// Last nonce allocated for this execution. Save this after signing when
-    /// an in-progress execution must survive a page reload.
-    pub fn current_nonce(&self) -> u64 {
-        self.nonces
-            .borrow()
-            .get(&self.execution_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Sign with the next nonce for this execution. The counter is shared with
-    /// other handles for the same execution and independent across IDs.
+    /// Sign a request with a fresh random nonce and the current timestamp.
     /// Errors with `NoSigningKey` on a public-key-only client (the WebAuthn
-    /// session-key path) - use `allocate_nonce` and sign externally there.
+    /// session-key path) - build `authenticationMessage` and sign externally
+    /// there instead (see the browser client library).
     #[wasm_bindgen(unchecked_return_type = "SignedBrowserRequest")]
     pub fn sign_request(&self, method: &str, body: &[u8]) -> Result<JsValue, JsValue> {
         let signing_key = self.core.signing_key.as_ref().ok_or(ClientError::NoSigningKey)?;
-        let nonce = next_nonce(&self.nonces, self.execution_id)?;
-        let message = authentication_message(method, &self.execution_id, nonce, body);
+        let created = (js_sys::Date::now() / 1000.0) as u64;
+        let nonce = random_nonce()?;
+        let message = authentication_message(method, &self.execution_id, created, &nonce, body);
         let signature: Signature = signing_key.sign(&message);
         serde_wasm_bindgen::to_value(&SignedBrowserRequest {
             public_key: self.core.public_key.clone(),
-            nonce,
+            created,
+            nonce: nonce.to_vec(),
             signature: signature.to_bytes().to_vec(),
             body: body.to_vec(),
         })
         .map_err(|error| ClientError::Js(error.to_string()).into())
-    }
-
-    /// Allocate the next nonce for this execution WITHOUT signing anything -
-    /// for the WebAuthn session-key path, where signing happens in JS via a
-    /// non-extractable WebCrypto key this module can never access. The
-    /// caller must independently build `authenticationMessage(method,
-    /// executionId, nonce, body)` (exposed below - build the exact same
-    /// bytes the coordinator verifies against, plus the session token, per
-    /// the browser client library's signing scheme), sign it, and construct
-    /// the outgoing request itself. Keeps this client's local nonce counter
-    /// in sync with externally-signed requests so `current_nonce`/
-    /// `resume_execution` keep working identically to the signing path.
-    pub fn allocate_nonce(&self) -> Result<u64, JsValue> {
-        next_nonce(&self.nonces, self.execution_id).map_err(Into::into)
     }
 
     /// Reconstruct and apply one mask per typed input.
@@ -453,7 +410,6 @@ impl StoffelWasmClient {
     fn execution_handle(&self, execution_id: [u8; 32]) -> StoffelWasmExecution {
         StoffelWasmExecution {
             core: self.core.clone(),
-            nonces: self.nonces.clone(),
             execution_id,
         }
     }
@@ -489,7 +445,6 @@ impl StoffelWasmClient {
                 parties,
                 threshold,
             }),
-            nonces: Rc::new(RefCell::new(HashMap::new())),
         })
     }
 
@@ -513,7 +468,6 @@ impl StoffelWasmClient {
                 parties,
                 threshold,
             }),
-            nonces: Rc::new(RefCell::new(HashMap::new())),
         })
     }
 }
@@ -622,21 +576,6 @@ fn reconstruct_outputs_core(
         .iter()
         .map(|shares| recover_robust_secret(shares, core.parties, core.threshold))
         .collect()
-}
-
-fn next_nonce(
-    nonces: &RefCell<HashMap<[u8; 32], u64>>,
-    execution_id: [u8; 32],
-) -> Result<u64, ClientError> {
-    let mut nonces = nonces.borrow_mut();
-    let next = nonces
-        .get(&execution_id)
-        .copied()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or(ClientError::NonceOverflow)?;
-    nonces.insert(execution_id, next);
-    Ok(next)
 }
 
 fn scalar_share_type(value: ClientScalarType) -> Result<ShareType, ClientError> {
@@ -812,29 +751,51 @@ fn to_js_value_with_bigints<T: Serialize>(value: &T) -> Result<JsValue, JsValue>
 pub fn authentication_message_js(
     method: &str,
     execution_id: &str,
-    nonce: u64,
+    created: u64,
+    nonce: &[u8],
     body: &[u8],
 ) -> Result<Vec<u8>, JsValue> {
     let execution_id = parse_execution_id(execution_id)?;
-    Ok(authentication_message(method, &execution_id, nonce, body))
+    Ok(authentication_message(method, &execution_id, created, nonce, body))
 }
 
+/// `created` bounds how long a signed request stays valid; `nonce` (16
+/// CSPRNG-random bytes, generated fresh per request - see `random_nonce`)
+/// is what actually prevents replay within that window. Neither alone is
+/// enough: `created` has only second resolution, so distinct legitimate
+/// requests routinely share a value, and a bare timestamp check doesn't stop
+/// a captured request from being replayed anywhere inside the window.
 pub fn authentication_message(
     method: &str,
     execution_id: &[u8; 32],
-    nonce: u64,
+    created: u64,
+    nonce: &[u8],
     body: &[u8],
 ) -> Vec<u8> {
     let body_hash = Sha256::digest(body);
-    let mut message = Vec::with_capacity(AUTH_DOMAIN.len() + method.len() + 1 + 32 + 8 + 32);
+    let mut message =
+        Vec::with_capacity(AUTH_DOMAIN.len() + method.len() + 1 + 32 + 8 + nonce.len() + 32);
     message.extend_from_slice(AUTH_DOMAIN);
     message.push(0);
     message.extend_from_slice(method.as_bytes());
     message.push(0);
     message.extend_from_slice(execution_id);
-    message.extend_from_slice(&nonce.to_le_bytes());
+    message.extend_from_slice(&created.to_le_bytes());
+    message.extend_from_slice(nonce);
     message.extend_from_slice(&body_hash);
     message
+}
+
+/// 16 CSPRNG-random bytes (128 bits - collisions within any realistic
+/// request volume and freshness window are negligible) for a fresh
+/// per-request nonce. `getrandom` backs this uniformly on wasm32 (via its
+/// "js" feature, browser `crypto.getRandomValues`) and on native targets
+/// (an OS random source) - the latter is what makes this callable from
+/// `cargo test`, not just from a real browser.
+fn random_nonce() -> Result<[u8; 16], ClientError> {
+    let mut nonce = [0u8; 16];
+    getrandom::getrandom(&mut nonce).map_err(|_| ClientError::RandomGenerationFailed)?;
+    Ok(nonce)
 }
 
 fn output_encryption_info(execution_id: &[u8; 32]) -> Vec<u8> {
@@ -1238,21 +1199,6 @@ mod tests {
         assert!(matches!(result, Err(ClientError::NoSecretKey)));
     }
 
-    /// `allocate_nonce` (the WebAuthn session-key path's replacement for
-    /// `sign_request`'s combined allocate-and-sign) is just `next_nonce`
-    /// exposed directly - confirm it still allocates sequentially and stays
-    /// independent per execution id, exactly like signing does today.
-    #[test]
-    fn next_nonce_allocates_sequentially_and_independently_per_execution() {
-        let nonces = RefCell::new(HashMap::new());
-        let execution_a = [5u8; 32];
-        let execution_b = [6u8; 32];
-        assert_eq!(next_nonce(&nonces, execution_a).unwrap(), 1);
-        assert_eq!(next_nonce(&nonces, execution_a).unwrap(), 2);
-        assert_eq!(next_nonce(&nonces, execution_b).unwrap(), 1);
-        assert_eq!(next_nonce(&nonces, execution_a).unwrap(), 3);
-    }
-
     /// The JS-callable wrapper must produce byte-identical output to the
     /// function `sign_request` itself signs with - this is what lets the
     /// browser client library build a signature base by calling into WASM
@@ -1262,16 +1208,19 @@ mod tests {
     fn authentication_message_js_matches_the_internal_byte_layout() {
         let execution_id = [9u8; 32];
         let execution_id_hex = hex::encode(execution_id);
+        let nonce = [7u8; 16];
         let expected = authentication_message(
             "browser_submit_masked_inputs",
             &execution_id,
-            12,
+            1_700_000_000,
+            &nonce,
             b"payload",
         );
         let via_js = match authentication_message_js(
             "browser_submit_masked_inputs",
             &execution_id_hex,
-            12,
+            1_700_000_000,
+            &nonce,
             b"payload",
         ) {
             Ok(bytes) => bytes,
@@ -1293,11 +1242,31 @@ mod tests {
         let secret = SecretKey::from_slice(&[7u8; 32]).unwrap();
         let client = StoffelWasmClient::from_secret_key(secret, 5, 1).unwrap();
         let execution = [3u8; 32];
-        let message = authentication_message("browser_round", &execution, 4, b"body");
+        let nonce = [4u8; 16];
+        let message = authentication_message("browser_round", &execution, 1_700_000_000, &nonce, b"body");
         let signature: Signature = client.core.signing_key.as_ref().unwrap().sign(&message);
         let verifier = VerifyingKey::from_sec1_bytes(&client.core.public_key).unwrap();
         verifier.verify(&message, &signature).unwrap();
     }
+
+    #[test]
+    fn random_nonce_is_16_bytes_and_not_trivially_repeated() {
+        let a = random_nonce().unwrap();
+        let b = random_nonce().unwrap();
+        assert_eq!(a.len(), 16);
+        assert_ne!(a, b);
+    }
+
+    // Not tested directly: `sign_request` itself, on a native test target -
+    // it calls `js_sys::Date::now()` for `created`, which (like
+    // `js_sys::Error::new` above) panics with "cannot call wasm-bindgen
+    // imported functions on non-wasm targets" outside a real wasm+JS
+    // environment. Its two real ingredients are covered directly instead:
+    // `authentication_message_is_signed_by_the_client_identity` (the
+    // signature/byte-layout side) and
+    // `random_nonce_is_16_bytes_and_not_trivially_repeated` (the nonce
+    // side) - between them, everything `sign_request` assembles is
+    // exercised, just not through the wasm-bindgen boundary itself.
 
     #[test]
     fn signed_field_values_decode_both_directions() {
@@ -1445,29 +1414,4 @@ mod tests {
         assert!(canonical_field_from_be_bytes(&canonical[1..]).is_err());
     }
 
-    #[test]
-    fn nonce_sequences_are_shared_per_execution_and_concurrent_between_them() {
-        let counters = RefCell::new(HashMap::new());
-        let first = [1u8; 32];
-        let second = [2u8; 32];
-
-        assert_eq!(next_nonce(&counters, first).unwrap(), 1);
-        assert_eq!(next_nonce(&counters, second).unwrap(), 1);
-        assert_eq!(next_nonce(&counters, first).unwrap(), 2);
-        assert_eq!(next_nonce(&counters, second).unwrap(), 2);
-    }
-
-    #[test]
-    fn resumed_execution_never_rolls_a_nonce_backward() {
-        let secret = SecretKey::from_slice(&[7u8; 32]).unwrap();
-        let client = StoffelWasmClient::from_secret_key(secret, 5, 1).unwrap();
-        let id = "03".repeat(32);
-
-        let handle = client.resume_execution(&id, 41).unwrap();
-        assert_eq!(handle.current_nonce(), 41);
-        assert_eq!(next_nonce(&client.nonces, handle.execution_id).unwrap(), 42);
-
-        let resumed_with_stale_storage = client.resume_execution(&id, 10).unwrap();
-        assert_eq!(resumed_with_stale_storage.current_nonce(), 42);
-    }
 }
