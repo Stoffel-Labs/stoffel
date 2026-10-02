@@ -192,6 +192,74 @@ struct StandingClientIdentity {
     certificate_identity: CertificateIdentity,
 }
 
+/// The fixed 26-byte SPKI DER prefix every uncompressed-point P-256 SubjectPublicKeyInfo has
+/// (`SEQUENCE { SEQUENCE { id-ecPublicKey, prime256v1 } }, BIT STRING` header) - fixed
+/// because the algorithm identifier is fixed, verified directly against real `openssl ec
+/// -pubout` output while designing this. Used to synthesize the same SPKI bytes
+/// `X509Certificate::from_der`'s `public_key().raw` would give for an equivalent cert,
+/// without ever needing a certificate at all - see `parse_client_identity`.
+const P256_SPKI_PREFIX: [u8; 26] = [
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+];
+
+/// Parses one client identity file, accepting two shapes:
+///
+/// - **A raw, uncompressed P-256 SEC1 point** (`0x04 || x || y`, exactly 65 bytes) - what the
+///   WebAuthn registration flow writes directly (see the design plan's §1/§5). This is the
+///   same way real WebAuthn relying parties store a credential's public key generally: no
+///   certificate involved at all, just the raw key. Detected purely by exact length plus the
+///   uncompressed-point marker - no real X.509 certificate is ever this short, so there's no
+///   ambiguity with the case below.
+/// - **An X.509 DER certificate** (every other client identity here, e.g. the original
+///   upload-a-`.der`-file flow) - unchanged from before this function existed.
+///
+/// Both produce the same `StandingClientIdentity` shape downstream; nothing else in this
+/// module needs to know which one a given file was.
+fn parse_client_identity(
+    cert_der: &[u8],
+    path: &Path,
+) -> Result<StandingClientIdentity, StandingControlError> {
+    if cert_der.len() == 65 && cert_der[0] == 0x04 {
+        let mut spki = Vec::with_capacity(P256_SPKI_PREFIX.len() + cert_der.len());
+        spki.extend_from_slice(&P256_SPKI_PREFIX);
+        spki.extend_from_slice(cert_der);
+        let transport_public_key = NodePublicKey(spki);
+        let certificate_identity = transport_public_key.certificate_identity();
+        return Ok(StandingClientIdentity {
+            coordinator_public_key: cert_der.to_vec(),
+            transport_public_key,
+            certificate_identity,
+        });
+    }
+
+    let (remainder, parsed) = X509Certificate::from_der(cert_der).map_err(|error| {
+        StandingControlError::InvalidCommand(format!(
+            "parse expected client certificate {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !remainder.is_empty() {
+        return Err(StandingControlError::InvalidCommand(format!(
+            "expected client certificate {} has trailing bytes",
+            path.display()
+        )));
+    }
+    let coordinator_public_key = parsed
+        .public_key()
+        .subject_public_key
+        .data
+        .as_ref()
+        .to_vec();
+    let transport_public_key = NodePublicKey(parsed.public_key().raw.to_vec());
+    let certificate_identity = transport_public_key.certificate_identity();
+    Ok(StandingClientIdentity {
+        coordinator_public_key,
+        transport_public_key,
+        certificate_identity,
+    })
+}
+
 #[derive(Debug)]
 pub struct StandingClientCatalog(BTreeMap<String, StandingClientIdentity>);
 
@@ -220,34 +288,8 @@ impl StandingClientCatalog {
                     MAX_STANDING_CONTROL_FILE_BYTES
                 )));
             }
-            let (remainder, parsed) = X509Certificate::from_der(&cert_der).map_err(|error| {
-                StandingControlError::InvalidCommand(format!(
-                    "parse expected client certificate {}: {error}",
-                    path.display()
-                ))
-            })?;
-            if !remainder.is_empty() {
-                return Err(StandingControlError::InvalidCommand(format!(
-                    "expected client certificate {} has trailing bytes",
-                    path.display()
-                )));
-            }
-            let coordinator_public_key = parsed
-                .public_key()
-                .subject_public_key
-                .data
-                .as_ref()
-                .to_vec();
-            let transport_public_key = NodePublicKey(parsed.public_key().raw.to_vec());
-            let certificate_identity = transport_public_key.certificate_identity();
-            identities.insert(
-                name.to_owned(),
-                StandingClientIdentity {
-                    coordinator_public_key,
-                    transport_public_key,
-                    certificate_identity,
-                },
-            );
+            let identity = parse_client_identity(&cert_der, &path)?;
+            identities.insert(name.to_owned(), identity);
         }
         Ok(Self(identities))
     }
@@ -876,6 +918,66 @@ mod tests {
                 .collect(),
             ..ClientIoManifest::default()
         }
+    }
+
+    /// Legacy/fallback path only - WebAuthn registration now writes a raw SEC1 point directly
+    /// (see `loads_a_raw_sec1_point_without_any_certificate_at_all` below), needing no
+    /// certificate at all. This test guards the *other* path `parse_client_identity` still
+    /// supports: an X.509 certificate whose embedded key differs from its own signer, which
+    /// is possible via `openssl x509 -new -force_pubkey <key> -key <different-key>` (OpenSSL
+    /// itself warns "Signature key and public key of cert do not match" - unusual, but valid
+    /// DER `X509Certificate::from_der` still parses). Kept as a permanent regression guard
+    /// since nothing here ever validates a cert's signature/chain (see this module's/
+    /// browser_rpc.rs's docs) - only the embedded key is ever extracted, and a future
+    /// `x509-parser` upgrade could in principle change that silently.
+    #[test]
+    fn parses_a_cert_whose_embedded_key_differs_from_its_signer() {
+        let cert_der = hex::decode(
+            "3082017130820116a00302010202147a9149f2f477e173305df57140075be2677123c1300a06082a8648ce3d04030230163114301206035504030c0b746573742d636c69656e74301e170d3236303932313134333235325a170d3237303932313134333235325a30163114301206035504030c0b746573742d636c69656e743059301306072a8648ce3d020106082a8648ce3d0301070342000467b3a4e8958dc8aa5c62495a3607e9cba183a395e51cfc9dee6c3a271877eff680b90a95fca96382d8196d21a4f8358a463e5193edb3d3eb67ce5194e33834bea3423040301d0603551d0e041604146c96cbebfc944c2ae8370aa2363b2079a6300f05301f0603551d2304183016801485e5b82f54c06617216bc2b9fc5f0f4a9656ed56300a06082a8648ce3d0403020349003046022100fc09d8a12305016e0da5000714ff24097a0364ae3f6a695ac4aafa45961e77fa022100c8da4f88640b76134f8eaeb6e9a7a3d6a0698b8487a5fba5dac0128d8f2cf9a8",
+        )
+        .unwrap();
+        let expected_embedded_key = hex::decode(
+            "0467b3a4e8958dc8aa5c62495a3607e9cba183a395e51cfc9dee6c3a271877eff680b90a95fca96382d8196d21a4f8358a463e5193edb3d3eb67ce5194e33834be",
+        )
+        .unwrap();
+
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::write(temporary.path().join("voter0.crt"), &cert_der).unwrap();
+        let catalog = StandingClientCatalog::load(temporary.path()).unwrap();
+        let identity = catalog.get("voter0.crt").expect("catalog should contain voter0.crt");
+        assert_eq!(identity.coordinator_public_key, expected_embedded_key);
+    }
+
+    /// The primary path WebAuthn registration now uses: a bare 65-byte raw SEC1 point,
+    /// exactly as `register_client.py` receives it and writes it to `ids/pub/clients/` - no
+    /// certificate, no signing, no operator step beyond writing the file. Same public key as
+    /// the test above, deliberately, to confirm both paths produce an identical
+    /// `coordinator_public_key` for the same underlying key - the certificate wrapper (or
+    /// lack of one) must never change what identity a client is recognized as.
+    #[test]
+    fn loads_a_raw_sec1_point_without_any_certificate_at_all() {
+        let raw_point = hex::decode(
+            "0467b3a4e8958dc8aa5c62495a3607e9cba183a395e51cfc9dee6c3a271877eff680b90a95fca96382d8196d21a4f8358a463e5193edb3d3eb67ce5194e33834be",
+        )
+        .unwrap();
+
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::write(temporary.path().join("voter0.crt"), &raw_point).unwrap();
+        let catalog = StandingClientCatalog::load(temporary.path()).unwrap();
+        let identity = catalog.get("voter0.crt").expect("catalog should contain voter0.crt");
+        assert_eq!(identity.coordinator_public_key, raw_point);
+    }
+
+    #[test]
+    fn rejects_a_65_byte_file_that_is_not_an_uncompressed_point() {
+        // Right length, wrong marker byte (compressed-point prefixes are 0x02/0x03, not
+        // 0x04) - must fall through to the X.509 path and fail there, not be silently
+        // misinterpreted as a valid point.
+        let mut not_a_point = vec![0x02u8];
+        not_a_point.extend(std::iter::repeat(0xAB).take(64));
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::write(temporary.path().join("voter0.crt"), &not_a_point).unwrap();
+        assert!(StandingClientCatalog::load(temporary.path()).is_err());
     }
 
     #[test]

@@ -2319,6 +2319,9 @@ fn cli_option_takes_value(argument: &str) -> bool {
         "--advertise"
             | "--bind"
             | "--bootstrap"
+            | "--browser-rpc-bind"
+            | "--browser-tls-cert-chain"
+            | "--browser-tls-key"
             | "--cert"
             | "--client-index"
             | "--client-input-count"
@@ -7319,8 +7322,51 @@ async fn run_standing_node(raw_args: &[String]) -> Result<(), String> {
     let node_rpc_bind = standing_required_flag(raw_args, "--rpc-bind")?
         .parse::<SocketAddr>()
         .map_err(|error| format!("invalid --rpc-bind: {error}"))?;
-    let node_rpc = Arc::new(
-        OffChainNodeRPCServer::start(
+    let browser_rpc_bind = standing_flag_value(raw_args, "--browser-rpc-bind")
+        .map(|value| value.parse::<SocketAddr>())
+        .transpose()
+        .map_err(|error| format!("invalid --browser-rpc-bind: {error}"))?;
+    let browser_tls_cert_chain_path = standing_flag_value(raw_args, "--browser-tls-cert-chain");
+    let browser_tls_key_path = standing_flag_value(raw_args, "--browser-tls-key");
+    let webauthn_rp_id = standing_flag_value(raw_args, "--webauthn-rp-id");
+    let browser_tls = match (
+        browser_rpc_bind,
+        browser_tls_cert_chain_path,
+        browser_tls_key_path,
+        webauthn_rp_id,
+    ) {
+        (Some(bind), Some(cert_chain_path), Some(key_path), Some(rp_id)) => {
+            let cert_chain_pem = fs::read(&cert_chain_path)
+                .map_err(|error| format!("read --browser-tls-cert-chain: {error}"))?;
+            let key_pem = fs::read(&key_path)
+                .map_err(|error| format!("read --browser-tls-key: {error}"))?;
+            Some((bind, cert_chain_pem, key_pem, rp_id))
+        }
+        (None, None, None, None) => None,
+        _ => {
+            return Err(
+                "--browser-rpc-bind, --browser-tls-cert-chain, --browser-tls-key, and --webauthn-rp-id must be given together or not at all"
+                    .to_owned(),
+            );
+        }
+    };
+    let node_rpc = Arc::new(match browser_tls {
+        Some((browser_bind, browser_cert_chain_pem, browser_key_pem, webauthn_rp_id)) => {
+            OffChainNodeRPCServer::start_with_browser_tls(
+                &node_rpc_bind.ip().to_string(),
+                node_rpc_bind.port(),
+                cert_der.clone(),
+                key_der.clone(),
+                &browser_bind.ip().to_string(),
+                browser_bind.port(),
+                browser_cert_chain_pem,
+                browser_key_pem,
+                &webauthn_rp_id,
+            )
+            .await
+            .map_err(|error| format!("start standing node RPC listeners: {error}"))?
+        }
+        None => OffChainNodeRPCServer::start(
             &node_rpc_bind.ip().to_string(),
             node_rpc_bind.port(),
             cert_der.clone(),
@@ -7328,7 +7374,7 @@ async fn run_standing_node(raw_args: &[String]) -> Result<(), String> {
         )
         .await
         .map_err(|error| format!("start standing node RPC listener: {error}"))?,
-    );
+    });
     let party_public_keys = load_standing_party_public_keys(&party_cert_dir, parties)?;
     let local_public_key = QuicNetworkManager::public_key_from_certificate_der(&cert_der)
         .map_err(|error| format!("parse --cert: {error}"))?;
