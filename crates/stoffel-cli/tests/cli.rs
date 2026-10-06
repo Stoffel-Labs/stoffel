@@ -158,6 +158,9 @@ fn init_creates_default_project() {
     let server_rs = fs::read_to_string(src.join("server.rs")).unwrap();
     assert!(server_rs.contains("config.parties"));
     assert!(server_rs.contains(".server(party_id)"));
+    assert!(server_rs.contains("numeric_bind_address"));
+    assert!(server_rs.contains("resolve_bootstrap_address"));
+    assert!(server_rs.contains(".to_socket_addrs()"));
     let coordinator_rs = fs::read_to_string(src.join("coordinator.rs")).unwrap();
     assert!(coordinator_rs.contains("Some(\"wait-ready\")"));
     assert!(coordinator_rs.contains("wait_for_round(Round::InputMaskReservation)"));
@@ -222,7 +225,12 @@ fn init_creates_default_project() {
             compose.contains(&format!("[\"stoffel-server\", \"{party}\"]")),
             "Compose is missing node {party}"
         );
+        assert!(compose.contains(&format!(
+            "STOFFEL_BIND_ADDRESS: 0.0.0.0:{}",
+            19_200 + party * 2
+        )));
     }
+    assert!(!compose.contains("STOFFEL_BIND_ADDRESS: node-"));
     assert!(compose.contains("[\"stoffel-coordinator\", \"wait-ready\"]"));
     assert!(compose.contains("condition: service_healthy"));
     assert!(!compose.contains("--client-input-total"));

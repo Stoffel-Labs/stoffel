@@ -5,6 +5,7 @@
 //! Guide: https://docs.stoffelmpc.com/developer-skills/stoffel-app-network-and-offchain-integration
 
 use serde::Deserialize;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use stoffel::prelude::{OffChainServerConfig, Stoffel, StoffelServer};
@@ -31,6 +32,27 @@ fn settings() -> Result<MpcConfigFile, Box<dyn std::error::Error>> {
 
 fn env_or(name: &str, fallback: String) -> String {
     std::env::var(name).unwrap_or(fallback)
+}
+
+fn numeric_bind_address(address: String) -> Result<String, Box<dyn std::error::Error>> {
+    address
+        .parse::<SocketAddr>()
+        .map(|address| address.to_string())
+        .map_err(|error| format!("MPC node bind address must be a numeric IP socket address, got {address}: {error}").into())
+}
+
+fn resolve_bootstrap_address(address: String) -> Result<String, Box<dyn std::error::Error>> {
+    if let Ok(address) = address.parse::<SocketAddr>() {
+        return Ok(address.to_string());
+    }
+    let mut addresses = address
+        .to_socket_addrs()
+        .map_err(|error| format!("failed to resolve MPC bootstrap address {address}: {error}"))?;
+    let resolved = addresses
+        .find(SocketAddr::is_ipv4)
+        .or_else(|| addresses.next())
+        .ok_or_else(|| format!("MPC bootstrap address {address} resolved to no socket addresses"))?;
+    Ok(resolved.to_string())
 }
 
 #[derive(Deserialize)]
@@ -98,12 +120,14 @@ pub async fn start_party(party_id: usize) -> Result<StoffelServer, Box<dyn std::
         .expected_client_cert(client_certificate())
         .build()?;
 
+    let bind_address = numeric_bind_address(env_or(
+        "STOFFEL_BIND_ADDRESS",
+        deployment.node_bind_addresses[party_id].clone(),
+    ))?;
+
     let mut builder = runtime
         .server(party_id)
-        .bind(env_or(
-            "STOFFEL_BIND_ADDRESS",
-            deployment.node_bind_addresses[party_id].clone(),
-        ))
+        .bind(bind_address)
         .peers(
             (0..config.parties)
                 .filter(|peer_id| *peer_id != party_id)
@@ -112,10 +136,11 @@ pub async fn start_party(party_id: usize) -> Result<StoffelServer, Box<dyn std::
         .expected_clients(1)
         .offchain_coordinator(offchain);
     if party_id > 0 {
-        builder = builder.bootstrap(env_or(
+        let bootstrap_address = resolve_bootstrap_address(env_or(
             "STOFFEL_BOOTSTRAP_ADDRESS",
             deployment.node_bind_addresses[0].clone(),
-        ));
+        ))?;
+        builder = builder.bootstrap(bootstrap_address);
     }
     if let Some(path) = std::env::var_os("STOFFEL_RUN_BIN") {
         builder = builder.runner_path(path);

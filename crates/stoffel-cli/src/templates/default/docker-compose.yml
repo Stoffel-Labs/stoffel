@@ -44,7 +44,7 @@ services:
         condition: service_healthy
     environment:
       <<: *node-env
-      STOFFEL_BIND_ADDRESS: node-0:19200
+      STOFFEL_BIND_ADDRESS: 0.0.0.0:19200
       STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:19400
     ports:
       - "19400:19400"
@@ -58,7 +58,7 @@ services:
         condition: service_healthy
     environment:
       <<: *node-env
-      STOFFEL_BIND_ADDRESS: node-1:19202
+      STOFFEL_BIND_ADDRESS: 0.0.0.0:19202
       STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:19401
       STOFFEL_BOOTSTRAP_ADDRESS: node-0:19200
     ports:
@@ -74,7 +74,7 @@ services:
         condition: service_healthy
     environment:
       <<: *node-env
-      STOFFEL_BIND_ADDRESS: node-2:19204
+      STOFFEL_BIND_ADDRESS: 0.0.0.0:19204
       STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:19402
       STOFFEL_BOOTSTRAP_ADDRESS: node-0:19200
     ports:
@@ -90,7 +90,7 @@ services:
         condition: service_healthy
     environment:
       <<: *node-env
-      STOFFEL_BIND_ADDRESS: node-3:19206
+      STOFFEL_BIND_ADDRESS: 0.0.0.0:19206
       STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:19403
       STOFFEL_BOOTSTRAP_ADDRESS: node-0:19200
     ports:
@@ -106,7 +106,7 @@ services:
         condition: service_healthy
     environment:
       <<: *node-env
-      STOFFEL_BIND_ADDRESS: node-4:19208
+      STOFFEL_BIND_ADDRESS: 0.0.0.0:19208
       STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:19404
       STOFFEL_BOOTSTRAP_ADDRESS: node-0:19200
     ports:
