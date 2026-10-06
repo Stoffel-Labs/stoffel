@@ -165,6 +165,8 @@ fn init_creates_default_project() {
     assert!(coordinator_rs.contains("Some(\"wait-ready\")"));
     assert!(coordinator_rs.contains("wait_for_round(Round::InputMaskReservation)"));
     assert!(coordinator_rs.contains("STOFFEL_READY_TIMEOUT_SECS"));
+    assert!(coordinator_rs.contains("validate_deployment()?;"));
+    assert!(!coordinator_rs.contains("let validated = validate_deployment()?;"));
     let generated_rust = format!("{main_rs}\n{client_rs}\n{server_rs}\n{coordinator_rs}");
     for prohibited in [
         "execute_local",
@@ -187,6 +189,10 @@ fn init_creates_default_project() {
     assert!(run_local.contains("cargo install stoffel-vm-runner --version 0.1.2 --locked"));
     assert!(run_local.contains("export STOFFEL_RUN_BIN"));
     assert!(run_local.contains("STOFFEL_AUTO_ADDRESSES=1"));
+    let prepare = run_local.find("stoffel-coordinator\" prepare").unwrap();
+    let stop_selecting = run_local.find("unset STOFFEL_AUTO_ADDRESSES").unwrap();
+    let serve = run_local.find("stoffel-coordinator\" serve").unwrap();
+    assert!(prepare < stop_selecting && stop_selecting < serve);
     #[cfg(unix)]
     assert_ne!(
         fs::metadata(temp.path().join("hello/scripts/run-local.sh"))
@@ -463,6 +469,13 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
     );
 
     let client_key = fs::read(deployment_dir.join("client-0.key.der")).unwrap();
+    let deployment_before_repeat = fs::read(&deployment_path).unwrap();
+    let selected_node_address = deployment["node_bind_addresses"][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let occupied_selected_node = std::net::UdpSocket::bind(&selected_node_address)
+        .expect("reserve the selected node endpoint before repeated preparation");
     assert!(StdCommand::new(&coordinator)
         .arg("prepare")
         .current_dir(temp.path())
@@ -475,6 +488,12 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
         client_key,
         "repeated preparation should preserve participant identity material"
     );
+    assert_eq!(
+        fs::read(&deployment_path).unwrap(),
+        deployment_before_repeat,
+        "repeated preparation must preserve the selected endpoint set"
+    );
+    drop(occupied_selected_node);
 
     let mut incomplete_deployment = deployment;
     incomplete_deployment

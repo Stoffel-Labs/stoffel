@@ -32,6 +32,8 @@ export STOFFEL_AUTO_ADDRESSES=1
 target_dir=${CARGO_TARGET_DIR:-target}
 
 "$target_dir/debug/stoffel-coordinator" prepare
+# Endpoint selection is complete. Every long-lived process reads the same file.
+unset STOFFEL_AUTO_ADDRESSES
 "$target_dir/debug/stoffel-coordinator" serve &
 pids=$!
 trap 'kill $pids 2>/dev/null || true' EXIT INT TERM
