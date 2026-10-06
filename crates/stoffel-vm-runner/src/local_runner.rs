@@ -555,6 +555,9 @@ impl LocalCoordinatorRunner {
         command
             .arg(context.program_path)
             .arg(&self.entry)
+            // Every local party reads this same temporary bytecode file, so keep
+            // local execution independent of discovery bytecode transport.
+            .arg("--no-program-upload")
             .arg("--n-parties")
             .arg(self.parties.to_string())
             .arg("--threshold")
