@@ -62,7 +62,7 @@ pub struct CoordinatorClientConfig {
     pub key_der: Vec<u8>,
     /// Node RPC addresses. Hints only: every leg is pinned to a member of the served roster.
     pub node_rpc_addresses: Vec<(String, u16)>,
-    /// The slot this client asks for and, under `Invitation`, its invitation.
+    /// The slot this client asks for, if any.
     pub request: AssociationRequest,
     /// `--expect-roster-digest`: refuse a coordinator that serves any other node roster.
     pub expected_roster_digest: Option<RosterDigest>,
@@ -237,17 +237,6 @@ impl CoordinatorClientConfig {
         .map_err(CoordinatorClientError::Connect)
     }
 
-    /// The slot this client will hold, when it is settled before associating: the one it asks
-    /// for, or the one its invitation names.
-    fn known_slot(&self) -> Option<ClientIndex> {
-        self.request.slot.or_else(|| {
-            self.request
-                .invitation
-                .as_ref()
-                .map(|signed| signed.invitation.client_index)
-        })
-    }
-
     /// Step 2, the refusals this client makes itself before an irrevocable association.
     ///
     /// An aborted execution is not refused here: its summary names only the round, and the
@@ -283,7 +272,7 @@ impl CoordinatorClientConfig {
             }
         }
         let slots = summary.client_slots.slots();
-        match self.known_slot() {
+        match self.request.slot {
             Some(slot) => {
                 let spec = usize::try_from(slot.0)
                     .ok()
@@ -318,7 +307,7 @@ impl CoordinatorClientConfig {
         if summary.round == Round::Aborted {
             return BindableSlots::Nothing;
         }
-        match (self.known_slot(), &summary.admission) {
+        match (self.request.slot, &summary.admission) {
             (Some(slot), _) => BindableSlots::Settled(slot),
             (None, AdmissionPolicyKind::Open) => BindableSlots::AnyOf(
                 (0..summary.client_slots.capacity())
@@ -326,8 +315,6 @@ impl CoordinatorClientConfig {
                     .collect(),
             ),
             (None, AdmissionPolicyKind::PreRegistered) => BindableSlots::Registered,
-            // Invitation admission without an invitation: refused as `InvitationRequired`.
-            (None, AdmissionPolicyKind::Invitation { .. }) => BindableSlots::Nothing,
         }
     }
 
@@ -379,8 +366,8 @@ impl CoordinatorClientConfig {
                 other => CoordinatorClientError::Association(other),
             })?;
 
-        // The requested slot, or the invitation's, is bound exactly or refused.
-        if let Some(requested) = self.known_slot() {
+        // The requested slot is bound exactly or refused.
+        if let Some(requested) = self.request.slot {
             if admission.client_index != requested {
                 return Err(CoordinatorClientError::SlotNotGranted {
                     requested,
@@ -496,7 +483,7 @@ impl CoordinatorClientConfig {
 /// associating (§9.E.1 step 2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindableSlots {
-    /// The slot this client asks for, or the one its invitation names. The coordinator binds
+    /// The slot this client asks for. The coordinator binds
     /// exactly it or refuses; an admission to any other slot is refused as
     /// [`CoordinatorClientError::SlotNotGranted`].
     Settled(ClientIndex),
@@ -507,7 +494,7 @@ pub enum BindableSlots {
     /// certificate. Association binds nothing new, and only the admission names the slot.
     Registered,
     /// The association will be refused with the coordinator's reason and bind nothing: the
-    /// execution is aborted, or invitation admission was asked without an invitation.
+    /// execution is aborted.
     Nothing,
 }
 
@@ -742,7 +729,6 @@ mod tests {
     fn open(slot: Option<u32>) -> AssociationRequest {
         AssociationRequest {
             slot: slot.map(ClientIndex),
-            invitation: None,
         }
     }
 

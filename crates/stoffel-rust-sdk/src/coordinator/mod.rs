@@ -10,5 +10,5 @@ pub use offchain::{
 };
 pub use stoffel_mpc_coordinator_shared::{
     ClientAdmission, ClientIndex, Coordinator, CoordinatorError, ExecutionId, NodeRoster,
-    OutputRights, RosterDigest, Round, ShareBound, SignedInvitation,
+    OutputRights, RosterDigest, Round, ShareBound,
 };

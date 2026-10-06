@@ -2981,10 +2981,7 @@ async fn offchain_client_config_takes_its_topology_from_the_coordinator() -> sto
     )
     .await?;
     let admission = avss
-        .associate_client(stoffel_mpc_coordinator_shared::AssociationRequest {
-            slot: None,
-            invitation: None,
-        })
+        .associate_client(stoffel_mpc_coordinator_shared::AssociationRequest { slot: None })
         .await?;
     assert_eq!(admission.client_index, ClientIndex(0));
     Ok(())
@@ -3436,58 +3433,7 @@ fn unrequested_slot_config(runtime: &StoffelRuntime) -> stoffel::Result<OffChain
     Ok(config)
 }
 
-/// An invitation to `client_index`. The SDK never verifies an invitation — the
-/// coordinator does — so its signature is left empty.
-fn invitation_to(client_index: ClientIndex) -> SignedInvitation {
-    SignedInvitation {
-        invitation: stoffel_mpc_coordinator_shared::Invitation {
-            execution_id: test_execution_id(),
-            registration_nonce: stoffel_mpc_coordinator_shared::RegistrationNonce::from_bytes(
-                [7; 32],
-            ),
-            program_hash: [0; 32],
-            roster_digest: RosterDigest::from_bytes([0; 32]),
-            not_after: stoffel_mpc_coordinator_shared::UnixSeconds(u64::MAX),
-            invitee: vec![1],
-            client_index,
-        },
-        signature: Vec::new(),
-    }
-}
-
-/// Under invitation admission the invitation names the slot the association
-/// binds (docs/design/bootnode-elimination.md §9.E.1 step 2), so a client that
-/// asks for no slot is checked against the invitation's slot, not slot 0.
-#[tokio::test]
-async fn a_client_validates_inputs_against_the_slot_its_invitation_names() -> stoffel::Result<()> {
-    let runtime = two_shaped_slot_runtime()?;
-    let mut config = unrequested_slot_config(&runtime)?;
-    config.invitation = Some(invitation_to(ClientIndex(1)));
-    assert_eq!(config.settled_slot(), Some(ClientIndex(1)));
-    let client = runtime.client().offchain_io(config).build()?;
-
-    // Slot 1's two inputs are what the invitation's slot takes: not refused as
-    // slot 0's layout, so the run goes on to the (absent) coordinator.
-    let admitted_shape = client.run(&[1_i64, 2_i64]).await.unwrap_err();
-    assert!(
-        !matches!(admitted_shape, stoffel::Error::InvalidInput(_)),
-        "{admitted_shape}"
-    );
-    // One value is slot 0's layout, refused for the invitation's slot before
-    // anything is sent.
-    let slot_zero_shape = client.run(&[1_i64]).await.unwrap_err();
-    assert!(
-        matches!(
-            &slot_zero_shape,
-            stoffel::Error::InvalidInput(message)
-                if message.contains("client slot 1 expects 2 inputs, got 1")
-        ),
-        "{slot_zero_shape}"
-    );
-    Ok(())
-}
-
-/// With neither a requested slot nor an invitation, the coordinator binds the
+/// With no requested slot, the coordinator binds the
 /// slot at association — the lowest free one under open admission, the one
 /// registered to this client under pre-registration — so the SDK assumes no
 /// slot before it associates. It refuses only a submission no slot of the

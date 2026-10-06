@@ -19,7 +19,6 @@ pub use crate::consensus::{ConsensusGate, NodePublicKey, VerifiedOrdering};
 pub use crate::coordinator::{
     ClientAdmission, ClientIndex, Coordinator, ExecutionId, NodeRoster, OffChainCoordinator,
     OffChainCoordinatorClient, OffChainCoordinatorServer, OutputRights, RosterDigest, ShareBound,
-    SignedInvitation,
 };
 pub use crate::error::{
     ConsensusError, CoordinatorError, Error, ErrorCategory, NetworkError, Result,

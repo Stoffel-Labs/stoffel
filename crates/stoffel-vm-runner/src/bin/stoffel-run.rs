@@ -17,8 +17,7 @@ use stoffel_mpc_coordinator_off_chain::{
 };
 use stoffel_mpc_coordinator_shared::{
     AssociationRequest, ClientAdmissionSet, ClientIndex, Coordinator, CoordinatorError,
-    ExecutionId, NodeRPCError, NodeRoster, OutputRights, PinError, RosterDigest, Round,
-    SignedInvitation, SpkiDer,
+    ExecutionId, NodeRPCError, NodeRoster, OutputRights, PinError, RosterDigest, Round, SpkiDer,
 };
 use stoffel_vm::core_vm::VirtualMachine;
 use stoffel_vm::net::curve::{field_from_i64, field_to_i64, SupportedMpcField};
@@ -861,7 +860,7 @@ struct ClientRunArgs {
     roster_expectations: RosterExpectations,
     /// `--expect-program-hash`.
     expected_program_hash: Option<[u8; 32]>,
-    /// `--client-slot` and `--invitation`.
+    /// `--client-slot`.
     request: AssociationRequest,
     /// `--servers`: node RPC addresses, pinned by the roster.
     server_addrs: Vec<SocketAddr>,
@@ -1024,14 +1023,6 @@ fn parse_expected_program_hash(value: &str) -> Result<[u8; 32], String> {
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&bytes);
     Ok(hash)
-}
-
-/// Reads `--invitation`: a `SignedInvitation` as JSON, as `issue-invitation --out` writes it.
-fn read_invitation(path: &str) -> Result<SignedInvitation, String> {
-    let bytes =
-        fs::read(path).map_err(|reason| format!("cannot read --invitation {path}: {reason}"))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|reason| format!("--invitation {path} is not a signed invitation: {reason}"))
 }
 
 // `NodeRPCServer` lost its `<F, S>` parameters in coordinator `0.2.0`: mask shares
@@ -1383,6 +1374,12 @@ const REMOVED_FLAGS: &[(&str, &str)] = &[
     (
         "--outputs",
         "A client's output count comes from its admission.",
+    ),
+    (
+        "--invitation",
+        "Invitation admission was removed in review and never shipped. A client's slot is \
+         the one its certificate is pre-registered to, the one --client-slot <index> names, \
+         or under open admission the lowest-numbered free one.",
     ),
     ("--expected-client-count", SLOT_LAYOUT_HINT),
     (
@@ -3069,9 +3066,8 @@ async fn main() {
     let mut wallet_sk_str: Option<String> = None;
     let mut contract_addr: Option<String> = None;
     let mut coordinator_client_slot: Option<ClientIndex> = None;
-    // `--invitation` and `--expect-program-hash`: a coordinator client's invitation, and the
-    // program it refuses to associate with any other one of (§9.E.2).
-    let mut invitation_path: Option<String> = None;
+    // `--expect-program-hash`: the program a coordinator client refuses to associate with
+    // any other one of (§9.E.2).
     let mut expected_program_hash: Option<[u8; 32]> = None;
     let mut preproc_store_path: Option<String> = None;
     let mut local_store_path: Option<String> = None;
@@ -3321,11 +3317,6 @@ async fn main() {
                     );
                 }
             }
-            "--invitation" => {
-                if let Some(v) = args_iter.next() {
-                    invitation_path = Some(v);
-                }
-            }
             "--expect-program-hash" => {
                 if let Some(v) = args_iter.next() {
                     expected_program_hash =
@@ -3535,19 +3526,14 @@ async fn main() {
         exit(2);
     }
 
-    // `--client-slot`, `--invitation` and `--expect-program-hash` shape a coordinator
-    // client's association; nothing else associates.
+    // `--client-slot` and `--expect-program-hash` shape a coordinator client's
+    // association; nothing else associates.
     let is_coordinator_client = as_client && coord_addr.is_some();
     for (given, flag, meaning) in [
         (
             coordinator_client_slot.is_some(),
             "--client-slot",
             "it names the client slot to bind",
-        ),
-        (
-            invitation_path.is_some(),
-            "--invitation",
-            "it is presented when the client associates",
         ),
         (
             expected_program_hash.is_some(),
@@ -3617,12 +3603,6 @@ async fn main() {
             );
             exit(2);
         }
-        let invitation = invitation_path.as_deref().map(|path| {
-            read_invitation(path).unwrap_or_else(|message| {
-                eprintln!("Error: {message}");
-                exit(2);
-            })
-        });
         run_coordinator_client(ClientRunArgs {
             backend,
             curve_config,
@@ -3634,7 +3614,6 @@ async fn main() {
             expected_program_hash,
             request: AssociationRequest {
                 slot: coordinator_client_slot,
-                invitation,
             },
             server_addrs,
             cert_der,
@@ -4740,13 +4719,10 @@ Flags:
   --key <path>            Path to DER-encoded private key
   --client-slot <u32>     Client slot this coordinator client asks to bind; optional.
                           Without it a client takes the slot its certificate is
-                          pre-registered to, its invitation's slot or, under open
-                          admission, the lowest-numbered free slot (every slot must then
-                          have one shape). Its input range and output count are the
+                          pre-registered to or, under open admission, the
+                          lowest-numbered free slot (every slot must then have one
+                          shape). Its input range and output count are the
                           coordinator's admission, never a flag
-  --invitation <path>     A signed invitation (JSON, as issue-invitation writes it),
-                          presented when this coordinator client associates. Required
-                          under invitation admission, refused under any other
   --expect-program-hash <64-hex>
                           Optional, client mode: refuse (exit 2) to associate with an
                           execution registered for any other program

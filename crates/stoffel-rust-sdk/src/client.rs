@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use stoffel_mpc_coordinator_off_chain::CoordinatorLink;
 use stoffel_mpc_coordinator_shared::{
     AssociationRequest, ClientAdmission, ClientIndex, ExecutionId, NodeRoster, RosterDigest,
-    SignedInvitation, SpkiDer,
+    SpkiDer,
 };
 use stoffel_vm::net::MpcBackendKind;
 use stoffel_vm_runner::coordinator_client::{
@@ -246,18 +246,13 @@ pub struct OffChainClientConfig {
     /// `AssociationRequest::slot` (`docs/design/bootnode-elimination.md`
     /// §9.C.4, §9.E.2).
     ///
-    /// `None` asks for the lowest-numbered free slot under open admission, and
-    /// for the invitation's slot under invitation admission. Under
-    /// pre-registration a slot other than the one registered to this client's
-    /// certificate is refused by the coordinator. Either way the slot, input
-    /// range and output rights this client uses are the ones the coordinator's
-    /// admission returns, never a layout this config computes.
+    /// `None` asks for the lowest-numbered free slot under open admission.
+    /// Under pre-registration a slot other than the one registered to this
+    /// client's certificate is refused by the coordinator. Either way the slot,
+    /// input range and output rights this client uses are the ones the
+    /// coordinator's admission returns, never a layout this config computes.
     #[serde(default)]
     pub client_slot: Option<ClientIndex>,
-    /// Presented when this client associates. Required under invitation
-    /// admission, refused under any other.
-    #[serde(default)]
-    pub invitation: Option<SignedInvitation>,
     /// Refuse to associate with an execution registered for any other program
     /// (the coordinator's `program_hash_of`).
     #[serde(default)]
@@ -288,16 +283,11 @@ impl OffChainClientConfig {
 
     /// The slot this client will hold when it is settled before associating
     /// (`docs/design/bootnode-elimination.md` §9.E.1 step 2): the one
-    /// [`Self::client_slot`] asks for, else the one [`Self::invitation`]
-    /// names. `None` leaves the choice to the coordinator's association: the
-    /// lowest free slot under open admission, or the slot registered to this
-    /// client's certificate under pre-registration.
+    /// [`Self::client_slot`] asks for. `None` leaves the choice to the
+    /// coordinator's association: the lowest free slot under open admission, or
+    /// the slot registered to this client's certificate under pre-registration.
     pub fn settled_slot(&self) -> Option<ClientIndex> {
-        self.client_slot.or_else(|| {
-            self.invitation
-                .as_ref()
-                .map(|signed| signed.invitation.client_index)
-        })
+        self.client_slot
     }
 
     /// Checks what can be checked without the coordinator. The topology is the
@@ -396,7 +386,6 @@ impl OffChainClientConfig {
             node_rpc_addresses: self.node_rpc_endpoints()?,
             request: AssociationRequest {
                 slot: self.client_slot,
-                invitation: self.invitation.clone(),
             },
             expected_roster_digest: self.expected_roster_digest,
             expected_program_hash: self.expected_program_hash,
@@ -412,7 +401,6 @@ pub struct OffChainClientConfigBuilder {
     coordinator_cert_der: Option<Vec<u8>>,
     execution_id: Option<ExecutionId>,
     client_slot: Option<ClientIndex>,
-    invitation: Option<SignedInvitation>,
     expected_program_hash: Option<[u8; 32]>,
     expected_roster_digest: Option<RosterDigest>,
     backend: MpcBackend,
@@ -473,32 +461,6 @@ impl OffChainClientConfigBuilder {
     /// slot the coordinator's admission policy assigns.
     pub fn client_slot(mut self, client_slot: ClientIndex) -> Self {
         self.client_slot = Some(client_slot);
-        self
-    }
-
-    /// The invitation presented when associating; see
-    /// [`OffChainClientConfig::invitation`].
-    pub fn invitation(mut self, invitation: SignedInvitation) -> Self {
-        self.invitation = Some(invitation);
-        self
-    }
-
-    /// Reads a signed invitation from `path`, as JSON (what `issue-invitation
-    /// --out` writes).
-    pub fn invitation_file(mut self, path: impl AsRef<Path>) -> Self {
-        let path = path.as_ref();
-        match std::fs::read(path) {
-            Ok(bytes) => match serde_json::from_slice::<SignedInvitation>(&bytes) {
-                Ok(invitation) => self.invitation = Some(invitation),
-                Err(error) => {
-                    self.config_error = Some(format!(
-                        "{} is not a signed invitation: {error}",
-                        path.display()
-                    ))
-                }
-            },
-            Err(error) => self.config_error = Some(error.to_string()),
-        }
         self
     }
 
@@ -615,7 +577,6 @@ impl OffChainClientConfigBuilder {
                 )
             })?,
             client_slot: self.client_slot,
-            invitation: self.invitation,
             expected_program_hash: self.expected_program_hash,
             expected_roster_digest: self.expected_roster_digest,
             backend: self.backend,
@@ -643,7 +604,6 @@ impl Default for OffChainClientConfigBuilder {
             coordinator_cert_der: None,
             execution_id: None,
             client_slot: None,
-            invitation: None,
             expected_program_hash: None,
             expected_roster_digest: None,
             backend: MpcBackend::HoneyBadger,
@@ -1114,8 +1074,8 @@ impl ManifestSlots {
 
 /// What one run checks of the client slot it holds.
 ///
-/// The slot is settled before associating only when the config asks for one or
-/// its invitation names one (§9.E.1 step 2). Otherwise the coordinator binds
+/// The slot is settled before associating only when the config asks for one
+/// (§9.E.1 step 2). Otherwise the coordinator binds
 /// it — the lowest free slot under open admission, the registered slot under
 /// pre-registration. An association is irrevocable, so the run checks every
 /// slot the execution's summary says it can bind before associating
@@ -1954,7 +1914,7 @@ def main() -> int64:
                     && message.contains("set client_slot")),
             "{refused}"
         );
-        // A requested slot, or the invitation's, is bound exactly.
+        // A requested slot is bound exactly.
         check.check_bindable(&BindableSlots::Settled(ClientIndex(1)))?;
         assert!(check
             .check_bindable(&BindableSlots::Settled(ClientIndex(0)))

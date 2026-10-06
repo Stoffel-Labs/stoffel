@@ -266,12 +266,6 @@ pub fn admission_agreement_digest(
         AdmissionPolicyKind::Open => {
             hasher.update(&[1]);
         }
-        AdmissionPolicyKind::Invitation { issuer } => {
-            hasher.update(&[2]);
-            let spki = issuer.spki().as_bytes();
-            update_len(&mut hasher, spki.len());
-            hasher.update(spki);
-        }
     }
     match summary.deadlines {
         None => {

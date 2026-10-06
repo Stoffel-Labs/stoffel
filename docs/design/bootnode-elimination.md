@@ -89,7 +89,7 @@ malicious coordinator "cannot … make a node dial an impostor", and to call the
 removed the offline path, so none of those claims holds any more, and they are not kept
 here. §9.G is the trust table; this section is its summary.*
 
-The coordinator — the process, whoever operates it, and an invitation issuer beside them
+The coordinator — the process and whoever operates it
 (§9) — is trusted for exactly three things, in every deployment, because every deployment
 runs one:
 
@@ -473,9 +473,7 @@ It implements three decisions (2026-09-16) and gives way on none of them:
 
 "The coordinator" means the coordinator process **and whoever operates it**: the operator
 registers executions in-process (§C.1), so the operator sits inside the coordinator's
-trust boundary and nowhere else. An invitation issuer (§C.3) is an admission authority
-and sits inside the same boundary: under rule 2 it must not be run by any node's
-operator.
+trust boundary and nowhere else.
 
 The coordinator is trusted for bootstrap, membership and admission — which executions
 exist, which program each runs, and who is admitted to it — and for nothing it does not
@@ -507,11 +505,11 @@ deleted rather than chunked), and V7's dependents paragraph (which described an 
 | S1 | Committed fixture keys make the coordinator pin worthless | §F.0 (new); §G rows hold only under it |
 | S2, C1 | One node registers an execution and picks its admission policy | `register_execution` RPC deleted, registration is in-process and operator-only (§C.1); nodes check the summary against their own program (§D.7 step 1). *Declined:* a per-node cap on pending registrations — nothing remote can register any more (§C.1) |
 | S3 | Event subscriptions are ungated and unbounded | every subscription gated (§C.6); parked sinks bounded per caller, listener connection limit (§A "Server side", §C.6) |
-| S4 | Invitations replay across registrations, programs and rosters | signing bytes bind the registration nonce, program, roster and an expiry (§C.3) |
-| S5 | `Open` squatting and absent invitees stall an execution forever | association and input deadlines, terminal `Round::Aborted` (§C.8); what `Open` is for (§C.2) |
+| S4 | Invitations replay across registrations, programs and rosters | moot: the `Invitation` policy was removed in review and never shipped (§C.3) |
+| S5 | `Open` squatting stalls an execution forever | association and input deadlines, terminal `Round::Aborted` (§C.8); what `Open` is for (§C.2) |
 | S6 | Masked inputs are not agreed across nodes | `InputsAgreed` digest barrier (§D.6, §D.7 step 9) |
 | S7 | Roster equivocation claimed detectable | §G rewritten; optional `--expect-roster-digest` (§D.2, §E.1) |
-| S8 | The invitation issuer key may be a node's or the coordinator's | `IssuerIsRosterNode`, `IssuerIsCoordinatorKey` (§C.1, §C.3) |
+| S8 | The invitation issuer key may be a node's or the coordinator's | moot: the `Invitation` policy was removed in review and never shipped (§C.3) |
 | S9 | The caller identity and the handshake key come from two parsers | one derivation with an algorithm allowlist (§A "Server side") |
 | S10 | `t = 0` is accepted; the VM checks `n`, `t` more weakly | `ZeroThreshold` everywhere, VM enforces `n >= 2t + 1` (§B, §D.4). *Declined:* a client `--min-threshold` (§D.4) |
 | S11, C7 | `min_output_shares` below reconstruction makes clients fail | revision 1: bounds and backend checks. *Superseded by revision 2 (C18):* outputs arrive one node at a time and the client reconstructs when it can, so the field is deleted (§C.1, §C.7) |
@@ -556,13 +554,13 @@ piece of its evidence did not hold, the section named says why.
 | S13 | Share ids are not tied to roster positions; reconstruction stops at the first `min_shares` answers | `ShareBound::reconstruct` over position-bound shares, Feldman verification, per-node output items (§9.0, §A, §C.7), §G. *Refined:* reconstruction returns as soon as it is conclusive, which is already correct with at most `t` corrupt positions, and otherwise waits for every leg; the position inside the sealed plaintext is not added — the share-id check and the node's signature already bind it (§C.7) |
 | S14 | One connection pool, no per-source or per-identity bound, no idle timeout, no capacity for nodes; summaries cloned under the state mutex; no reconnection | `RpcServerLimits` (§A "Server side"), rate limit and summary snapshot (§C.6, §C.7), a lost link exits the node (§D.1 step 10), residual stated (§G) |
 | S15 | §F.0 rule 1 is not enforced and `ids/` keys may back compose secrets | every compose stack in this repository is loopback-only, enforced by a fourth check (§F.0). *Declined:* a key-minting init service (§F.0) |
-| S16 | `Invitation.client_index: None` lets an invitee take any role, including a slot another invitation names | `client_index` required, signing bytes v3 (§C.3, §C.4 step 7, §E.1). *Declined:* a shape-scoped wildcard (§C.3) |
+| S16 | `Invitation.client_index: None` lets an invitee take any role, including a slot another invitation names | moot: the `Invitation` policy was removed in review and never shipped (§C.3) |
 | S17, C23 | One P-256 key has several SPKI encodings, so byte comparisons are not key comparisons | canonical SPKI layouts, `PinError::NonCanonicalPublicKey` (§A) |
 | S18 | HoneyBadger reconstructs only at `n >= 3t + 1`, but only `n >= 2t + 1` is checked | `ShareBound::min_parties`; nodes (§D.7 step 1), `associate_client` (§C.7), every client surface (§E.1 step 1, §E.2) |
 | S19 | A malicious coordinator can shift a client's input and substitute its outputs | clients sign masked inputs, nodes sign sealed outputs (§C.7), nodes verify at §D.7 step 9, clients at §E.1 step 7; §G |
 | S20 | The local runner writes node keys under the shared temp directory with default modes | run directory `0700`, key files `0600` (§F.4) |
 | S21 | §3 still claims the coordinator cannot make a node dial an impostor | §3 rewritten |
-| S22 | The issuer checks compare keys, not operators | issuer placed inside the coordinator's trust boundary (§9 preamble, §C.3, §G); checks kept as misconfiguration guards |
+| S22 | The issuer checks compare keys, not operators | moot: the `Invitation` policy was removed in review and never shipped (§C.3) |
 | C13 | The state mutex is held across WebSocket sends on replay and on `reserve_mask_indices` | no send under the state mutex; sequence-numbered replay; live broadcasts never wait (§C.6) |
 | C14 | Aborts race the take-and-return sink paths and post-accept parking | lock order and aborted re-checks (§C.6, §C.8) |
 | C15 | The input deadline aborts an execution whose inputs are all present | the input deadline needs a missing input (§C.8) |
@@ -626,12 +624,12 @@ encodings, its length names its algorithm: 65 bytes is a P-256 point, 32 an Ed25
 | `NodeRoster`, `NodeRosterWire`, `NodeCertificateDer`, `RosterDigest`, `RosterDigestParseError`, `RosterError` | shared, `src/roster.rs` (new) | B |
 | `ShareBound::{min_parties, share_id_of_position, share_id, share_degree, serialized_share_len, reconstruct}`, `PositionedShare`, `Reconstruction` | shared, `src/lib.rs` (`ShareBound`, `:100-143`) | A, C.7 |
 | `SignatureError`, `sign_with_pkcs8`, `verify_identity_signature`, `masked_inputs_signing_bytes`, `sealed_output_signing_bytes` | shared, `src/signing.rs` (new) | C.7 |
-| `ClientIdentity` (moved from `coord:off-chain/src/lib.rs:51`, re-exported there), `ClientIndex`, `ClientSlotSpec`, `ClientSlotTable`, `InputRange`, `OutputRights`, `UnixSeconds`, `ExecutionDeadlines`, `RegistrationNonce`, `AdmissionPolicy`, `AdmissionPolicyKind`, `InvitationIssuer`, `Invitation`, `SignedInvitation`, `AssociationRequest`, `ClientAdmission`, `ClientAdmissionRecord`, `ClientAdmissionSet`, `AbortReason`, `ExecutionOutcome`, `AdmissionError`, `SubmissionError`, `InvitationRejection`, `RegistrationError`, `InvitationSigningError`, `program_hash_of`, the `MAX_*` bounds | shared, `src/admission.rs` (new) | C |
+| `ClientIdentity` (moved from `coord:off-chain/src/lib.rs:51`, re-exported there), `ClientIndex`, `ClientSlotSpec`, `ClientSlotTable`, `InputRange`, `OutputRights`, `UnixSeconds`, `ExecutionDeadlines`, `RegistrationNonce`, `AdmissionPolicy`, `AdmissionPolicyKind`, `AssociationRequest`, `ClientAdmission`, `ClientAdmissionRecord`, `ClientAdmissionSet`, `AbortReason`, `ExecutionOutcome`, `AdmissionError`, `SubmissionError`, `RegistrationError`, `program_hash_of`, the `MAX_*` bounds | shared, `src/admission.rs` (new) | C |
 | `Round::Aborted`; new `CoordinatorError` variants; `RpcRefusal` | shared, `src/lib.rs:145`, `:257` | A, C |
 | reshaped `ExecutionRegistration`, `ExecutionSummary`, `CoordinatorLink`, `MaskedInputSubmission`, `SealedOutput`, `SealedOutputShares`, `Event::ExecutionAborted`, `EndedExecutions`, new and deleted RPC methods, new `CoordinatorRPCBaseError` codes, `OffChainCoordinatorServer::state`, `OffChainCoordinatorConnection`, deadline sweeper | `stoffel-mpc-coordinator-off-chain`, `src/lib.rs` | B, C |
-| `issue-invitation` binary; `run-coord` flags | `stoffel-mpc-coordinator-bins`, `src/bin/` | C.3, F.3 |
+| `run-coord` flags | `stoffel-mpc-coordinator-bins`, `src/bin/` | F.3 |
 | on-chain `NodeRPCClient::start_rpc_client` and `start_rpc_client_from_cert` taking a `&NodeRoster` (both lose `n` and `t`, `coord:on-chain/src/lib.rs:113-160`); `Round::Aborted` handling | `stoffel-mpc-coordinator-on-chain`, `src/lib.rs` | A |
-| `serde_json = "1.0"` in `[workspace.dependencies]`; `ring` and `serde_json` in `crates/bins` `[dependencies]` (`issue-invitation` signs with `EcdsaKeyPair` and writes JSON); `serde_json` in `crates/coord-shared` `[dev-dependencies]` (the wire-bound test); `blake3 = "1.8"` in `[workspace.dependencies]` and `coord-shared` | coordinator `Cargo.toml`, `crates/{bins,coord-shared}/Cargo.toml` | B, C.1, C.3, H |
+| `serde_json = "1.0"` in `[workspace.dependencies]`; `serde_json` in `crates/coord-shared` `[dev-dependencies]` (the wire-bound test); `blake3 = "1.8"` in `[workspace.dependencies]` and `coord-shared` | coordinator `Cargo.toml`, `crates/coord-shared/Cargo.toml` | B, C.1, H |
 | the preprocessing store is never written with material an execution may still draw: `persist_preproc` deleted in both engines | `crates/stoffel-vm/src/net/mpc/{honeybadger,avss}/preprocessing.rs` | C.9 |
 | `Roster` (nodes only), `Roster::from_node_keys`, `Roster::from_coordinator` | `crates/stoffel-vm/src/net/mesh/roster.rs` | D.4 |
 | `SessionExecutionId`, `derive_instance_id` (v2) | `crates/stoffel-vm/src/net/session.rs` | D.5 |
@@ -716,7 +714,7 @@ the sweeper for both starts, ended executions, retention, client methods,
   `Cargo.lock` and `docker/coordinator-wrapper/Cargo.lock` are re-locked
   (`cargo update -p stoffel-mpc-coordinator-shared -p stoffel-mpc-coordinator-off-chain`,
   once with and once without `--manifest-path docker/coordinator-wrapper/Cargo.toml`) and
-  name `0.3.0` from the patch path.
+  name `0.3.0` from the patch.
 - **V-c — deletion.** The now-dead `Roster::new(nodes, clients, t)`, `from_cert_paths`,
   `install_for_client`, `clients()`, `admits_client`, the legacy `RosterError` variants
   (`AllowlistDisabled` loses its `clients` field); both `n == 1` branches of the join
@@ -815,32 +813,42 @@ remainder is `TrailingBytes`; the algorithm test compares
 curve parameters, is not this algorithm) or `OID_SIG_ED25519`, and
 `UnsupportedKeyAlgorithm.algorithm` is the dotted OID. Then the canonical-layout check
 below runs. Every
-certificate this system handles goes through it: server pins, roster certificates (§B),
-invitation issuers (§C.3) and callers (below). `key_algorithm` and `client_identity`
+certificate this system handles goes through it: server pins, roster certificates (§B)
+and callers (below). `key_algorithm` and `client_identity`
 are infallible because the constructor already refused everything else.
 
 **Canonical layouts.** An admitted algorithm is necessary but not sufficient. One P-256
 key has an uncompressed (`0x04`), a compressed (33-byte) and a hybrid (`0x06`/`0x07`)
 point encoding, and an Ed25519 SPKI may carry a stray `NULL` parameter; each is a
 different `SpkiDer` and a different `ClientIdentity` for the same key. Every identity comparison in this section —
-`DuplicateKey`, `IssuerIsRosterNode`, `IssuerIsCoordinatorKey`, `invitee == caller`,
-`by_identity`, reservation ownership, the node RPC delivery gate — is a byte comparison,
+`DuplicateKey`, `by_identity`, reservation ownership, the node RPC delivery gate — is a byte comparison,
 so each of them could be evaded by re-encoding a key. `from_certificate_der` therefore
 requires `public_key().raw` to be byte for byte one of:
 
 ```text
 EcdsaP256   3059301306072a8648ce3d020106082a8648ce3d030107034200 || point     91 bytes
-            point: 65 bytes, point[0] == 0x04, and p256::PublicKey::from_sec1_bytes(point) is Ok
+            point: 65 bytes, uncompressed, on the curve -- decided by re-encoding
+            and not by inspection: p256::PublicKey::from_public_key_der(raw) must
+            round-trip through to_public_key_der() back to raw, byte for byte
 Ed25519     302a300506032b6570032100 || key                                   44 bytes
-            key: 32 bytes
+            key: 32 bytes, parameters absent, BIT STRING with zero unused bits
 ```
 
 and refuses anything else with the algorithm's `NonCanonicalPublicKey`. The prefixes are
 the DER of the two `AlgorithmIdentifier`s and the BIT STRING header with zero unused
 bits; `openssl pkey -pubin -outform DER` produces exactly them, and every certificate
-under `ids/` has the 91-byte form (§B's golden vector). `p256` is already a
-`coord-shared` dependency with its default `arithmetic` feature. Nothing that works today
-is refused: ring verifies ECDSA only over uncompressed points
+under `ids/` has the 91-byte form (§B's golden vector). Deciding the P-256 case by
+round-trip rather than by inspecting the point is a simplification, not a strengthening:
+it admits exactly the byte strings the prefix comparison and three point tests it
+replaced admitted. Every DER length byte and the unused-bits byte sit inside the 26-byte
+`P256_SPKI_PREFIX`, which was compared for equality, so a non-minimal length or a
+declared unused bit was already refused there; the re-encoding pins those same bytes
+instead, and keeps the layout above the one thing the code states. `p256` is already a
+`coord-shared` dependency whose default features supply both the `arithmetic` the curve
+check needs and, through `pem`, the `pkcs8` the encoder needs, so no dependency is added.
+The algorithm test stays separate from the round-trip: a bare round-trip would collapse
+`UnsupportedKeyAlgorithm` into `NonCanonicalPublicKey`, and both cross the wire. Nothing
+that works today is refused: ring verifies ECDSA only over uncompressed points
 (`ring-0.17.14/src/ec/suite_b/ecdsa/verification.rs:109`, which refuses any first byte
 but `0x04` at `src/ec/suite_b/public_key.rs:39-43`), and HPKE's P-256 key parser accepts
 only the uncompressed length (`hpke-0.13.0/src/dhkex/ecdh_nistp.rs:73-83`), so a
@@ -1302,8 +1310,7 @@ other deserialization path, so no unverified `NodeRoster` value exists anywhere.
   again:
 
   ```rust
-  /// `server_spki` is the key of the certificate the operator serves this state with;
-  /// registration validation refuses it as an invitation issuer (§C.1).
+  /// `server_spki` is the key of the certificate the operator serves this state with.
   pub fn new(node_roster: NodeRoster, server_spki: SpkiDer) -> Self;   // replaces new(n, t, initial_mpc_nodes), :1157
   pub fn new_for_execution(node_roster: NodeRoster, server_spki: SpkiDer,
       registration: ExecutionRegistration) -> Result<Self, CoordinatorError>;   // replaces the eight-argument form, :1201
@@ -1318,8 +1325,9 @@ other deserialization path, so no unverified `NodeRoster` value exists anywhere.
 
   **The served key is the pinned key.** Nothing in `0.2.0` ties the state to the
   certificate its listener presents: `OffChainCoordinatorServer::start_coord` receives
-  `cert_der` separately from the state (`coord:off-chain/src/lib.rs:2552-2568`). So
-  `IssuerIsCoordinatorKey` could be checked against a key the listener does not serve.
+  `cert_der` separately from the state (`coord:off-chain/src/lib.rs:2552-2568`). So a
+  registration check against the coordinator's own key could be made against a key the
+  listener does not serve.
   `start_coord`, `start_coord_from_cert` and `start_coord_one_off` therefore derive
   `SpkiDer::from_certificate_der(&cert_der)` before binding, and refuse to start with
   `CoordinatorError::ServerCertificateMismatch` when it differs from the state's
@@ -1349,7 +1357,7 @@ pub struct ExecutionRegistration {
     pub program_hash: [u8; 32],
     pub client_slots: ClientSlotTable,
     pub admission: AdmissionPolicy,
-    /// Required under `Open` and `Invitation`, optional under `PreRegistered` (C.8).
+    /// Required under `Open`, optional under `PreRegistered` (C.8).
     pub deadlines: Option<ExecutionDeadlines>,
 }
 
@@ -1440,7 +1448,7 @@ to decide.
 
 - The RPC is gated only on `mpc_nodes.contains(&self.id)`, and registration is
   first-writer-wins (`:1231-1239`). Any single node could therefore fix an unregistered
-  execution's program hash, slot table and policy — `Open`, or an issuer it controls —
+  execution's program hash, slot table and policy — `Open`, say —
   and every later registration of that id would fail as a conflict. That is admission
   authority in one node, which rule 2 forbids, and §D.6's barrier cannot see it: every
   node reads the same bad registration.
@@ -1507,10 +1515,7 @@ errors at `:1231-1270` and `:1414-1455`:
 | `PreRegistered`: exactly one identity per slot | `PreRegisteredCountMismatch { slots, clients }` |
 | `PreRegistered`: every identity is a canonical key (`KeyAlgorithm::of_client_identity` is `Some`, §A) — a P-256 one for a slot with `output_count > 0` | `UnsupportedPreRegisteredKey { client_index }` |
 | `PreRegistered`: identities unique | `DuplicatePreRegisteredClient { client_index }` |
-| `Invitation`: the issuer SPKI's `key_algorithm()` is `EcdsaP256` | `UnsupportedIssuerKey` |
-| `Invitation`: the issuer SPKI is no roster node's (`roster.node_spkis()`) | `IssuerIsRosterNode { position }` |
-| `Invitation`: the issuer SPKI is not `server_spki` | `IssuerIsCoordinatorKey` |
-| `Open` and `Invitation` carry `deadlines` | `DeadlinesRequired` |
+| `Open` carries `deadlines` | `DeadlinesRequired` |
 | `deadlines.association <= deadlines.input` | `DeadlinesOutOfOrder { association, input }` |
 | both deadlines later than `now` | `DeadlineElapsed { deadline, now }` |
 
@@ -1619,7 +1624,7 @@ send without copying; the reservation and submission histories are `reservation_
 sent (C.6); and the assigned streams are gone (C.10). An execution at the bounds therefore holds
 at most `MAX_INPUTS × 104` bytes of inputs (a 24-byte `Vec` header and at most 80 bytes of
 allocation for a 64-byte input) plus, per slot, an identity, an admission and an
-association request with any invitation (under 1 KiB) — about 100 MiB and 16 MiB — and the
+association request (under 1 KiB) — about 100 MiB and 16 MiB — and the
 coordinator holds up to `DEFAULT_MAX_CONCURRENT_EXECUTIONS` (1,024) of them. Registration
 is operator-only, so that product is the operator's to size; nothing remote can create an
 execution.
@@ -1634,21 +1639,17 @@ pub enum AdmissionPolicy {
     PreRegistered { clients: Vec<ClientIdentity> },
     /// Any certificate holder may bind a free slot, first come, first served.
     Open,
-    /// Only the invitee named by a valid `SignedInvitation` from `issuer` may bind the slot
-    /// that invitation names.
-    Invitation { issuer: InvitationIssuer },
 }
 
 /// What a non-node may learn about the policy: never the pre-registered identities.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AdmissionPolicyKind { PreRegistered, Open, Invitation { issuer: InvitationIssuer } }
+pub enum AdmissionPolicyKind { PreRegistered, Open }
 ```
 
 | Policy | A slot is bound | By whom | Capacity | Deadlines |
 |---|---|---|---|---|
 | `PreRegistered` | at registration: every `AdmittedClient` exists before the first RPC | nobody else; `associate_client` returns the existing admission | `client_slots.len()`, all bound from the start | optional |
 | `Open` | at `associate_client` | any caller | `client_slots.len()` | required |
-| `Invitation` | at `associate_client` | the invitee of a valid invitation, in the slot it names | `client_slots.len()` | required |
 
 `Open` deliberately has **no `capacity` field**. The slot table already is the capacity: a
 compiled program has exactly `client_slots.len()` client slots, and a second number could
@@ -1665,118 +1666,36 @@ the coordinator can bind every slot of an `Open` execution the moment it is regi
 then never reserve, which holds `InputCollection`, or reserve and never submit, which holds
 `MPCExecution` (`:1603-1618`). Deadlines turn that from a permanent stall into an abort
 (C.8), but such an attacker can still abort every `Open` execution it can reach. Use
-`Open` on a private network, behind an authenticating front end, or in tests. **For
-arbitrary clients on a reachable network, use `Invitation`**: the issuer decides who may
-bind, and an invitee who never shows is bounded by the same deadlines.
+`Open` on a private network, behind an authenticating front end, or in tests. Admitting
+arbitrary clients on a reachable network needs an admission policy this change does not
+ship; §C.3 records what was removed in review and what would replace it.
 
-#### C.3 Signed invitations
+#### C.3 Signed invitations — *removed in review*
 
-```rust
-/// An ECDSA P-256 issuer key.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct InvitationIssuer(SpkiDer);
+Revisions 0-3 of this document specified a third admission policy, `Invitation`, under
+which a coordinator-registered issuer key signed a `SignedInvitation` naming an invitee
+and a slot. It was **removed in review and never shipped**: it was a hand-rolled
+certificate authority — its own signing-bytes layout, its own expiry, its own revocation
+story (none) — and it added a principal that holds extra trust to a change whose whole
+thesis is that no principal does. No deployment used it; every shipped stack defaulted to
+`pre-registered`.
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Invitation {
-    pub execution_id: ExecutionId,
-    /// One registration of `execution_id`: a coordinator restart, or a later
-    /// registration of the same id, draws a new nonce and orphans the invitation.
-    pub registration_nonce: RegistrationNonce,
-    pub program_hash: [u8; 32],
-    /// The coordinator's node roster. The nodes are part of what the issuer vouches for.
-    pub roster_digest: RosterDigest,
-    /// Coordinator time after which association with this invitation is refused.
-    pub not_after: UnixSeconds,
-    /// The invitee's key in coordinator identity form, compared with the caller's mTLS identity.
-    pub invitee: ClientIdentity,
-    /// The slot the issuer assigns. Required: a slot is a program role, with its own input
-    /// range and output rights.
-    pub client_index: ClientIndex,
-}
+The need it answered is real: admitting clients that are not known in advance, on a
+network where `Open` would let anyone squat every slot. The replacement is **future work**
+and is not implemented: an `AdmissionPolicy::TrustedIssuer` over rustls'
+`WebPkiClientVerifier`, so the issuer is an ordinary X.509 CA, verified by an audited
+implementation, with the revocation and expiry semantics that come with it. Until then the
+shipped policies are `PreRegistered` and `Open` (§C.2), and §C.2's advice stands: run
+`Open` on a private network, behind an authenticating front end, or in tests.
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignedInvitation {
-    pub invitation: Invitation,
-    /// ASN.1 DER ECDSA P-256 / SHA-256 signature over `invitation.signing_bytes()`.
-    pub signature: Vec<u8>,
-}
-```
+The flags and variables the policy took do not disappear quietly: `stoffel-run` refuses
+`--invitation` by name (§D.3) and `docker/entrypoint.sh` refuses `STOFFEL_INVITATION` the
+same way, so a stack still carrying either is told what happened instead of running with
+the value ignored. The coordinator wrapper takes no `--invitation-issuer-cert` and exits
+non-zero on it, as on any unknown flag.
 
-`Invitation::signing_bytes()`, byte-exact:
-
-```text
-b"stoffel-coordinator-invitation-v3"            33 bytes, ASCII, no terminator
-execution_id                                    32 bytes
-registration_nonce                              32 bytes
-program_hash                                    32 bytes
-roster_digest                                   32 bytes
-not_after as u64                                 8 bytes little-endian
-invitee.len() as u64                             8 bytes little-endian
-invitee                                         invitee.len() bytes
-client_index as u32                              4 bytes little-endian
-```
-
-- **The slot is required (v3).** Revision 1's `client_index: None` let the invitee bind any
-  free slot. Slots are program roles — each has its own input range and `OutputRights` —
-  so an invitee meant for an input-only role could take the slot that receives outputs,
-  or the slot another invitation names, leaving the rightful invitee `SlotTaken` and the
-  execution to abort at its association deadline. The coordinator cannot see that
-  conflict, because invitations are not registered. "Admit this identity" had become
-  "admit this identity to any role". A shape-scoped wildcard (`AnyOfShape(ClientSlotSpec)`)
-  is **not** added: an issuer that wants interchangeable invitees already decides how
-  many invitations it issues, so it can number them itself, and a wildcard invitee could
-  still take the slot an exact invitation of the same shape names — the same squat,
-  narrowed but not removed, and still invisible to the coordinator.
-- **Why each field.** Revision 0 bound only `execution_id`, the invitee and the slot, and
-  justified having no expiry and no nonce by the execution id bounding the invitation's
-  life. It does not: shipped stacks reuse one `ExecutionId` across `docker compose
-  down`/`up` (§8 row 3), and every coordinator-bearing compose file defaults
-  `STOFFEL_EXECUTION_ID` to the same constant (`docker-compose.yml:102`,
-  `docker-compose.mesh.yml:88`, `docker-compose.benchmark.yml:98`,
-  `docker-compose.coordinator.reserve-index.yml:118`), so such an invitation stayed valid
-  for every later program registered under that id, on every coordinator that trusted
-  the issuer. The nonce scopes an invitation to one registration, the program hash to one
-  program, the roster digest to one node set, and `not_after` to a window inside that
-  registration. There is no revocation list: a short `not_after` is the tool. Presenting
-  the same invitation twice is C.4's idempotent case, not a replay.
-- **Verify:** `ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_ASN1,
-  issuer_point).verify(&signing_bytes, &signature)`, where `issuer_point` is the issuer
-  SPKI's `subject_public_key` BIT STRING. `ring` is already a `coord-shared` dependency.
-- **Sign:** `SignedInvitation::sign(invitation: Invitation, issuer_pkcs8_der: &[u8]) ->
-  Result<SignedInvitation, InvitationSigningError>`, via
-  `ring::signature::EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8, &SystemRandom::new())`.
-  `InvitationSigningError` is `UnsupportedIssuerKey | SigningFailed`.
-- **The issuer is an admission authority, inside the coordinator's trust boundary.** It
-  decides who may associate, which is one of the functions rules 1–2 give the
-  coordinator, so it is trusted exactly as the coordinator's operator is, and rule 2
-  requires that **no node's operator runs it**: a node operator who also held the issuer
-  key would control admission for its node alone, more trust than its peers. Registration
-  refuses an issuer whose key is a roster node's (`IssuerIsRosterNode`) or the
-  coordinator's own server key (`IssuerIsCoordinatorKey`). Those checks compare keys, not
-  operators — a node operator can hold a second, unrelated key — so they guard against
-  misconfiguration, such as reusing a node or server identity as the issuer, and do not
-  by themselves enforce rule 2; who holds the issuer key is a deployment decision rule 2
-  constrains. Generate the issuer key for that purpose and nothing else,
-  on the issuer's machine — never reuse a `generate-ids` node or server identity.
-  `generate-ids` run once for the issuer does produce a usable pair (rcgen's
-  `generate_simple_self_signed` makes a P-256 key, `rcgen-0.14.7/src/key_pair.rs:85-87`,
-  and `signing_key.serialize_der()` is PKCS#8); its certificate goes to the operator as
-  `--invitation-issuer-cert`, its key stays with the issuer.
-- **Tooling:** `crates/bins/src/bin/issue-invitation.rs`:
-  `--coordinator <host:port> --coord-cert <path> --execution-id <64-hex>
-  --expect-program-hash <64-hex> --issuer-key <pkcs8.der> --invitee-cert <cert.der>
-  --client-index <u32> --valid-for-secs <u64> --out <invitation.json>`, every flag
-  required. It connects
-  with a certificate it mints for the call, pinned to `--coord-cert`, reads
-  `get_node_roster` and `get_execution_summary`, and exits 2 without signing when the
-  summary's `program_hash` differs from `--expect-program-hash`, when the policy is not
-  `Invitation` with this key as its issuer (the issuer SPKI's BIT STRING against
-  `EcdsaKeyPair::public_key()`), or when the execution is past association
-  (`round` beyond `InputMaskReservation`, or `Aborted`), or when `--client-index` is not
-  below the summary's `capacity()`. `not_after` is now plus `--valid-for-secs`. The
-  output is `serde_json` of `SignedInvitation`; `crates/bins/Cargo.toml` gains `ring` and
-  `serde_json` for it (§9.0).
+The section letters after this one are unchanged. C.4-C.10 are cross-referenced from code
+comments in both repositories, so the gap is kept deliberately rather than renumbering.
 
 #### C.4 `associate_client`
 
@@ -1784,11 +1703,8 @@ client_index as u32                              4 bytes little-endian
 // coord-shared/src/admission.rs
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssociationRequest {
-    /// `None` binds the lowest-numbered free slot under `Open`, and the invitation's slot
-    /// under `Invitation`.
+    /// `None` binds the lowest-numbered free slot under `Open`.
     pub slot: Option<ClientIndex>,
-    /// Required by `Invitation`, refused by every other policy.
-    pub invitation: Option<SignedInvitation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1828,12 +1744,8 @@ sequence `transition` and `submit_masked_inputs` already use (`:2343-2372`,
 
 *Pure checks, no lock held.* Each yields a verdict that is **not** returned yet.
 
-2. The policy is `Invitation` and `request.invitation` is `Some`: check, in order,
-   `execution_id` (`WrongExecution`), `registration_nonce` (`WrongRegistration`),
-   `program_hash` (`WrongProgram`), `roster_digest` against the coordinator's roster
-   (`WrongRoster`), `not_after` against the coordinator's clock
-   (`Expired { not_after, now }`), `invitee == caller` (`WrongInvitee`), then the
-   signature (`BadSignature`).
+2. *(Step 2 was the invitation check; it went with §C.3. The step numbers are kept so the
+   later steps, which code comments in both repositories cite, do not shift.)*
 3. Whether the caller identity is a P-256 point
    (`KeyAlgorithm::of_client_identity(caller) == Some(EcdsaP256)`, §A), the only form
    output shares can be sealed to (`<DhP256HkdfSha256 as Kem>::PublicKey::from_bytes`,
@@ -1849,7 +1761,7 @@ mutex.*
    - its recorded `request` equals this `request` → return the stored `ClientAdmission`,
      whatever steps 2–3 found: the binding already exists;
    - its recorded `request` is `None` (a pre-registered slot, first call) → apply the
-     pre-registered check — an `invitation` → `UnexpectedInvitation`; `slot: Some(i)` for
+     pre-registered check — `slot: Some(i)` for
      another slot → `PreRegisteredSlotMismatch { registered, requested }` — then record
      `request` and return the stored admission;
    - otherwise → `AlreadyAssociated { execution_id, admission }`.
@@ -1864,14 +1776,7 @@ mutex.*
 7. Policy:
    - `PreRegistered` → `NotPreRegistered { execution_id }` (every pre-registered identity
      was answered in step 5);
-   - `Open`: an `invitation` → `UnexpectedInvitation { execution_id }`. It is refused, not
-     ignored, so a client that believes it was invited learns that this execution is not
-     invitation-gated;
-   - `Invitation`: no `invitation` → `InvitationRequired { execution_id }`; step 2's
-     verdict is a rejection → `InvitationRejected { reason }`; `request.slot` is
-     `Some(j)` with `j != invitation.client_index` →
-     `InvitationRejected { reason: SlotMismatch { invited, requested } }`. The slot asked
-     for is `invitation.client_index`, never `None`.
+   - `Open`: the slot asked for is `request.slot`, which step 8 binds.
 8. Slot: `Some(i)` with `i >= capacity()` → `SlotOutOfRange { execution_id, requested, slots }`;
    `Some(i)` already bound → `SlotTaken { execution_id, requested }`; `None` (only under
    `Open`) and no free slot → `CapacityExhausted { execution_id, capacity }`.
@@ -1898,27 +1803,12 @@ pub enum AdmissionError {
     SlotTaken { execution_id: ExecutionId, requested: ClientIndex },
     NotPreRegistered { execution_id: ExecutionId },
     PreRegisteredSlotMismatch { registered: ClientIndex, requested: ClientIndex },
-    InvitationRequired { execution_id: ExecutionId },
-    InvitationRejected { reason: InvitationRejection },
-    UnexpectedInvitation { execution_id: ExecutionId },
     UnsupportedClientKey { client_index: ClientIndex },
     AlreadyAssociated { execution_id: ExecutionId, admission: ClientAdmission },
     NotAdmitted { execution_id: ExecutionId },
     ReservationOutsideAdmission { admitted: Option<InputRange> },
     AdmissionsNotFrozen { execution_id: ExecutionId, current: Round },
     NoOutputRights { execution_id: ExecutionId },
-}
-
-#[derive(thiserror::Error, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InvitationRejection {
-    WrongExecution,
-    WrongRegistration,
-    WrongProgram,
-    WrongRoster,
-    Expired { not_after: UnixSeconds, now: UnixSeconds },
-    WrongInvitee,
-    BadSignature,
-    SlotMismatch { invited: ClientIndex, requested: ClientIndex },
 }
 
 #[derive(thiserror::Error, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1974,9 +1864,7 @@ decodes it the same way (§C.7).
 | 23 | `SlotTaken` | `AdmissionError::SlotTaken` | `associate_client` |
 | 24 | `NotPreRegistered` | `AdmissionError::NotPreRegistered` | `associate_client` |
 | 25 | `PreRegisteredSlotMismatch` | `AdmissionError::PreRegisteredSlotMismatch` | `associate_client` |
-| 26 | `InvitationRequired` | `AdmissionError::InvitationRequired` | `associate_client` |
-| 27 | `InvitationRejected` | `AdmissionError::InvitationRejected` | `associate_client` |
-| 28 | `UnexpectedInvitation` | `AdmissionError::UnexpectedInvitation` | `associate_client` |
+| 26, 27, 28 | **retired** (`InvitationRequired`, `InvitationRejected`, `UnexpectedInvitation`) | — | never reused; the `Invitation` policy was removed in review (§C.3). The ledger is in `coord:off-chain/src/lib.rs`, beside 1, 3, 4, 7, 11, 13, 15, 17, 18 and 19 |
 | 29 | `UnsupportedClientKey` | `AdmissionError::UnsupportedClientKey` | `associate_client` |
 | 30 | `AlreadyAssociated` | `AdmissionError::AlreadyAssociated` | `associate_client` |
 | 31 | `NotAdmitted` | `AdmissionError::NotAdmitted` | `reserve_mask_indices`, `submit_masked_inputs`, `sub_round` |
@@ -2412,8 +2300,12 @@ pub trait ShareBound<F: FftField>: /* unchanged supertraits */ {
   agree, and error correction over all of them (`:589-623`) corrects `e`.
 - **AVSS:** shares are grouped by their `commitments` vector, compared byte for byte; a
   share that does not satisfy `share · G == Σⱼ commitmentsⱼ · idʲ` for its *own*
-  commitments is ignored (`stoffelcrypto` `0.1.1` has no public check; `reconstruct`
-  computes it with `ark-ec`); the first group with `t + 1` verified shares is interpolated
+  commitments, at the id its roster position fixes, is ignored (`reconstruct` calls
+  `stoffelcrypto`'s public `verify_feldman`,
+  `stoffelcrypto-0.1.1/src/common/share/avss.rs:103`, passing
+  `share_id_of_position(position)` as the expected id; upstream bounds the commitment
+  count by `share.feldmanshare.degree + 1`, which the degree filter above has already
+  pinned to `t + 1`); the first group with `t + 1` verified shares is interpolated
   (`FeldmanShamirShare::recover_secret`) and is `Secret`; otherwise `Pending`. A group
   forms around the vector its members *present*, and an honest node presents the honest
   one, so a vector the at most `t` corrupt nodes present never reaches `t + 1` members —
@@ -2539,7 +2431,7 @@ and `start_coord_one_off` both spawn it, through one private helper
 JoinHandle<()>`: revision 1 put it in `start_coord` alone, but `start_coord_one_off` builds
 its own listener and never calls `start_coord` (`coord:off-chain/src/lib.rs:2585-2607`), and
 `run-coord --one-off` goes through it (`coord:bins/src/bin/run-coord.rs:219-232`), so a
-one-off coordinator would never abort an `Open` or `Invitation` execution — S5's permanent
+one-off coordinator would never abort an `Open` execution — S5's permanent
 stall — and would never expire retention. The server owns the handle: `OffChainCoordinatorServer`
 stores it beside its `RPCServerHandle`, `shutdown` aborts it, and `start_coord_one_off`
 aborts it after the drain; its `Drop` aborts it too. Both starts therefore require
@@ -2616,8 +2508,8 @@ today. `retire_execution` is the exception for both: acknowledging an execution 
 gone stays a success (`:1319-1323`), so a node's best-effort retirement never fails.
 The bound makes the memory finite, so an id can be registered again once 4,096 later
 executions have ended. That is safe for two reasons that do not depend on this
-memory: a new registration draws a new nonce, which orphans every invitation and every
-signed submission and sealed output of the old one (C.3, C.7), and no node ever provisions
+memory: a new registration draws a new nonce, which orphans every
+signed submission and sealed output of the old one (C.7), and no node ever provisions
 a mask share or triple it provisioned for an earlier execution (C.9 part 4).
 
 Deadlines are optional under `PreRegistered`, where the operator chose every identity; set
@@ -2828,9 +2720,9 @@ shim is offered.
   makes it routine. In `0.3.0` that path, and every other path that re-locks after
   releasing — the broadcasts and subscriptions of C.6, `associate_client` step 4 — treats
   an execution that is gone as the end of its work and returns quietly.
-- **Error codes:** 35 through 41 added; 1, 3, 4, 7, 11, 13, 15, 17, 18 and 19 retired (C.5).
-- **Binaries:** `run-coord` and the wrapper flags change (§F.3); `issue-invitation` is new
-  (C.3).
+- **Error codes:** 35 through 41 added; 1, 3, 4, 7, 11, 13, 15, 17, 18, 19, 26, 27 and 28
+  retired (C.5).
+- **Binaries:** `run-coord` and the wrapper flags change (§F.3).
 
 ### D. VM node behavior
 
@@ -2895,6 +2787,7 @@ Party mode (`stoffel-run <program> --peers …`), in this order and no other:
 | `--client-roster`, `--client-input-slots`, `--client-input-count` (`STOFFEL_CLIENT_INPUT_COUNT`), `--client-input-total` | **removed**; the layout is `get_execution_summary`'s |
 | `--n-parties`, `--threshold` / `STOFFEL_N_PARTIES`, `STOFFEL_THRESHOLD` | **removed** in party and client mode — `--peers` now always comes with `--off-chain-coord` — so `n` and `t` have exactly one source |
 | `--preproc-store` / `STOFFEL_PREPROC_STORE` | **removed** (§C.9 part 4, stage V-0) |
+| `--invitation` / `STOFFEL_INVITATION` | **removed in review**, fails by name; the `Invitation` policy it fed never shipped (§C.3) |
 | `--timestamp` / `STOFFEL_TIMESTAMP` | **removed**. Emitted by the entrypoint (`docker/entrypoint.sh:274`, `:342`), the SDK server (`crates/stoffel-rust-sdk/src/server.rs:1039-1040`) and `local_runner` (`local_runner.rs:589-590`), but `stoffel-run` has no parser arm for it (`stoffel-run.rs:4045-4250` falls to `_ => {}`), so its value only ever landed among the positional arguments (`:4033-4036`), and no coordinator version takes a timestamp |
 
 `--expect-roster-digest`, `--expect-n-parties` and `--expect-threshold` are defense in
@@ -2918,6 +2811,7 @@ Removed flags use the existing `fail_removed_flag` (`stoffel-run.rs:960`), which
 | `--n-parties`, `--threshold` | `n and t come from the coordinator's node roster. To refuse a roster of another size, pass --expect-n-parties and --expect-threshold.` |
 | `--preproc-store` | `Preprocessing material is never stored between executions: a stored item could be drawn by a second execution (docs/design/bootnode-elimination.md §9.C.9). Remove the flag.` |
 | `--timestamp` | `No coordinator takes a timestamp; an execution's deadlines are part of its registration. Remove the flag.` |
+| `--invitation` | `Invitation admission was removed in review and never shipped. A client's slot is the one its certificate is pre-registered to, the one --client-slot <index> names, or under open admission the lowest-numbered free one.` |
 
 The existing refusals whose hints name flags this section removes are rewritten, so an
 operator is never sent from one refusal to the next:
@@ -2966,7 +2860,8 @@ The rest exit with these exact messages:
 `ERROR: STOFFEL_NODE_ROSTER was removed. The coordinator serves the node roster: set STOFFEL_COORD_ADDR, STOFFEL_COORD_CERT and STOFFEL_EXECUTION_ID.`
 — and likewise `STOFFEL_EXPECTED_CLIENTS`, `STOFFEL_WAIT_FOR_CLIENTS`, `STOFFEL_CLIENT_INDEX`,
 `STOFFEL_CLIENT_INPUT_COUNT`, `STOFFEL_OUTPUTS`, `STOFFEL_N_PARTIES`, `STOFFEL_THRESHOLD`,
-`STOFFEL_PREPROC_STORE` and `STOFFEL_TIMESTAMP` (each when non-empty, in both roles). Every
+`STOFFEL_PREPROC_STORE`, `STOFFEL_TIMESTAMP` and `STOFFEL_INVITATION` (each when non-empty,
+in both roles). Every
 site of the entrypoint that names them changes in the same edit:
 
 | `docker/entrypoint.sh` | Today | `0.3.0` |
@@ -3245,8 +3140,10 @@ impl DigestBarrier {
   update( execution_id )                                        32 bytes
   update( registration_nonce )                                  32 bytes
   update( program_hash )                                        32 bytes
-  update( policy tag as u8 )     0 PreRegistered, 1 Open, 2 Invitation
-      Invitation only: update( issuer_spki.len() as u64 ), update( issuer_spki )
+  update( policy tag as u8 )     0 PreRegistered, 1 Open
+      (tag 2 was Invitation, removed in review; the two surviving tags keep
+       their values, so the digest of every Open and PreRegistered execution
+       is byte for byte what it was)
   deadlines:     update( 0x00 )  or  update( 0x01 ), update( association as u64 ), update( input as u64 )
   update( client_slots.len() as u64 )
       per slot: update( input_count as u64 ), update( output_count as u64 )
@@ -3531,7 +3428,7 @@ Every client surface does this, in this order:
      Every slot is checked, not only the one this client will get: which slot that is is
      not settled until association.
    - **the slot's shape.** When the slot is known before associating — `--client-slot`
-     given, or the invitation names one, as every invitation now does (§C.3) — its
+     given — its
      `input_count` must equal the number of `--inputs`. Under `Open` with no
      `--client-slot`, every slot must have one shape, and its `input_count` must equal the
      number of `--inputs`; otherwise exit 2:
@@ -3540,8 +3437,8 @@ Every client surface does this, in this order:
      new, and the count is checked right after step 3. A client that also checks input and
      output types (the SDK) checks them here against every slot the association can bind,
      not just some slot (`BindableSlots`, §E.2).
-3. **Associate.** `associate_client(AssociationRequest { slot: --client-slot,
-   invitation: --invitation })` → `ClientAdmission`, stored on the client. A count mismatch
+3. **Associate.** `associate_client(AssociationRequest { slot: --client-slot })`
+   → `ClientAdmission`, stored on the client. A count mismatch
    exits 2: `Error: client slot {i} takes {count} inputs, but --inputs has {m}.`
 4. `wait_for_round(InputMaskReservation)`; `reserve_mask_indices(start..start + count)`.
 5. **Pinned node legs.** `NodeRPCClient::start_rpc_client_for_execution(&roster, --servers,
@@ -3579,8 +3476,8 @@ over its own ciphertext.
 - **`stoffel-run --client`.** Required: `--off-chain-coord`, `--coord-cert`,
   `--execution-id`, `--cert`, `--key`, `--servers` (node RPC addresses: hints, pinned by the
   roster), `--inputs`; `--mpc-backend` and `--mpc-curve` choose the share type, as today.
-  Optional: `--client-slot <u32>` (`STOFFEL_CLIENT_SLOT`), `--invitation <path>`
-  (`STOFFEL_INVITATION`), `--expect-program-hash <64-hex>` (`STOFFEL_EXPECT_PROGRAM_HASH`),
+  Optional: `--client-slot <u32>` (`STOFFEL_CLIENT_SLOT`),
+  `--expect-program-hash <64-hex>` (`STOFFEL_EXPECT_PROGRAM_HASH`),
   `--expect-roster-digest <64-hex>` (`STOFFEL_EXPECT_ROSTER_DIGEST`), `--expect-n-parties`
   and `--expect-threshold`. Revision 0 called the program flag `--program-hash`; it is
   `--expect-program-hash` beside
@@ -3598,7 +3495,7 @@ over its own ciphertext.
   - `OffChainClientConfig` (`client.rs:325`) loses `input_start_index`, `parties`,
     `threshold`, `output_count` and `timestamp` (`:335`, validated non-zero at `:371-375`
     for no reader), and gains `coordinator_cert_der: Vec<u8>`,
-    `invitation: Option<SignedInvitation>`, `expected_program_hash: Option<[u8; 32]>` and
+    `expected_program_hash: Option<[u8; 32]>` and
     `expected_roster_digest: Option<RosterDigest>`; `client_slot: u64` becomes
     `client_slot: Option<ClientIndex>` (`#[serde(default)]`, so absent means `None`).
     `validate` loses the checks that need `n` or `t` (`threshold == 0`, `parties >= 5`,
@@ -3617,8 +3514,8 @@ over its own ciphertext.
     (`:501`), `parties` (`:506`), `threshold` (`:511`), `timestamp` (`:491`) and
     `output_count` (`:574`), and
     `output_types` (`:587`) stops setting a count. It gains `coordinator_cert_der(Vec<u8>)`,
-    `coordinator_cert_file(path)`, `invitation(SignedInvitation)`, `invitation_file(path)`
-    (`serde_json`), `expected_program_hash([u8; 32])` and `expected_roster_digest(RosterDigest)`;
+    `coordinator_cert_file(path)`, `expected_program_hash([u8; 32])` and
+    `expected_roster_digest(RosterDigest)`;
     `client_slot(ClientIndex)` (`:496`) sets `Some`.
   - `Runtime::offchain_client_config(client_slot: u64)` (`runtime.rs:141-165`) no longer
     derives `input_start_index` — the coordinator assigns ranges — and no longer calls
@@ -3685,7 +3582,7 @@ over its own ciphertext.
   - `read_run_network_config` (`:2169-2193`) parses only the SDK's `OffChainClientConfig`,
     whose TOML schema is the struct above: `coordinator_host`, `coordinator_port`,
     `coordinator_cert_der`, `execution_id`, optional `client_slot`,
-    `invitation`, `expected_program_hash` and `expected_roster_digest`, `backend`,
+    `expected_program_hash` and `expected_roster_digest`, `backend`,
     `node_rpc_addresses`, `cert_der`, `key_der`, `input_types`, `output_types`, `timeout` —
     and no `parties`, `threshold`, `input_start_index`, `output_count` or `timestamp`.
   - A file that parses as a node `NetworkConfig` instead is refused by name:
@@ -3716,8 +3613,7 @@ over its own ciphertext.
     `threshold` from them (F.4), so they do not change.
 
 Two refusals the flow adds beside E.1 step 2's, both exit 2 and both before
-associating, since an association is irrevocable: a `--client-slot` (or invitation
-slot) past the table is
+associating, since an association is irrevocable: a `--client-slot` past the table is
 `Error: execution {id} has {capacity} client slot(s), so it has no client slot {i}; refusing to associate.`,
 and `stoffel-run --client` without `--servers` is refused before anything is dialed —
 a client that associated and then reached no node would hold its slot until the
@@ -3732,7 +3628,7 @@ the typed half of step 2 itself, before associating. The flow splits there:
 `PendingAssociation`, whose `bindable_slots()` names every slot the association can bind;
 `PendingAssociation::associate` then makes the irrevocable association. `BindableSlots` is:
 
-- `Settled(i)` — `client_slot` or the invitation names slot `i`
+- `Settled(i)` — `client_slot` names slot `i`
   (`OffChainClientConfig::settled_slot`). It is checked before anything is sent, and an
   admission to any other slot is refused as `SlotNotGranted` (exit 13).
 - `AnyOf(0..capacity)` — `Open` with no slot requested. The coordinator binds the lowest
@@ -3744,8 +3640,8 @@ the typed half of step 2 itself, before associating. The flow splits there:
 - `Registered` — `PreRegistered` with no slot requested. Association binds nothing new,
   and the registered slot is known only from the admission, so it is checked on
   `AdmittedClient::admission` right after association, before any input is sent.
-- `Nothing` — an aborted execution, or `Invitation` without an invitation: the association
-  is refused with the coordinator's reason and binds nothing.
+- `Nothing` — an aborted execution: the association is refused with the coordinator's
+  reason and binds nothing.
 
 Before connecting at all, a client without a settled slot is refused a submission that no
 slot of the program accepts, which no policy can bind to an accepting slot. The admitted
@@ -3839,8 +3735,8 @@ saying any of this. Rules:
    and clients get the coordinator's certificate and their own.
 5. A real deployment mints every key on the host that owns it — `generate-ids --cert
    <cert> --key <key> --subject-alt-names <name>` run there — and distributes only
-   certificates: node certificates to the coordinator's operator, the coordinator's
-   certificate to every node and client, and an issuer's certificate (C.3) to the operator.
+   certificates: node certificates to the coordinator's operator and the coordinator's
+   certificate to every node and client.
 
 The §G rows that rest on a key being secret hold only under these rules, and say so. The
 §B golden vector reads certificates only and is unaffected.
@@ -3898,8 +3794,8 @@ never reaches a party container.
 `--preproc-store` (`:371-373`) and the coordinator-less `--cert`/`--key` (`:389-392`).
 Both roles emit `--coord-cert ${STOFFEL_COORD_CERT}` and, when set,
 `--expect-roster-digest ${STOFFEL_EXPECT_ROSTER_DIGEST}`; client mode emits
-`--client-slot`, `--invitation` and `--expect-program-hash` from `STOFFEL_CLIENT_SLOT`,
-`STOFFEL_INVITATION` and `STOFFEL_EXPECT_PROGRAM_HASH` when they are set. Its refusals are
+`--client-slot` and `--expect-program-hash` from `STOFFEL_CLIENT_SLOT`
+and `STOFFEL_EXPECT_PROGRAM_HASH` when they are set. Its refusals are
 §D.3's.
 
 **The program hash.** Nodes refuse a summary for another program (D.7 step 1), so every
@@ -3937,7 +3833,6 @@ slot table.
 **As built** (§9.I), with three additions to this table. First, every coordinator service
 takes the whole admission surface from the environment, not only `--client-io`:
 `--admission "${STOFFEL_ADMISSION:-pre-registered}"`,
-`--invitation-issuer-cert "${STOFFEL_INVITATION_ISSUER_CERT-}"`,
 `--association-deadline-secs "${STOFFEL_ASSOCIATION_DEADLINE_SECS-}"` and
 `--input-deadline-secs "${STOFFEL_INPUT_DEADLINE_SECS-}"`, which the wrapper reads as absent
 when empty (§F.3). The reserve-index stack keeps `open` and its two deadlines written out,
@@ -4021,15 +3916,14 @@ no stack sets `STOFFEL_PREPROC_STORE` any more and the entrypoint refuses it.
 | `--t <u64>` | unchanged; `--n` is removed, since `n` is the number of `--node-certs` |
 | `--client-io <in:out>[,<in:out>…]` | replaces `--n-inputs`: one `ClientSlotSpec` per entry, in slot order; absent means no client slots |
 | startup output | **as built**: beside `Listening on … (… admission)`, the wrapper prints `Serving node roster n=…, t=…, digest=…`, which is the value an operator passes as `--expect-roster-digest` / `STOFFEL_EXPECT_ROSTER_DIGEST` |
-| `--admission <pre-registered\|open\|invitation>` | a clap `ValueEnum`, default `pre-registered`. It never defaults to `open`: `--client-io 1:1` without `--client-certs` fails `PreRegisteredCountMismatch` rather than admitting anyone |
+| `--admission <pre-registered\|open>` | a clap `ValueEnum`, default `pre-registered`. It never defaults to `open`: `--client-io 1:1` without `--client-certs` fails `PreRegisteredCountMismatch` rather than admitting anyone |
 | `--client-certs <paths>` | `pre-registered` only: one per slot, in slot order; replaces `--output-clients` |
-| `--invitation-issuer-cert <path>` | `invitation` only; refused (exit 2) when it is one of `--node-certs` or `--server-cert` (`IssuerIsRosterNode`, `IssuerIsCoordinatorKey`) |
-| `--association-deadline-secs <u64>`, `--input-deadline-secs <u64>` | **new**: seconds after startup, turned into `ExecutionDeadlines`; required under `open` and `invitation`, optional under `pre-registered`, both or neither |
+| `--association-deadline-secs <u64>`, `--input-deadline-secs <u64>` | **new**: seconds after startup, turned into `ExecutionDeadlines`; required under `open`, optional under `pre-registered`, both or neither |
 | `--min-output-shares` | **not added**: the registration field is gone (§C.1) |
 | `--max-connections <usize>` | **new**: `RpcServerLimits::max_connections`, default 4096; the other `RpcServerLimits` fields keep their defaults (§A) |
 
 An empty value is the same as an absent flag — **as built**, for every flag that takes one,
-including `--invitation-issuer-cert`, `--association-deadline-secs` and
+including `--association-deadline-secs` and
 `--input-deadline-secs`, whose clap value parser maps an empty or blank string to `None`
 while a non-empty one still has to parse — so a compose file can pass
 `--client-io "${STOFFEL_CLIENT_IO-}"` and `--client-certs "${STOFFEL_CLIENT_CERTS-}"`
@@ -4169,7 +4063,6 @@ pub async fn run_offchain_client(endpoint: &LocalClientEndpoint, cert_der: Vec<u
   `LocalAdmission::Open` with a non-empty slot table nobody would bind a slot and
   `InputCollection` would be held until the deadline aborted the run. `run()` refuses it:
   `Configuration("run() starts only pre-registered clients; with LocalAdmission::Open use start() and run_offchain_client")`.
-- `Invitation` is not exposed here in this change; the coordinator crate's tests cover it.
 - Retargeted unit tests: `expected_clients_create_output_identities_for_dynamic_outputs`
   (`:1890`) builds with `.client_output_count(0, 1).client_output_count(1, 1)` and asserts
   the table `[0:1, 0:1]`, and asserts that without the counts `build()` fails naming
@@ -4194,8 +4087,8 @@ cannot see) carry:
 # TEMPORARY — docs/design/bootnode-elimination.md §9.F.5. stoffel-mpc-coordinator 0.3.0 is
 # not published yet. Delete this table, and re-lock, as soon as it is.
 [patch.crates-io]
-stoffel-mpc-coordinator-shared = { path = "/Users/gabriel/RustroverProjects/stoffel-mpc-coordinator-roster-admission/crates/coord-shared" }
-stoffel-mpc-coordinator-off-chain = { path = "/Users/gabriel/RustroverProjects/stoffel-mpc-coordinator-roster-admission/crates/off-chain" }
+stoffel-mpc-coordinator-shared = { git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "feature/no-bootnode" }
+stoffel-mpc-coordinator-off-chain = { git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "feature/no-bootnode" }
 ```
 
 and the pins move `=0.2.0` → `=0.3.0` in `crates/stoffel-vm-runner/Cargo.toml:20-21`,
@@ -4205,65 +4098,73 @@ requirement is left unused, and cargo only warns.
 
 While the patch exists:
 
-- **The path exists only on this machine.** GitHub CI (`.github/workflows/ci.yml`) cannot
-  resolve the workspace and is red by construction until `0.3.0` is published. That is
-  the honest state of an unreleased dependency, not a flake to work around.
+- **The pin resolves to the branch tip, never to a working tree.** A build sees what is
+  committed on `feature/no-bootnode` and nothing that is only in a local coordinator
+  checkout. **That is a merge-ordering constraint, and it is the whole of why the Rust CI
+  jobs (`.github/workflows/ci.yml`) are red:** the coordinator's own change has to land on
+  that branch before this repository compiles against it, because the tip the pin resolves
+  to is the coordinator's pre-merge state while this repository is already written against
+  the post-merge one. Until then the VM side builds only against a local coordinator
+  checkout — a `--config` override of this table, which is neither what CI resolves nor
+  what a plain `cargo check` here resolves, and which relocks `Cargo.lock`. So a claim
+  that the VM side builds has to say which of the two it was built against.
+- **`.githooks/pre-commit` refuses this table in either shape.** It rejects a
+  `git`/`branch`/`rev` reference to a Stoffel crate, and a `path` entry for one outside an
+  allowlist that holds neither manifest, so the table is committed with `--no-verify`
+  however it is written. The refusal is right — it exists to keep an unpublished
+  dependency out of a release — and it stops mattering when the table goes.
 - **`cargo publish`** of `stoffel-vm-runner` and `stoffel-rust-sdk` fails (`=0.3.0` cannot
   be satisfied from crates.io) — the correct failure.
-- **Docker cannot see the path.** Every image's build context is this repository
-  (`context: .`, or `${STOFFEL_VM_DIR}` for the examples stack). For the patch window each
-  Dockerfile that builds a crate depending on the coordinator copies a BuildKit named
-  context to the very path the patch names,
+- **Docker resolves the pin over the network.** Every stage that runs `cargo` writes
+  `git-fetch-with-cli = true` into its `.cargo/config.toml` (`Dockerfile:25-28`,
+  `Dockerfile.benchmark:22`, `:64`, `docker/coordinator.Dockerfile:23`, which the builder
+  copies from the planner), so the invocation fetches the branch itself. Nothing in the
+  build context supplies the dependency; a private repository would need credentials in
+  the build instead, which only `Dockerfile` and `Dockerfile.benchmark` arrange
+  (`--mount=type=ssh`).
+- **The `coordinator` named context is inert**, and is residue of the path-shaped form
+  this table used to take. `Dockerfile` (`:40`), `Dockerfile.benchmark` (`:30`, `:45`) and
+  `docker/coordinator.Dockerfile` (`:33`, `:51`) still copy a BuildKit named context to
+  the path that form named,
 
   ```dockerfile
   COPY --from=coordinator . /Users/gabriel/RustroverProjects/stoffel-mpc-coordinator-roster-admission
   ```
 
-  **before every `cargo` invocation that resolves the workspace in that stage** — the patch
-  path must exist when `cargo metadata` runs, and cargo-chef runs it in `prepare` and
-  `cook`:
-  - `Dockerfile`: one builder stage; before `cargo build` (`:38-40`). Its `COPY . .`
-    (`:22`) copies this repository only.
-  - `Dockerfile.benchmark`: in the planner, before `cargo chef prepare` (`:26`); in the
-    builder, before `cargo chef cook` (`:38-45`). The builder's `COPY . .` (`:47`) comes
-    after cook, and would not carry the coordinator anyway.
-  - `docker/coordinator.Dockerfile`: in the planner, before `cargo chef prepare` (`:31`);
-    in the builder, before `cargo chef cook` (`:43-46`) — not merely somewhere in the
-    builder, since the wrapper's own `COPY` (`:48`) follows cook.
-
-  Every compose build block declares
+  and every compose build block still demands it:
 
   ```yaml
   additional_contexts:
     coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?set STOFFEL_COORDINATOR_CONTEXT to the stoffel-mpc-coordinator 0.3.0 checkout until it is published}"
   ```
 
-  This reuses the `coordinator` named context the reserve-index and examples stacks
-  already declare — today pointing at a git branch and consumed by no Dockerfile — and the
-  `STOFFEL_COORDINATOR_CONTEXT` / `STOFFEL_COORDINATOR_DIR` variables both docker test
-  scripts already export, and it replaces their stale default with a hard error. The
-  `COPY` lines and the `:?` go when the patch goes.
-- **CI `docker-build` is red for the patch window too.** Its "Build Docker image" step
+  A `git` patch never reads that path, so the copy feeds nothing and the `:?` makes a
+  stack refuse to start over a variable that changes no build. The `COPY` lines, the
+  `additional_contexts` entries and the `STOFFEL_COORDINATOR_CONTEXT` /
+  `STOFFEL_COORDINATOR_DIR` plumbing in the two
+  `crates/stoffel-lang/examples/` scripts and in
+  `docker/test-coordinator-reserve-index.sh` all go — with the table, or before it, since
+  nothing now depends on them.
+- **CI `docker-build` is red on that inert copy alone.** Its "Build Docker image" step
   (`.github/workflows/ci.yml:215-222`) runs `docker/build-push-action` with no
   `build-contexts`, so `COPY --from=coordinator` resolves `coordinator` as an image
-  reference and fails; and no `build-contexts` entry can point a GitHub runner at a path on
-  this machine. Like the Rust jobs, it stays red until `0.3.0` is published.
+  reference and fails before any `cargo` runs. Deleting the copy ends that failure on its
+  own, without waiting for `0.3.0`.
 
 ### G. Trust table
 
 Every row that rests on a private key being secret holds only under §F.0: each private
 key exists in exactly one place, its owner's, and a fixture key is reachable only on
-loopback. "The coordinator" includes its operator and the invitation issuer, which sit
+loopback. "The coordinator" includes its operator, which sits
 inside one trust boundary (§9 preamble, §C.3).
 
 | Actor | Can | Cannot |
 |---|---|---|
 | **Coordinator, honest** | Serve one immutable node roster; register executions; bind clients to slots under each execution's policy; abort an execution at its deadline; see every client identity and binding, the program hash, masked inputs, sealed output shares and all timing; stop serving (liveness). | Learn a client's input: mask shares go node→client over node RPC legs it is not on, and a masked input under a uniformly random mask carries no information. Learn an output: shares are sealed to the client's key. Choose a party index (each node sorts SPKIs itself) or an `instance_id` (local epoch plus roster digest). |
 | **Coordinator, malicious** | Everything it is trusted for, which is irreducible. **Roster:** serve a roster of its own keys — to every node, to some of them, or to one client. Equivocation is detected only between nodes that appear in each other's served roster: agreement (`JoinCommit` and both digest barriers) travels over the mesh, and each node installs only the roster it was served (`join.rs:366`), so a coordinator that partitions the nodes and pads each part with keys of its own gets internally consistent meshes that never exchange a frame. A client pins its node legs to whatever roster it was served (§E.1). **Trusting the coordinator's roster is therefore trusting it with client input privacy and output integrity**: serving a client a roster of the coordinator's own keys hands it that client's inputs and lets it sign whatever outputs it likes. `--expect-roster-digest` turns that into a refusal for a node or client that knows the intended roster (§D.2), and nothing else does. **Admission:** register any execution and admit any identity, itself included, under any policy; refuse associations or round transitions, or let deadlines abort (censorship, DoS). **Relay:** withhold a client's submission or a node's sealed output (DoS). | Within one mesh: serve its nodes different rosters, summaries or admission sets without the run aborting at `JoinCommit` or `AdmissionsAgreed`, before any mask share is released, input stored or output sealed; deliver different masked inputs to different nodes without aborting at `InputsAgreed`, before any input is unmasked; unmask a client's input by naming different reservation owners to different nodes (nodes release mask shares only for reservations that match the agreed set, C.7). **Against a client served the true roster:** shift its input — nodes verify the client's signature over its submission against the agreed identity and nonce (C.7, §D.7 step 9), which revision 1 left as a `0.2.0` property; substitute or relabel its outputs — each item must carry a roster node's signature over its own position and ciphertext, and each share the id of that position (C.7); replay a submission or output from an earlier registration of the same id (the nonce is signed). Make an honest node run for a program other than the one registered (D.7 step 1). Read the outputs of a client it did not admit as itself. Make a node trust a key outside the roster it served that node, or a client a node outside the roster it served that client. Force `instance_id` reuse, or make a node reuse a mask or triple of an earlier execution (C.9 part 4). |
-| **Attacker at the coordinator's address, or at a node's** | Drop, delay or refuse connections (DoS). Without any certificate, hold a listener's pending-handshake pool from `max_pending_handshakes / max_pending_handshakes_per_ip` source addresses (64 by default); with free certificates, fill the unreserved connection pool (§A). Either stops new clients from associating, and so aborts an `Open` or `Invitation` execution at its association deadline; reachability controls in front of a listener are the deployment's (§C.2). | Holds under §F.0 only. Complete a handshake as the coordinator: its key is not the pinned one, so nodes and clients stop at `ServerPinMismatch` before any RPC, and no roster, admission or relayed input comes from it. As a node RPC listener: be trusted by a client (not a roster key) or answer as a node already answering elsewhere (`DuplicateNodeIdentity`). As a mesh peer: be admitted (node allowlist). Take the connection capacity of roster nodes, which no other identity draws on, so a node connecting at startup is not crowded out; nor, with certificates alone, the bound-client pool (§A). Hold the coordinator's state mutex through a slow connection (C.6). With a committed fixture key from `ids/` on a reachable port, the first three are possible, which is why §F.0 makes every such port loopback-only and checks it. |
+| **Attacker at the coordinator's address, or at a node's** | Drop, delay or refuse connections (DoS). Without any certificate, hold a listener's pending-handshake pool from `max_pending_handshakes / max_pending_handshakes_per_ip` source addresses (64 by default); with free certificates, fill the unreserved connection pool (§A). Either stops new clients from associating, and so aborts an `Open` execution at its association deadline; reachability controls in front of a listener are the deployment's (§C.2). | Holds under §F.0 only. Complete a handshake as the coordinator: its key is not the pinned one, so nodes and clients stop at `ServerPinMismatch` before any RPC, and no roster, admission or relayed input comes from it. As a node RPC listener: be trusted by a client (not a roster key) or answer as a node already answering elsewhere (`DuplicateNodeIdentity`). As a mesh peer: be admitted (node allowlist). Take the connection capacity of roster nodes, which no other identity draws on, so a node connecting at startup is not crowded out; nor, with certificates alone, the bound-client pool (§A). Hold the coordinator's state mutex through a slow connection (C.6). With a committed fixture key from `ids/` on a reachable port, the first three are possible, which is why §F.0 makes every such port loopback-only and checks it. |
 | **Malicious node (at most `t`)** | Whatever the MPC protocol tolerates of a corrupt party; withhold its mask and output shares; send wrong ones, which reconstruction excludes (C.7); cast its one vote of `transition_quorum()`; acknowledge retirement early (a drain starts only in a terminal round, C.10); read client identities, reservations and masked inputs through `get_client_admissions` and the node-gated subscriptions; bind a slot under `Open`, like anyone; abort a run by sending a divergent `JoinCommit`, `AdmissionsAgreed` or `InputsAgreed` frame; lose its own subscriptions by reading slowly (C.6). | Register an execution or choose its program, slot table or policy (in-process only, C.1); change membership, party indices or `t`; admit or unbind a client; learn a client's mask (it holds one share, and every honest node serves its share only to the identity the agreed admissions name, C.7); make a client use a wrong mask or output, or never reconstruct one, by relabelling its share with another node's id, changing its degree, or sending a value off the sharing — a client attributes each share to the pinned leg or signed item it came on, ignores one whose id or degree does not match that position, decodes HoneyBadger shares robustly, and accepts an AVSS share only if it verifies against the commitments it came with and `t + 1` positions presented those same commitments (A, C.7); make an oversized ciphertext block a client's other outputs (one item per node, bounded, C.1); receive another client's outputs; advance a round alone; impersonate the coordinator (pinned; §F.0); stall the coordinator for other executions or subscribers (no send under the state mutex, C.6); make honest nodes of its mesh disagree about the roster, the admissions or the masked inputs without the run aborting. |
-| **Malicious client** | Fetch the node roster and an execution's summary, at a bounded rate per identity (C.6); under `Open`, bind free slots — with enough certificates, all of them — and then never reserve or never submit, which aborts that execution at its deadline (C.8); submit any value as its own input; repeat `associate_client` (idempotent); open connections and parked subscriptions up to the per-listener, per-identity and per-caller bounds (§A, C.6) — enough certificates can fill a listener's unreserved pool (row above). | Bind a pre-registered slot, or an invitation slot without an unexpired invitation for its own key issued for this registration, program, roster and **that slot** (C.3); reserve or submit outside its admitted range; submit oversized inputs that make other nodes' streams undeliverable (C.1); subscribe to reservations, masked inputs or other clients' identities (node-gated, C.6); obtain another client's mask shares (node RPC checks the caller's certificate against the reservation) or outputs (gated on admission, and sealed to the other key); learn anything from a mask a previous execution used, because no node hands one out twice (C.9 part 4); stall an execution past its deadlines; reach the node mesh transport at all (the node allowlist holds nodes only), and so pose as a server peer and skew party indices; take a roster node's connection capacity (bound clients under `Open` can fill only the bound-client pool, §A); affect any other `ExecutionId`. |
-| **Invitation issuer** | Admit any identity it signs for, to an `Invitation` execution registered with its key, until the invitation's `not_after`, in the slot the invitation names. It is an admission authority inside the coordinator's trust boundary, so rule 2 requires that no node's operator runs it (§C.3). | Admit anyone to another registration of the same id, another program, another roster, another slot, or after `not_after` (C.3); use a key that is a roster node's or the coordinator's (registration refuses both, C.1 — a guard against misconfiguration: it compares keys, and cannot tell who operates a key); withdraw an issued invitation before `not_after` (there is no revocation list; keep `not_after` short). |
+| **Malicious client** | Fetch the node roster and an execution's summary, at a bounded rate per identity (C.6); under `Open`, bind free slots — with enough certificates, all of them — and then never reserve or never submit, which aborts that execution at its deadline (C.8); submit any value as its own input; repeat `associate_client` (idempotent); open connections and parked subscriptions up to the per-listener, per-identity and per-caller bounds (§A, C.6) — enough certificates can fill a listener's unreserved pool (row above). | Bind a pre-registered slot; reserve or submit outside its admitted range; submit oversized inputs that make other nodes' streams undeliverable (C.1); subscribe to reservations, masked inputs or other clients' identities (node-gated, C.6); obtain another client's mask shares (node RPC checks the caller's certificate against the reservation) or outputs (gated on admission, and sealed to the other key); learn anything from a mask a previous execution used, because no node hands one out twice (C.9 part 4); stall an execution past its deadlines; reach the node mesh transport at all (the node allowlist holds nodes only), and so pose as a server peer and skew party indices; take a roster node's connection capacity (bound clients under `Open` can fill only the bound-client pool, §A); affect any other `ExecutionId`. |
 
 ### H. Test plan
 
@@ -4293,15 +4194,11 @@ replacing it removes no test.
 | `a_served_roster_out_of_order_or_with_a_wrong_digest_is_refused_with_a_typed_error` | same, and `crates/off-chain/tests/off_chain.rs` | `NotCanonical`, `DigestMismatch`, `CountMismatch` from `TryFrom<NodeRosterWire>`; over the wire, `CoordinatorLink::connect` returns `CoordinatorError::Roster(DigestMismatch)`, not a decode string |
 | `a_roster_digest_parses_and_displays_as_64_hex` | `crates/coord-shared/src/roster.rs` | `Display` is lowercase hex; `FromStr` round-trips, accepts upper case, and refuses 63 and 65 characters (`WrongLength`) and a non-hex character (`NotHex { position }`); `NodeCertificateDer::from_der(..).as_bytes()` returns the bytes |
 | `share_bound_positions_parties_and_sizes_match_the_backends` | `crates/coord-shared/src/lib.rs` | `min_parties` is `3t + 1` (HoneyBadger) and `2t + 1` (AVSS); `share_id_of_position` is `p` and `p + 1`, matching the ids RanSha and AVSS share generation give party `p`; `serialized_share_len(t)` equals `CanonicalSerialize::serialized_size` of a real share — 48 bytes for `RobustShare<Fr>`, 344 for `FeldmanShamirShare<Fr, G1>` at `t = 5` (C.1) |
-| `reconstruction_excludes_relabelled_resized_and_corrupted_shares` | same | HoneyBadger, `n = 4, t = 1`: a share relabelled with another position's id, or of degree 0, is ignored and the other three reconstruct; one wrong value among four still reconstructs the right secret; `Pending` with only two valid shares. AVSS, `n = 3, t = 1`: a share off its own commitments is ignored; a corrupt node presenting consistent commitments of its own design, chosen to accept an honest share, never reaches `t + 1` supporters; the honest two reconstruct |
+| `reconstruction_excludes_relabelled_resized_and_corrupted_shares` | same | HoneyBadger, `n = 4, t = 1`: a share relabelled with another position's id, or of degree 0, is ignored and the other three reconstruct; one wrong value among four still reconstructs the right secret; `Pending` with only two valid shares. AVSS, `n = 3, t = 1`: a share relabelled with another position's id is ignored, and `verify_feldman` rejects it against the `share_id_of_position` id; a share off its own commitments is ignored; a corrupt node presenting consistent commitments of its own design, chosen to accept an honest share, never reaches `t + 1` supporters; the honest two reconstruct |
 | `program_hash_of_matches_the_shared_golden_vector` | `crates/coord-shared/src/admission.rs` | `program_hash_of(b"stoffel golden program")` is `fe9f7bf2…79ee` (§C.1) |
-| `invitation_signing_bytes_have_the_documented_layout` | same | the v3 layout of C.3, with no option tag |
-| `a_signed_invitation_verifies_only_for_its_registration_program_roster_window_invitee_and_issuer` | same | `WrongExecution`, `WrongRegistration`, `WrongProgram`, `WrongRoster`, `Expired`, `WrongInvitee`, `BadSignature` |
-| `an_invitation_binds_only_the_slot_it_names` | `crates/off-chain/tests/off_chain.rs` | on a table of an input-only slot 0 and an output slot 1, an invitation for slot 0 binds slot 0 with `slot: None`, is `SlotMismatch` with `slot: Some(1)`, and leaves slot 1 to the invitation that names it |
 | `masked_input_and_sealed_output_signatures_have_the_documented_layout_and_bind_every_field` | `crates/coord-shared/src/signing.rs` | the two layouts of C.7; `sign_with_pkcs8` then `verify_identity_signature` succeeds for a P-256 and an Ed25519 key; changing the nonce, slot, first index, any input, the position, the encapsulated key or the ciphertext fails verification; a signature from another key fails |
-| `registration_refuses_an_issuer_that_is_a_roster_node_or_the_coordinator` | `crates/coord-shared/src/admission.rs` | `IssuerIsRosterNode`, `IssuerIsCoordinatorKey` |
 | `registration_bounds_keep_every_response_under_the_wire_limit` | same (`serde_json` as a dev-dependency) | at the C.1 bounds, `ClientAdmissionSet`, `ExecutionSummary`, a `MaskedInputEvent` of `MAX_INPUTS_PER_SLOT` inputs of `MAX_MASKED_INPUT_BYTES`, and a `SealedOutputShares` of `MAX_SEALED_OUTPUT_BYTES` serialize — notification envelope included — within C.1's measured sizes, under 10 MiB; one past each slot bound is refused (`TooManyClientSlots`, `TooManyInputsInSlot`, `TooManyOutputsInSlot`, `TooManyInputs`) |
-| `registration_refuses_missing_or_disordered_deadlines_and_non_canonical_clients` | same | `DeadlinesRequired` under `Open` and `Invitation`; `DeadlinesOutOfOrder`; `DeadlineElapsed`; `UnsupportedPreRegisteredKey` for a 33-byte identity — replaces revision 1's planned `registration_refuses_an_output_quorum_below_t_plus_one_and_missing_deadlines`, whose field is gone |
+| `registration_refuses_missing_or_disordered_deadlines_and_non_canonical_clients` | same | `DeadlinesRequired` under `Open`; `DeadlinesOutOfOrder`; `DeadlineElapsed`; `UnsupportedPreRegisteredKey` for a 33-byte identity — replaces revision 1's planned `registration_refuses_an_output_quorum_below_t_plus_one_and_missing_deadlines`, whose field is gone |
 | `registration_checks_state_in_order_and_never_evicts_for_a_refused_one` | `crates/off-chain/tests/off_chain.rs` | an identical registration of a live execution past its association deadline returns its nonce; an ended id is `ExecutionIdRetired`; a different registration of a live id is `ConflictingRegistration`; at capacity with an evictable execution, a registration that fails `validate` is refused and the evictable one is still registered |
 | `deleted_methods_are_not_rpc_methods` | same | raw JSON-RPC calls to `register_execution`, `request_shutdown`, `available_input_masks`, `reserve_mask_index`, `submit_masked_input`, `sub_assigned_reserved_indices` and `sub_assigned_masked_inputs` answer `METHOD_NOT_FOUND` (-32601) |
 | `get_node_roster_is_served_to_a_caller_no_configuration_names` | same | a certificate minted in the test fetches the roster |
@@ -4311,8 +4208,6 @@ replacing it removes no test.
 | `open_admission_refuses_association_past_capacity` | same | `CapacityExhausted { capacity }` |
 | `associate_client_is_idempotent_for_an_identical_request_and_refuses_a_different_one` | same | same admission returned in a later round; `AlreadyAssociated`; `ExecutionNotFound` once the execution is removed |
 | `association_closes_when_input_collection_begins` | same | `AssociationClosed { current: InputCollection }` |
-| `invitation_admission_accepts_a_valid_invitation_and_refuses_every_forgery` | same | `InvitationRequired`, `InvitationRejected{..}`, `UnexpectedInvitation` under `Open` |
-| `an_invitation_for_an_earlier_registration_of_the_same_id_is_refused` | same | a coordinator restarted with the same `ExecutionId` and registration draws a new nonce, and the old invitation is `InvitationRejected { reason: WrongRegistration }` |
 | `an_output_slot_refuses_a_key_output_shares_cannot_be_sealed_to` | same | `UnsupportedClientKey` for an Ed25519 client certificate |
 | `a_reservation_must_name_exactly_the_admitted_range` | same | `NotAdmitted`, `ReservationOutsideAdmission` — **retargets** `client_may_only_call_reserve_mask_indices_once` and `reserve_mask_indices_rejects_empty_batch` onto admitted clients |
 | `a_submission_must_cover_the_admitted_range_once_within_bounds_and_signed` | same | `SubmissionOutsideAdmission` (37) for a partial range, another start or an input-less slot; `MaskedInputTooLarge` (36) at 65 bytes, accepted at 64; `BadMaskedInputSignature` (38) for a signature by another key or over another nonce; `IndexNotReserved` (6) before reserving; `MaskedInputAlreadySubmitted` (5) for a second submission; the accepted submission reaches `sub_masked_inputs` byte for byte, signature included |
@@ -4341,7 +4236,6 @@ replacing it removes no test.
 | `unanimous_retirement_keeps_outputs_for_the_retention_window` | same | an output client subscribing after every node retired still receives every node's item within `output_retention`, and `ExecutionNotFound` after it |
 | `client_slots_ignore_scalar_share_types` | `crates/bins/src/bin/run-coord.rs` | **retargets** `input_assignment_ignores_scalar_share_types` |
 | `run_coord_registers_its_execution_at_startup_in_both_modes` | same | the parsed flags produce one registration with or without `--one-off`; `--program` and `--hash` are exclusive; `--backend` and `--min-output-shares` are unknown flags |
-| `issue_invitation_requires_a_slot_and_refuses_one_past_capacity` | `crates/bins/src/bin/issue-invitation.rs` | a missing `--client-index` is a clap error; an index not below the summary's capacity exits 2 without writing `--out` |
 | `start_node_rpc`, `end_to_end` | `crates/on-chain/tests/on_chain.rs` | **retargeted**: each builds `NodeRoster::new(t, …)` from its node RPC servers' certificates and passes it to `NodeRPCClient::start_rpc_client` or `start_rpc_client_from_cert`, which lost `n` and `t` (§A "The on-chain crate") |
 
 Every other `off_chain.rs` test (`end_to_end`, `end_to_end_fake_coord`, `trigger_pp`,
@@ -4449,7 +4343,7 @@ mint certificates); both versions are the ones `crates/stoffel-vm/Cargo.toml` al
    the registration names no identity at all.
 4. Connect it with `OffChainCoordinatorClient::start_rpc_client_for_execution` (pinned to the
    endpoint's coordinator certificate) and `associate_client(AssociationRequest { slot:
-   None, invitation: None })`; assert slot 0, input range `[0, 1)`,
+   None })`; assert slot 0, input range `[0, 1)`,
    `OutputRights::Receive { output_count: 1 }`.
 5. Mint a second certificate and assert its `associate_client` fails with
    `AdmissionError::CapacityExhausted { capacity: 1 }`. This is deterministic: the first
@@ -4470,7 +4364,7 @@ and marked **as built** in the section it belongs to.
 |---|---|
 | C-a `coord-shared` — `pin.rs`, `roster.rs`, `admission.rs`, `signing.rs`, `ShareBound`, `caller_identity`, `RpcServerLimits`, TLS 1.3-only, pinned `setup_client` | done, in `stoffel-mpc-coordinator-roster-admission` at version `0.3.0` |
 | C-b `off-chain` — registration, admission RPCs and gates, signed submissions, per-node sealed outputs, delivery discipline, deadlines and sweeper, ended executions, `OffChainCoordinatorConnection` | done |
-| C-c `on-chain` and `bins` — roster-taking node RPC client, `run-coord` flags, `issue-invitation`, CHANGELOG and README | done |
+| C-c `on-chain` and `bins` — roster-taking node RPC client, `run-coord` flags, CHANGELOG and README | done |
 | V-0 no preprocessing item serves two executions | **not done.** `persist_preproc` is still called by both engines (`crates/stoffel-vm/src/net/mpc/{honeybadger,avss}/preprocessing.rs`) and `stoffel-run` still parses `--preproc-store`. What has landed is the deployment half: no compose stack sets `STOFFEL_PREPROC_STORE`, the entrypoint refuses it by name with the §D.3 hint, and `docker/test-coordinator-preproc-store.sh` refutes both persistence and load. A direct `stoffel-run --preproc-store` run can still draw a stored item into a second execution |
 | V-a additive roster, session and barrier work | done |
 | V-b the pin bump and everything that breaks with it | done; the `[patch.crates-io]` tables and `=0.3.0` pins are in both workspaces (§F.5) |
@@ -4487,44 +4381,56 @@ no party carries a roster, a party count, a threshold or any client identity, an
 entrypoint refuses each of those variables by name. `docker-compose.nat.yml` is deleted
 (§4).
 
-**What is not covered by a run of the shipped stacks.** The coordinator images cannot be
-built on a machine that does not hold a `stoffel-mpc-coordinator` `0.3.0` checkout (below),
-so the compose stacks of this change have been validated with `docker compose config`, with
-the entrypoint's emitted argv checked directly, and with the native rehearsals earlier
-stages recorded — not by a full `docker compose up` of every stack. The one Docker build
-step this stage did run is `docker/coordinator.Dockerfile`'s `planner` stage with the
-`coordinator` named context, which is where `cargo metadata` first has to resolve the
-patched path: it succeeds, and the context transfer honours the coordinator checkout's
-`.dockerignore` (about 1 MB, not its `target/`).
+**What is not covered by a run of the shipped stacks.** No image can be built until the
+`coordinator` named context is satisfied (below), so the compose stacks of this change have
+been validated with `docker compose config`, with the entrypoint's emitted argv checked
+directly, and with the native rehearsals earlier stages recorded — not by a full
+`docker compose up` of every stack. The one Docker build step this stage did run is
+`docker/coordinator.Dockerfile`'s `planner` stage with the `coordinator` named context,
+back when the patch table named a path and `cargo metadata` had to resolve it: it succeeds,
+and the context transfer honours the coordinator checkout's `.dockerignore` (about 1 MB,
+not its `target/`).
 
-**Building images during the patch window (§F.5).** Nothing in a Docker build context can
-see the absolute path the `[patch.crates-io]` tables name, so every Dockerfile that
-resolves a workspace copies a BuildKit named context, `coordinator`, to exactly that path
-before the first `cargo` invocation of the stage, and every compose build block declares
-that context from `STOFFEL_COORDINATOR_CONTEXT` with `:?`. The images therefore build **only**
-on a machine holding the `0.3.0` checkout, and only when that variable points at it:
+**Building images during the patch window (§F.5).** The `[patch.crates-io]` tables name a
+git branch, which a `cargo` invocation inside an image fetches for itself, so no part of a
+build context supplies the coordinator. What a build context must still supply is the
+`coordinator` named context the `COPY --from=coordinator` lines and the compose
+`additional_contexts` entries demand — residue of the path-shaped form of those tables,
+read by nothing (§F.5). Until those lines go, the variable has to be set to some directory
+for compose to start a stack:
 
 ```bash
-export STOFFEL_COORDINATOR_CONTEXT=/path/to/stoffel-mpc-coordinator   # the 0.3.0 checkout
+export STOFFEL_COORDINATOR_CONTEXT=/path/to/stoffel-mpc-coordinator   # read by no build
 docker compose up --build
 ```
 
 Outside compose the same context is passed with
 `docker build --build-context coordinator=$STOFFEL_COORDINATOR_CONTEXT …`. A plain
-`docker build .` cannot build these images, CI's `docker-build` job cannot build them —
-`COPY --from=coordinator` resolves `coordinator` as an image reference there — and the Rust
-CI jobs cannot resolve the patch path either. All of that ends with the patch: when `0.3.0`
-is published, the `[patch.crates-io]` tables, the `COPY --from=coordinator` lines and the
-`additional_contexts` entries are deleted together and both lockfiles are re-locked.
+`docker build .` cannot build these images, and CI's `docker-build` job cannot build
+them — `COPY --from=coordinator` resolves `coordinator` as an image reference there. That
+failure
+ends with the `COPY` lines and the `additional_contexts` entries, which nothing depends on;
+the `[patch.crates-io]` tables and the re-lock of both lockfiles wait for `0.3.0`.
 
 **Other open items.** `crates/stoffel-lang/examples/run_mpc_local.sh` runs the wrapper
 binary as a host-process coordinator instead of `stoffel run --local` (§F.2), because the
 local runner requires consistent party returns and that script's default program,
-`mpc_runtime_info`, returns a different value per party. Invitation admission has no
-shipped stack: the wrapper, the client flag (`--invitation`, `STOFFEL_INVITATION`) and the
-coordinator's `issue-invitation` binary are all in place, and a stack registers it with
-`STOFFEL_ADMISSION=invitation` plus an issuer certificate mounted into its coordinator
-service, but no compose file does so by default.
+`mpc_runtime_info`, returns a different value per party.
+
+**Removed in review: the `Invitation` admission policy.** It was specified in §C.3 and
+implemented across both repositories — the `InvitationIssuer`, `Invitation`,
+`SignedInvitation` types, the `issue-invitation` binary, the `--invitation-issuer-cert`
+and `--invitation` flags, error codes 26-28 — and never shipped in any stack. Review
+judged it a hand-rolled certificate authority that added a trusted principal to a change
+whose thesis is that no principal holds extra trust, so all of it was deleted: types,
+errors, wire fields, CLI flags, environment variables, compose entries and tests. The two
+operator-facing names, `--invitation` and `STOFFEL_INVITATION`, are refused by name rather
+than ignored (§C.3, §D.3). Error
+codes 26, 27 and 28 are retired, never reused. The digest tags for `PreRegistered` (0) and
+`Open` (1) in §D.6 are unchanged, so no shipped execution's admission-agreement digest
+moved. The replacement — `AdmissionPolicy::TrustedIssuer` over rustls'
+`WebPkiClientVerifier`, with a real X.509 CA — is **future work and is not implemented**;
+§C.3 records it. The shipped policies are `PreRegistered` and `Open`.
 
 ## 10. Post-audit hardening (2026-09-20)
 

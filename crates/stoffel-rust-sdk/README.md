@@ -112,7 +112,7 @@ assert_eq!(result, vec![Value::I64(100)]);
   `runtime.offchain_client_config(slot)` derives the backend, the slot to ask
   for and the typed client IO; callers then provide the coordinator address and
   certificate, the execution id, node RPC addresses and client identity
-  material (optionally an invitation, `expected_program_hash` and
+  material (optionally `expected_program_hash` and
   `expected_roster_digest`) before calling `client.run_typed(...)`,
   `client.submit_typed(...)`, `client.run(...)`, or `client.submit(...)`.
   `n` and `t` are the coordinator's node roster: a roster the client's backend

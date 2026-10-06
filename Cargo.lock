@@ -1776,7 +1776,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -5688,7 +5688,7 @@ dependencies = [
 [[package]]
 name = "stoffel-mpc-coordinator-off-chain"
 version = "0.3.0"
-source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#272e4933c4aee6e8f33da7d1c877cb30881133cb"
+source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#59fb7f502d3da1c7f7223ba7ba3249f47aab8d21"
 dependencies = [
  "ark-bls12-381",
  "ark-ff 0.5.0",
@@ -5710,7 +5710,7 @@ dependencies = [
 [[package]]
 name = "stoffel-mpc-coordinator-shared"
 version = "0.3.0"
-source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#272e4933c4aee6e8f33da7d1c877cb30881133cb"
+source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#59fb7f502d3da1c7f7223ba7ba3249f47aab8d21"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -5860,7 +5860,6 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde",
- "serde_json",
  "stoffel-mpc-coordinator-off-chain",
  "stoffel-mpc-coordinator-shared",
  "stoffel-vm",
@@ -6893,7 +6892,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

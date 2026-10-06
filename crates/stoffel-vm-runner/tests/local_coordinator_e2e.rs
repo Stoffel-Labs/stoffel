@@ -10,9 +10,8 @@ use stoffel_mpc_coordinator_shared::{
 };
 use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 use stoffel_vm_runner::{
-    run_offchain_client, CoordinatorClientError, LocalAdmission, LocalClientInput,
-    LocalCoordinatorRunOutput, LocalCoordinatorRunner, LocalCoordinatorRunnerError,
-    LocalPartyOutput, LocalTopology,
+    run_offchain_client, LocalAdmission, LocalClientInput, LocalCoordinatorRunOutput,
+    LocalCoordinatorRunner, LocalPartyOutput, LocalTopology,
 };
 use stoffel_vm_types::compiled_binary::{ClientIoManifest, ClientIoSchema, CompiledBinary};
 use stoffel_vm_types::core_types::{ShareType, Value};
@@ -356,7 +355,6 @@ def main() -> int64:
                 slot_one_key,
                 AssociationRequest {
                     slot: Some(ClientIndex(1)),
-                    invitation: None,
                 },
                 &slot_one_inputs,
                 timeout,
@@ -365,10 +363,7 @@ def main() -> int64:
                 &endpoint,
                 first_free_cert,
                 first_free_key,
-                AssociationRequest {
-                    slot: None,
-                    invitation: None,
-                },
+                AssociationRequest { slot: None },
                 &first_free_inputs,
                 timeout,
             ),
@@ -451,10 +446,7 @@ def main() -> int64:
         )
     };
     let (cert_der, key_der) = mint();
-    let request = AssociationRequest {
-        slot: None,
-        invitation: None,
-    };
+    let request = AssociationRequest { slot: None };
     let connect = |cert_der: Vec<u8>, key_der: Vec<u8>| {
         let endpoint = &endpoint;
         let coordinator_pin = &coordinator_pin;
@@ -557,7 +549,15 @@ def main() -> int64:
 /// (docs/design/bootnode-elimination.md §9.H): a client's node RPC addresses
 /// are hints, and every leg is pinned to a member of the roster the pinned
 /// coordinator served. A node RPC listener presenting a certificate minted
-/// here — no roster member — is refused as `ServerPinMismatch`, not believed.
+/// here — no roster member — never becomes a leg.
+///
+/// Retargeted in review (§10): the impostor's leg is DROPPED, not fatal to the
+/// client. A node owns its own listener, so making a pin mismatch fail the whole
+/// call handed any single roster member a denial-of-service switch over every
+/// client. What the pin guarantees is that the impostor is never believed; the
+/// run completing over the remaining four legs is the point, not a weakening of
+/// it. The old assertion — a `ServerPinMismatch` error out of the client — is
+/// exactly the behaviour that was removed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "starts a real localhost coordinator, MPC party mesh, and an impostor node RPC listener"]
 async fn a_local_client_refuses_a_node_rpc_listener_outside_the_served_roster() {
@@ -606,28 +606,33 @@ def main() -> int64:
     endpoint.node_rpc_addresses[0] = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let client = rcgen::generate_simple_self_signed(vec!["client".to_owned()])
         .expect("mint a client certificate");
-    let refused = run_offchain_client(
+    let completed = run_offchain_client(
         &endpoint,
         client.cert.der().to_vec(),
         client.signing_key.serialize_der(),
-        AssociationRequest {
-            slot: None,
-            invitation: None,
-        },
+        AssociationRequest { slot: None },
         &["42".to_owned()],
         timeout,
     )
     .await
-    .expect_err("a leg answered by a key outside the roster is refused");
-    assert!(
-        matches!(
-            refused,
-            LocalCoordinatorRunnerError::Client(CoordinatorClientError::NodeRpc(
-                CoordinatorError::ServerPinMismatch { .. }
-            ))
-        ),
-        "{refused:?}"
+    .expect(
+        "the impostor's leg is dropped and the run completes over the remaining roster members",
     );
+    // Admission is unaffected: the client still gets its slot and its input range.
+    assert_eq!(completed.admission.client_index, ClientIndex(0));
+    assert_eq!(
+        completed
+            .admission
+            .input_range
+            .expect("the client was admitted with an input range")
+            .count
+            .get(),
+        1
+    );
+    // The impostor served nothing: had it been believed, it would have had to supply a
+    // mask share for this client's reserved index, and the run could not have completed
+    // without the genuine node's share. Reaching here at all is that proof.
+    drop(_impostor);
     // The run is abandoned: dropping it kills every party.
     drop(running);
 }

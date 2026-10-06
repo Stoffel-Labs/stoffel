@@ -132,7 +132,7 @@ services:
   # (docs/design/bootnode-elimination.md §9.F.1). Client slots are registered
   # as `<inputs>:<outputs>` entries (STOFFEL_CLIENT_IO) under
   # STOFFEL_ADMISSION — pre-registered by default, with STOFFEL_CLIENT_CERTS
-  # naming the certificate bound to each slot in order; open or invitation with
+  # naming the certificate bound to each slot in order; open with
   # both deadline variables. None is registered by default because nothing here
   # uses one: this stack runs no client service, and the default program (the
   # AES circuit) sends nothing to a client. A benchmark program that does
@@ -179,7 +179,6 @@ services:
           --client-io "${STOFFEL_CLIENT_IO-}" \
           --client-certs "${STOFFEL_CLIENT_CERTS-}" \
           --admission "${STOFFEL_ADMISSION:-pre-registered}" \
-          --invitation-issuer-cert "${STOFFEL_INVITATION_ISSUER_CERT-}" \
           --association-deadline-secs "${STOFFEL_ASSOCIATION_DEADLINE_SECS-}" \
           --input-deadline-secs "${STOFFEL_INPUT_DEADLINE_SECS-}" &
         COORD_PID=$$!

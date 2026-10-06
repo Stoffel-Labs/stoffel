@@ -180,15 +180,11 @@ services:
       # How clients are admitted to the slots (§9.C.2, §9.F.3): pre-registered
       # (the default) binds STOFFEL_CLIENT_CERTS to the slots in order; open
       # names no client, so any certificate holder that pins this coordinator
-      # may bind a free slot; invitation admits holders of an invitation that
-      # STOFFEL_INVITATION_ISSUER_CERT's key signed (mount that certificate
-      # into this service). Open and invitation need both deadlines, in seconds
+      # may bind a free slot. Open needs both deadlines, in seconds
       # after the coordinator starts. An empty value is an absent flag, and a
       # flag the chosen admission does not read makes the coordinator exit 2.
       - --admission
       - "${STOFFEL_ADMISSION:-pre-registered}"
-      - --invitation-issuer-cert
-      - "${STOFFEL_INVITATION_ISSUER_CERT-}"
       - --association-deadline-secs
       - "${STOFFEL_ASSOCIATION_DEADLINE_SECS-}"
       - --input-deadline-secs
