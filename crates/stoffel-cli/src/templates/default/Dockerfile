@@ -1,6 +1,6 @@
 # Builds deployable coordinator/node infrastructure around the already compiled
 # artifacts/program.stflb. Participant application clients are built separately.
-FROM rust:1.88-bookworm AS build
+FROM rust:1.94-bookworm AS build
 ARG STOFFEL_VERSION=0.1.2
 WORKDIR /app
 RUN cargo install stoffel-vm-runner --version "=${STOFFEL_VERSION}" --locked
