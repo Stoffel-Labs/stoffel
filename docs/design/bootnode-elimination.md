@@ -1702,11 +1702,12 @@ implementation, with the revocation and expiry semantics that come with it. Unti
 shipped policies are `PreRegistered` and `Open` (§C.2), and §C.2's advice stands: run
 `Open` on a private network, behind an authenticating front end, or in tests.
 
-The flags and variables the policy took do not disappear quietly: `stoffel-run` refuses
-`--invitation` by name (§D.3) and `docker/entrypoint.sh` refuses `STOFFEL_INVITATION` the
-same way, so a stack still carrying either is told what happened instead of running with
-the value ignored. The coordinator wrapper takes no `--invitation-issuer-cert` and exits
-non-zero on it, as on any unknown flag.
+The flags and variables the policy took are gone outright, with no refusal-by-name guard
+left behind: `--invitation`, `--invitation-issuer-cert` and `STOFFEL_INVITATION` are simply
+not arguments any more, and a stack still passing one gets the ordinary unknown-argument
+error. The removed-flag guards elsewhere in §D.3 exist for flags that shipped in a release
+and whose users need redirecting; `Invitation` only ever existed on this branch, so a
+guard naming it would advertise a mechanism nobody could have used.
 
 The section letters after this one are unchanged. C.4-C.10 are cross-referenced from code
 comments in both repositories, so the gap is kept deliberately rather than renumbering.
@@ -2801,7 +2802,6 @@ Party mode (`stoffel-run <program> --peers …`), in this order and no other:
 | `--client-roster`, `--client-input-slots`, `--client-input-count` (`STOFFEL_CLIENT_INPUT_COUNT`), `--client-input-total` | **removed**; the layout is `get_execution_summary`'s |
 | `--n-parties`, `--threshold` / `STOFFEL_N_PARTIES`, `STOFFEL_THRESHOLD` | **removed** in party and client mode — `--peers` now always comes with `--off-chain-coord` — so `n` and `t` have exactly one source |
 | `--preproc-store` / `STOFFEL_PREPROC_STORE` | **removed** (§C.9 part 4, stage V-0) |
-| `--invitation` / `STOFFEL_INVITATION` | **removed in review**, fails by name; the `Invitation` policy it fed never shipped (§C.3) |
 | `--timestamp` / `STOFFEL_TIMESTAMP` | **removed**. Emitted by the entrypoint (`docker/entrypoint.sh:274`, `:342`), the SDK server (`crates/stoffel-rust-sdk/src/server.rs:1039-1040`) and `local_runner` (`local_runner.rs:589-590`), but `stoffel-run` has no parser arm for it (`stoffel-run.rs:4045-4250` falls to `_ => {}`), so its value only ever landed among the positional arguments (`:4033-4036`), and no coordinator version takes a timestamp |
 
 `--expect-roster-digest`, `--expect-n-parties` and `--expect-threshold` are defense in
@@ -2825,7 +2825,6 @@ Removed flags use the existing `fail_removed_flag` (`stoffel-run.rs:960`), which
 | `--n-parties`, `--threshold` | `n and t come from the coordinator's node roster. To refuse a roster of another size, pass --expect-n-parties and --expect-threshold.` |
 | `--preproc-store` | `Preprocessing material is never stored between executions: a stored item could be drawn by a second execution (docs/design/bootnode-elimination.md §9.C.9). Remove the flag.` |
 | `--timestamp` | `No coordinator takes a timestamp; an execution's deadlines are part of its registration. Remove the flag.` |
-| `--invitation` | `Invitation admission was removed in review and never shipped. A client's slot is the one its certificate is pre-registered to, the one --client-slot <index> names, or under open admission the lowest-numbered free one.` |
 
 The existing refusals whose hints name flags this section removes are rewritten, so an
 operator is never sent from one refusal to the next:
@@ -4440,10 +4439,16 @@ implemented across both repositories — the `InvitationIssuer`, `Invitation`,
 and `--invitation` flags, error codes 26-28 — and never shipped in any stack. Review
 judged it a hand-rolled certificate authority that added a trusted principal to a change
 whose thesis is that no principal holds extra trust, so all of it was deleted: types,
-errors, wire fields, CLI flags, environment variables, compose entries and tests. The two
-operator-facing names, `--invitation` and `STOFFEL_INVITATION`, are refused by name rather
-than ignored (§C.3, §D.3). Error
-codes 26, 27 and 28 are retired, never reused. The digest tags for `PreRegistered` (0) and
+errors, wire fields, CLI flags, environment variables, compose entries and tests.
+
+No deprecation hint survives. A first pass left refusal-by-name guards for `--invitation`
+and `STOFFEL_INVITATION`, a `--admission invitation` invalid-value assertion, and the
+retired error codes named after the mechanism. Those were removed too: a guard exists to
+redirect someone whose working configuration a release broke, and `Invitation` never
+reached a release — it was added and deleted on this branch. A guard naming it would
+advertise a mechanism nobody could have used, and would be the one trace of it left in the
+tree. The flags are now ordinary unknown arguments. Error codes 26, 27 and 28 stay
+unallocated and unnamed. The digest tags for `PreRegistered` (0) and
 `Open` (1) in §D.6 are unchanged, so no shipped execution's admission-agreement digest
 moved. The replacement — `AdmissionPolicy::TrustedIssuer` over rustls'
 `WebPkiClientVerifier`, with a real X.509 CA — is **future work and is not implemented**;

@@ -219,20 +219,28 @@ jobs:
     # build against the unpublished stoffel-mpc-coordinator 0.3.0, copied into
     # the build from a BuildKit named context called `coordinator`
     # (`COPY --from=coordinator` in the Dockerfile). The coordinator repository
-    # is public, so this job checks it out at the revision Cargo.lock pins and
-    # passes it as that context; without it `coordinator` resolves as an image
+    # is public, so this job checks it out at the revision Cargo.lock pins
+    # (read from the lockfile) and passes it as that context; without it `coordinator` resolves as an image
     # reference and the build fails. Delete the checkout, both `build-contexts:`
     # entries and this note with the patch; do not drop the COPY instead.
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Read from Cargo.lock rather than written here, so the context cannot
+      # drift from the revision the [patch.crates-io] entries resolve to.
+      - name: Resolve the coordinator revision Cargo.lock pins
+        id: coordinator
+        run: |
+          rev="$(grep -m1 -o 'stoffel-mpc-coordinator\.git?[^#"]*#[0-9a-f]\{40\}' Cargo.lock | sed 's/.*#//')"
+          test -n "$rev" || { echo "Cargo.lock pins no stoffel-mpc-coordinator git revision" >&2; exit 1; }
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
       - name: Check out the coordinator build context
         uses: actions/checkout@v4
         with:
           repository: Stoffel-Labs/stoffel-mpc-coordinator
-          # The revision Cargo.lock pins for the feature/no-bootnode [patch.crates-io] entries.
-          ref: 59fb7f502d3da1c7f7223ba7ba3249f47aab8d21
+          ref: ${{ steps.coordinator.outputs.rev }}
           path: .coordinator-context
 
       - name: Set up Docker Buildx

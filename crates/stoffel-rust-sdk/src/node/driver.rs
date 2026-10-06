@@ -1376,12 +1376,6 @@ const REMOVED_FLAGS: &[(&str, &str)] = &[
         "--outputs",
         "A client's output count comes from its admission.",
     ),
-    (
-        "--invitation",
-        "Invitation admission was removed in review and never shipped. A client's slot is \
-         the one its certificate is pre-registered to, the one --client-slot <index> names, \
-         or under open admission the lowest-numbered free one.",
-    ),
     ("--expected-client-count", SLOT_LAYOUT_HINT),
     (
         "--bootnode",
