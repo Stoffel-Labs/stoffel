@@ -16,4 +16,5 @@ COPY --from=build /usr/local/cargo/bin/stoffel-run /usr/local/bin/stoffel-run
 COPY --from=build /app/target/release/stoffel-coordinator /usr/local/bin/stoffel-coordinator
 COPY --from=build /app/target/release/stoffel-server /usr/local/bin/stoffel-server
 COPY --from=build /app/artifacts/program.stflb /app/artifacts/program.stflb
+COPY --from=build /app/Stoffel.toml /app/Stoffel.toml
 CMD ["stoffel-coordinator", "serve"]
