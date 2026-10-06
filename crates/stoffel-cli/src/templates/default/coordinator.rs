@@ -134,7 +134,9 @@ fn deployment_dir() -> PathBuf {
     project_root().join("deploy/local")
 }
 
-fn identity(name: &str) -> Result<Arc<rcgen::CertifiedKey<rcgen::KeyPair>>, Box<dyn std::error::Error>> {
+fn identity(
+    name: &str,
+) -> Result<Arc<rcgen::CertifiedKey<rcgen::KeyPair>>, Box<dyn std::error::Error>> {
     let subject = name.replace('-', ".");
     let certified = rcgen::generate_simple_self_signed(vec![format!("{subject}.local")])?;
     Ok(Arc::new(certified))
@@ -243,6 +245,46 @@ pub fn prepare_development() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_vec_pretty(&deployment)?,
     )?;
     Ok(())
+}
+
+pub fn validate_deployment() -> Result<boolean, Box<dyn std::error::Error>> {
+    let config = settings()?;
+    let dep_dir = deployment_dir();
+    let (coordinator_port, node_bind_addresses, servers, node_rpc_addresses) =
+        development_addresses(config.parties)?;
+    if !config.exists() {
+        return Err(
+            "Stoffel.toml doesn't exist in this project. Please run stoffel init again.".into(),
+        );
+    }
+    if dep_dir.exists() {
+        let required = std::iter::once("coordinator.cert.der".to_owned())
+            .chain(std::iter::once("coordinator.key.der".to_owned()))
+            .chain(std::iter::once("client-0.cert.der".to_owned()))
+            .chain(std::iter::once("client-0.key.der".to_owned()))
+            .chain((0..config.parties).flat_map(|party| {
+                [
+                    format!("node-{party}.cert.der"),
+                    format!("node-{party}.key.der"),
+                ]
+            }))
+            .chain(std::iter::once("deployment.json".to_owned()));
+        for name in required {
+            if !dep_dir.join(&name).exists() {
+                return Err(format!(
+                    "{} is incomplete; remove it and rerun the prepare command",
+                    dep_dir.display()
+                )
+                .into());
+            }
+        }
+        let deployment: DeploymentFile =
+            serde_json::from_slice(&std::fs::read(dep_dir.join("deployment.json"))?)?;
+        if deployment.parties != config.parties || deployment.threshold != config.threshold {
+            return Err("Stoffel.toml changed after development identities were prepared; remove deploy/local and prepare again".into());
+        }
+    }
+    Ok(true)
 }
 
 pub async fn start() -> Result<DevelopmentCoordinator, Box<dyn std::error::Error>> {
@@ -366,7 +408,6 @@ async fn wait_ready() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 #[allow(dead_code)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -376,7 +417,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Prepared development identities and deploy/local/deployment.json");
         }
         Some("serve") => {
-            prepare_development()?;
+            let validated = validate_development()?;
             let _coordinator = start().await?;
             eprintln!("Coordinator started; press Ctrl-C to stop");
             tokio::signal::ctrl_c().await?;
