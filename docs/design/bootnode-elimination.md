@@ -4122,8 +4122,11 @@ While the patch exists:
   build context supplies the dependency; a private repository would need credentials in
   the build instead, which only `Dockerfile` and `Dockerfile.benchmark` arrange
   (`--mount=type=ssh`).
-- **The `coordinator` named context is inert**, and is residue of the path-shaped form
-  this table used to take. `Dockerfile` (`:40`), `Dockerfile.benchmark` (`:30`, `:45`) and
+- **The `coordinator` named context does not feed the Rust build**, and is residue of the
+  path-shaped form this table used to take. It is nonetheless supplied rather than removed:
+  commit fb64966 gives the Docker Build job the context by checking the (public) coordinator
+  repository out at the revision `Cargo.lock` pins. The `COPY` stays; it is removed together
+  with the patch table once 0.3.0 is published. `Dockerfile` (`:40`), `Dockerfile.benchmark` (`:30`, `:45`) and
   `docker/coordinator.Dockerfile` (`:33`, `:51`) still copy a BuildKit named context to
   the path that form named,
 

@@ -33,11 +33,13 @@ RUN printf '%s\n' \
 RUN mkdir -p ~/.ssh && \
     ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true
 
-# TEMPORARY — docs/design/bootnode-elimination.md §9.F.5, and inert. The workspace's
+# TEMPORARY — docs/design/bootnode-elimination.md §9.F.5. The workspace's
 # [patch.crates-io] names the coordinator's feature/no-bootnode branch, which cargo
 # fetches itself, so nothing reads this path: the copy is residue of the earlier
-# path-shaped patch. Delete it with that table, or before — it only costs every
-# build the named context it cannot start without.
+# path-shaped patch and does not feed the Rust build. It stays regardless. CI
+# supplies the `coordinator` named context (see .github/workflows/ci.yml), so the
+# copy resolves; do NOT drop it as a way of fixing a build. Remove it together with
+# the patch table once coordinator 0.3.0 is published.
 COPY --from=coordinator . /Users/gabriel/RustroverProjects/stoffel-mpc-coordinator-roster-admission
 
 # Build the release binary
