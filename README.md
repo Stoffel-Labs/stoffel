@@ -17,12 +17,11 @@ language and compiler down to the runtime and the networking/MPC layer:
 |---------|-------|------------|
 | **Stoffel CLI** | `crates/stoffel-cli` | The Cargo-like `stoffel` command for creating, building, and running MPC projects |
 | **StoffelLang** | `crates/stoffel-lang` | The `stoffel` language compiler (`.stfl` → `.stflb` bytecode) |
-| **Stoffel SDK** | `crates/stoffel-rust-sdk` | The Rust SDK (`stoffel` crate) for embedding compilation, execution, and MPC config in apps |
+| **Stoffel SDK** | `crates/stoffel-rust-sdk` | The Rust SDK (`stoffel` crate) for embedding compilation, execution, and MPC config in apps; its `stoffel::node` module is the local coordinator runner and the MPC party/client node driver behind `stoffel run-node` |
 | **Stoffel VM** | `crates/stoffel-vm` | The register-based VM runtime, networking, and MPC backends (HoneyBadger, AVSS), plus the C FFI |
 
 Supporting crates:
 
-- `crates/stoffel-vm-runner`: the `stoffel-run` binary — local runner and distributed MPC party/client node
 - `crates/stoffel-vm-types`: shared VM types, the instruction set, runtime `Value`s, and the compiled bytecode format
 - `crates/stoffel-bindgen`: build-time generation of typed Rust bindings for Stoffel programs
 - `include/`: the public C header and FFI notes for embedding the VM from C-compatible environments
@@ -32,7 +31,7 @@ StoffelLang source (.stfl)
         │  stoffel build / stoffel-lang
         ▼
 Compiled bytecode (.stflb)        ← stoffel-vm-types::compiled_binary
-        │  stoffel run / stoffel-run / Stoffel SDK
+        │  stoffel run / stoffel run-node / Stoffel SDK
         ▼
 Stoffel VM  ── local execution  (clear or simulated MPC)
             └─ distributed MPC  (HoneyBadger / AVSS over QUIC)
@@ -61,12 +60,10 @@ cd hello-mpc
 stoffel run --input a=40 --input b=2
 ```
 
-> **Runner caveat:** local runs need the `stoffel-run` MPC runner. The installer
-> drops it next to `stoffel`, and the CLI discovers it automatically. If you
-> installed `stoffel` another way, Stoffel also looks for `stoffel-run` on your
-> `PATH` (e.g. after `cargo install stoffel-vm-runner`), or
-> you can point at a specific binary with `--runner <path>` or the
-> `STOFFEL_RUN_BIN` environment variable.
+> **MPC parties:** the `stoffel` binary is the whole install. Local MPC runs
+> spawn each party as `stoffel run-node`, using the `stoffel` executable that is
+> running, so there is no separate runner to install. Pass `--runner <path>` (or
+> set `STOFFEL_RUN_BIN`) to use a different `stoffel` build for the parties.
 
 To build from source instead, see [Build and Test](#build-and-test).
 
@@ -77,12 +74,14 @@ It reads `Stoffel.toml`, defaults to `src/main.stfl`, and writes bytecode to
 `target/debug/<package>.stflb` or `target/release/<package>.stflb`.
 
 > **Local runner:** local execution (`stoffel run` without `--network`, and
-> `stoffel dev`) drives the `stoffel-run` MPC runner. Stoffel resolves it in order:
-> an explicit `--runner <path>`, the `STOFFEL_RUN_BIN` environment variable, a
-> `stoffel-run` sitting next to the `stoffel` binary (where the installer puts it),
-> a `stoffel-run` on your `PATH` (e.g. via `cargo install stoffel-vm-runner`),
-> then a `stoffel-run` built in the current
-> Cargo workspace. See [Build and Test](#build-and-test) to build one from source.
+> `stoffel dev`) spawns each MPC party as `stoffel run-node`. The CLI uses its
+> own executable for the parties unless `--runner <path>` names another `stoffel`
+> binary. The SDK (`execute_local`, `LocalCoordinatorRunner`) resolves the
+> `stoffel` binary in order: an explicit `local_runner_path(...)` /
+> `runner_path(...)`, the `STOFFEL_RUN_BIN` environment variable, a `stoffel`
+> next to the current executable, a `stoffel` on your `PATH`, then a `stoffel`
+> built in the current Cargo workspace (`target/{debug,release}/stoffel`). See
+> [Build and Test](#build-and-test) to build one from source.
 
 ### Create a project
 
@@ -218,8 +217,8 @@ assert_eq!(result[0].as_i64(), Some(100));
 ```
 
 For local MPC smoke runs, use the same builder and call `execute_local().await`.
-This starts real localhost VM parties through `stoffel-vm`'s local coordinator
-runner when a built `stoffel-run` binary is available:
+This starts real localhost VM parties (`stoffel run-node` processes) through the
+SDK's local coordinator runner when a built `stoffel` CLI binary is available:
 
 ```rust
 use stoffel::prelude::*;
@@ -386,21 +385,22 @@ let binary = CompiledBinary::from_vm_functions(&functions);
 save_to_file(&binary, "program.stflb").unwrap();
 ```
 
-## VM Runner CLI (`stoffel-run`)
+## MPC Node (`stoffel run-node`)
 
-`stoffel-vm-runner` provides `stoffel-run`, which executes a compiled Stoffel
-bytecode file locally or as part of a distributed MPC session.
+`stoffel run-node` executes a compiled Stoffel bytecode file locally or as one
+party or client of a distributed MPC session. It is a subcommand of the
+`stoffel` CLI; the driver lives in the SDK as `stoffel::node::run_node`.
 
 ```bash
-cargo build --release -p stoffel-vm-runner
-cargo run -p stoffel-vm-runner --bin stoffel-run -- --help
+cargo build --release -p stoffel-cli
+./target/release/stoffel run-node --help
 ```
 
 Run a compiled program locally (default entry function is `main`):
 
 ```bash
-./target/release/stoffel-run path/to/program.stflb
-./target/release/stoffel-run path/to/program.stflb main --trace-instr
+./target/release/stoffel run-node path/to/program.stflb
+./target/release/stoffel run-node path/to/program.stflb main --trace-instr
 ```
 
 Run one party of a 3-party MPC session. Every party is spelled the same way:
@@ -413,7 +413,7 @@ anything, and refuses to run if its own certificate is not one of them.
 ```bash
 COORD="--off-chain-coord 127.0.0.1:31415 --coord-cert coordinator.crt --execution-id $EXEC"
 
-./target/release/stoffel-run path/to/program.stflb main \
+./target/release/stoffel run-node path/to/program.stflb main \
   --party-id 0 \
   --bind 127.0.0.1:9001 \
   $COORD \
@@ -427,7 +427,7 @@ Join as another party — the same command line with its own identity, bind
 address, peer list and epoch store:
 
 ```bash
-./target/release/stoffel-run path/to/program.stflb main \
+./target/release/stoffel run-node path/to/program.stflb main \
   --party-id 1 \
   --bind 127.0.0.1:9002 \
   $COORD \
@@ -445,7 +445,7 @@ not appear in any configuration: under open admission any certificate holder
 that pins the coordinator may bind a free slot:
 
 ```bash
-./target/release/stoffel-run --client \
+./target/release/stoffel run-node --client \
   --inputs 10,20 \
   $COORD \
   --cert client0.crt --key client0.der \
@@ -456,7 +456,7 @@ AVSS output-client mode can reconstruct private field outputs; the output
 count is the client's admission:
 
 ```bash
-./target/release/stoffel-run --client \
+./target/release/stoffel run-node --client \
   --mpc-backend avss \
   --mpc-curve secp256k1 \
   --inputs 0x<sha256-tbs-digest-hex> \
@@ -474,12 +474,12 @@ Notes:
 - The seed list is hints, not membership: every dial is pinned to a roster certificate, so a wrong or hostile address costs one failed handshake and nothing else. A **missing** address is not as cheap. A first mesh forms out of dials alone, and the peer book is exchanged inside the join handshake — after the mesh is already complete — so peer exchange cannot supply an address the mesh needs in order to form; it is what lets a later join in the same process start from less. The requirement is per pair: for every two parties, at least one of them must hold a hint for the other. Listing all `n-1` peers at every party always satisfies it, and is what every shipped stack does; a shorter list is accepted but warned about, because the parties it leaves out have to dial this node themselves.
 - `--coord-cert <path>` is the coordinator's DER certificate, and is required with `--off-chain-coord` (and refused without it). Coordinator `0.3.0` pins its key on every connection and has no unpinned client; a server presenting another key is refused with exit 13. In the Docker flows it is `STOFFEL_COORD_CERT`, which the entrypoint requires whenever `STOFFEL_COORD_ADDR` is set. A coordinator client (docs/design/bootnode-elimination.md §9.E.1) reads the execution summary before it associates, since an association is irrevocable, and refuses (exit 2) an execution of another program than `--expect-program-hash <64-hex>` (`STOFFEL_EXPECT_PROGRAM_HASH`), a roster its backend cannot reconstruct at, a slot whose outputs cannot be sealed under the bound, and a slot that does not take its `--inputs`; a slot table past its bounds or an aborted execution exits 13. It then associates with a client slot — its pre-registered one, the one `--client-slot` (`STOFFEL_CLIENT_SLOT`) names, or under open admission the first free one — and its input range and output count are that admission, never a flag: `--client-index` and `--outputs` fail by name. A client of an output-only slot passes no `--inputs`. The coordinator's admission policies and the Docker coordinator's flags are described under [Docker Flows](#docker-flows). `LocalCoordinatorRunner` offers the same choice as `LocalAdmission::{PreRegistered, Open}`: under `Open`, `start()` returns a running coordinator whose `client_endpoint()` any client can pass to `run_offchain_client`.
 - A coordinated party trusts the coordinator's decisions but checks what it serves (docs/design/bootnode-elimination.md §9.D.6, §9.D.7). Before preprocessing it refuses an execution summary registered for another program than the one it loaded, a roster too small for its backend, a slot whose sealed outputs exceed the bound, or a slot table that contradicts the program's manifest (exit 13); the coordinator wrapper therefore takes `--program <path>` in every shipped stack, not a placeholder `--hash`. Mask count and preprocessing are sized from the registration. Every party then agrees the frozen client admissions, and later the masked inputs exactly as delivered, with every other party over the mesh (`STOFFEL_ADMISSIONS_AGREED_V1` / `STOFFEL_INPUTS_AGREED_V1` digest barriers) before it releases a mask share or unmasks an input, so a coordinator that tells parties different things stops the run. Inputs are stored and outputs sent by the agreed client slot; outputs come only from `send_to_client` — a returned share is revealed by the parties, not broadcast to clients — and every run finishes the coordinator's `ProgramFinished` round. `--client-input-total` and `--client-input-slots` fail by name: the slot layout is the registration.
-- The images contain no identity material. Every compose stack mounts certificates read-only one file at a time under `/app/ids`, gives each service only its own private key as a compose secret at `/run/secrets/<name>` (`STOFFEL_KEY`, `--server-key`), and publishes every port on `127.0.0.1` only: the keys under `ids/` are committed development fixtures, so a pin to them authenticates nothing on a reachable port. `crates/stoffel-vm-runner/tests/deployment_key_material.rs` enforces this (docs/design/bootnode-elimination.md §9.F.0). A real deployment mints each key on the host that uses it and distributes only certificates.
+- The images contain no identity material. Every compose stack mounts certificates read-only one file at a time under `/app/ids`, gives each service only its own private key as a compose secret at `/run/secrets/<name>` (`STOFFEL_KEY`, `--server-key`), and publishes every port on `127.0.0.1` only: the keys under `ids/` are committed development fixtures, so a pin to them authenticates nothing on a reachable port. `crates/stoffel-rust-sdk/tests/deployment_key_material.rs` enforces this (docs/design/bootnode-elimination.md §9.F.0). A real deployment mints each key on the host that uses it and distributes only certificates.
 - `STOFFEL_PEERS` is the Docker flows' spelling of `--peers`, and it is required for every non-client role. The entrypoint emits `--bind`, an advertise address on the *same* port it binds, `--peers`, `--off-chain-coord`, `--coord-cert`, `--execution-id`, `--cert` and `--key`; a party without `STOFFEL_COORD_ADDR` and `STOFFEL_COORD_CERT` is refused. `STOFFEL_ROLE=leader` is now only a label on a stack's first service: no party drives the coordinator's rounds. Every shipped compose stack runs a coordinator and forms a mesh: `docker-compose.yml`, `docker-compose.mesh.yml`, `docker-compose.avss.yml`, `docker-compose.benchmark.yml`, both `docker-compose.coordinator.reserve-index*.yml` files and the two `crates/stoffel-lang/examples/docker-compose.*.yml` stacks. `docker-compose.mesh.yml` is the fully symmetric one — every service is `STOFFEL_ROLE=party`, because nothing distinguishes one party from another. `docker-compose.nat.yml` was deleted with the `nat` feature (design doc §4), which never worked: nothing read the flags it set, and the topology it shipped required the leader to be publicly reachable anyway.
 - The entrypoint refuses `STOFFEL_AUTH_TOKEN`, `STOFFEL_BOOTSTRAP_ADDR`, `STOFFEL_ROLE=bootnode`, `STOFFEL_COORD_DRIVER`, `STOFFEL_ENABLE_NAT` and `STOFFEL_STUN_SERVERS` by name, and requires `STOFFEL_EXECUTION_ID` whenever `STOFFEL_COORD_ADDR` is set. A compose file that still sets one was configured for a topology that no longer exists, and starting anyway would turn that into a debugging session.
-- There is no `BIND_PORT + 1000` advertise convention any more. A party binds one socket and advertises the port it bound; the pairing existed only because a leader ran a bootnode on one port and its own listener on the other, and it was removed from all four of its homes at once (`stoffel-run`, the local runner, `docker/entrypoint.sh`, and the `Dockerfile`'s `EXPOSE`).
+- There is no `BIND_PORT + 1000` advertise convention any more. A party binds one socket and advertises the port it bound; the pairing existed only because a leader ran a bootnode on one port and its own listener on the other, and it was removed from all four of its homes at once (`stoffel run-node`, the local runner, `docker/entrypoint.sh`, and the `Dockerfile`'s `EXPOSE`).
 
-Direct client mode — a client dialing the node mesh — was removed (docs/design/bootnode-elimination.md §9.E.3): `stoffel-run --client` without `--off-chain-coord` exits 2 naming the flags to pass. A client associates with an execution through the coordinator, and every node leg it opens is pinned to a member of the node roster the pinned coordinator serves. It presents its certificate to the coordinator and to the nodes' RPC listeners, and no node lists it.
+Direct client mode — a client dialing the node mesh — was removed (docs/design/bootnode-elimination.md §9.E.3): `stoffel run-node --client` without `--off-chain-coord` exits 2 naming the flags to pass. A client associates with an execution through the coordinator, and every node leg it opens is pinned to a member of the node roster the pinned coordinator serves. It presents its certificate to the coordinator and to the nodes' RPC listeners, and no node lists it.
 - The CLI accepts any file path; this repository conventionally stores compiled fixtures as `.stflb`
 - `--mpc-backend` supports `honeybadger` and `avss` for client mode; `.stflb` party runs use the backend recorded in the program manifest and reject conflicting CLI overrides
 - `--mpc-curve` supports `bls12-381`, `bn254`, `curve25519`, `ed25519`, `secp256k1`, and `p-256` (`secp256r1`) for AVSS
@@ -526,7 +526,7 @@ STOFFEL_ADMISSION=open STOFFEL_ASSOCIATION_DEADLINE_SECS=600 STOFFEL_INPUT_DEADL
 
 A client container (`STOFFEL_ROLE=client`) needs `STOFFEL_COORD_ADDR`, `STOFFEL_COORD_CERT`, `STOFFEL_EXECUTION_ID`, `STOFFEL_SERVERS` (the parties' `STOFFEL_RPC_ADDR` listeners) and its own `STOFFEL_CERT` / `STOFFEL_KEY`; the entrypoint refuses it without them. `STOFFEL_INPUTS`, `STOFFEL_CLIENT_SLOT`, `STOFFEL_EXPECT_PROGRAM_HASH` and `STOFFEL_EXPECT_ROSTER_DIGEST` are optional and map to the flags of the same names.
 
-**Key material.** Certificates are mounted read-only, one file per mount, only where they are read: the coordinator gets the node certificates and, for the pre-registered recipes, the client certificates; a party gets the coordinator's certificate and its own; a client the same. Each service gets exactly its own private key as a compose secret, and every port is published on `127.0.0.1` only, because the keys under `ids/` are committed development fixtures. `crates/stoffel-vm-runner/tests/deployment_key_material.rs` enforces all of this, including that no party or client service is given another identity's certificate.
+**Key material.** Certificates are mounted read-only, one file per mount, only where they are read: the coordinator gets the node certificates and, for the pre-registered recipes, the client certificates; a party gets the coordinator's certificate and its own; a client the same. Each service gets exactly its own private key as a compose secret, and every port is published on `127.0.0.1` only, because the keys under `ids/` are committed development fixtures. `crates/stoffel-rust-sdk/tests/deployment_key_material.rs` enforces all of this, including that no party or client service is given another identity's certificate.
 
 **Test scripts.** `docker/test-coordinator-reserve-index.sh` runs the open-admission stack and checks that every party reveals `client[0] - client[1]` (`-10`; `STOFFEL_CLIENT0_SLOT=1 STOFFEL_CLIENT1_SLOT=0 EXPECTED_OUTPUT=10` flips it), that the coordinator registered open admission and served the expected roster, and — from the containers' actual mounts — that no party or client held any identity but its own and the coordinator's pin. `docker/test-coordinator-preproc-store.sh` runs the same stack twice over the same per-party volumes and checks that no preprocessing material is persisted or loaded (no preprocessing item may serve two executions, §9.C.9) and that the second run's session `instance_id` differs from the first's (the persisted epoch, blocker B5). `crates/stoffel-lang/examples/run_coordinator_compose.sh` runs the examples coordinator stack and checks the client's output and the parties' mounts.
 
@@ -536,7 +536,7 @@ The AVSS stack covers AVSS curves and local share storage:
 docker compose -f docker-compose.avss.yml up --build
 ```
 
-`docker-compose.avss.yml` mounts a per-party local data volume and forwards `STOFFEL_LOCAL_STORE` to `stoffel-run`.
+`docker-compose.avss.yml` mounts a per-party local data volume and forwards `STOFFEL_LOCAL_STORE` to `stoffel run-node`.
 
 The AVSS threshold ECDSA examples mirror the threshold signature fixtures:
 
@@ -567,12 +567,12 @@ The roster and admission contract lives in `stoffel-mpc-coordinator` `0.3.0`, wh
   ```
 
   Outside compose, pass it yourself: `docker build --build-context coordinator=$STOFFEL_COORDINATOR_CONTEXT -f docker/coordinator.Dockerfile .`
-- A plain `docker build .` without that context fails, and so does CI's `docker-build` job, on `COPY --from=coordinator` resolving `coordinator` as an image reference before any cargo runs. Deleting those `COPY` lines and the `additional_contexts` entries ends that failure on its own. The `[patch.crates-io]` tables go when `0.3.0` is published, and both lockfiles are re-locked then.
-- `cargo publish` of `stoffel-vm-runner` and `stoffel-rust-sdk` fails while the `=0.3.0` pins cannot be satisfied from crates.io — the correct failure.
+- A plain `docker build .` without that context fails on `COPY --from=coordinator` resolving `coordinator` as an image reference before any cargo runs; CI's `docker-build` job supplies the context for that reason. The `COPY` lines, the `additional_contexts` entries and the `[patch.crates-io]` tables go together when `0.3.0` is published, and both lockfiles are re-locked then.
+- `cargo publish` of `stoffel-rust-sdk` fails while the `=0.3.0` pins cannot be satisfied from crates.io — the correct failure.
 
 ### Still open
 
-- `stoffel-run --preproc-store` still persists HoneyBadger preprocessing material and loads it on the next run (stage V-0 of §9.1 is not done): a stored item could then serve a second execution. The entrypoint refuses `STOFFEL_PREPROC_STORE` and no stack sets it; do not pass the flag directly.
+- `stoffel run-node --preproc-store` still persists HoneyBadger preprocessing material and loads it on the next run (stage V-0 of §9.1 is not done): a stored item could then serve a second execution. The entrypoint refuses `STOFFEL_PREPROC_STORE` and no stack sets it; do not pass the flag directly.
 - The node binary still contains the branches for parties without a coordinator and for direct clients. Both are refused before they are reached, and their deletion (stage V-c) is not done.
 - `crates/stoffel-lang/examples/run_mpc_local.sh` runs its host-process parties against the wrapper binary as a host-process coordinator rather than through `stoffel run --local` (§9.F.2), because the local runner requires every party to return the same value and that script's default program does not.
 
@@ -609,7 +609,7 @@ cargo test -- --ignored
 Build the runtime and CLI in release mode:
 
 ```bash
-cargo build --release -p stoffel-vm -p stoffel-vm-runner
+cargo build --release -p stoffel-vm -p stoffel-cli
 ```
 
 HoneyBadger and AVSS backend code is built by default. Distributed party runs

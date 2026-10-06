@@ -5,7 +5,7 @@
 # commitment[0]. All parties should output the same public key.
 #
 # This stack is also the local-store persistence testbed: each party mounts a
-# named /app/data volume and passes STOFFEL_LOCAL_STORE to stoffel-run.
+# named /app/data volume and passes STOFFEL_LOCAL_STORE to stoffel run-node.
 #
 # Every party is coordinated (docs/design/bootnode-elimination.md §9.F.1): the
 # coordinator service below registers the execution — the program the parties

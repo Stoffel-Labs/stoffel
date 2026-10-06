@@ -62,8 +62,8 @@ Ciphertext : 69c4e0d86a7b0430d8cdb78070b4c55a
 ```
 
 ```bash
-# build the runner once
-cargo build --release -p stoffel-vm-runner --bin stoffel-run
+# build the stoffel CLI once (it runs each party as `stoffel run-node`)
+cargo build --release -p stoffel-cli --bin stoffel
 
 # from this directory
 ./run.sh

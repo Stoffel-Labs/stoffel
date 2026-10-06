@@ -14,6 +14,7 @@ const CIPHERTEXT_HEX: &str = "7649abac8119b246cee98e9b12e9197d";
 async fn main() -> stoffel::Result<()> {
     println!("Compiling {PROGRAM}");
 
+    // STOFFEL_RUN_BIN names a built stoffel CLI binary; each party runs as `stoffel run-node`.
     let program = ProgramClient::new(PROGRAM).local_runner_path_from_env("STOFFEL_RUN_BIN");
 
     let ciphertext = program.encrypt(PLAINTEXT_HEX, KEY_HEX).await?;

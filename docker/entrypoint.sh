@@ -54,7 +54,7 @@ validate_env() {
     # roster authority, and client participation is its per-execution
     # admission, so every variable that gave a container a roster, a party
     # count, a threshold, a timestamp or a client list of its own is refused by
-    # name, in both roles, rather than ignored. stoffel-run refuses the matching
+    # name, in both roles, rather than ignored. stoffel run-node refuses the matching
     # flags the same way.
     removed_variable_hint() {
         case "$1" in
@@ -108,7 +108,7 @@ validate_env() {
         exit 2
     fi
 
-    # Coordinator 0.3.0 has no connection without a pin: stoffel-run refuses
+    # Coordinator 0.3.0 has no connection without a pin: stoffel run-node refuses
     # --off-chain-coord without --coord-cert, and failing here names the
     # variable the operator has to set (docs/design/bootnode-elimination.md §9.A).
     if [ -n "${STOFFEL_COORD_ADDR:-}" ] && [ -z "${STOFFEL_COORD_CERT:-}" ]; then
@@ -119,7 +119,7 @@ validate_env() {
     fi
 
     # A mesh's membership is the coordinator's node roster, and nothing else;
-    # stoffel-run refuses --peers without --off-chain-coord, and failing here
+    # stoffel run-node refuses --peers without --off-chain-coord, and failing here
     # names the variables the operator has to set.
     if [ -n "${STOFFEL_PEERS:-}" ] && [ "${STOFFEL_ROLE}" != "client" ] \
         && { [ -z "${STOFFEL_COORD_ADDR:-}" ] || [ -z "${STOFFEL_COORD_CERT:-}" ]; }; then
@@ -140,7 +140,7 @@ validate_env() {
 
     # A client is admitted by the identity it presents: the coordinator binds
     # its certificate to a slot, and every node RPC leg delivers masks and
-    # outputs to that certificate only. stoffel-run requires both, and failing
+    # outputs to that certificate only. stoffel run-node requires both, and failing
     # here names the variables instead.
     if [ "${STOFFEL_ROLE}" = "client" ] \
         && { [ -z "${STOFFEL_CERT:-}" ] || [ -z "${STOFFEL_KEY:-}" ]; }; then
@@ -230,7 +230,7 @@ wait_for_host() {
 # Resolve one peer's host:port, waiting for the name to appear.
 #
 # A name that falls through unresolved would reach `--peers`, which parses
-# SocketAddrs and aborts the process on a hostname (`stoffel-run.rs`,
+# SocketAddrs and aborts the process on a hostname (`crates/stoffel-rust-sdk/src/node/driver.rs`,
 # `expect("Invalid --peers address")`). There is also no single address
 # `depends_on` can order the stack around — every party names every other party
 # — so this retry loop is what a mesh has instead. If the name never appears it
@@ -282,7 +282,7 @@ resolve_peer_addr() {
 }
 
 # Resolve every host:port in a comma-separated list: compose service names have
-# to become addresses before they reach stoffel-run, which parses --peers as
+# to become addresses before they reach stoffel run-node, which parses --peers as
 # SocketAddrs. A single unresolvable entry fails the whole list rather than being
 # passed through.
 resolve_peer_list() {
@@ -310,7 +310,7 @@ resolve_peer_list() {
 
 # Build command based on role
 build_command() {
-    local cmd="/app/stoffel-run"
+    local cmd="/app/stoffel run-node"
 
     if [ "${STOFFEL_ROLE}" = "client" ]; then
         # Client mode: associate with the execution through the coordinator

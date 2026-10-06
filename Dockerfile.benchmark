@@ -78,12 +78,12 @@ RUN --mount=type=ssh \
     if [ "$PROFILE_BUILD" = "true" ]; then \
         export CARGO_PROFILE_RELEASE_DEBUG=1; \
     fi; \
-    cargo build --release --package stoffel-vm-runner --bin stoffel-run; \
+    cargo build --release --package stoffel-cli --bin stoffel; \
     if [ "$PROFILE_BUILD" != "true" ]; then \
-        strip target/release/stoffel-run; \
+        strip target/release/stoffel; \
     fi; \
     mkdir -p /build/artifacts && \
-    cp target/release/stoffel-run /build/artifacts/stoffel-run
+    cp target/release/stoffel /build/artifacts/stoffel
 
 RUN --mount=type=cache,id=stoffel-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=stoffel-cargo-git,target=/usr/local/cargo/git,sharing=locked \
@@ -121,7 +121,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY --from=builder /build/artifacts/stoffel-run /app/stoffel-run
+COPY --from=builder /build/artifacts/stoffel /app/stoffel
 COPY --from=builder /build/programs /app/programs
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

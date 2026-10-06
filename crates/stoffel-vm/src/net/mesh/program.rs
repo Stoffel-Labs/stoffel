@@ -24,7 +24,7 @@
 //! transfer is bounded per frame rather than per program.
 //!
 //! **It is optional.** Party mode hard-exits without a local program today
-//! (`stoffel-run.rs`), and every shipped stack mounts the program into the
+//! (`stoffel-rust-sdk`'s `node/driver.rs`), and every shipped stack mounts the program into the
 //! image, so nothing in production pulls. The pull exists so that a node which
 //! has a *content address* but not the bytes has a way to get them that does
 //! not involve a trusted party — the case the bootnode's path was supposed to

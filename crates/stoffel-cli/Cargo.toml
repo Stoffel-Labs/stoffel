@@ -20,6 +20,17 @@ tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread"] }
 toml = "=0.8.23"
 
 [dev-dependencies]
+ark-bls12-381 = "=0.5.0"
 assert_cmd = "=2.2.2"
 predicates = "=3.1.4"
+# The run-node tests mint node certificates (docs/design/bootnode-elimination.md §9.H).
+rcgen = "=0.14.8"
+rustls = { version = "=0.23.41", default-features = false, features = ["ring"] }
+stoffel-mpc-coordinator-off-chain = "=0.3.0"
+stoffel-mpc-coordinator-shared = "=0.3.0"
+stoffel-vm = { version = "=0.1.2", path = "../stoffel-vm" }
+stoffel-vm-types = { version = "=0.1.2", path = "../stoffel-vm-types" }
+stoffellang = { version = "=0.1.2", path = "../stoffel-lang" }
+stoffelmpc-mpc = { package = "stoffelcrypto", version = "=0.1.1" }
 tempfile = "=3.27.0"
+tokio = { version = "=1.52.3", features = ["full"] }

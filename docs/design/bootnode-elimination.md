@@ -6,6 +6,16 @@ few places where the code deliberately differs are listed there.
 Branch: `claude/bootnode-elimination-mesh-146b80` (VM),
 `claude/coordinator-roster-admission` (`stoffel-mpc-coordinator`).
 
+> **Note (later rename).** This document is a historical record and still uses the names
+> of the time. The `stoffel-run` binary is now `stoffel run-node`, a subcommand of the
+> `stoffel` CLI (`crates/stoffel-cli`), with the same flags. The `stoffel-vm-runner` crate
+> was removed: its code now lives in `crates/stoffel-rust-sdk/src/node/`
+> (`bin/stoffel-run.rs` became `node/driver.rs`; `local_runner.rs`,
+> `coordinator_client.rs` and `admissions.rs` kept their names), and its tests moved to
+> `crates/stoffel-cli/tests/run_node_*.rs` and
+> `crates/stoffel-rust-sdk/tests/deployment_key_material.rs`. Line numbers cited below
+> refer to the old files.
+
 Rule applied throughout: functionality that genuinely needs a trusted party moves to the
 **coordinator**; everything else becomes **mesh** behavior in the VM nodes. Nothing is
 kept under a new name.
@@ -945,7 +955,11 @@ each leg, the roster position of the `server_spki` it answered with
 (`roster.position_of`). It requires those positions to be pairwise distinct —
 `CoordinatorError::DuplicateNodeIdentity { address }` otherwise, because two addresses
 answering as one node would count one node's share twice — and refuses more addresses
-than the roster has nodes (`TooManyNodeAddresses { given, n }`).
+than the roster has nodes (`TooManyNodeAddresses { given, n }`). A leg outside the roster
+(`ServerPinMismatch`) or duplicating a position (`DuplicateNodeIdentity`) is dropped with a
+warning rather than failing the call; the call fails (`ConnectError`) only when no leg is
+admitted. See the audit follow-up "One malicious node can no longer deny every client its
+connection" below.
 
 **Reconstruction is bound to positions.** `0.2.0`'s `receive_assigned_masks` pushes each
 share into its index's list in arrival order, stops at the first `S::min_shares(t)`
@@ -4232,7 +4246,7 @@ replacing it removes no test.
 | `a_listener_refuses_state_for_a_certificate_it_does_not_serve` | same | `start_coord`, `start_coord_from_cert` and `start_coord_one_off` with a state built for another key return `ServerCertificateMismatch` and bind nothing |
 | `a_refused_subscription_decodes_to_a_typed_error` | same | `wait_for_indices`, `wait_for_round` and `obtain_outputs` on an aborted execution return `CoordinatorError::ExecutionAborted` with its reason, and `wait_for_indices` from a non-node returns `NotParty` — no panic |
 | `client_admissions_are_node_only_and_frozen` | same | `NotParty` for a client; `AdmissionsNotFrozen` before the freeze; complete set after |
-| `a_node_rpc_client_refuses_a_node_outside_the_roster_and_a_duplicated_node` | same | `ServerPinMismatch`; `DuplicateNodeIdentity` — **retargets** the VM's `a_client_pinned_to_the_roster_refuses_a_node_outside_it` (`crates/stoffel-vm/src/net/mesh/roster.rs:778`), whose API is removed |
+| `a_node_rpc_client_drops_impostor_and_duplicate_legs_without_failing` | same | an impostor leg and a duplicated leg are each dropped (`leg_count` is the genuine members only), not fatal; `TooManyNodeAddresses` stays fatal — **retargets** the VM's `a_client_pinned_to_the_roster_refuses_a_node_outside_it` (`crates/stoffel-vm/src/net/mesh/roster.rs:778`), whose API is removed |
 | `open_admission_end_to_end_with_a_client_minted_at_test_time` | same | in one process: coordinator under `Open`, node RPC servers presenting roster certificates, and a client whose certificate is generated after the coordinator starts; it associates, reserves, reconstructs its mask by position, submits a signed range, and reconstructs its output from signed per-node items; its identity appears in no registration field |
 | `one_off_coordinator_drains_after_the_retirement_quorum_of_a_terminal_round` | same | acknowledgements before `ProgramFinished` do not start the drain; the quorum after it does — **retargets** `one_off_shutdown_does_not_disconnect_a_slow_party_before_terminal_replay` and `one_off_shutdown_grace_bounds_a_missing_party` onto `watch_for_retirement_quorum` |
 | `unanimous_retirement_keeps_outputs_for_the_retention_window` | same | an output client subscribing after every node retired still receives every node's item within `output_retention`, and `ExecutionNotFound` after it |
@@ -4304,7 +4318,7 @@ longer exist; `deleted_methods_are_not_rpc_methods`,
 | `no_image_or_stack_distributes_a_private_key` | `crates/stoffel-vm-runner/tests/deployment_key_material.rs` (new) | V-b | §F.0's four checks over every Dockerfile and compose file, and each check fails on a fixture line that breaks it (`"9000:9000"`, a long-form port without `host_ip`, `network_mode: host`) |
 | **`local_offchain_coordinator_admits_an_unconfigured_client_under_open_admission`** | `crates/stoffel-vm-runner/tests/local_coordinator_e2e.rs` | V-b | see below |
 | `an_execution_without_outputs_reaches_program_finished_and_is_retired` | same (`#[ignore]`d like its siblings) | V-b | a run of a program with no client IO finishes, and afterwards `get_execution_summary` from a fresh pinned connection answers `ExecutionNotFound` (16): every node proposed `finalize`, reached `ProgramFinished` and retired (§D.7 step 12) |
-| `a_local_client_refuses_a_node_rpc_listener_outside_the_served_roster` | same | V-b | `#[ignore]`d like its siblings: under `start()`, a `NodeRPCServer` presenting a freshly minted certificate is put among the endpoint's node RPC addresses, and `run_offchain_client` fails with `CoordinatorError::ServerPinMismatch` — this repository's own cover for the client-leg pin (§E.1 step 5), beside the coordinator test it moved to |
+| `a_local_client_refuses_a_node_rpc_listener_outside_the_served_roster` | same | V-b | `#[ignore]`d like its siblings: under `start()`, a `NodeRPCServer` presenting a freshly minted certificate replaces one of the endpoint's node RPC addresses. The impostor gets no leg — it is dropped, not fatal (§10) — the client is admitted as usual, and the run completes over the remaining four legs with the client's input: this repository's own cover for the client-leg pin (§E.1 step 5). Its sibling `a_local_client_is_refused_when_every_node_rpc_listener_is_outside_the_roster` replaces every address: no leg is admitted and `run_offchain_client` fails with `CoordinatorError::ConnectError` naming a pin refusal (`presented a key its pin does not admit`) for each leg |
 | `an_sdk_server_presents_its_identity_and_coordinator_pin` | `crates/stoffel-rust-sdk/tests/sdk_usage.rs` | V-b | **retargets** `an_sdk_server_presents_its_identity_and_roster_without_a_coordinator` |
 | `an_sdk_mesh_server_without_seeds_a_coordinator_pin_or_an_epoch_store_is_refused` | same | V-b | **retargets** `an_sdk_mesh_server_without_seeds_a_roster_or_an_epoch_store_is_refused` |
 | `an_sdk_coordinator_pin_without_an_identity_is_refused` | same | V-b | **retargets** `an_sdk_roster_without_an_identity_is_refused` |

@@ -78,7 +78,7 @@ x-party-common: &party-common
     # docs/design/bootnode-elimination.md §9): which clients take part, and
     # with how many inputs, is the coordinator's registration (--client-io and
     # --client-certs on the coordinator service), and the clients reach the
-    # parties' RPC listeners, never the mesh. stoffel-run refuses
+    # parties' RPC listeners, never the mesh. stoffel run-node refuses
     # STOFFEL_EXPECTED_CLIENTS and STOFFEL_CLIENT_INPUT_COUNT alongside a
     # coordinator.
     # Mesh seeds (docs/design/bootnode-elimination.md): every party below dials
@@ -118,7 +118,7 @@ x-client-common: &client-common
     STOFFEL_OUTPUT_FIXED_POINT_FRACTIONAL_BITS: ${STOFFEL_OUTPUT_FIXED_POINT_FRACTIONAL_BITS:-}
     # No roster is set on this client, or on any container: the client's node
     # legs are pinned to the node roster the pinned coordinator serves
-    # (docs/design/bootnode-elimination.md §9.E.1), and stoffel-run refuses
+    # (docs/design/bootnode-elimination.md §9.E.1), and stoffel run-node refuses
     # --roster by name.
     STOFFEL_EXPECT_ROSTER_DIGEST: ${STOFFEL_EXPECT_ROSTER_DIGEST-}
     STOFFEL_CLIENT_DELAY: ${STOFFEL_CLIENT_DELAY:-20}

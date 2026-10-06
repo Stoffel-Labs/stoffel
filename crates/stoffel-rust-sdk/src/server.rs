@@ -254,13 +254,13 @@ impl ServerBuilder {
         self
     }
 
-    /// Override the `stoffel-run` binary used by [`StoffelServer::start`].
+    /// Override the `stoffel` binary [`StoffelServer::start`] spawns as `stoffel run-node`.
     pub fn runner_path(mut self, path: impl AsRef<Path>) -> Self {
         self.runner_path = Some(path.as_ref().to_path_buf());
         self
     }
 
-    /// Set the entrypoint passed to `stoffel-run`. Default is `main`.
+    /// Set the entrypoint passed to `stoffel run-node`. Default is `main`.
     pub fn entry(mut self, entry: impl Into<String>) -> Self {
         self.entry = entry.into();
         self
@@ -287,7 +287,7 @@ impl ServerBuilder {
         self
     }
 
-    /// Configure the off-chain coordinator flags passed to `stoffel-run`.
+    /// Configure the off-chain coordinator flags passed to `stoffel run-node`.
     ///
     /// This is required when the attached program declares ClientStore IO.
     /// The certificate and key this server presents on the mesh.
@@ -317,7 +317,7 @@ impl ServerBuilder {
     ///
     /// Only read on the mesh path, where it is what makes `instance_id` fresh
     /// across runs of one roster (blocker B5). One directory per node; two nodes
-    /// must not share one. Unset leaves `stoffel-run` to its own default
+    /// must not share one. Unset leaves `stoffel run-node` to its own default
     /// (`$STOFFEL_EPOCH_STORE`, then `$HOME/.stoffel/epochs`).
     pub fn epoch_store(mut self, path: impl AsRef<Path>) -> Self {
         self.epoch_store = Some(path.as_ref().to_path_buf());
@@ -921,9 +921,12 @@ impl StoffelServer {
             ));
         }
 
-        let runner_path = resolve_stoffel_run_binary(self.runner_path.as_deref())?;
+        let runner_path = crate::node::binary::resolve_stoffel_binary(
+            self.runner_path.as_deref(),
+            "server start",
+        )?;
         eprintln!(
-            "[stoffel] using stoffel-run binary: {}",
+            "[stoffel] using stoffel binary for run-node: {}",
             runner_path.display()
         );
         let tempdir = tempfile::tempdir()?;
@@ -937,6 +940,7 @@ impl StoffelServer {
         // coordinator whose roster is anything else, instead of silently
         // joining it.
         command
+            .arg(crate::node::local_runner::RUN_NODE_SUBCOMMAND)
             .arg(&program_path)
             .arg(&self.entry)
             .arg("--expect-n-parties")
@@ -982,7 +986,7 @@ impl StoffelServer {
                     .arg(digest.to_string());
             }
             // No `--roster`, `--expected-clients` or `--timestamp`:
-            // `stoffel-run` refuses each by name. Membership is the
+            // `stoffel run-node` refuses each by name. Membership is the
             // coordinator's node roster, and clients are admitted by the
             // coordinator and reach this party's RPC listener, never its mesh
             // transport.
@@ -1227,37 +1231,6 @@ fn server_backend_name(backend: MpcBackend) -> &'static str {
         MpcBackend::HoneyBadger => "honeybadger",
         MpcBackend::Avss { .. } => "avss",
     }
-}
-
-fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
-    if let Some(path) = explicit_path {
-        return path.exists().then(|| path.to_path_buf()).ok_or_else(|| {
-            Error::Unsupported(format!(
-                "server start requires an existing stoffel-run binary; configured path does not exist: {}",
-                path.display()
-            ))
-        });
-    }
-    if let Some(path) = std::env::var_os("STOFFEL_RUN_BIN").map(PathBuf::from) {
-        return path.exists().then_some(path.clone()).ok_or_else(|| {
-            Error::Unsupported(format!(
-                "server start requires an existing stoffel-run binary; STOFFEL_RUN_BIN points to a missing path: {}",
-                path.display()
-            ))
-        });
-    }
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map(|root| root.join("target").join("debug").join("stoffel-run"));
-    candidate
-        .filter(|path| path.exists())
-        .ok_or_else(|| {
-            Error::Unsupported(
-                "server start requires a built stoffel-run binary; set STOFFEL_RUN_BIN, call runner_path, or build `cargo build -p stoffel-vm-runner --bin stoffel-run`"
-                    .to_owned(),
-            )
-        })
 }
 
 fn validate_existing_file(label: &str, path: &Path) -> Result<()> {

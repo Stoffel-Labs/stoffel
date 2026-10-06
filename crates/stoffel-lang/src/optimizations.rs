@@ -5189,6 +5189,20 @@ fn inline_in_node(node: AstNode, fns: &HashMap<String, InlineInfo>, budget: &mut
 }
 
 /// Collect the names a function body calls directly (for recursion detection).
+/// True when `body` calls a builtin that looks up variables of the executing frame
+/// by name (closure creation and upvalue access). Such a body must stay its own
+/// frame: see the inlining guard in `gather_inline_infos`.
+fn calls_frame_name_sensitive_builtin(body: &AstNode) -> bool {
+    let mut called = HashSet::new();
+    collect_called_names(body, &mut called);
+    called.iter().any(|name| {
+        matches!(
+            name.as_str(),
+            "create_closure" | "create_closure_with_upvalue" | "get_upvalue" | "set_upvalue"
+        )
+    })
+}
+
 fn collect_called_names(node: &AstNode, out: &mut HashSet<String>) {
     if let Some(name) = call_name(node) {
         out.insert(name.to_string());
@@ -5266,6 +5280,14 @@ fn gather_inline_infos(root: &AstNode, allow_multi_return: bool) -> HashMap<Stri
             .iter()
             .any(|p| p.is_variadic || p.default_value.is_some())
         {
+            continue;
+        }
+        // Never inline a function that names its own frame's variables at run time:
+        // `create_closure_with_upvalue("f", "start")` captures the local `start` by
+        // name, and `get_upvalue`/`set_upvalue` resolve names against the closure
+        // frame. Splicing the body into a caller renames or moves those locals, so
+        // the lookup fails (`Could not find upvalue start`) or hits the wrong one.
+        if calls_frame_name_sensitive_builtin(&body) {
             continue;
         }
         // Single-return functions splice directly. Multi-return functions are first

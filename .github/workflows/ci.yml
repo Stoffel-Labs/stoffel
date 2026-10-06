@@ -45,8 +45,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
         continue-on-error: true  # Don't fail on clippy warnings initially
 
-      - name: Build release runner
-        run: cargo build --release --package stoffel-vm-runner --bin stoffel-run
+      - name: Build release CLI
+        run: cargo build --release --package stoffel-cli --bin stoffel
 
       # NOTE: `tests::mesh_join_harness` is deliberately absent from the skip
       # list below. It is the regression cover for session formation
@@ -117,12 +117,12 @@ jobs:
             --skip run_validates_entry_and_inputs_before_timeout \
             --skip source_and_bytecode_extensions_are_case_insensitive
 
-      - name: Upload VM binary
+      - name: Upload CLI binary
         if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: stoffel-run-${{ matrix.os }}
-          path: target/release/stoffel-run
+          name: stoffel-${{ matrix.os }}
+          path: target/release/stoffel
           retention-days: 7
 
   mesh-join-harness:
@@ -179,7 +179,7 @@ jobs:
             ${{ runner.os }}-cargo-nightly-
 
       # The mesh-join-harness job above covers mesh formation in process; this
-      # one covers what that job cannot reach -- the real `stoffel-run` argv,
+      # one covers what that job cannot reach -- the real `stoffel run-node` argv,
       # spawned as separate processes against a real off-chain coordinator. The
       # case is `#[ignore]`d (it spawns processes and binds ports), so it runs
       # in no other job.
@@ -195,7 +195,7 @@ jobs:
         run: |
           for attempt in 1 2 3 4 5; do
             echo "== mesh e2e attempt ${attempt} =="
-            cargo test --package stoffel-vm-runner --test local_coordinator_e2e \
+            cargo test --package stoffel-cli --test run_node_local_coordinator_e2e \
               local_offchain_coordinator_runs_networked_vm_over_a_roster_mesh \
               -- --ignored --nocapture
           done
@@ -206,7 +206,7 @@ jobs:
       # output. Ignored for the same reason as the case above.
       - name: Unconfigured client under open admission
         run: |
-          cargo test --package stoffel-vm-runner --test local_coordinator_e2e \
+          cargo test --package stoffel-cli --test run_node_local_coordinator_e2e \
             local_offchain_coordinator_admits_an_unconfigured_client_under_open_admission \
             -- --ignored --exact --nocapture
 
@@ -219,20 +219,28 @@ jobs:
     # build against the unpublished stoffel-mpc-coordinator 0.3.0, copied into
     # the build from a BuildKit named context called `coordinator`
     # (`COPY --from=coordinator` in the Dockerfile). The coordinator repository
-    # is public, so this job checks it out at the revision Cargo.lock pins and
-    # passes it as that context; without it `coordinator` resolves as an image
+    # is public, so this job checks it out at the revision Cargo.lock pins
+    # (read from the lockfile) and passes it as that context; without it `coordinator` resolves as an image
     # reference and the build fails. Delete the checkout, both `build-contexts:`
     # entries and this note with the patch; do not drop the COPY instead.
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Read from Cargo.lock rather than written here, so the context cannot
+      # drift from the revision the [patch.crates-io] entries resolve to.
+      - name: Resolve the coordinator revision Cargo.lock pins
+        id: coordinator
+        run: |
+          rev="$(grep -m1 -o 'stoffel-mpc-coordinator\.git?[^#"]*#[0-9a-f]\{40\}' Cargo.lock | sed 's/.*#//')"
+          test -n "$rev" || { echo "Cargo.lock pins no stoffel-mpc-coordinator git revision" >&2; exit 1; }
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
       - name: Check out the coordinator build context
         uses: actions/checkout@v4
         with:
           repository: Stoffel-Labs/stoffel-mpc-coordinator
-          # The revision Cargo.lock pins for the feature/no-bootnode [patch.crates-io] entries.
-          ref: 272e4933c4aee6e8f33da7d1c877cb30881133cb
+          ref: ${{ steps.coordinator.outputs.rev }}
           path: .coordinator-context
 
       - name: Set up Docker Buildx

@@ -5,7 +5,7 @@
 //! PRD's non-simulated local network behavior.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::config::MpcBackend;
@@ -221,7 +221,7 @@ pub(crate) async fn execute_local_capturing_with_options(
     let local_client_inputs = flattened_client_inputs
         .iter()
         .map(|(client_slot, values)| {
-            Ok(stoffel_vm_runner::LocalClientInput::raw(
+            Ok(crate::node::LocalClientInput::raw(
                 *client_slot,
                 values
                     .iter()
@@ -230,18 +230,19 @@ pub(crate) async fn execute_local_capturing_with_options(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    let runner_path = resolve_stoffel_run_binary(
+    let runner_path = crate::node::binary::resolve_stoffel_binary(
         options
             .runner_path
             .as_deref()
             .or_else(|| runtime.local_runner_binary_path()),
+        "SDK local coordinator execution",
     )?;
     eprintln!(
-        "[stoffel] using stoffel-run binary: {}",
+        "[stoffel] using stoffel binary for run-node parties: {}",
         runner_path.display()
     );
 
-    let mut runner = stoffel_vm_runner::LocalCoordinatorRunner::builder(
+    let mut runner = crate::node::LocalCoordinatorRunner::builder(
         runner_path,
         runtime.program().binary().clone(),
     )
@@ -317,7 +318,7 @@ pub(crate) async fn execute_local_capturing_with_options(
 
 /// The first party's printed program output, with `Program returned:` markers
 /// removed. Empty when no party produced output.
-fn local_program_output(output: &stoffel_vm_runner::LocalCoordinatorRunOutput) -> String {
+fn local_program_output(output: &crate::node::LocalCoordinatorRunOutput) -> String {
     let Some(first_party) = output.party_outputs.first() else {
         return String::new();
     };
@@ -415,184 +416,6 @@ fn local_client_input_value(value: &Value) -> Result<String> {
             ))
         }
     }
-}
-
-fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
-    if let Some(path) = explicit_path {
-        return resolve_existing_runner_path(path).ok_or_else(|| {
-            Error::Unsupported(format!(
-                "SDK local coordinator execution requires an existing stoffel-run binary; configured path does not exist: {}",
-                path.display()
-            ))
-        });
-    }
-
-    if let Some(path) = std::env::var_os("STOFFEL_RUN_BIN").map(PathBuf::from) {
-        return resolve_existing_runner_path(&path).ok_or_else(|| {
-            Error::Unsupported(format!(
-                "SDK local coordinator execution requires an existing stoffel-run binary; STOFFEL_RUN_BIN points to a missing path: {}",
-                path.display()
-            ))
-        });
-    }
-
-    if let Some(path) = built_workspace_runner() {
-        return Ok(path);
-    }
-
-    if let Some(path) = sibling_runner() {
-        return Ok(path);
-    }
-
-    if !running_from_workspace_target() {
-        if let Some(path) = path_runner() {
-            return Ok(path);
-        }
-    }
-
-    if let Some(workspace_root) = workspace_root() {
-        return Err(Error::Unsupported(format!(
-            "SDK local coordinator execution requires a built workspace stoffel-run binary at {}; build it with `cargo build -p stoffel-vm-runner --bin stoffel-run`, set STOFFEL_RUN_BIN, or call `local_runner_path`",
-            workspace_root
-                .join("target")
-                .join(if cfg!(debug_assertions) { "debug" } else { "release" })
-                .join(format!("stoffel-run{}", std::env::consts::EXE_SUFFIX))
-                .display()
-        )));
-    }
-
-    if let Some(path) = path_runner() {
-        return Ok(path);
-    }
-
-    Err(Error::Unsupported(
-        "SDK local coordinator execution requires a stoffel-run binary; install it with `cargo install --path crates/stoffel-vm-runner` (or `cargo install stoffel-vm-runner`) so it lands on your PATH, set STOFFEL_RUN_BIN, call `local_runner_path`, or build `cargo build -p stoffel-vm-runner --bin stoffel-run`"
-            .to_owned(),
-    ))
-}
-
-/// Look for a `stoffel-run` binary sitting next to the current executable.
-/// This is the case after the `stoffel` CLI installer, which drops both
-/// `stoffel` and `stoffel-run` into the same directory (e.g. `~/.local/bin`).
-fn sibling_runner() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let candidate = exe.with_file_name("stoffel-run");
-    candidate.exists().then_some(candidate)
-}
-
-/// Look for a `stoffel-run` binary anywhere on the user's PATH.
-fn path_runner() -> Option<PathBuf> {
-    find_binary_on_path("stoffel-run")
-}
-
-fn built_workspace_runner() -> Option<PathBuf> {
-    let workspace_root = workspace_root()?;
-    let mut candidates = Vec::new();
-
-    if let Some(profile_dir) = current_target_profile_dir() {
-        candidates.push(profile_dir.join(format!("stoffel-run{}", std::env::consts::EXE_SUFFIX)));
-    }
-
-    candidates.push(
-        workspace_root
-            .join("target")
-            .join(if cfg!(debug_assertions) {
-                "debug"
-            } else {
-                "release"
-            })
-            .join(format!("stoffel-run{}", std::env::consts::EXE_SUFFIX)),
-    );
-
-    candidates.push(
-        workspace_root
-            .join("target")
-            .join("debug")
-            .join(format!("stoffel-run{}", std::env::consts::EXE_SUFFIX)),
-    );
-
-    candidates
-        .into_iter()
-        .find(|candidate| is_executable_file(candidate))
-}
-
-fn current_target_profile_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    target_profile_dir_from_exe(&exe)
-}
-
-fn running_from_workspace_target() -> bool {
-    let (Some(workspace_root), Ok(exe)) = (workspace_root(), std::env::current_exe()) else {
-        return false;
-    };
-    path_is_under(&exe, &workspace_root.join("target"))
-}
-
-fn path_is_under(path: &Path, ancestor: &Path) -> bool {
-    path.ancestors().any(|candidate| candidate == ancestor)
-}
-
-fn target_profile_dir_from_exe(exe: &Path) -> Option<PathBuf> {
-    let parent = exe.parent()?;
-    let profile_dir = if parent.file_name().is_some_and(|name| name == "deps") {
-        parent.parent()?
-    } else {
-        parent
-    };
-    profile_dir
-        .parent()
-        .and_then(Path::file_name)
-        .is_some_and(|name| name == "target")
-        .then(|| profile_dir.to_path_buf())
-}
-
-fn find_binary_on_path(binary_name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-
-    find_binary_in_path(binary_name, &path)
-}
-
-fn find_binary_in_path(binary_name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
-    let binary_name = format!("{binary_name}{}", std::env::consts::EXE_SUFFIX);
-
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(&binary_name))
-        .find(|candidate| is_executable_file(candidate))
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    path.is_file()
-        && path
-            .metadata()
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
-}
-
-fn resolve_existing_runner_path(path: &Path) -> Option<PathBuf> {
-    if path.exists() {
-        return Some(path.to_path_buf());
-    }
-    if path.is_absolute() {
-        return None;
-    }
-    workspace_root()
-        .map(|root| root.join(path))
-        .filter(|candidate| candidate.exists())
-}
-
-fn workspace_root() -> Option<PathBuf> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .map(Path::to_path_buf)
 }
 
 fn parse_runner_return_value(value: &str) -> Result<Value> {
@@ -755,11 +578,7 @@ fn sdk_value_from_vm_value(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        find_binary_in_path, local_program_output_without_return_markers, path_is_under,
-        target_profile_dir_from_exe,
-    };
-    use std::path::PathBuf;
+    use super::local_program_output_without_return_markers;
 
     #[test]
     fn local_program_output_filter_removes_runner_return_markers() {
@@ -769,52 +588,5 @@ mod tests {
             local_program_output_without_return_markers(stdout),
             "polynomial p\n"
         );
-    }
-
-    #[test]
-    fn find_binary_in_path_finds_executable_file() {
-        let missing_dir = tempfile::tempdir().unwrap();
-        let bin_dir = tempfile::tempdir().unwrap();
-        let binary = bin_dir
-            .path()
-            .join(format!("stoffel-run{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&binary, permissions).unwrap();
-        }
-
-        let path = std::env::join_paths([missing_dir.path(), bin_dir.path()]).unwrap();
-
-        assert_eq!(find_binary_in_path("stoffel-run", &path), Some(binary));
-    }
-
-    #[test]
-    fn target_profile_dir_from_test_exe_uses_parent_of_deps_dir() {
-        let exe: PathBuf = ["workspace", "target", "debug", "deps", "sdk_usage-abc"]
-            .iter()
-            .collect();
-
-        assert_eq!(
-            target_profile_dir_from_exe(&exe),
-            Some(["workspace", "target", "debug"].iter().collect())
-        );
-    }
-
-    #[test]
-    fn path_is_under_detects_workspace_target_executables() {
-        let exe: PathBuf = ["workspace", "target", "debug", "deps", "sdk_usage-abc"]
-            .iter()
-            .collect();
-        let target: PathBuf = ["workspace", "target"].iter().collect();
-        let other: PathBuf = ["workspace", "other-target"].iter().collect();
-
-        assert!(path_is_under(&exe, &target));
-        assert!(!path_is_under(&exe, &other));
     }
 }

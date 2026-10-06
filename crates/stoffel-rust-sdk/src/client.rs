@@ -4,7 +4,7 @@
 //! client reaches an execution only through the coordinator: it pins the
 //! coordinator, associates, and submits and receives within its admission
 //! (`docs/design/bootnode-elimination.md` §9.E), through the one client flow
-//! `stoffel_vm_runner::coordinator_client` implements.
+//! [`crate::node::coordinator_client`] implements.
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -13,6 +13,9 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::node::coordinator_client::{
+    BindableSlots, CoordinatorClientConfig, CoordinatorClientError, CoordinatorEndpoint,
+};
 use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::{PrimeField, Zero};
 use serde::{Deserialize, Serialize};
@@ -22,9 +25,6 @@ use stoffel_mpc_coordinator_shared::{
     SpkiDer,
 };
 use stoffel_vm::net::MpcBackendKind;
-use stoffel_vm_runner::coordinator_client::{
-    BindableSlots, CoordinatorClientConfig, CoordinatorClientError, CoordinatorEndpoint,
-};
 use stoffel_vm_types::core_types::ShareType;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -1270,7 +1270,7 @@ fn sdk_backend_from_program(program: &Program) -> MpcBackend {
     }
 }
 
-/// §9.E.1 for one run (`stoffel_vm_runner::coordinator_client`), over `link`
+/// §9.E.1 for one run (`crate::node::coordinator_client`), over `link`
 /// when [`ClientBuilder::connect`] opened one. Returns the outputs and the
 /// admission the run was given.
 async fn run_offchain_inputs_with_config(
