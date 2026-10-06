@@ -1139,7 +1139,6 @@ async fn run_pre_registered_client(
         std::fs::read(&client.key_path)?,
         AssociationRequest {
             slot: Some(ClientIndex(slot)),
-            invitation: None,
         },
         &client.input.values,
         timeout,

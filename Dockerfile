@@ -34,10 +34,13 @@ RUN printf '%s\n' \
 RUN mkdir -p ~/.ssh && \
     ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true
 
-# TEMPORARY — docs/design/bootnode-elimination.md §9.F.5. stoffel-mpc-coordinator 0.3.0 is
-# not published, so the workspace's [patch.crates-io] names a path on the build
-# host. The `coordinator` named build context is copied to exactly that path
-# before cargo resolves the workspace. Delete with the patch.
+# TEMPORARY — docs/design/bootnode-elimination.md §9.F.5. The workspace's
+# [patch.crates-io] names the coordinator's feature/no-bootnode branch, which cargo
+# fetches itself, so nothing reads this path: the copy is residue of the earlier
+# path-shaped patch and does not feed the Rust build. It stays regardless. CI
+# supplies the `coordinator` named context (see .github/workflows/ci.yml), so the
+# copy resolves; do NOT drop it as a way of fixing a build. Remove it together with
+# the patch table once coordinator 0.3.0 is published.
 COPY --from=coordinator . /Users/gabriel/RustroverProjects/stoffel-mpc-coordinator-roster-admission
 
 # Build the release binary

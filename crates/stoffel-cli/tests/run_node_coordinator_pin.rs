@@ -255,7 +255,7 @@ async fn a_client_slot_that_is_not_a_slot_number_is_refused() {
 /// Every flag design doc §9.D.3 removes, with the hint it fails with. The hints
 /// are the contract: none of them names a flag of this table, so an operator
 /// following one refusal is never sent to the next.
-const REMOVED_FLAGS: [(&str, &str, &str); 12] = [
+const REMOVED_FLAGS: [(&str, &str, &str); 13] = [
     (
         "--roster",
         "ids/nodes/cert0.crt",
@@ -323,6 +323,17 @@ const REMOVED_FLAGS: [(&str, &str, &str); 12] = [
         "--outputs",
         "1",
         "A client's output count comes from its admission.",
+    ),
+    // §9.C.3: the `Invitation` policy was removed in review and never shipped, so
+    // the flag that presented one is refused by name rather than swallowed by the
+    // argument parser's catch-all (where its value would land among the
+    // positionals and be taken for the program path).
+    (
+        "--invitation",
+        "invitation.json",
+        "Invitation admission was removed in review and never shipped. A client's slot is \
+         the one its certificate is pre-registered to, the one --client-slot <index> names, \
+         or under open admission the lowest-numbered free one.",
     ),
 ];
 
@@ -672,16 +683,13 @@ async fn an_unexpected_roster_size_or_digest_is_refused_before_binding() {
     .await;
 }
 
-/// `--invitation` and `--expect-program-hash` shape a coordinator client's
-/// association (§9.E.2), so they are refused where no association happens, and
-/// a value that cannot be used is refused before anything is dialed.
+/// `--expect-program-hash` shapes a coordinator client's association (§9.E.2),
+/// so it is refused where no association happens, and a value that cannot be
+/// used is refused before anything is dialed.
 #[tokio::test]
 async fn association_flags_are_refused_without_a_coordinator_or_a_usable_value() {
     let hash = "01".repeat(32);
-    for (flag, value) in [
-        ("--invitation", "invitation.json"),
-        ("--expect-program-hash", hash.as_str()),
-    ] {
+    for (flag, value) in [("--expect-program-hash", hash.as_str())] {
         let output = run_client(&[flag, value]).await;
         let stderr = stderr(&output);
         assert_eq!(output.status.code(), Some(2), "{flag}: {stderr}");
@@ -701,29 +709,6 @@ async fn association_flags_are_refused_without_a_coordinator_or_a_usable_value()
         malformed
             .contains("Error: --expect-program-hash: expected 64 hexadecimal characters, got 3"),
         "{malformed}"
-    );
-
-    let pinned = ids_dir().join("server_cert.crt");
-    let missing = scratch_dir("invitation").join("missing-invitation.json");
-    let output = run_client(&[
-        "--off-chain-coord",
-        "127.0.0.1:9",
-        "--coord-cert",
-        pinned.to_str().expect("utf-8 path"),
-        "--invitation",
-        missing.to_str().expect("utf-8 path"),
-        "--servers",
-        "127.0.0.1:9",
-    ])
-    .await;
-    let unreadable = stderr(&output);
-    assert_eq!(output.status.code(), Some(2), "{unreadable}");
-    assert!(
-        unreadable.contains(&format!(
-            "Error: cannot read --invitation {}",
-            missing.display()
-        )),
-        "{unreadable}"
     );
 }
 
@@ -837,10 +822,7 @@ impl OpenCoordinator {
         .await
         .expect("a pinned connection");
         client
-            .associate_client(AssociationRequest {
-                slot: None,
-                invitation: None,
-            })
+            .associate_client(AssociationRequest { slot: None })
             .await
             .is_ok_and(|admission| admission.client_index == ClientIndex(0))
     }

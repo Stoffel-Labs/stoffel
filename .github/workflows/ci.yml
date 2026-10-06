@@ -232,7 +232,7 @@ jobs:
         with:
           repository: Stoffel-Labs/stoffel-mpc-coordinator
           # The revision Cargo.lock pins for the feature/no-bootnode [patch.crates-io] entries.
-          ref: 272e4933c4aee6e8f33da7d1c877cb30881133cb
+          ref: 59fb7f502d3da1c7f7223ba7ba3249f47aab8d21
           path: .coordinator-context
 
       - name: Set up Docker Buildx

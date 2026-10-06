@@ -22,10 +22,8 @@
 //! - `open` names no client anywhere: any certificate holder that pins this
 //!   coordinator may bind a free slot, first come, first served. This is how a
 //!   computation takes clients whose identities are not known in advance.
-//! - `invitation` admits only the invitee named by an invitation that
-//!   `--invitation-issuer-cert`'s key signed.
 //!
-//! `open` and `invitation` require `--association-deadline-secs` and
+//! `open` requires `--association-deadline-secs` and
 //! `--input-deadline-secs`, so an execution whose slots are never bound is
 //! aborted instead of holding its nodes forever. A flag the chosen admission
 //! does not read is refused, never ignored. An empty flag value is the same as
@@ -46,8 +44,8 @@ use stoffel_mpc_coordinator_off_chain::{
 use stoffel_mpc_coordinator_shared::rpc::RpcServerLimits;
 use stoffel_mpc_coordinator_shared::{
     program_hash_of, AdmissionPolicy, ClientIdentity, ClientSlotSpec, ClientSlotTable,
-    CoordinatorError, ExecutionDeadlines, ExecutionId, InvitationIssuer, NodeCertificateDer,
-    NodeRoster, PinError, RosterDigest, RosterError, SpkiDer, UnixSeconds,
+    CoordinatorError, ExecutionDeadlines, ExecutionId, NodeCertificateDer, NodeRoster, PinError,
+    RosterDigest, RosterError, SpkiDer, UnixSeconds,
 };
 
 /// How clients come to hold the execution's slots (§9.C.2).
@@ -58,9 +56,6 @@ enum Admission {
     PreRegistered,
     /// Any certificate holder may bind a free slot. Requires deadlines.
     Open,
-    /// Only holders of an invitation signed by `--invitation-issuer-cert` may
-    /// bind a slot. Requires deadlines.
-    Invitation,
 }
 
 /// A flag value in which the empty string means the flag is absent
@@ -128,14 +123,8 @@ struct Args {
     #[arg(long, value_delimiter = ',', num_args = 0..)]
     client_certs: Vec<String>,
 
-    /// `invitation` only: the certificate (DER X.509) whose key signs
-    /// invitations. It may be neither a roster node's nor this coordinator's.
-    /// An empty value is no issuer.
-    #[arg(long, value_parser = blankable::<PathBuf>)]
-    invitation_issuer_cert: Option<Blankable<PathBuf>>,
-
     /// Seconds after startup by which every client slot must be bound, or the
-    /// execution is aborted. Required under `open` and `invitation`; optional
+    /// execution is aborted. Required under `open`; optional
     /// under `pre-registered`; given together with `--input-deadline-secs`. An
     /// empty value is no deadline.
     #[arg(long, value_parser = blankable::<u64>)]
@@ -190,10 +179,6 @@ enum ProgramHashParseError {
 enum AdmissionFlagError {
     #[error("--client-certs is read only under --admission pre-registered, not {admission}")]
     ClientCertsUnread { admission: &'static str },
-    #[error("--invitation-issuer-cert is read only under --admission invitation, not {admission}")]
-    IssuerCertUnread { admission: &'static str },
-    #[error("--admission invitation requires --invitation-issuer-cert")]
-    IssuerCertRequired,
     #[error(
         "--association-deadline-secs and --input-deadline-secs are given together or not at all"
     )]
@@ -241,12 +226,11 @@ impl Admission {
         match self {
             Self::PreRegistered => "pre-registered",
             Self::Open => "open",
-            Self::Invitation => "invitation",
         }
     }
 
     fn requires_deadlines(self) -> bool {
-        matches!(self, Self::Open | Self::Invitation)
+        matches!(self, Self::Open)
     }
 }
 
@@ -255,7 +239,6 @@ impl Admission {
 struct AdmissionFlags {
     admission: Admission,
     clients: Vec<ClientIdentity>,
-    invitation_issuer: Option<InvitationIssuer>,
     association_deadline_secs: Option<u64>,
     input_deadline_secs: Option<u64>,
 }
@@ -272,9 +255,6 @@ fn admission_policy(
     let name = admission.flag_value();
     if admission != Admission::PreRegistered && !flags.clients.is_empty() {
         return Err(AdmissionFlagError::ClientCertsUnread { admission: name });
-    }
-    if admission != Admission::Invitation && flags.invitation_issuer.is_some() {
-        return Err(AdmissionFlagError::IssuerCertUnread { admission: name });
     }
 
     let deadlines = match (flags.association_deadline_secs, flags.input_deadline_secs) {
@@ -303,11 +283,6 @@ fn admission_policy(
             clients: flags.clients,
         },
         Admission::Open => AdmissionPolicy::Open,
-        Admission::Invitation => AdmissionPolicy::Invitation {
-            issuer: flags
-                .invitation_issuer
-                .ok_or(AdmissionFlagError::IssuerCertRequired)?,
-        },
     };
     Ok((policy, deadlines))
 }
@@ -419,15 +394,10 @@ fn configure(args: &Args, startup: UnixSeconds) -> Result<Configured, ConfigErro
         .map(|path| read_certificate_spki("--client-certs", Path::new(path)))
         .map(|spki| spki.map(|spki| spki.client_identity()))
         .collect::<Result<Vec<_>, _>>()?;
-    let invitation_issuer = given(args.invitation_issuer_cert.clone())
-        .map(|path| read_certificate_spki("--invitation-issuer-cert", &path))
-        .transpose()?
-        .map(InvitationIssuer::new);
     let (admission, deadlines) = admission_policy(
         AdmissionFlags {
             admission: args.admission,
             clients,
-            invitation_issuer,
             association_deadline_secs: given(args.association_deadline_secs.clone()),
             input_deadline_secs: given(args.input_deadline_secs.clone()),
         },
@@ -446,8 +416,7 @@ fn configure(args: &Args, startup: UnixSeconds) -> Result<Configured, ConfigErro
 
     // One execution, registered before the listener accepts anything, so no
     // party can propose a round for an invocation the coordinator has not heard
-    // of. The coordinator refuses an invitation issuer that is a roster node or
-    // this coordinator's own key here.
+    // of.
     let registration = ExecutionRegistration {
         execution_id,
         program_hash,
@@ -555,10 +524,6 @@ mod tests {
         fixture_spki("clients/cert0.crt").client_identity()
     }
 
-    fn fixture_issuer() -> InvitationIssuer {
-        InvitationIssuer::new(fixture_spki("clients/cert1.crt"))
-    }
-
     fn node_certs_flag() -> String {
         (0..5)
             .map(|index| {
@@ -599,7 +564,6 @@ mod tests {
         AdmissionFlags {
             admission,
             clients: Vec::new(),
-            invitation_issuer: None,
             association_deadline_secs: None,
             input_deadline_secs: None,
         }
@@ -635,11 +599,10 @@ mod tests {
     }
 
     #[test]
-    fn admission_flag_takes_the_three_policy_names() {
+    fn admission_flag_takes_the_two_policy_names() {
         for (value, expected) in [
             ("pre-registered", Admission::PreRegistered),
             ("open", Admission::Open),
-            ("invitation", Admission::Invitation),
         ] {
             assert_eq!(Admission::from_str(value, false), Ok(expected));
             assert_eq!(expected.flag_value(), value);
@@ -654,14 +617,11 @@ mod tests {
             "",
             "--client-certs",
             "",
-            "--invitation-issuer-cert",
-            "",
             "--association-deadline-secs",
             "",
             "--input-deadline-secs",
             " ",
         ]);
-        assert_eq!(given(blank.invitation_issuer_cert.clone()), None);
         assert_eq!(given(blank.association_deadline_secs.clone()), None);
         assert_eq!(given(blank.input_deadline_secs.clone()), None);
         let configured = configure(&blank, STARTUP).expect("the empty registration");
@@ -704,22 +664,10 @@ mod tests {
     }
 
     #[test]
-    fn open_and_invitation_require_deadlines() {
+    fn open_requires_deadlines() {
         assert_eq!(
             admission_policy(flags(Admission::Open), STARTUP),
             Err(AdmissionFlagError::DeadlinesRequired { admission: "open" })
-        );
-        assert_eq!(
-            admission_policy(
-                AdmissionFlags {
-                    invitation_issuer: Some(fixture_issuer()),
-                    ..flags(Admission::Invitation)
-                },
-                STARTUP
-            ),
-            Err(AdmissionFlagError::DeadlinesRequired {
-                admission: "invitation"
-            })
         );
     }
 
@@ -788,76 +736,6 @@ mod tests {
             ),
             Err(AdmissionFlagError::ClientCertsUnread { admission: "open" })
         );
-        assert_eq!(
-            admission_policy(
-                AdmissionFlags {
-                    invitation_issuer: Some(fixture_issuer()),
-                    ..with_deadlines(Admission::Open)
-                },
-                STARTUP
-            ),
-            Err(AdmissionFlagError::IssuerCertUnread { admission: "open" })
-        );
-        assert_eq!(
-            admission_policy(with_deadlines(Admission::Invitation), STARTUP),
-            Err(AdmissionFlagError::IssuerCertRequired)
-        );
-    }
-
-    #[test]
-    fn invitation_admission_carries_its_issuer() {
-        let (policy, _) = admission_policy(
-            AdmissionFlags {
-                invitation_issuer: Some(fixture_issuer()),
-                association_deadline_secs: Some(600),
-                input_deadline_secs: Some(900),
-                ..flags(Admission::Invitation)
-            },
-            STARTUP,
-        )
-        .expect("invitation with issuer and deadlines");
-        assert_eq!(
-            policy,
-            AdmissionPolicy::Invitation {
-                issuer: fixture_issuer()
-            }
-        );
-    }
-
-    #[test]
-    fn an_invitation_issuer_that_is_a_roster_node_or_the_coordinator_is_refused() {
-        let with_issuer = |issuer: PathBuf| {
-            let issuer = issuer.display().to_string();
-            configure(
-                &stack_args(&[
-                    "--client-io",
-                    "1:0",
-                    "--admission",
-                    "invitation",
-                    "--invitation-issuer-cert",
-                    &issuer,
-                    "--association-deadline-secs",
-                    "600",
-                    "--input-deadline-secs",
-                    "900",
-                ]),
-                UnixSeconds::now(),
-            )
-        };
-        assert!(matches!(
-            with_issuer(fixture_path("nodes/cert2.crt")),
-            Err(ConfigError::Registration(CoordinatorError::Registration(
-                RegistrationError::IssuerIsRosterNode { .. }
-            )))
-        ));
-        assert!(matches!(
-            with_issuer(fixture_path("server_cert.crt")),
-            Err(ConfigError::Registration(CoordinatorError::Registration(
-                RegistrationError::IssuerIsCoordinatorKey
-            )))
-        ));
-        let accepted = with_issuer(fixture_path("clients/cert1.crt"));
-        assert!(accepted.is_ok(), "{:?}", accepted.err());
     }
 
     #[test]
@@ -959,10 +837,7 @@ mod tests {
         let admission = CoordinatorRPCBaseClient::associate_client(
             &client.client,
             execution_id,
-            AssociationRequest {
-                slot: None,
-                invitation: None,
-            },
+            AssociationRequest { slot: None },
         )
         .await
         .expect("an unconfigured client associates under open admission");

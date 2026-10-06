@@ -3195,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "stoffel-mpc-coordinator-off-chain"
 version = "0.3.0"
-source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#272e4933c4aee6e8f33da7d1c877cb30881133cb"
+source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#59fb7f502d3da1c7f7223ba7ba3249f47aab8d21"
 dependencies = [
  "ark-bls12-381",
  "ark-ff",
@@ -3217,7 +3217,7 @@ dependencies = [
 [[package]]
 name = "stoffel-mpc-coordinator-shared"
 version = "0.3.0"
-source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#272e4933c4aee6e8f33da7d1c877cb30881133cb"
+source = "git+https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git?branch=feature%2Fno-bootnode#59fb7f502d3da1c7f7223ba7ba3249f47aab8d21"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",

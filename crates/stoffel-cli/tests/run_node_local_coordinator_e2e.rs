@@ -368,7 +368,6 @@ def main() -> int64:
                 slot_one_key,
                 AssociationRequest {
                     slot: Some(ClientIndex(1)),
-                    invitation: None,
                 },
                 &slot_one_inputs,
                 timeout,
@@ -377,10 +376,7 @@ def main() -> int64:
                 &endpoint,
                 first_free_cert,
                 first_free_key,
-                AssociationRequest {
-                    slot: None,
-                    invitation: None,
-                },
+                AssociationRequest { slot: None },
                 &first_free_inputs,
                 timeout,
             ),
@@ -463,10 +459,7 @@ def main() -> int64:
         )
     };
     let (cert_der, key_der) = mint();
-    let request = AssociationRequest {
-        slot: None,
-        invitation: None,
-    };
+    let request = AssociationRequest { slot: None };
     let connect = |cert_der: Vec<u8>, key_der: Vec<u8>| {
         let endpoint = &endpoint;
         let coordinator_pin = &coordinator_pin;
@@ -616,15 +609,14 @@ fn client_identity() -> (Vec<u8>, Vec<u8>) {
     )
 }
 
-/// §9.E.1 step 5, this repository's own cover for the client-leg pin
-/// (docs/design/bootnode-elimination.md §9.H): a client's node RPC addresses
-/// are hints, and every leg is pinned to a member of the roster the pinned
-/// coordinator served. When every address answers with a key outside that
-/// roster, no leg is admitted and the client refuses the run: an impostor is
-/// never believed.
+/// The limit of the drop-not-fail contract below: when every node RPC address
+/// answers with a key outside the served roster, no leg is admitted and the
+/// client is refused. Each leg's failure is the roster pin's refusal, not
+/// reachability, so this is the pin never believing an impostor rather than a
+/// run that merely could not connect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "starts a real localhost coordinator, MPC party mesh, and impostor node RPC listeners"]
-async fn a_local_client_refuses_a_node_rpc_listener_outside_the_served_roster() {
+async fn a_local_client_is_refused_when_every_node_rpc_listener_is_outside_the_roster() {
     let timeout = Duration::from_secs(120);
     let running = LocalCoordinatorRunner::builder(
         STOFFEL_BIN,
@@ -652,10 +644,7 @@ async fn a_local_client_refuses_a_node_rpc_listener_outside_the_served_roster() 
         &endpoint,
         cert,
         key,
-        AssociationRequest {
-            slot: None,
-            invitation: None,
-        },
+        AssociationRequest { slot: None },
         &["42".to_owned()],
         timeout,
     )
@@ -684,14 +673,22 @@ async fn a_local_client_refuses_a_node_rpc_listener_outside_the_served_roster() 
     drop(running);
 }
 
-/// The other half of the client-leg pin contract: a single node RPC listener
-/// outside the roster is dropped, not fatal (the coordinator's
-/// `connect_roster_legs`; otherwise any one address could deny every client its
-/// masks). The impostor gets no leg, the client reconstructs its mask from the
-/// roster members it did reach, and the run completes with the client's input.
+/// §9.E.1 step 5, this repository's own cover for the client-leg pin
+/// (docs/design/bootnode-elimination.md §9.H): a client's node RPC addresses
+/// are hints, and every leg is pinned to a member of the roster the pinned
+/// coordinator served. A node RPC listener presenting a certificate minted
+/// here — no roster member — never becomes a leg.
+///
+/// Retargeted in review (§10): the impostor's leg is DROPPED, not fatal to the
+/// client. A node owns its own listener, so making a pin mismatch fail the whole
+/// call handed any single roster member a denial-of-service switch over every
+/// client. What the pin guarantees is that the impostor is never believed; the
+/// run completing over the remaining four legs is the point, not a weakening of
+/// it. The old assertion — a `ServerPinMismatch` error out of the client — is
+/// exactly the behaviour that was removed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "starts a real localhost coordinator, MPC party mesh, and an impostor node RPC listener"]
-async fn a_local_client_drops_an_impostor_leg_and_completes_from_roster_members() {
+async fn a_local_client_refuses_a_node_rpc_listener_outside_the_served_roster() {
     let timeout = Duration::from_secs(180);
     let running = LocalCoordinatorRunner::builder(
         STOFFEL_BIN,
@@ -716,16 +713,27 @@ async fn a_local_client_drops_an_impostor_leg_and_completes_from_roster_members(
         &endpoint,
         cert,
         key,
-        AssociationRequest {
-            slot: None,
-            invitation: None,
-        },
+        AssociationRequest { slot: None },
         &inputs,
         timeout,
     );
     let (output, client) = tokio::join!(running.finish(), client);
-    let client = client.expect("one impostor leg does not take the client down");
+    let client = client.expect(
+        "the impostor's leg is dropped and the run completes over the remaining roster members",
+    );
+    // Admission is unaffected: the client still gets its slot and its input range.
     assert_eq!(client.admission.client_index, ClientIndex(0));
+    assert_eq!(
+        client
+            .admission
+            .input_range
+            .expect("the client was admitted with an input range")
+            .count
+            .get(),
+        1
+    );
+    // The impostor served nothing: the mask is reconstructed from the roster members'
+    // shares alone, and the parties open exactly the client's input.
     let output = output.expect("the run completes from the roster members' masks");
     assert_eq!(output.consistent_returned_values().unwrap(), vec!["42"]);
 }
