@@ -74,15 +74,13 @@ validate_env() {
                 echo "The coordinator assigns each client's input range when it associates. Set STOFFEL_CLIENT_SLOT to ask for a specific slot." ;;
             STOFFEL_OUTPUTS)
                 echo "A client's output count comes from its admission." ;;
-            STOFFEL_INVITATION)
-                echo "Invitation admission was removed in review and never shipped. A client binds the slot its certificate is pre-registered to, the one STOFFEL_CLIENT_SLOT asks for, or under open admission the first free one." ;;
             STOFFEL_PREPROC_STORE)
                 echo "Preprocessing material is never stored between executions: a stored item could be drawn by a second execution (docs/design/bootnode-elimination.md §9.C.9). Remove the variable." ;;
         esac
     }
     for var in STOFFEL_NODE_ROSTER STOFFEL_EXPECTED_CLIENTS STOFFEL_WAIT_FOR_CLIENTS \
         STOFFEL_CLIENT_INPUT_COUNT STOFFEL_N_PARTIES STOFFEL_THRESHOLD STOFFEL_TIMESTAMP \
-        STOFFEL_CLIENT_INDEX STOFFEL_OUTPUTS STOFFEL_PREPROC_STORE STOFFEL_INVITATION; do
+        STOFFEL_CLIENT_INDEX STOFFEL_OUTPUTS STOFFEL_PREPROC_STORE; do
         if [ -n "${!var:-}" ]; then
             echo "ERROR: ${var} was removed. $(removed_variable_hint "${var}")"
             exit 2

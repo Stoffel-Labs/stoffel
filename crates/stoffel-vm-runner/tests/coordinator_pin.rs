@@ -243,7 +243,7 @@ async fn a_client_slot_that_is_not_a_slot_number_is_refused() {
 /// Every flag design doc §9.D.3 removes, with the hint it fails with. The hints
 /// are the contract: none of them names a flag of this table, so an operator
 /// following one refusal is never sent to the next.
-const REMOVED_FLAGS: [(&str, &str, &str); 13] = [
+const REMOVED_FLAGS: [(&str, &str, &str); 12] = [
     (
         "--roster",
         "ids/nodes/cert0.crt",
@@ -311,17 +311,6 @@ const REMOVED_FLAGS: [(&str, &str, &str); 13] = [
         "--outputs",
         "1",
         "A client's output count comes from its admission.",
-    ),
-    // §9.C.3: the `Invitation` policy was removed in review and never shipped, so
-    // the flag that presented one is refused by name rather than swallowed by the
-    // argument parser's catch-all (where its value would land among the
-    // positionals and be taken for the program path).
-    (
-        "--invitation",
-        "invitation.json",
-        "Invitation admission was removed in review and never shipped. A client's slot is \
-         the one its certificate is pre-registered to, the one --client-slot <index> names, \
-         or under open admission the lowest-numbered free one.",
     ),
 ];
 
