@@ -188,6 +188,8 @@ docker compose -f scripts/docker-compose.yml up --build
 
 The Compose stack runs one coordinator and five independently addressable MPC nodes. The `input-ready` service exits successfully only when preprocessing is complete and the coordinator can accept client input. Run `./scripts/run-client.sh 42` after Compose prints `MPC network is ready for client input`.
 
+Each node sets `STOFFEL_BIND_ADDRESS` to its own Compose service name (for example `node-1:19202`). `src/server.rs` resolves that name at startup and binds the MPC listener to the container's own network address, because the bootnode on party 0 hands each node's bind address to the other parties. Binding `0.0.0.0` instead makes every peer dial itself, and `input-ready` times out. For any other topology, set `STOFFEL_BIND_ADDRESS` to an address the other nodes can reach; a container attached to more than one network needs an explicit numeric address. Party 0 serves the bootnode on its bind port and its party listener on the bind port + 1000.
+
 An open port only means a process is listening. If readiness times out, inspect the coordinator and node logs. Party 0 must remain running and advance the coordinator through preprocessing to input-mask reservation.
 
 For an operator-managed production deployment, provide each service its own identity and persistent runtime environment, replace loopback endpoints, manage secrets with your deployment platform, and follow the [Stoffel deployment runbook](https://docs.stoffelmpc.com/developer-skills/stoffel-deployment-runbook). For the container topology, see the [Docker network deployment guide](https://docs.stoffelmpc.com/deployment/docker-local-network).

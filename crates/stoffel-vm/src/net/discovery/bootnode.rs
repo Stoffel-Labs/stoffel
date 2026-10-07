@@ -708,7 +708,11 @@ fn session_nonce() -> u64 {
 }
 
 fn program_id_matches_bytes(program_id: &[u8; 32], bytes: &[u8]) -> bool {
-    blake3::hash(bytes).as_bytes() == program_id
+    // Must use the same domain-separated hash that parties use to derive the
+    // program id they register with (`program_sync::program_id_from_bytes`),
+    // otherwise every uploaded program is rejected as a hash mismatch and the
+    // bootnode never stores the bytecode for parties that need to fetch it.
+    &crate::net::program_sync::program_id_from_bytes(bytes) == program_id
 }
 
 #[cfg(test)]
@@ -726,7 +730,21 @@ mod tests {
     }
 
     fn program_id(bytes: &[u8]) -> [u8; 32] {
-        *blake3::hash(bytes).as_bytes()
+        crate::net::program_sync::program_id_from_bytes(bytes)
+    }
+
+    #[test]
+    fn program_id_matches_bytes_uses_domain_separated_hash() {
+        let bytes = b"example program bytecode";
+        // The bootnode must accept the same program id parties derive via
+        // `program_id_from_bytes` (domain-separated), and must reject a plain
+        // blake3 digest of the bytes.
+        let registered = crate::net::program_sync::program_id_from_bytes(bytes);
+        assert!(program_id_matches_bytes(&registered, bytes));
+
+        let plain = *blake3::hash(bytes).as_bytes();
+        assert_ne!(plain, registered);
+        assert!(!program_id_matches_bytes(&plain, bytes));
     }
 
     fn registration(party_id: PartyId, program_id: [u8; 32]) -> SessionRegistration {

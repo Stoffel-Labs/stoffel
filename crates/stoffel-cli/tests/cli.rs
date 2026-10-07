@@ -158,8 +158,15 @@ fn init_creates_default_project() {
     let server_rs = fs::read_to_string(src.join("server.rs")).unwrap();
     assert!(server_rs.contains("config.parties"));
     assert!(server_rs.contains(".server(party_id)"));
-    assert!(server_rs.contains("numeric_bind_address"));
-    assert!(server_rs.contains("resolve_bootstrap_address"));
+    // Bind and bootstrap addresses share one resolver so a Compose service
+    // name becomes the numeric, routable address the runner needs.
+    assert!(server_rs.contains("fn resolve_socket_address("));
+    assert!(server_rs.contains("resolve_socket_address(\n        \"bind\","));
+    assert!(server_rs.contains("resolve_socket_address(\n            \"bootstrap\","));
+    assert!(!server_rs.contains("numeric_bind_address"));
+    assert!(!server_rs.contains("resolve_bootstrap_address"));
+    // The template pins a published SDK without `.advertise()`.
+    assert!(!server_rs.contains(".advertise("));
     assert!(server_rs.contains(".to_socket_addrs()"));
     let coordinator_rs = fs::read_to_string(src.join("coordinator.rs")).unwrap();
     assert!(coordinator_rs.contains("Some(\"wait-ready\")"));
@@ -231,12 +238,28 @@ fn init_creates_default_project() {
             compose.contains(&format!("[\"stoffel-server\", \"{party}\"]")),
             "Compose is missing node {party}"
         );
+        // Each node binds its MPC listener to its own service address: the
+        // bootnode hands that address to the other parties, so 0.0.0.0 would
+        // make every peer dial itself.
         assert!(compose.contains(&format!(
-            "STOFFEL_BIND_ADDRESS: 0.0.0.0:{}",
+            "STOFFEL_BIND_ADDRESS: node-{party}:{}",
             19_200 + party * 2
         )));
+        assert!(compose.contains(&format!(
+            "STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:{}",
+            19_400 + party
+        )));
     }
-    assert!(!compose.contains("STOFFEL_BIND_ADDRESS: node-"));
+    assert!(!compose.contains("STOFFEL_BIND_ADDRESS: 0.0.0.0"));
+    assert_eq!(
+        compose
+            .matches("STOFFEL_BOOTSTRAP_ADDRESS: node-0:19200")
+            .count(),
+        4
+    );
+    // Peers gate on node-0 starting, not on its health: node-0 only becomes
+    // healthy after every party has joined.
+    assert_eq!(compose.matches("condition: service_started").count(), 4);
     assert!(compose.contains("[\"stoffel-coordinator\", \"wait-ready\"]"));
     assert!(compose.contains("condition: service_healthy"));
     assert!(!compose.contains("--client-input-total"));
@@ -260,6 +283,7 @@ fn init_creates_default_project() {
     assert!(readme.contains("scripts/docker-compose.yml"));
     assert!(readme.contains("input-ready"));
     assert!(readme.contains("open port"));
+    assert!(readme.contains("STOFFEL_BIND_ADDRESS"));
     assert!(readme.contains("https://docs.stoffelmpc.com"));
     assert!(readme.contains("runnable base project"));
     assert!(readme.contains("## Integrate Stoffel into your own app"));

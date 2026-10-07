@@ -34,25 +34,39 @@ fn env_or(name: &str, fallback: String) -> String {
     std::env::var(name).unwrap_or(fallback)
 }
 
-fn numeric_bind_address(address: String) -> Result<String, Box<dyn std::error::Error>> {
-    address
-        .parse::<SocketAddr>()
-        .map(|address| address.to_string())
-        .map_err(|error| format!("MPC node bind address must be a numeric IP socket address, got {address}: {error}").into())
-}
-
-fn resolve_bootstrap_address(address: String) -> Result<String, Box<dyn std::error::Error>> {
-    if let Ok(address) = address.parse::<SocketAddr>() {
-        return Ok(address.to_string());
+/// Resolves an MPC listener or bootstrap address to the numeric socket address
+/// the node runtime requires.
+///
+/// Numeric addresses pass through unchanged. A host name (for example a
+/// Compose service name) is resolved once at startup, preferring IPv4 so every
+/// node picks the same address family. The bootnode hands each node's bind
+/// address to the other parties, so a host name must resolve to an address
+/// they can reach.
+fn resolve_socket_address(
+    label: &str,
+    address: &str,
+) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+    if let Ok(numeric) = address.parse::<SocketAddr>() {
+        return Ok(numeric);
     }
-    let mut addresses = address
+    let candidates: Vec<SocketAddr> = address
         .to_socket_addrs()
-        .map_err(|error| format!("failed to resolve MPC bootstrap address {address}: {error}"))?;
-    let resolved = addresses
-        .find(SocketAddr::is_ipv4)
-        .or_else(|| addresses.next())
-        .ok_or_else(|| format!("MPC bootstrap address {address} resolved to no socket addresses"))?;
-    Ok(resolved.to_string())
+        .map_err(|error| format!("failed to resolve MPC {label} address {address}: {error}"))?
+        .collect();
+    let resolved = candidates
+        .iter()
+        .find(|candidate| candidate.is_ipv4())
+        .or_else(|| candidates.first())
+        .copied()
+        .ok_or_else(|| format!("MPC {label} address {address} resolved to no socket addresses"))?;
+    if resolved.ip().is_unspecified() || resolved.ip().is_loopback() {
+        return Err(format!(
+            "MPC {label} address {address} resolved to {resolved}, which other nodes cannot reach; \
+             use a host name that resolves to a routable address or a numeric address"
+        )
+        .into());
+    }
+    Ok(resolved)
 }
 
 #[derive(Deserialize)]
@@ -120,10 +134,16 @@ pub async fn start_party(party_id: usize) -> Result<StoffelServer, Box<dyn std::
         .expected_client_cert(client_certificate())
         .build()?;
 
-    let bind_address = numeric_bind_address(env_or(
-        "STOFFEL_BIND_ADDRESS",
-        deployment.node_bind_addresses[party_id].clone(),
-    ))?;
+    // Other parties dial the address this node binds: the bootnode records it
+    // and announces it to the session. Party 0's party listener uses the bind
+    // port + 1000; the bind port itself serves the bootnode.
+    let bind_address = resolve_socket_address(
+        "bind",
+        &env_or(
+            "STOFFEL_BIND_ADDRESS",
+            deployment.node_bind_addresses[party_id].clone(),
+        ),
+    )?;
 
     let mut builder = runtime
         .server(party_id)
@@ -136,11 +156,14 @@ pub async fn start_party(party_id: usize) -> Result<StoffelServer, Box<dyn std::
         .expected_clients(1)
         .offchain_coordinator(offchain);
     if party_id > 0 {
-        let bootstrap_address = resolve_bootstrap_address(env_or(
-            "STOFFEL_BOOTSTRAP_ADDRESS",
-            deployment.node_bind_addresses[0].clone(),
-        ))?;
-        builder = builder.bootstrap(bootstrap_address);
+        let bootstrap_address = resolve_socket_address(
+            "bootstrap",
+            &env_or(
+                "STOFFEL_BOOTSTRAP_ADDRESS",
+                deployment.node_bind_addresses[0].clone(),
+            ),
+        )?;
+        builder = builder.bootstrap(bootstrap_address.to_string());
     }
     if let Some(path) = std::env::var_os("STOFFEL_RUN_BIN") {
         builder = builder.runner_path(path);

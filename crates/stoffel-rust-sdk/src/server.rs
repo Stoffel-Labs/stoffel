@@ -5,8 +5,9 @@
 //! integration concern and is not simulated by the SDK.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fmt;
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
@@ -94,6 +95,7 @@ pub struct ServerBuilder {
     verified_ordering: Option<VerifiedOrdering>,
     runner_path: Option<PathBuf>,
     bootstrap_addr: Option<String>,
+    advertise_addr: Option<SocketAddr>,
     entry: String,
     offchain_coordinator: Option<OffChainServerConfig>,
     config_error: Option<String>,
@@ -116,6 +118,7 @@ impl ServerBuilder {
             verified_ordering: None,
             runner_path: None,
             bootstrap_addr: None,
+            advertise_addr: None,
             entry: "main".to_owned(),
             offchain_coordinator: None,
             config_error: None,
@@ -240,6 +243,37 @@ impl ServerBuilder {
         self
     }
 
+    /// Set the address other parties dial to reach this party's mesh listener.
+    ///
+    /// The address is forwarded to `stoffel-run` as `--advertise` and is what
+    /// the bootnode hands to the other parties, so it must be reachable from
+    /// them. The port must be the party mesh port: for the leader (party 0
+    /// without a bootstrap address) that is the bind port + 1000, for every
+    /// other party it is the bind port itself.
+    ///
+    /// Host names are resolved once, here, preferring IPv4. When unset, the
+    /// runner advertises the address derived from the bind address, which is
+    /// only dialable by other hosts if the bind address itself is routable.
+    pub fn advertise<A: ToSocketAddrs>(mut self, addr: A) -> Self {
+        match addr.to_socket_addrs() {
+            Ok(addrs) => {
+                let addrs: Vec<SocketAddr> = addrs.collect();
+                self.advertise_addr = addrs
+                    .iter()
+                    .find(|addr| addr.is_ipv4())
+                    .or_else(|| addrs.first())
+                    .copied();
+                if self.advertise_addr.is_none() {
+                    self.config_error = Some("server advertise address did not resolve".to_owned());
+                }
+            }
+            Err(error) => {
+                self.config_error = Some(format!("invalid server advertise address: {error}"));
+            }
+        }
+        self
+    }
+
     /// Configure the off-chain coordinator flags passed to `stoffel-run`.
     ///
     /// This is required when the attached program declares ClientStore IO.
@@ -314,6 +348,10 @@ impl ServerBuilder {
 
     pub fn configured_bootstrap(&self) -> Option<&str> {
         self.bootstrap_addr.as_deref()
+    }
+
+    pub fn configured_advertise(&self) -> Option<SocketAddr> {
+        self.advertise_addr
     }
 
     pub fn configured_offchain_coordinator(&self) -> Option<&OffChainServerConfig> {
@@ -394,6 +432,18 @@ impl ServerBuilder {
             return Err(Error::Configuration(
                 "server bind address is required".to_owned(),
             ));
+        }
+        if let Some(advertise) = self.advertise_addr {
+            if advertise.ip().is_unspecified() {
+                return Err(Error::Configuration(format!(
+                    "server advertise address must be a routable address, not {advertise}"
+                )));
+            }
+            if advertise.port() == 0 {
+                return Err(Error::Configuration(format!(
+                    "server advertise address must have a non-zero port, not {advertise}"
+                )));
+            }
         }
         if self.consensus_timeout.is_zero() {
             return Err(Error::Configuration(
@@ -489,6 +539,7 @@ impl ServerBuilder {
             verified_ordering: self.verified_ordering,
             runner_path: self.runner_path,
             bootstrap_addr: self.bootstrap_addr,
+            advertise_addr: self.advertise_addr,
             entry: self.entry,
             offchain_coordinator: self.offchain_coordinator,
             process: Arc::new(Mutex::new(None)),
@@ -629,6 +680,7 @@ pub struct StoffelServer {
     verified_ordering: Option<VerifiedOrdering>,
     runner_path: Option<PathBuf>,
     bootstrap_addr: Option<String>,
+    advertise_addr: Option<SocketAddr>,
     entry: String,
     offchain_coordinator: Option<OffChainServerConfig>,
     process: Arc<Mutex<Option<ServerProcess>>>,
@@ -707,61 +759,19 @@ impl StoffelServer {
         let program_path = tempdir.path().join("program.stflb");
         program.save_bytecode(&program_path)?;
 
+        let args = self.runner_args(&program_path, mpc_config)?;
+        if self.advertise_addr.is_none() && bind_ip_is_unspecified(&self.bind_addr) {
+            eprintln!(
+                "[stoffel] warning: party {} binds {} without an advertise address; parties on other hosts cannot dial it",
+                self.party_id, self.bind_addr
+            );
+        }
+
         let mut command = Command::new(runner_path);
         command
-            .arg(&program_path)
-            .arg(&self.entry)
-            .arg("--n-parties")
-            .arg(mpc_config.parties.to_string())
-            .arg("--threshold")
-            .arg(mpc_config.threshold.to_string())
-            .arg("--bind")
-            .arg(&self.bind_addr)
-            .arg("--mpc-backend")
-            .arg(server_backend_name(self.backend))
+            .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if let Some(curve) = self.backend.curve() {
-            command.arg("--mpc-curve").arg(curve.to_string());
-        }
-        if let Some(config) = &self.offchain_coordinator {
-            config.validate(self.expected_clients)?;
-            command
-                .arg("--off-chain-coord")
-                .arg(&config.coordinator_address)
-                .arg("--rpc-bind")
-                .arg(&config.rpc_bind_address)
-                .arg("--key")
-                .arg(&config.key_path)
-                .arg("--cert")
-                .arg(&config.cert_path)
-                .arg("--timestamp")
-                .arg(config.timestamp.to_string());
-            if !config.expected_client_certs.is_empty() {
-                command.arg("--expected-clients").arg(
-                    config
-                        .expected_client_certs
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                );
-            }
-        }
-        if let Some(bootstrap) = &self.bootstrap_addr {
-            command
-                .arg("--party-id")
-                .arg(self.party_id.to_string())
-                .arg("--bootstrap")
-                .arg(bootstrap);
-        } else {
-            command.arg("--leader");
-            if self.party_id != 0 {
-                return Err(Error::Configuration(
-                    "only party 0 can start as leader without bootstrap".to_owned(),
-                ));
-            }
-        }
 
         let child = command.spawn()?;
         *self.process.lock().map_err(|_| {
@@ -774,6 +784,69 @@ impl StoffelServer {
         Ok(())
     }
 
+    /// Build the `stoffel-run` argument list for this server.
+    fn runner_args(&self, program_path: &Path, mpc_config: &MpcConfig) -> Result<Vec<OsString>> {
+        let mut args: Vec<OsString> = vec![
+            program_path.into(),
+            (&self.entry).into(),
+            "--n-parties".into(),
+            mpc_config.parties.to_string().into(),
+            "--threshold".into(),
+            mpc_config.threshold.to_string().into(),
+            "--bind".into(),
+            (&self.bind_addr).into(),
+            "--mpc-backend".into(),
+            server_backend_name(self.backend).into(),
+        ];
+        if let Some(curve) = self.backend.curve() {
+            args.push("--mpc-curve".into());
+            args.push(curve.to_string().into());
+        }
+        if let Some(advertise) = self.advertise_addr {
+            args.push("--advertise".into());
+            args.push(advertise.to_string().into());
+        }
+        if let Some(config) = &self.offchain_coordinator {
+            config.validate(self.expected_clients)?;
+            args.push("--off-chain-coord".into());
+            args.push((&config.coordinator_address).into());
+            args.push("--rpc-bind".into());
+            args.push((&config.rpc_bind_address).into());
+            args.push("--key".into());
+            args.push((&config.key_path).into());
+            args.push("--cert".into());
+            args.push((&config.cert_path).into());
+            args.push("--timestamp".into());
+            args.push(config.timestamp.to_string().into());
+            if !config.expected_client_certs.is_empty() {
+                args.push("--expected-clients".into());
+                args.push(
+                    config
+                        .expected_client_certs
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                        .into(),
+                );
+            }
+        }
+        if let Some(bootstrap) = &self.bootstrap_addr {
+            args.push("--party-id".into());
+            args.push(self.party_id.to_string().into());
+            args.push("--bootstrap".into());
+            args.push(bootstrap.into());
+        } else {
+            if self.party_id != 0 {
+                return Err(Error::Configuration(
+                    "only party 0 can start as leader without bootstrap".to_owned(),
+                ));
+            }
+            args.push("--leader".into());
+        }
+        Ok(args)
+    }
+
     #[tracing::instrument(skip_all, fields(party_id = self.party_id, bind_addr = %self.bind_addr))]
     pub async fn run_forever(self) -> Result<()> {
         self.start().await?;
@@ -782,12 +855,18 @@ impl StoffelServer {
             .lock()
             .map_err(|_| Error::Computation("server process state lock was poisoned".to_owned()))?
             .take();
-        if let Some(mut process) = process {
-            process.child.wait()?;
+        let status = if let Some(mut process) = process {
+            process.child.wait()?
         } else {
-            std::future::pending::<()>().await;
-        }
+            std::future::pending::<std::process::ExitStatus>().await
+        };
         self.set_state(ServerState::Shutdown);
+        if !status.success() {
+            return Err(Error::Computation(format!(
+                "stoffel-run for party {} exited unsuccessfully: {status}",
+                self.party_id
+            )));
+        }
         Ok(())
     }
 
@@ -923,6 +1002,11 @@ impl StoffelServer {
         self.bootstrap_addr.as_deref()
     }
 
+    /// The address forwarded to `stoffel-run` as `--advertise`, if any.
+    pub fn advertise_addr(&self) -> Option<SocketAddr> {
+        self.advertise_addr
+    }
+
     pub fn offchain_coordinator(&self) -> Option<&OffChainServerConfig> {
         self.offchain_coordinator.as_ref()
     }
@@ -941,6 +1025,12 @@ fn server_backend_name(backend: MpcBackend) -> &'static str {
         MpcBackend::HoneyBadger => "honeybadger",
         MpcBackend::Avss { .. } => "avss",
     }
+}
+
+fn bind_ip_is_unspecified(bind_addr: &str) -> bool {
+    bind_addr
+        .parse::<SocketAddr>()
+        .is_ok_and(|addr| addr.ip().is_unspecified())
 }
 
 fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
@@ -1027,5 +1117,120 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(matches!(err, Error::Configuration(_)));
+    }
+
+    fn runner_args_for(server: &StoffelServer) -> Result<Vec<OsString>> {
+        let mpc_config = server
+            .mpc_config()
+            .expect("test server has an MPC configuration");
+        server.runner_args(Path::new("program.stflb"), mpc_config)
+    }
+
+    fn five_party_builder(party_id: PartyId) -> ServerBuilder {
+        let mpc_config = MpcConfig::default();
+        StoffelServer::builder(party_id)
+            .bind("127.0.0.1:19200")
+            .mpc_config(&mpc_config)
+            .peers(
+                (0..5)
+                    .filter(|peer| *peer != party_id)
+                    .map(|peer| (peer, format!("127.0.0.1:{}", 19300 + peer))),
+            )
+    }
+
+    fn advertise_values(args: &[OsString]) -> Vec<&OsString> {
+        args.iter()
+            .zip(args.iter().skip(1))
+            .filter(|(flag, _)| *flag == "--advertise")
+            .map(|(_, value)| value)
+            .collect()
+    }
+
+    #[test]
+    fn advertise_defaults_to_unset_and_is_not_forwarded() -> Result<()> {
+        let builder = five_party_builder(0);
+        assert_eq!(builder.configured_advertise(), None);
+
+        let server = builder.build()?;
+        assert_eq!(server.advertise_addr(), None);
+        let args = runner_args_for(&server)?;
+        assert!(!args.iter().any(|arg| arg == "--advertise"));
+        assert_eq!(
+            args.last().map(OsString::as_os_str),
+            Some("--leader".as_ref())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn advertise_round_trips_and_is_forwarded_for_leader_and_follower() -> Result<()> {
+        let expected: SocketAddr = "10.0.0.5:20200".parse().expect("numeric socket address");
+
+        let builder = five_party_builder(0).advertise("10.0.0.5:20200");
+        assert_eq!(builder.configured_advertise(), Some(expected));
+        let leader = builder.build()?;
+        assert_eq!(leader.advertise_addr(), Some(expected));
+        let args = runner_args_for(&leader)?;
+        assert_eq!(advertise_values(&args), ["10.0.0.5:20200"]);
+        assert!(args.iter().any(|arg| arg == "--leader"));
+
+        let follower = five_party_builder(2)
+            .bootstrap("10.0.0.4:19200")
+            .advertise(expected)
+            .build()?;
+        let args = runner_args_for(&follower)?;
+        assert_eq!(advertise_values(&args), ["10.0.0.5:20200"]);
+        assert!(args.iter().any(|arg| arg == "--bootstrap"));
+        assert!(!args.iter().any(|arg| arg == "--leader"));
+        Ok(())
+    }
+
+    #[test]
+    fn advertise_accepts_loopback_for_single_host_networks() -> Result<()> {
+        let server = five_party_builder(0).advertise("127.0.0.1:20200").build()?;
+        assert_eq!(
+            server.advertise_addr(),
+            Some("127.0.0.1:20200".parse().expect("numeric socket address"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn advertise_rejects_undialable_addresses() {
+        for address in ["0.0.0.0:20200", "[::]:20200", "10.0.0.5:0"] {
+            let err = five_party_builder(0)
+                .advertise(address)
+                .build()
+                .unwrap_err();
+            assert!(
+                matches!(&err, Error::Configuration(message) if message.contains("advertise")),
+                "{address}: {err}"
+            );
+        }
+
+        let err = five_party_builder(0)
+            .advertise("not a socket address")
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::Configuration(message) if message.contains("invalid server advertise address")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn non_leader_without_bootstrap_has_no_runner_args() -> Result<()> {
+        let server = five_party_builder(1).build()?;
+        let err = runner_args_for(&server).unwrap_err();
+        assert!(matches!(err, Error::Configuration(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn unspecified_bind_detection_only_matches_wildcard_addresses() {
+        assert!(bind_ip_is_unspecified("0.0.0.0:19200"));
+        assert!(bind_ip_is_unspecified("[::]:19200"));
+        assert!(!bind_ip_is_unspecified("127.0.0.1:19200"));
+        assert!(!bind_ip_is_unspecified("10.0.0.5:19200"));
     }
 }

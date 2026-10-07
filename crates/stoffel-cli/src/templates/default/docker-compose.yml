@@ -44,7 +44,12 @@ services:
         condition: service_healthy
     environment:
       <<: *node-env
-      STOFFEL_BIND_ADDRESS: 0.0.0.0:19200
+      # Each node binds its MPC listener to its own service address, resolved
+      # at startup, because the bootnode hands that address to the other
+      # parties. Binding 0.0.0.0 would make every peer dial itself. node-0
+      # serves the bootnode on this port and its party mesh on the bind port
+      # + 1000 (20200).
+      STOFFEL_BIND_ADDRESS: node-0:19200
       STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:19400
     ports:
       - "19400:19400"
@@ -55,10 +60,14 @@ services:
       coordinator:
         condition: service_healthy
       node-0:
-        condition: service_healthy
+        # Peers only need node-0's container to exist (so node-0:19200
+        # resolves) and its bootnode process listening. node-0's healthcheck
+        # probes its RPC port, which cannot come up until every party has
+        # joined the session, so a service_healthy gate here deadlocks startup.
+        condition: service_started
     environment:
       <<: *node-env
-      STOFFEL_BIND_ADDRESS: 0.0.0.0:19202
+      STOFFEL_BIND_ADDRESS: node-1:19202
       STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:19401
       STOFFEL_BOOTSTRAP_ADDRESS: node-0:19200
     ports:
@@ -71,10 +80,14 @@ services:
       coordinator:
         condition: service_healthy
       node-0:
-        condition: service_healthy
+        # Peers only need node-0's container to exist (so node-0:19200
+        # resolves) and its bootnode process listening. node-0's healthcheck
+        # probes its RPC port, which cannot come up until every party has
+        # joined the session, so a service_healthy gate here deadlocks startup.
+        condition: service_started
     environment:
       <<: *node-env
-      STOFFEL_BIND_ADDRESS: 0.0.0.0:19204
+      STOFFEL_BIND_ADDRESS: node-2:19204
       STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:19402
       STOFFEL_BOOTSTRAP_ADDRESS: node-0:19200
     ports:
@@ -87,10 +100,14 @@ services:
       coordinator:
         condition: service_healthy
       node-0:
-        condition: service_healthy
+        # Peers only need node-0's container to exist (so node-0:19200
+        # resolves) and its bootnode process listening. node-0's healthcheck
+        # probes its RPC port, which cannot come up until every party has
+        # joined the session, so a service_healthy gate here deadlocks startup.
+        condition: service_started
     environment:
       <<: *node-env
-      STOFFEL_BIND_ADDRESS: 0.0.0.0:19206
+      STOFFEL_BIND_ADDRESS: node-3:19206
       STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:19403
       STOFFEL_BOOTSTRAP_ADDRESS: node-0:19200
     ports:
@@ -103,10 +120,14 @@ services:
       coordinator:
         condition: service_healthy
       node-0:
-        condition: service_healthy
+        # Peers only need node-0's container to exist (so node-0:19200
+        # resolves) and its bootnode process listening. node-0's healthcheck
+        # probes its RPC port, which cannot come up until every party has
+        # joined the session, so a service_healthy gate here deadlocks startup.
+        condition: service_started
     environment:
       <<: *node-env
-      STOFFEL_BIND_ADDRESS: 0.0.0.0:19208
+      STOFFEL_BIND_ADDRESS: node-4:19208
       STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:19404
       STOFFEL_BOOTSTRAP_ADDRESS: node-0:19200
     ports:
