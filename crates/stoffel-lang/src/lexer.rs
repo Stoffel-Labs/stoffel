@@ -1,5 +1,8 @@
+use crate::docs::text::cleandoc;
 use crate::errors::{extract_source_snippet, CompilerError, CompilerResult, SourceLocation};
 use std::collections::HashMap;
+use std::iter::Peekable;
+use std::str::Chars;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenInfo {
@@ -21,6 +24,11 @@ pub enum TokenKind {
     }, // includes bases and optional suffix
     FloatLiteral(u64), // raw f64 bits
     StringLiteral(String),
+    /// A `"""..."""` docstring. The text has already been normalized with
+    /// [`cleandoc`](crate::docs::text::cleandoc); consumers must not
+    /// normalize it again (cleandoc is not idempotent). The token location is
+    /// the opening `"""`. Docstrings are not expressions.
+    DocString(String),
     BoolLiteral(bool),
     NilLiteral,
     LParen,
@@ -108,6 +116,169 @@ fn get_keywords() -> HashMap<String, TokenKind> {
     // Note: 'let' intentionally not added as a keyword anymore. It will be tokenized
     // as an Identifier to allow targeted parse-time diagnostics and potential use as a name.
     keywords
+}
+
+/// The kind of quoted literal being lexed; selects the diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuotedLiteral {
+    /// A single-line `"..."` string.
+    String,
+    /// A multi-line `"""..."""` docstring.
+    DocString,
+}
+
+impl QuotedLiteral {
+    fn unterminated_error(self, source: &str, open: &SourceLocation) -> CompilerError {
+        let (message, hint) = match self {
+            QuotedLiteral::String => (
+                "Unterminated string literal",
+                "Close the string with '\"' on the same line; use \"\"\"...\"\"\" for multi-line docstrings",
+            ),
+            QuotedLiteral::DocString => (
+                "Unterminated docstring",
+                "Close the docstring with \"\"\"",
+            ),
+        };
+        CompilerError::syntax_error(message, open.clone())
+            .with_snippet(extract_source_snippet(source, open, 2))
+            .with_hint(hint)
+    }
+}
+
+/// Decodes the character following a `\` inside a quoted literal.
+///
+/// `escaped` is the character after the backslash (`None` at end of input) and
+/// `escape_location` is the location of the backslash itself.
+fn decode_escape(
+    escaped: Option<char>,
+    literal: QuotedLiteral,
+    source: &str,
+    open: &SourceLocation,
+    escape_location: SourceLocation,
+) -> CompilerResult<char> {
+    match escaped {
+        Some('n') => Ok('\n'),
+        Some('t') => Ok('\t'),
+        Some('\\') => Ok('\\'),
+        Some('"') => Ok('"'),
+        None => Err(literal.unterminated_error(source, open)),
+        Some('\n') if literal == QuotedLiteral::String => {
+            Err(literal.unterminated_error(source, open))
+        }
+        Some(other) => {
+            let shown = match other {
+                '\n' => "'\\' before a line break".to_string(),
+                other => format!("\\{}", other),
+            };
+            let snippet = extract_source_snippet(source, &escape_location, 2);
+            Err(CompilerError::syntax_error(
+                format!("Invalid escape sequence: {}", shown),
+                escape_location,
+            )
+            .with_snippet(snippet)
+            .with_hint("Valid escape sequences are: \\n, \\t, \\\", and \\\\"))
+        }
+    }
+}
+
+/// Lexes the rest of a single-line `"..."` string after its opening quote.
+///
+/// A raw line break or the end of input before the closing quote is an
+/// "Unterminated string literal" error reported at the opening quote.
+fn lex_string_body(
+    iter: &mut Peekable<Chars<'_>>,
+    source: &str,
+    open: &SourceLocation,
+    line: usize,
+    column: &mut usize,
+) -> CompilerResult<String> {
+    let mut text = String::new();
+    loop {
+        match iter.next() {
+            Some('"') => {
+                *column += 1;
+                return Ok(text);
+            }
+            Some('\\') => {
+                let escape_location = SourceLocation {
+                    column: *column,
+                    line,
+                    ..open.clone()
+                };
+                *column += 2;
+                text.push(decode_escape(
+                    iter.next(),
+                    QuotedLiteral::String,
+                    source,
+                    open,
+                    escape_location,
+                )?);
+            }
+            Some('\n') | None => return Err(QuotedLiteral::String.unterminated_error(source, open)),
+            Some(ch) => {
+                text.push(ch);
+                *column += 1;
+            }
+        }
+    }
+}
+
+/// Lexes the rest of a `"""..."""` docstring after its opening `"""`.
+///
+/// Raw line breaks are kept and advance `line`; columns are counted in chars.
+/// The docstring is consumed within a single token, so its continuation lines
+/// take no part in indentation or comment handling. Reaching the end of input
+/// before the closing `"""` is an "Unterminated docstring" error reported at
+/// the opening quotes.
+fn lex_docstring_body(
+    iter: &mut Peekable<Chars<'_>>,
+    source: &str,
+    open: &SourceLocation,
+    line: &mut usize,
+    column: &mut usize,
+) -> CompilerResult<String> {
+    let mut text = String::new();
+    loop {
+        match iter.next() {
+            Some('"') => {
+                let mut quotes = 1;
+                while quotes < 3 && iter.peek() == Some(&'"') {
+                    iter.next();
+                    quotes += 1;
+                }
+                *column += quotes;
+                if quotes == 3 {
+                    return Ok(text);
+                }
+                text.extend(std::iter::repeat_n('"', quotes));
+            }
+            Some('\\') => {
+                let escape_location = SourceLocation {
+                    line: *line,
+                    column: *column,
+                    ..open.clone()
+                };
+                *column += 2;
+                text.push(decode_escape(
+                    iter.next(),
+                    QuotedLiteral::DocString,
+                    source,
+                    open,
+                    escape_location,
+                )?);
+            }
+            Some('\n') => {
+                text.push('\n');
+                *line += 1;
+                *column = 1;
+            }
+            Some(ch) => {
+                text.push(ch);
+                *column += 1;
+            }
+            None => return Err(QuotedLiteral::DocString.unterminated_error(source, open)),
+        }
+    }
 }
 
 const SPACES_PER_INDENT: usize = 2;
@@ -637,67 +808,27 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
                     }
                 }
             }
-            // Strings
+            // Strings and docstrings
             '"' => {
-                let start_col = column;
-                let mut s = String::new();
-                column += 1; // Account for opening quote
-                loop {
-                    match iter.next() {
-                        Some('"') => {
-                            column += 1;
-                            break;
-                        }
-                        Some('\\') => {
-                            // Handle escape sequences
-                            let escape_col = column; // Column of the escape character
-                            column += 1;
-                            match iter.next() {
-                                Some('n') => {
-                                    s.push('\n');
-                                    column += 1;
-                                }
-                                Some('t') => {
-                                    s.push('\t');
-                                    column += 1;
-                                }
-                                Some('\\') => {
-                                    s.push('\\');
-                                    column += 1;
-                                }
-                                Some('"') => {
-                                    s.push('"');
-                                    column += 1;
-                                }
-                                Some(esc_c) => {
-                                    // Invalid escape sequence
-                                    let location = SourceLocation {
-                                        file: filename.to_string(),
-                                        line,
-                                        column: escape_col,
-                                    };
-                                    let snippet = extract_source_snippet(source, &location, 2);
-                                    return Err(CompilerError::syntax_error(
-                                        format!("Invalid escape sequence: \\{}", esc_c),
-                                        location,
-                                    )
-                                    .with_snippet(snippet)
-                                    .with_hint(
-                                        "Valid escape sequences are: \\n, \\t, \\\", and \\\\",
-                                    ));
-                                }
-                                None => { /* Unterminated escape error */ }
-                            }
-                        }
-                        Some('\n') => { /* Unterminated string error (newline) */ }
-                        Some(str_c) => {
-                            s.push(str_c);
-                            column += 1;
-                        }
-                        None => { /* Unterminated string error (EOF) */ }
+                let open = make_location(line, column);
+                if iter.peek() == Some(&'"') {
+                    iter.next(); // Second quote
+                    if iter.peek() == Some(&'"') {
+                        iter.next(); // Third quote: this is a `"""docstring"""`
+                        column += 3;
+                        let raw =
+                            lex_docstring_body(&mut iter, source, &open, &mut line, &mut column)?;
+                        push_token(TokenKind::DocString(cleandoc(&raw)), open);
+                    } else {
+                        // `""` is an empty string literal.
+                        column += 2;
+                        push_token(TokenKind::StringLiteral(String::new()), open);
                     }
+                } else {
+                    column += 1; // Opening quote
+                    let s = lex_string_body(&mut iter, source, &open, line, &mut column)?;
+                    push_token(TokenKind::StringLiteral(s), open);
                 }
-                push_token(TokenKind::StringLiteral(s), make_location(line, start_col));
             }
             // Identifiers and Keywords
             c if c.is_alphabetic() || c == '_' => {
@@ -744,4 +875,292 @@ pub fn tokenize(source: &str, filename: &str) -> CompilerResult<Vec<TokenInfo>> 
 
     push_token(TokenKind::Eof, make_location(line, column));
     Ok(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tokenize, TokenInfo, TokenKind};
+    use crate::errors::CompilerResult;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    /// Upper bound for a single tokenize call. Unterminated literals used to
+    /// loop forever, so every test lexes on a worker thread under a deadline.
+    const LEX_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn lex(source: &str) -> CompilerResult<Vec<TokenInfo>> {
+        let (sender, receiver) = mpsc::channel();
+        let source = source.to_owned();
+        thread::spawn(move || {
+            // The receiver may be gone after a timeout; ignore send failures.
+            let _ = sender.send(tokenize(&source, "test.stfl"));
+        });
+        receiver
+            .recv_timeout(LEX_TIMEOUT)
+            .expect("tokenize did not finish within the timeout (lexer hang)")
+    }
+
+    fn kinds(source: &str) -> Vec<TokenKind> {
+        lex(source)
+            .unwrap_or_else(|err| panic!("unexpected lex error for {source:?}: {err}"))
+            .into_iter()
+            .map(|token| token.kind)
+            .collect()
+    }
+
+    fn lex_error(source: &str) -> crate::errors::CompilerError {
+        match lex(source) {
+            Ok(tokens) => panic!("expected a lex error for {source:?}, got {tokens:?}"),
+            Err(err) => err,
+        }
+    }
+
+    fn string(text: &str) -> TokenKind {
+        TokenKind::StringLiteral(text.to_owned())
+    }
+
+    fn doc(text: &str) -> TokenKind {
+        TokenKind::DocString(text.to_owned())
+    }
+
+    fn ident(name: &str) -> TokenKind {
+        TokenKind::Identifier(name.to_owned())
+    }
+
+    // --- M0: unterminated plain strings ---
+
+    #[test]
+    fn unterminated_string_at_eof_is_an_error() {
+        let err = lex_error("x = \"abc");
+        assert_eq!(err.message, "Unterminated string literal");
+        assert_eq!((err.location.line, err.location.column), (1, 5));
+        assert!(err.hint.as_deref().unwrap_or("").contains("\"\"\""));
+        assert!(err.source_snippet.is_some());
+    }
+
+    #[test]
+    fn trailing_backslash_at_eof_is_an_unterminated_string() {
+        let err = lex_error("x = \"abc\\");
+        assert_eq!(err.message, "Unterminated string literal");
+        assert_eq!((err.location.line, err.location.column), (1, 5));
+    }
+
+    #[test]
+    fn raw_newline_inside_string_is_an_error() {
+        let err = lex_error("x = \"abc\ndef\"\n");
+        assert_eq!(err.message, "Unterminated string literal");
+        assert_eq!((err.location.line, err.location.column), (1, 5));
+    }
+
+    #[test]
+    fn backslash_before_newline_inside_string_is_an_error() {
+        let err = lex_error("x = \"abc\\\ndef\"\n");
+        assert_eq!(err.message, "Unterminated string literal");
+    }
+
+    #[test]
+    fn lone_quote_at_eof_is_an_error() {
+        assert_eq!(lex_error("\"").message, "Unterminated string literal");
+    }
+
+    #[test]
+    fn invalid_escape_is_still_reported_at_the_backslash() {
+        let err = lex_error("x = \"a\\qb\"");
+        assert_eq!(err.message, "Invalid escape sequence: \\q");
+        assert_eq!((err.location.line, err.location.column), (1, 7));
+    }
+
+    #[test]
+    fn string_escapes_are_decoded() {
+        assert_eq!(kinds("\"a\\n\\t\\\\\\\"b\"")[0], string("a\n\t\\\"b"),);
+    }
+
+    #[test]
+    fn lines_after_a_string_keep_correct_locations() {
+        let tokens = lex("x = \"abc\"\ny = 1\n").unwrap();
+        let y = tokens.iter().find(|t| t.kind == ident("y")).unwrap();
+        assert_eq!((y.location.line, y.location.column), (2, 1));
+    }
+
+    // --- Empty string vs docstring ---
+
+    #[test]
+    fn empty_string_stays_a_string_literal() {
+        assert_eq!(
+            kinds("x = \"\""),
+            vec![ident("x"), TokenKind::Assign, string(""), TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn empty_string_concatenation_is_unchanged() {
+        let kinds = kinds("\"\" + \"x\"");
+        assert_eq!(kinds[0], string(""));
+        assert_eq!(kinds[1], TokenKind::Operator("+".to_owned()));
+        assert_eq!(kinds[2], string("x"));
+    }
+
+    #[test]
+    fn empty_string_columns_are_tracked() {
+        let tokens = lex("\"\" + y").unwrap();
+        let y = tokens.iter().find(|t| t.kind == ident("y")).unwrap();
+        assert_eq!(y.location.column, 6);
+    }
+
+    // --- M1: docstrings ---
+
+    #[test]
+    fn one_line_docstring_is_a_docstring_token() {
+        assert_eq!(kinds("\"\"\"Doc.\"\"\""), vec![doc("Doc."), TokenKind::Eof]);
+    }
+
+    #[test]
+    fn empty_docstring() {
+        assert_eq!(kinds("\"\"\"\"\"\"")[0], doc(""));
+    }
+
+    #[test]
+    fn docstring_location_is_the_opening_quotes() {
+        let tokens = lex("def f():\n  \"\"\"Doc.\"\"\"\n").unwrap();
+        let docstring = tokens
+            .iter()
+            .find(|t| matches!(t.kind, TokenKind::DocString(_)))
+            .unwrap();
+        assert_eq!((docstring.location.line, docstring.location.column), (2, 3));
+    }
+
+    #[test]
+    fn multi_line_docstring_is_cleandoced_and_lines_are_tracked() {
+        let source = "\
+def f():
+  \"\"\"Summary line.
+
+  Args:
+    x: The value.
+  \"\"\"
+  y = 1
+";
+        let tokens = lex(source).unwrap();
+        let docstring = tokens
+            .iter()
+            .find(|t| matches!(t.kind, TokenKind::DocString(_)))
+            .unwrap();
+        assert_eq!(
+            docstring.kind,
+            doc("Summary line.\n\nArgs:\n  x: The value.")
+        );
+        let y = tokens.iter().find(|t| t.kind == ident("y")).unwrap();
+        assert_eq!((y.location.line, y.location.column), (7, 3));
+    }
+
+    #[test]
+    fn tokens_after_closing_quotes_on_the_same_line_have_char_columns() {
+        // "é" and "→" are multi-byte; columns count chars.
+        let tokens = lex("\"\"\"é\n→ x\"\"\" y").unwrap();
+        let y = tokens.iter().find(|t| t.kind == ident("y")).unwrap();
+        assert_eq!((y.location.line, y.location.column), (2, 8));
+    }
+
+    #[test]
+    fn docstring_escapes_use_the_string_escape_table() {
+        assert_eq!(
+            kinds("\"\"\"a\\tb\\\\c\\\"d\\ne\"\"\"")[0],
+            // cleandoc expands tabs (like Python), so `\t` becomes spaces.
+            doc("a       b\\c\"d\ne")
+        );
+    }
+
+    #[test]
+    fn invalid_escape_inside_docstring_reports_its_line() {
+        let err = lex_error("\"\"\"ok\n  bad \\q\n\"\"\"");
+        assert_eq!(err.message, "Invalid escape sequence: \\q");
+        assert_eq!((err.location.line, err.location.column), (2, 7));
+    }
+
+    #[test]
+    fn embedded_quotes_inside_docstring_are_kept() {
+        assert_eq!(
+            kinds("\"\"\"say \"hi\" and \"\"twice\"\" \"\"\"")[0],
+            doc("say \"hi\" and \"\"twice\"\"")
+        );
+    }
+
+    #[test]
+    fn four_quotes_close_then_start_a_new_string() {
+        // Like Python, the first `"""` closes; the fourth quote opens a string.
+        let err = lex_error("\"\"\"a\"\"\"\"");
+        assert_eq!(err.message, "Unterminated string literal");
+        assert_eq!(err.location.column, 8);
+    }
+
+    #[test]
+    fn unterminated_docstring_is_reported_at_the_opening_quotes() {
+        let err = lex_error("def f():\n  \"\"\"Never closed.\n\n  More text\n");
+        assert_eq!(err.message, "Unterminated docstring");
+        assert_eq!((err.location.line, err.location.column), (2, 3));
+        assert!(err.source_snippet.is_some());
+    }
+
+    #[test]
+    fn docstring_with_trailing_backslash_at_eof_is_unterminated() {
+        assert_eq!(lex_error("\"\"\"abc\\").message, "Unterminated docstring");
+    }
+
+    #[test]
+    fn docstring_continuation_lines_skip_indentation_and_comments() {
+        let source = "\
+def f():
+  \"\"\"Summary.
+# not a comment
+      deeper
+back at zero
+  \"\"\"
+  pass
+";
+        let kinds = kinds(source);
+        let indents = kinds.iter().filter(|k| **k == TokenKind::Indent).count();
+        let dedents = kinds.iter().filter(|k| **k == TokenKind::Dedent).count();
+        assert_eq!((indents, dedents), (1, 1));
+        assert!(kinds.contains(&doc(
+            "Summary.\n# not a comment\n      deeper\nback at zero"
+        )));
+        assert!(kinds.contains(&TokenKind::Keyword("pass".to_owned())));
+    }
+
+    #[test]
+    fn docstring_inside_brackets_does_not_affect_bracket_depth() {
+        let kinds = kinds("f(\"\"\"a\nb\"\"\")\nx\n");
+        assert_eq!(
+            kinds,
+            vec![
+                ident("f"),
+                TokenKind::LParen,
+                doc("a\nb"),
+                TokenKind::RParen,
+                TokenKind::Newline,
+                ident("x"),
+                TokenKind::Newline,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn docstring_opening_at_the_wrong_depth_is_invalid_indentation() {
+        let err = lex_error("def f():\n   \"\"\"Doc.\"\"\"\n");
+        assert!(
+            err.message.starts_with("Invalid indentation"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn triple_single_quotes_remain_an_error() {
+        assert_eq!(
+            lex_error("'''doc'''").message,
+            "Single-quoted strings are not supported"
+        );
+    }
 }

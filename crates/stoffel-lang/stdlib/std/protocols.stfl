@@ -1,6 +1,129 @@
-builtin opaque RbcResult
+"""Reliable broadcast (RBC) between the MPC parties.
+
+Every item here is a builtin that is always in scope. `import std.protocols`
+is accepted but optional: imports of `std.*` modules are no-ops.
+
+Reliable broadcast lets one party send a public message that every honest
+party delivers identically, even when up to `t` parties are malicious.
+Use it to agree on public coordination data such as phase markers or
+parameters. Messages are public: never broadcast secret values.
+
+Requirements. RBC needs a running MPC engine that supports the
+`"consensus"` capability; today that is the HoneyBadger backend only, so
+check `Mpc.has_capability("consensus")` before using it on other backends.
+The network must have at least `3t + 1` parties.
+
+Delivery. Each broadcast from a party gets the next session number for
+that party, starting at 0. A message is delivered only after more than
+`2t` parties have confirmed it (Bracha-style ECHO and READY rounds), so
+every honest party delivers the same content for it. Each receiver
+delivers each (party, session) message at most once. When several
+messages are ready at the same time, lower session numbers are delivered
+first, then lower party ids.
+
+Example:
+  var session_id = Rbc.broadcast("phase:preprocessing-complete")
+  if Mpc.party_id() != 0:
+    var leader_message = Rbc.receive(0, 5000)
+  var any_message = Rbc.receive_any(5000)
+  print(any_message.party_id, any_message.message)
+"""
+
+builtin opaque RbcResult:
+  """A message delivered by `Rbc.receive_any`, with its sender.
+
+  Read its fields with field access:
+
+  - `party_id` (`int64`): the party that broadcast the message.
+  - `message` (`string`): the message text, or `"<binary>"` if the message
+    was not valid UTF-8.
+  """
 
 builtin object Rbc:
+  """Reliable broadcast between the MPC parties.
+
+  See the module documentation for requirements and delivery order.
+  """
   def broadcast(message: string) -> int64 {.builtin.}:
+    """Reliably broadcast a public message to every party.
+
+    The call sends the message and returns without waiting for the other
+    parties to deliver it.
+
+    Args:
+      message: The text to broadcast, sent as its UTF-8 bytes.
+
+    Returns:
+      This party's session number for the broadcast: 0 for its first
+      broadcast, then 1, 2, and so on.
+
+    Raises:
+      An error if no MPC engine is running, or the engine does not support
+      the `"consensus"` capability.
+
+    MPC:
+      Interactive but non-blocking: sends the message and its ECHO to all
+      parties. Delivery completes while receivers run `Rbc.receive` or
+      `Rbc.receive_any`. No preprocessing is consumed. The message becomes
+      public to every party.
+
+    Example:
+      var session_id = Rbc.broadcast("phase:ready")
+    """
   def receive(from_party: int64, timeout_ms: int64) -> string {.builtin.}:
+    """Wait for the next reliable broadcast from one party.
+
+    Delivers a broadcast from that party that this party has not yet
+    delivered, the lowest session number first when several are ready.
+    `from_party` may be this party's own id.
+
+    Args:
+      from_party: Id of the broadcasting party, from 0 to the party count
+        minus 1.
+      timeout_ms: How long to wait, in milliseconds.
+
+    Returns:
+      The message text, or `"<binary data>"` if the message was not valid
+      UTF-8.
+
+    Raises:
+      An error on timeout, if `from_party` is outside the network, if the
+      network has fewer than `3t + 1` parties, if either argument is
+      negative, or if no engine with the `"consensus"` capability is
+      running.
+
+    MPC:
+      Interactive: takes part in the ECHO and READY rounds and blocks until
+      more than `2t` parties confirm the message. No preprocessing is
+      consumed.
+
+    Example:
+      var leader_message = Rbc.receive(0, 5000)
+    """
   def receive_any(timeout_ms: int64) -> RbcResult {.builtin.}:
+    """Wait for the next reliable broadcast from any other party.
+
+    Delivers a not yet delivered broadcast from any party except this
+    one. When several are ready, lower session numbers come first, then
+    lower party ids.
+
+    Args:
+      timeout_ms: How long to wait, in milliseconds.
+
+    Returns:
+      The message and its sender, as an `RbcResult`.
+
+    Raises:
+      An error on timeout, if the network has fewer than `3t + 1` parties,
+      if `timeout_ms` is negative, or if no engine with the `"consensus"`
+      capability is running.
+
+    MPC:
+      Interactive: takes part in the ECHO and READY rounds and blocks until
+      more than `2t` parties confirm the message. No preprocessing is
+      consumed.
+
+    Example:
+      var delivered = Rbc.receive_any(5000)
+      print(delivered.party_id, delivered.message)
+    """

@@ -249,11 +249,7 @@ impl Project {
     }
 
     pub fn source_files_under(&self, dir: &Path) -> Result<Vec<PathBuf>> {
-        let dir = absolutize(dir)?;
-        let mut files = Vec::new();
-        collect_stfl_files(&dir, &mut files)?;
-        files.sort();
-        Ok(files)
+        stfl_files_under(&absolutize(dir)?)
     }
 
     pub fn watch_files(&self) -> Result<Vec<PathBuf>> {
@@ -264,7 +260,9 @@ impl Project {
         Ok(files)
     }
 
-    fn source_dir(&self) -> PathBuf {
+    /// The directory holding the project's `.stfl` sources; module names are
+    /// relative to it (`src/utils/math.stfl` is module `utils.math`).
+    pub fn source_dir(&self) -> PathBuf {
         if self.configured_source_is_dir() {
             self.root.join(&self.config.build.source)
         } else {
@@ -927,6 +925,15 @@ fn validate_target_dir(
     Ok(())
 }
 
+/// Every `.stfl` file under `dir`, recursively, in sorted order. Unlike
+/// [`Project::source_files`], this needs no `Stoffel.toml`.
+pub(crate) fn stfl_files_under(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_stfl_files(dir, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
 fn collect_stfl_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
@@ -934,6 +941,65 @@ fn collect_stfl_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
             collect_stfl_files(&path, files)?;
         } else if is_stoffel_source_path(&path) {
             files.push(path);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_project_controlled_path(
+    root: &Path,
+    path: &Path,
+    allow_final_symlink: bool,
+) -> Result<()> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        anyhow::anyhow!(
+            "project-controlled path {} is outside project root {}",
+            path.display(),
+            root.display()
+        )
+    })?;
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        anyhow::bail!(
+            "project-controlled path {} escapes project root {}",
+            path.display(),
+            root.display()
+        );
+    }
+
+    let mut current = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        current.push(component.as_os_str());
+        let is_final = components.peek().is_none();
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if allow_final_symlink && is_final {
+                    return Ok(());
+                }
+                anyhow::bail!(
+                    "project-controlled path {} traverses symlink {}",
+                    path.display(),
+                    current.display()
+                );
+            }
+            Ok(metadata) if !is_final && !metadata.is_dir() => {
+                anyhow::bail!(
+                    "project-controlled path {} has non-directory component {}; it is an existing file, not a directory",
+                    path.display(),
+                    current.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", current.display()));
+            }
         }
     }
     Ok(())
@@ -1016,7 +1082,7 @@ fn project_name(path: &Path) -> String {
     }
 }
 
-fn absolutize(path: &Path) -> Result<PathBuf> {
+pub(crate) fn absolutize(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
     } else {
