@@ -363,11 +363,6 @@ impl OffChainClientConfig {
                 "off-chain client threshold must be greater than zero".to_owned(),
             ));
         }
-        if self.parties < 5 {
-            return Err(Error::Configuration(
-                "off-chain client parties must be at least 5".to_owned(),
-            ));
-        }
         if let MpcBackend::Avss { curve } = self.backend {
             if curve != Curve::Bls12_381 {
                 return Err(Error::Unsupported(
@@ -375,11 +370,8 @@ impl OffChainClientConfig {
                 ));
             }
         }
-        if self.parties < 4 * self.threshold + 1 {
-            return Err(Error::Unsupported(
-                "off-chain client IO requires parties >= 4 * threshold + 1".to_owned(),
-            ));
-        }
+        self.backend
+            .ensure_minimum_parties(self.parties, self.threshold)?;
         if self.node_rpc_addresses.is_empty() {
             return Err(Error::Configuration(
                 "off-chain client IO requires at least one node RPC address".to_owned(),
