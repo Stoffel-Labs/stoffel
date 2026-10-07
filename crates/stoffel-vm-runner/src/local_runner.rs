@@ -16,7 +16,7 @@ use stoffel_mpc_coordinator_off_chain::{
     OffChainCoordinatorServer,
 };
 use stoffel_mpc_coordinator_shared::self_signed_certs;
-use stoffel_mpc_coordinator_shared::Coordinator;
+use stoffel_mpc_coordinator_shared::{Coordinator, Round};
 use stoffel_vm_types::compiled_binary::{utils::save_to_file, CompiledBinary};
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -555,6 +555,9 @@ impl LocalCoordinatorRunner {
         command
             .arg(context.program_path)
             .arg(&self.entry)
+            // Every local party reads this same temporary bytecode file, so keep
+            // local execution independent of discovery bytecode transport.
+            .arg("--no-program-upload")
             .arg("--n-parties")
             .arg(self.parties.to_string())
             .arg("--threshold")
@@ -929,6 +932,12 @@ async fn run_honeybadger_offchain_client(
             );
             reserve_mask_index_when_ready(&mut coord, index, timeout).await?;
         }
+
+        // Let every party publish the reserved indices and mask shares before
+        // opening node-RPC subscriptions. Subscribing while parties are still
+        // publishing can leave a subscription send and an index update waiting
+        // on the same node-RPC state lock.
+        coord.wait_for_round(Round::InputCollection).await?;
 
         eprintln!("[local-client {}] connecting node RPC", client.client_slot);
         let rpc_addrs = node_rpc_addrs

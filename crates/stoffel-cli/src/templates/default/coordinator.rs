@@ -1,0 +1,395 @@
+//! Off-chain coordinator and development deployment preparation.
+//!
+//! This is infrastructure, not an application endpoint for participant plaintext.
+//! Operator-managed deployments should replace generated development identities
+//! and loopback endpoints with managed configuration and follow the deployment runbook:
+//! https://docs.stoffelmpc.com/developer-skills/stoffel-deployment-runbook
+
+use blake3::Hasher;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::net::{TcpListener, UdpSocket};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use stoffel::coordinator::{Coordinator, OffChainCoordinatorServer, Round};
+use stoffel_mpc_coordinator_off_chain::tests::fake_coord::{
+    HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
+    HoneyBadgerOffChainCoordinatorClient,
+};
+use x509_parser::parse_x509_certificate;
+
+pub type DevelopmentCoordinator = OffChainCoordinatorServer<HoneyBadgerCoordinatorConnection>;
+
+#[derive(Deserialize)]
+struct ProjectConfig {
+    mpc: MpcConfig,
+}
+
+#[derive(Deserialize)]
+struct MpcConfig {
+    parties: usize,
+    threshold: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DeploymentFile {
+    program: String,
+    coordinator_host: String,
+    coordinator_port: u16,
+    timestamp: u64,
+    parties: usize,
+    threshold: usize,
+    node_bind_addresses: Vec<String>,
+    servers: Vec<String>,
+    node_rpc_addresses: Vec<String>,
+    client_cert: String,
+    client_key: String,
+}
+
+type DevelopmentAddresses = (u16, Vec<String>, Vec<String>, Vec<String>);
+
+fn development_addresses(
+    parties: usize,
+) -> Result<DevelopmentAddresses, Box<dyn std::error::Error>> {
+    let host = "127.0.0.1";
+    let auto_select = std::env::var("STOFFEL_AUTO_ADDRESSES").as_deref() == Ok("1");
+    for base in 19_200u32..=64_000 {
+        let coordinator = base + 100;
+        let node_binds = (0..parties)
+            .map(|party| base + (party as u32).saturating_mul(2))
+            .collect::<Vec<_>>();
+        let servers = (0..parties)
+            .map(|party| {
+                if party == 0 {
+                    base + 1_000
+                } else {
+                    node_binds[party]
+                }
+            })
+            .collect::<Vec<_>>();
+        let node_rpcs = (0..parties)
+            .map(|party| base + 200 + party as u32)
+            .collect::<Vec<_>>();
+        let tcp_ports = std::iter::once(coordinator)
+            .chain(node_rpcs.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let udp_ports = node_binds
+            .iter()
+            .copied()
+            .chain(servers.iter().copied())
+            .collect::<BTreeSet<_>>();
+        if tcp_ports
+            .iter()
+            .chain(udp_ports.iter())
+            .any(|port| *port > u16::MAX as u32)
+        {
+            continue;
+        }
+        let available = !auto_select
+            || (tcp_ports
+                .iter()
+                .map(|port| TcpListener::bind((host, *port as u16)))
+                .collect::<Result<Vec<_>, _>>()
+                .is_ok()
+                && udp_ports
+                    .iter()
+                    .map(|port| UdpSocket::bind((host, *port as u16)))
+                    .collect::<Result<Vec<_>, _>>()
+                    .is_ok());
+        if available {
+            return Ok((
+                coordinator as u16,
+                node_binds
+                    .into_iter()
+                    .map(|port| format!("{host}:{port}"))
+                    .collect(),
+                servers
+                    .into_iter()
+                    .map(|port| format!("{host}:{port}"))
+                    .collect(),
+                node_rpcs
+                    .into_iter()
+                    .map(|port| format!("{host}:{port}"))
+                    .collect(),
+            ));
+        }
+        if !auto_select {
+            break;
+        }
+    }
+    Err("could not find available loopback endpoints for the development deployment".into())
+}
+
+fn project_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn settings() -> Result<MpcConfig, Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(project_root().join("Stoffel.toml"))?;
+    Ok(toml::from_str::<ProjectConfig>(&text)?.mpc)
+}
+
+fn deployment_dir() -> PathBuf {
+    project_root().join("deploy/local")
+}
+
+fn identity(
+    name: &str,
+) -> Result<Arc<rcgen::CertifiedKey<rcgen::KeyPair>>, Box<dyn std::error::Error>> {
+    let subject = name.replace('-', ".");
+    let certified = rcgen::generate_simple_self_signed(vec![format!("{subject}.local")])?;
+    Ok(Arc::new(certified))
+}
+
+fn write_identity(
+    dir: &Path,
+    name: &str,
+    identity: &rcgen::CertifiedKey<rcgen::KeyPair>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::write(dir.join(format!("{name}.cert.der")), identity.cert.der())?;
+    std::fs::write(
+        dir.join(format!("{name}.key.der")),
+        identity.signing_key.serialize_der(),
+    )?;
+    Ok(())
+}
+
+fn public_key(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    let (_, certificate) = parse_x509_certificate(&bytes)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+    Ok(certificate.public_key().subject_public_key.data.to_vec())
+}
+
+pub fn prepare_development() -> Result<(), Box<dyn std::error::Error>> {
+    // INTEGRATION STEP 5: create development identities and one coherent set of
+    // loopback endpoints. Production provisioning belongs to the deployment platform.
+    let config = settings()?;
+    let dir = deployment_dir();
+    if dir.exists() {
+        validate_deployment()?;
+        return Ok(());
+    }
+
+    let (coordinator_port, node_bind_addresses, servers, node_rpc_addresses) =
+        development_addresses(config.parties)?;
+
+    std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let coordinator = identity("coordinator")?;
+    write_identity(&dir, "coordinator", &coordinator)?;
+    let client = identity("client-0")?;
+    write_identity(&dir, "client-0", &client)?;
+    for party in 0..config.parties {
+        let node = identity(&format!("node-{party}"))?;
+        write_identity(&dir, &format!("node-{party}"), &node)?;
+    }
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let deployment = DeploymentFile {
+        program: "../../artifacts/program.stflb".to_owned(),
+        coordinator_host: "127.0.0.1".to_owned(),
+        coordinator_port,
+        timestamp,
+        parties: config.parties,
+        threshold: config.threshold,
+        node_bind_addresses,
+        servers,
+        node_rpc_addresses,
+        client_cert: "client-0.cert.der".to_owned(),
+        client_key: "client-0.key.der".to_owned(),
+    };
+    std::fs::write(
+        dir.join("deployment.json"),
+        serde_json::to_vec_pretty(&deployment)?,
+    )?;
+    Ok(())
+}
+
+pub fn validate_deployment() -> Result<(), Box<dyn std::error::Error>> {
+    let config = settings()?;
+    let dir = deployment_dir();
+    if !dir.exists() {
+        return Err("development deployment is not prepared; run `stoffel-coordinator prepare` first".into());
+    }
+    let required = std::iter::once("coordinator.cert.der".to_owned())
+        .chain(std::iter::once("coordinator.key.der".to_owned()))
+        .chain(std::iter::once("client-0.cert.der".to_owned()))
+        .chain(std::iter::once("client-0.key.der".to_owned()))
+        .chain((0..config.parties).flat_map(|party| {
+            [
+                format!("node-{party}.cert.der"),
+                format!("node-{party}.key.der"),
+            ]
+        }))
+        .chain(std::iter::once("deployment.json".to_owned()));
+    for name in required {
+        if !dir.join(&name).exists() {
+            return Err(format!(
+                "{} is incomplete; remove it and rerun the prepare command",
+                dir.display()
+            )
+            .into());
+        }
+    }
+    let deployment: DeploymentFile =
+        serde_json::from_slice(&std::fs::read(dir.join("deployment.json"))?)?;
+    if deployment.parties != config.parties || deployment.threshold != config.threshold {
+        return Err("Stoffel.toml changed after development identities were prepared; remove deploy/local and prepare again".into());
+    }
+    if deployment.node_bind_addresses.len() != config.parties
+        || deployment.servers.len() != config.parties
+        || deployment.node_rpc_addresses.len() != config.parties
+    {
+        return Err("deployment address counts must match mpc.parties".into());
+    }
+    Ok(())
+}
+
+pub async fn start() -> Result<DevelopmentCoordinator, Box<dyn std::error::Error>> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let config = settings()?;
+    let dir = deployment_dir();
+    let deployment: DeploymentFile =
+        serde_json::from_slice(&std::fs::read(dir.join("deployment.json"))?)?;
+    let program = std::fs::read(dir.join(&deployment.program))?;
+    let mut hasher = Hasher::new();
+    hasher.update(b"stoffel-program-v1");
+    hasher.update(&program);
+    let program_id = *hasher.finalize().as_bytes();
+    let node_public_keys = (0..config.parties)
+        .map(|party| public_key(&dir.join(format!("node-{party}.cert.der"))))
+        .collect::<Result<Vec<_>, _>>()?;
+    let client_id = public_key(&dir.join("client-0.cert.der"))?;
+    let state = HoneyBadgerCoordinatorRPCServerSharedBase::new(
+        program_id,
+        config.parties as u64,
+        config.threshold as u64,
+        node_public_keys,
+        1,
+        vec![client_id],
+    );
+    let host = std::env::var("STOFFEL_COORDINATOR_BIND")
+        .unwrap_or_else(|_| deployment.coordinator_host.clone());
+    let cert = std::fs::read(dir.join("coordinator.cert.der"))?;
+    let key = std::fs::read(dir.join("coordinator.key.der"))?;
+    Ok(DevelopmentCoordinator::start_coord(
+        state,
+        &host,
+        deployment.coordinator_port,
+        config.threshold as u64,
+        cert,
+        key,
+    )
+    .await?)
+}
+
+fn coordinator_endpoint(
+    deployment: &DeploymentFile,
+) -> Result<(String, u16), Box<dyn std::error::Error>> {
+    if let Ok(address) = std::env::var("STOFFEL_COORDINATOR_ADDRESS") {
+        let (host, port) = address
+            .rsplit_once(':')
+            .ok_or("STOFFEL_COORDINATOR_ADDRESS must use host:port")?;
+        return Ok((host.to_owned(), port.parse()?));
+    }
+    Ok((
+        deployment.coordinator_host.clone(),
+        deployment.coordinator_port,
+    ))
+}
+
+async fn wait_ready() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = deployment_dir();
+    let deployment: DeploymentFile =
+        serde_json::from_slice(&std::fs::read(dir.join("deployment.json"))?)?;
+    let (host, port) = coordinator_endpoint(&deployment)?;
+    let timeout_secs = std::env::var("STOFFEL_READY_TIMEOUT_SECS")
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()?
+        .unwrap_or(180);
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let cert = std::fs::read(dir.join(&deployment.client_cert))?;
+    let key = std::fs::read(dir.join(&deployment.client_key))?;
+    let mut last_error = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            let detail = last_error
+                .as_deref()
+                .map(|error| format!(" Last coordinator error: {error}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "MPC network did not become input-ready within {timeout_secs}s; check party 0 and node logs. Party 0 must complete preprocessing before clients submit input.{detail}"
+            )
+            .into());
+        }
+
+        let client = match HoneyBadgerOffChainCoordinatorClient::start_rpc_client(
+            &host,
+            port,
+            deployment.threshold as u64,
+            deployment.parties as u64,
+            1,
+            cert.clone(),
+            key.clone(),
+        )
+        .await
+        {
+            Ok(client) => client,
+            Err(error) => {
+                last_error = Some(error.to_string());
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
+        // Party 0 resets the coordinator immediately before preprocessing, which
+        // clears subscriptions created during Idle. Reconnect and resubscribe on
+        // timeouts, closed subscriptions, and coordinator restarts.
+        let attempt = tokio::time::timeout(
+            remaining.min(Duration::from_secs(2)),
+            client.wait_for_round(Round::InputMaskReservation),
+        )
+        .await;
+        match attempt {
+            Ok(Ok(())) => break,
+            Ok(Err(error)) => {
+                last_error = Some(error.to_string());
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(_) => continue,
+        }
+    }
+    println!("MPC network is ready for client input");
+    Ok(())
+}
+
+#[allow(dead_code)]
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match std::env::args().nth(1).as_deref() {
+        Some("prepare") => {
+            prepare_development()?;
+            println!("Prepared development identities and deploy/local/deployment.json");
+        }
+        Some("serve") => {
+            validate_deployment()?;
+            let _coordinator = start().await?;
+            eprintln!("Coordinator started; press Ctrl-C to stop");
+            tokio::signal::ctrl_c().await?;
+        }
+        Some("wait-ready") => wait_ready().await?,
+        _ => return Err("usage: stoffel-coordinator <prepare|serve|wait-ready>".into()),
+    }
+    Ok(())
+}
