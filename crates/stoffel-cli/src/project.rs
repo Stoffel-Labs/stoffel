@@ -557,7 +557,7 @@ fn init_rust_project(path: &Path) -> Result<()> {
     write_new(
         path.join("Cargo.toml"),
         &format!(
-            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", version = \"=0.1.2\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n\n[build-dependencies]\nstoffel-bindgen = \"=0.1.2\"\n",
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", version = \"=0.1.3\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n\n[build-dependencies]\nstoffel-bindgen = \"=0.1.3\"\n",
             project_name(path)
         ),
     )?;
@@ -1033,7 +1033,7 @@ fn default_readme_text(title: &str) -> String {
 
 fn default_cargo_toml_text(name: &str) -> String {
     format!(
-        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\nautobins = false\ndefault-run = \"stoffel-client\"\n\n[[bin]]\nname = \"stoffel-client\"\npath = \"src/client.rs\"\n\n[[bin]]\nname = \"stoffel-server\"\npath = \"src/server.rs\"\n\n[[bin]]\nname = \"stoffel-coordinator\"\npath = \"src/coordinator.rs\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", version = \"=0.1.2\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"net\", \"rt-multi-thread\", \"signal\", \"time\"] }}\nserde = {{ version = \"1\", features = [\"derive\"] }}\nserde_json = \"1\"\ntoml = \"0.8\"\nrustls = {{ version = \"=0.23.41\", default-features = false, features = [\"ring\"] }}\nstoffel-mpc-coordinator-off-chain = \"=0.1.0\"\nblake3 = \"1\"\nx509-parser = \"0.18\"\nrcgen = \"0.14\"\n\n[build-dependencies]\nstoffel-bindgen = \"=0.1.2\"\n"
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\nautobins = false\ndefault-run = \"stoffel-client\"\n\n[[bin]]\nname = \"stoffel-client\"\npath = \"src/client.rs\"\n\n[[bin]]\nname = \"stoffel-server\"\npath = \"src/server.rs\"\n\n[[bin]]\nname = \"stoffel-coordinator\"\npath = \"src/coordinator.rs\"\n\n[dependencies]\nstoffel = {{ package = \"stoffel-rust-sdk\", version = \"=0.1.3\" }}\ntokio = {{ version = \"1\", features = [\"macros\", \"net\", \"rt-multi-thread\", \"signal\", \"time\"] }}\nserde = {{ version = \"1\", features = [\"derive\"] }}\nserde_json = \"1\"\ntoml = \"0.8\"\nrustls = {{ version = \"=0.23.41\", default-features = false, features = [\"ring\"] }}\nstoffel-mpc-coordinator-off-chain = \"=0.1.0\"\nblake3 = \"1\"\nx509-parser = \"0.18\"\nrcgen = \"0.14\"\n\n[build-dependencies]\nstoffel-bindgen = \"=0.1.3\"\n"
     )
 }
 

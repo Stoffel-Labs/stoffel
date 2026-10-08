@@ -1,6 +1,6 @@
 [package]
 name = "stoffel-rust-sdk"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Rust SDK for building Stoffel MPC applications"
 license = "Apache-2.0"
@@ -34,16 +34,16 @@ tracing = { version = "=0.1.44", features = ["attributes"] }
 tracing-opentelemetry = "=0.33.0"
 tracing-subscriber = { version = "=0.3.23", features = ["fmt"] }
 
-stoffellang = { version = "=0.1.2", path = "../stoffel-lang" }
+stoffellang = { version = "=0.1.3", path = "../stoffel-lang" }
 stoffel-mpc-coordinator-shared = "=0.1.0"
 stoffel-mpc-coordinator-off-chain = "=0.1.0"
-stoffel-vm = { version = "=0.1.2", path = "../stoffel-vm" }
-stoffel-vm-runner = { version = "=0.1.2", path = "../stoffel-vm-runner" }
-stoffel-vm-types = { version = "=0.1.2", path = "../stoffel-vm-types" }
+stoffel-vm = { version = "=0.1.3", path = "../stoffel-vm" }
+stoffel-vm-runner = { version = "=0.1.3", path = "../stoffel-vm-runner" }
+stoffel-vm-types = { version = "=0.1.3", path = "../stoffel-vm-types" }
 stoffelmpc-mpc = { package = "stoffelcrypto", version = "=0.1.1" }
 
 [dev-dependencies]
 aes = "=0.8.4"
-stoffel-bindgen = { version = "=0.1.2", path = "../stoffel-bindgen" }
+stoffel-bindgen = { version = "=0.1.3", path = "../stoffel-bindgen" }
 tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread"] }
 trybuild = "=1.0.117"

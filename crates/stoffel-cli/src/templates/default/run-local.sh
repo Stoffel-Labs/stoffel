@@ -12,7 +12,7 @@ else
   printf '%s\n' \
     "Missing stoffel-run, which runs the development MPC node processes." \
     "Install the matching runner once:" \
-    "  cargo install stoffel-vm-runner --version 0.1.2 --locked" \
+    "  cargo install stoffel-vm-runner --version 0.1.3 --locked" \
     "Then rerun this script. You can also set STOFFEL_RUN_BIN to an existing stoffel-run binary." >&2
   exit 1
 fi
