@@ -8,7 +8,7 @@ bytecode loading, VM execution, and MPC participant configuration in Rust apps.
 Add the crate and import the prelude:
 
 ```toml
-stoffel-rust-sdk = "=0.1.2"
+stoffel-rust-sdk = "=0.1.3"
 ```
 
 ```rust

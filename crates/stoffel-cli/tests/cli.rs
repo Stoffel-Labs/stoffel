@@ -193,7 +193,7 @@ fn init_creates_default_project() {
     assert!(temp.path().join("hello/scripts/run-local.sh").exists());
     let run_local = fs::read_to_string(temp.path().join("hello/scripts/run-local.sh")).unwrap();
     assert!(run_local.contains("command -v stoffel-run"));
-    assert!(run_local.contains("cargo install stoffel-vm-runner --version 0.1.2 --locked"));
+    assert!(run_local.contains("cargo install stoffel-vm-runner --version 0.1.3 --locked"));
     assert!(run_local.contains("export STOFFEL_RUN_BIN"));
     assert!(run_local.contains("STOFFEL_AUTO_ADDRESSES=1"));
     let prepare = run_local.find("stoffel-coordinator\" prepare").unwrap();
@@ -341,14 +341,14 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
     let cargo_toml = fs::read_to_string(&cargo_toml_path)
         .unwrap()
         .replace(
-            "stoffel = { package = \"stoffel-rust-sdk\", version = \"=0.1.2\" }",
+            "stoffel = { package = \"stoffel-rust-sdk\", version = \"=0.1.3\" }",
             &format!(
                 "stoffel = {{ package = \"stoffel-rust-sdk\", path = \"{}\" }}",
                 sdk_path.display()
             ),
         )
         .replace(
-            "stoffel-bindgen = \"=0.1.2\"",
+            "stoffel-bindgen = \"=0.1.3\"",
             &format!(
                 "stoffel-bindgen = {{ path = \"{}\" }}",
                 bindgen_path.display()
