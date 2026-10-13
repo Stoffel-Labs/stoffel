@@ -1,0 +1,23 @@
+# Builds the browser-side WASM client (crates/stoffel-wasm-client) for the
+# voting example's hosted website - see
+# ../stoffel-ec2-user-deployment-persistent/app.py's _add_web_site. Kept as
+# its own single-stage Dockerfile (distinct from Dockerfile.benchmark, which
+# builds the native coordinator/party binaries) since it targets
+# wasm32-unknown-unknown instead of the host platform and needs
+# wasm-bindgen-cli, not just cargo.
+FROM rustlang/rust:nightly-bookworm
+WORKDIR /build
+COPY . .
+# wasm-bindgen-cli's version must exactly match the wasm-bindgen crate
+# version this workspace's Cargo.lock resolves to (the bindgen format is
+# unstable across versions) - read off Cargo.lock instead of a hardcoded
+# version, so a future `cargo update` bumping wasm-bindgen doesn't silently
+# break this build the way a pinned version would.
+RUN rustup target add wasm32-unknown-unknown && \
+    WASM_BINDGEN_VERSION=$(awk '/^name = "wasm-bindgen"$/{getline; print; exit}' Cargo.lock | sed -E 's/version = "(.*)"/\1/') && \
+    cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked && \
+    cargo build --release --target wasm32-unknown-unknown -p stoffel-wasm-client && \
+    wasm-bindgen \
+      --target web \
+      --out-dir /build/web-pkg \
+      /build/target/wasm32-unknown-unknown/release/stoffel_wasm_client.wasm
