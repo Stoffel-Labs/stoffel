@@ -20,6 +20,8 @@ use std::{collections::HashMap, sync::Arc};
 use stoffel_mpc_coordinator_shared::{CoordinatorError, ExecutionId};
 use tokio::sync::Mutex;
 
+mod mask_envelope;
+
 const AUTH_DOMAIN: &[u8] = b"stoffel-browser-rpc-auth-v1";
 const AUTH_ERROR: i32 = -32050;
 const BAD_BODY: i32 = -32602;
@@ -77,11 +79,7 @@ impl NonceBook {
         nonce: u64,
     ) -> RpcResult<()> {
         let key = (execution_id, identity.clone());
-        if self
-            .latest
-            .get(&key)
-            .is_some_and(|latest| nonce <= *latest)
-        {
+        if self.latest.get(&key).is_some_and(|latest| nonce <= *latest) {
             return Err(auth_error("request nonce was already used"));
         }
         self.latest.insert(key, nonce);
@@ -107,11 +105,111 @@ pub(crate) async fn start_coordinator_browser_rpc(
         .build(bind)
         .await
         .map_err(|error| CoordinatorError::BindError(format!("{bind}: {error}")))?;
+    Ok(server.start(coordinator_browser_module(coordinator)?))
+}
+
+fn coordinator_browser_module(
+    coordinator: Arc<Mutex<CoordinatorRPCServerSharedBase>>,
+) -> Result<RpcModule<Arc<CoordinatorBrowserState>>, CoordinatorError> {
     let state = Arc::new(CoordinatorBrowserState {
         coordinator,
         nonces: Mutex::new(NonceBook::default()),
     });
     let mut module = RpcModule::new(state);
+
+    module
+        .register_async_method::<RpcResult<crate::OpenClosureAuthorization>, _, _>(
+            "browser_open_authorize_closure",
+            |params, state, _| async move {
+                let call: BrowserCall = params.one()?;
+                let identity =
+                    authenticate("browser_open_authorize_closure", &call, &state.nonces).await?;
+                let authorization: crate::OpenClosureAuthorization =
+                    parse_body(&call.request.body)?;
+                CoordinatorRPCServerConnectionBase::new(state.coordinator.clone(), identity)
+                    .open_authorize_closure(call.execution_id, authorization)
+                    .await
+            },
+        )
+        .map_err(json_error)?;
+
+    module
+        .register_async_method::<RpcResult<Vec<crate::AssignedMaskReservation>>, _, _>(
+            "browser_open_reserve",
+            |params, state, _| async move {
+                let call: BrowserCall = params.one()?;
+                let identity = authenticate("browser_open_reserve", &call, &state.nonces).await?;
+                let connection =
+                    CoordinatorRPCServerConnectionBase::new(state.coordinator.clone(), identity);
+                connection.open_reserve(call.execution_id).await
+            },
+        )
+        .map_err(json_error)?;
+
+    module
+        .register_async_method::<RpcResult<()>, _, _>(
+            "browser_open_submit",
+            |params, state, _| async move {
+                let call: BrowserCall = params.one()?;
+                let identity = authenticate("browser_open_submit", &call, &state.nonces).await?;
+                let connection =
+                    CoordinatorRPCServerConnectionBase::new(state.coordinator.clone(), identity);
+                {
+                    let batch: MaskedInputBatch = parse_body(&call.request.body)?;
+                    connection
+                        .open_submit(
+                            call.execution_id,
+                            batch.reserved_indices,
+                            batch.masked_inputs,
+                        )
+                        .await
+                }
+            },
+        )
+        .map_err(json_error)?;
+
+    module
+        .register_async_method::<RpcResult<crate::FrozenCollection>, _, _>(
+            "browser_open_freeze",
+            |params, state, _| async move {
+                let call: BrowserCall = params.one()?;
+                let identity = authenticate("browser_open_freeze", &call, &state.nonces).await?;
+                let connection =
+                    CoordinatorRPCServerConnectionBase::new(state.coordinator.clone(), identity);
+                {
+                    let hash: [u8; 32] = parse_body(&call.request.body)?;
+                    connection.open_freeze(call.execution_id, hash).await
+                }
+            },
+        )
+        .map_err(json_error)?;
+
+    module
+        .register_async_method::<RpcResult<crate::OpenCollectionStatus>, _, _>(
+            "browser_open_status",
+            |params, state, _| async move {
+                let call: BrowserCall = params.one()?;
+                let identity = authenticate("browser_open_status", &call, &state.nonces).await?;
+                let connection =
+                    CoordinatorRPCServerConnectionBase::new(state.coordinator.clone(), identity);
+                connection.open_status(call.execution_id).await
+            },
+        )
+        .map_err(json_error)?;
+
+    module
+        .register_async_method::<RpcResult<Option<Vec<(Vec<u8>, Vec<u8>)>>>, _, _>(
+            "browser_open_output_shares",
+            |params, state, _| async move {
+                let call: BrowserCall = params.one()?;
+                let identity =
+                    authenticate("browser_open_output_shares", &call, &state.nonces).await?;
+                let connection =
+                    CoordinatorRPCServerConnectionBase::new(state.coordinator.clone(), identity);
+                connection.open_output_shares(call.execution_id).await
+            },
+        )
+        .map_err(json_error)?;
 
     module
         .register_async_method::<RpcResult<BrowserExecutionStatus>, _, _>(
@@ -193,7 +291,7 @@ pub(crate) async fn start_coordinator_browser_rpc(
         )
         .map_err(json_error)?;
 
-    Ok(server.start(module))
+    Ok(module)
 }
 
 pub(crate) async fn start_node_browser_rpc(
@@ -230,6 +328,55 @@ pub(crate) async fn start_node_browser_rpc(
                     .assigned_mask_shares_for_client(&identity, range.start, range.count)
                     .map_err(|error| rpc_error(-32051, error.to_string()))?;
                 Ok(result)
+            },
+        )
+        .map_err(json_error)?;
+
+    Ok(server.start(module))
+}
+
+struct SealedNodeBrowserState {
+    node: Arc<Mutex<NodeRPCServerInternal>>,
+    nonces: Mutex<NonceBook>,
+    party: p256::ecdsa::SigningKey,
+}
+
+pub(crate) async fn start_node_browser_rpc_sealed(
+    bind: &str,
+    node: Arc<Mutex<NodeRPCServerInternal>>,
+    party: p256::ecdsa::SigningKey,
+) -> Result<ServerHandle, CoordinatorError> {
+    let server = Server::builder()
+        .build(bind)
+        .await
+        .map_err(|error| CoordinatorError::BindError(format!("{bind}: {error}")))?;
+    let state = Arc::new(SealedNodeBrowserState {
+        node,
+        party,
+        nonces: Mutex::new(NonceBook::default()),
+    });
+    let mut module = RpcModule::new(state);
+
+    module
+        .register_async_method::<RpcResult<mask_envelope::Envelope>, _, _>(
+            "browser_assigned_mask_shares",
+            |params, state, _| async move {
+                let call: BrowserCall = params.one()?;
+                let identity =
+                    authenticate("browser_assigned_mask_shares", &call, &state.nonces).await?;
+                let range: MaskRange = parse_body(&call.request.body)?;
+                let execution = state
+                    .node
+                    .lock()
+                    .await
+                    .execution_state(call.execution_id)
+                    .ok_or_else(|| rpc_error(-32016, "execution is not registered"))?;
+                let result = execution
+                    .lock()
+                    .await
+                    .assigned_mask_shares_for_client(&identity, range.start, range.count)
+                    .map_err(|error| rpc_error(-32051, error.to_string()))?;
+                mask_envelope::seal(&state.party, &call, &result)
             },
         )
         .map_err(json_error)?;
@@ -363,14 +510,11 @@ async fn authenticate(
     );
     key.verify(&message, &signature)
         .map_err(|_| auth_error("request signature did not verify"))?;
-    nonces
-        .lock()
-        .await
-        .accept(
-            call.execution_id,
-            &call.request.public_key,
-            call.request.nonce,
-        )?;
+    nonces.lock().await.accept(
+        call.execution_id,
+        &call.request.public_key,
+        call.request.nonce,
+    )?;
     Ok(call.request.public_key.clone())
 }
 
@@ -410,6 +554,9 @@ fn rpc_error(code: i32, message: impl Into<String>) -> ErrorObjectOwned {
 fn json_error(error: impl std::fmt::Display) -> CoordinatorError {
     CoordinatorError::JSONError(error.to_string())
 }
+
+#[cfg(test)]
+mod open_tests;
 
 #[cfg(test)]
 mod tests {

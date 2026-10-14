@@ -1,3 +1,6 @@
+#[path = "open_collection_run/mod.rs"]
+mod open_collection_run;
+
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{BigInteger, FftField, PrimeField};
 use ark_std::rand::{rngs::OsRng, RngCore};
@@ -7674,6 +7677,13 @@ async fn main() {
     }
 
     let raw_args = env::args().skip(1).collect::<Vec<_>>();
+    if raw_args.iter().any(|a| a == "--open-collection-config") {
+        if let Err(error) = open_collection_run::run(&raw_args).await {
+            eprintln!("Open collection failed: {error}");
+            exit(14);
+        }
+        return;
+    }
     exit_on_cli_configuration_error(validate_cli_option_values(&raw_args));
     let positional_client_program = client_program_from_arguments(&raw_args);
 

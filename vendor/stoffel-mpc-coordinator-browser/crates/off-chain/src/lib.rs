@@ -1,4 +1,9 @@
 pub mod browser_rpc;
+pub mod open_collection;
+pub use open_collection::{
+    FrozenCollection, FrozenInputMapping, OpenAcceptedMetadata, OpenClosureAuthorization,
+    OpenCollectionPolicy, OpenCollectionStatus, OpenEncryptedOutput, OpenTerminationReceipt,
+};
 pub mod tests;
 
 use ark_ff::FftField;
@@ -376,6 +381,25 @@ pub mod node_rpc {
         pub async fn with_browser_rpc(mut self, bind: &str) -> Result<Self, CoordinatorError> {
             self.browser_handle = Some(
                 crate::browser_rpc::start_node_browser_rpc(bind, self.rpc_server.clone()).await?,
+            );
+            Ok(self)
+        }
+
+        /// Seal assigned browser mask shares inside this party before any socket write.
+        /// The key is the party's existing P-256 PKCS8 identity, not a relay key.
+        pub async fn with_browser_rpc_sealed(
+            mut self,
+            bind: &str,
+            party_pkcs8: &[u8],
+        ) -> Result<Self, CoordinatorError> {
+            use p256::pkcs8::DecodePrivateKey;
+            if self.browser_handle.is_some() {
+                return Err(CoordinatorError::JSONError("browser listener already installed".into()));
+            }
+            let party = p256::ecdsa::SigningKey::from_pkcs8_der(party_pkcs8)
+                .map_err(|_| CoordinatorError::JSONError("invalid party signing key".into()))?;
+            self.browser_handle = Some(
+                crate::browser_rpc::start_node_browser_rpc_sealed(bind, self.rpc_server.clone(), party).await?,
             );
             Ok(self)
         }
@@ -881,6 +905,83 @@ pub trait StoffelCoordinatorRPC {
 // RPC interface already implemented by this library.
 #[rpc(server, client)]
 pub trait CoordinatorRPCBase {
+    #[method(name = "open_authorize_closure")]
+    async fn open_authorize_closure(
+        &self,
+        execution_id: ExecutionId,
+        authorization: OpenClosureAuthorization,
+    ) -> RpcResult<OpenClosureAuthorization>;
+
+    #[method(name = "open_freeze_eligible")]
+    async fn open_freeze_eligible(&self, execution_id: ExecutionId) -> RpcResult<FrozenCollection>;
+
+    #[method(name = "open_accepted_metadata")]
+    async fn open_accepted_metadata(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Vec<OpenAcceptedMetadata>>;
+
+    #[method(name = "open_encrypted_archive")]
+    async fn open_encrypted_archive(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Option<Vec<OpenEncryptedOutput>>>;
+
+    #[method(name = "open_stop")]
+    async fn open_stop(&self, execution_id: ExecutionId) -> RpcResult<OpenTerminationReceipt>;
+
+    #[method(name = "open_register_policy")]
+    async fn open_register_policy(&self, policy: OpenCollectionPolicy) -> RpcResult<()>;
+
+    #[method(name = "open_reserve")]
+    async fn open_reserve(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Vec<AssignedMaskReservation>>;
+
+    #[method(name = "open_submit")]
+    async fn open_submit(
+        &self,
+        execution_id: ExecutionId,
+        indices: Vec<u64>,
+        inputs: Vec<Vec<u8>>,
+    ) -> RpcResult<()>;
+
+    #[method(name = "open_freeze")]
+    async fn open_freeze(
+        &self,
+        execution_id: ExecutionId,
+        expected_program_hash: [u8; 32],
+    ) -> RpcResult<FrozenCollection>;
+
+    #[method(name = "open_status")]
+    async fn open_status(&self, execution_id: ExecutionId) -> RpcResult<OpenCollectionStatus>;
+
+    #[method(name = "open_reservations")]
+    async fn open_reservations(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Vec<AssignedMaskReservation>>;
+
+    #[method(name = "open_frozen_inputs")]
+    async fn open_frozen_inputs(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Vec<AssignedMaskedInputEvent>>;
+
+    #[method(name = "open_send_output")]
+    async fn open_send_output(
+        &self,
+        execution_id: ExecutionId,
+        ciphertext: (Vec<u8>, Vec<u8>),
+    ) -> RpcResult<()>;
+
+    #[method(name = "open_output_shares")]
+    async fn open_output_shares(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Option<Vec<(Vec<u8>, Vec<u8>)>>>;
+
     #[method(name = "register_execution")]
     async fn register_execution(&self, registration: ExecutionRegistration) -> RpcResult<()>;
 
@@ -1042,6 +1143,7 @@ pub struct CoordinatorRPCServerSharedBase {
     n: u64,
     t: u64,
     executions: HashMap<ExecutionId, CoordinatorExecutionState>,
+    open_collections: HashMap<ExecutionId, open_collection::OpenCollectionState>,
     /// Set by one-off coordinator invocations via `watch_for_shutdown_request`. Fired by the
     /// `request_shutdown` RPC method; absent (and thus rejecting shutdown requests) for standing
     /// coordinators.
@@ -1184,6 +1286,7 @@ impl CoordinatorRPCServerSharedBase {
             n,
             t,
             executions: HashMap::new(),
+            open_collections: HashMap::new(),
             shutdown_notify: None,
             one_off_execution: None,
             retired: RetiredExecutions::default(),
@@ -1247,6 +1350,15 @@ impl CoordinatorRPCServerSharedBase {
         &mut self,
         registration: ExecutionRegistration,
     ) -> Result<(), CoordinatorError> {
+        if self
+            .open_collections
+            .contains_key(&registration.execution_id)
+        {
+            return Err(CoordinatorError::JSONError(
+                "execution has a separate open-collection policy; legacy registration is forbidden"
+                    .into(),
+            ));
+        }
         if let Some(existing) = self.executions.get(&registration.execution_id) {
             if existing.registration == registration {
                 return Ok(());
@@ -1256,7 +1368,8 @@ impl CoordinatorRPCServerSharedBase {
                 registration.execution_id
             )));
         }
-        if self.executions.len() >= DEFAULT_MAX_CONCURRENT_EXECUTIONS {
+        if self.executions.len() + self.open_collections.len() >= DEFAULT_MAX_CONCURRENT_EXECUTIONS
+        {
             // Healthy stragglers need the completed round history until they have also reached
             // ProgramFinished. Keep that history during normal operation, and only compact a
             // quorum-retired execution when its slot is actually needed. This preserves bounded
@@ -1781,6 +1894,103 @@ async fn deliver_ready_output_waiters(
 /// Pre-implemented RPC methods.
 #[async_trait]
 impl CoordinatorRPCBaseServer for CoordinatorRPCServerConnectionBase {
+    async fn open_authorize_closure(
+        &self,
+        execution_id: ExecutionId,
+        authorization: OpenClosureAuthorization,
+    ) -> RpcResult<OpenClosureAuthorization> {
+        CoordinatorRPCServerConnectionBase::open_authorize_closure(
+            self,
+            execution_id,
+            authorization,
+        )
+        .await
+    }
+
+    async fn open_freeze_eligible(&self, execution_id: ExecutionId) -> RpcResult<FrozenCollection> {
+        CoordinatorRPCServerConnectionBase::open_freeze_eligible(self, execution_id).await
+    }
+
+    async fn open_accepted_metadata(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Vec<OpenAcceptedMetadata>> {
+        CoordinatorRPCServerConnectionBase::open_accepted_metadata(self, execution_id).await
+    }
+
+    async fn open_encrypted_archive(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Option<Vec<OpenEncryptedOutput>>> {
+        CoordinatorRPCServerConnectionBase::open_encrypted_archive(self, execution_id).await
+    }
+
+    async fn open_stop(&self, execution_id: ExecutionId) -> RpcResult<OpenTerminationReceipt> {
+        CoordinatorRPCServerConnectionBase::open_stop(self, execution_id).await
+    }
+
+    async fn open_register_policy(&self, policy: OpenCollectionPolicy) -> RpcResult<()> {
+        CoordinatorRPCServerConnectionBase::open_register_policy(self, policy).await
+    }
+
+    async fn open_reserve(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Vec<AssignedMaskReservation>> {
+        CoordinatorRPCServerConnectionBase::open_reserve(self, execution_id).await
+    }
+
+    async fn open_submit(
+        &self,
+        execution_id: ExecutionId,
+        indices: Vec<u64>,
+        inputs: Vec<Vec<u8>>,
+    ) -> RpcResult<()> {
+        CoordinatorRPCServerConnectionBase::open_submit(self, execution_id, indices, inputs).await
+    }
+
+    async fn open_freeze(
+        &self,
+        execution_id: ExecutionId,
+        expected_program_hash: [u8; 32],
+    ) -> RpcResult<FrozenCollection> {
+        CoordinatorRPCServerConnectionBase::open_freeze(self, execution_id, expected_program_hash)
+            .await
+    }
+
+    async fn open_status(&self, execution_id: ExecutionId) -> RpcResult<OpenCollectionStatus> {
+        CoordinatorRPCServerConnectionBase::open_status(self, execution_id).await
+    }
+
+    async fn open_reservations(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Vec<AssignedMaskReservation>> {
+        CoordinatorRPCServerConnectionBase::open_reservations(self, execution_id).await
+    }
+
+    async fn open_frozen_inputs(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Vec<AssignedMaskedInputEvent>> {
+        CoordinatorRPCServerConnectionBase::open_frozen_inputs(self, execution_id).await
+    }
+
+    async fn open_send_output(
+        &self,
+        execution_id: ExecutionId,
+        ciphertext: (Vec<u8>, Vec<u8>),
+    ) -> RpcResult<()> {
+        CoordinatorRPCServerConnectionBase::open_send_output(self, execution_id, ciphertext).await
+    }
+
+    async fn open_output_shares(
+        &self,
+        execution_id: ExecutionId,
+    ) -> RpcResult<Option<Vec<(Vec<u8>, Vec<u8>)>>> {
+        CoordinatorRPCServerConnectionBase::open_output_shares(self, execution_id).await
+    }
+
     async fn register_execution(&self, registration: ExecutionRegistration) -> RpcResult<()> {
         let mut shared = self.d.lock().await;
         if !shared.mpc_nodes.contains(&self.id) {
