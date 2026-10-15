@@ -247,24 +247,26 @@ where
         &self,
         new_instance_id: u64,
     ) -> Result<HoneyBadgerMPCNode<F, RBCImpl>, String> {
-        let (n_triples, n_random_shares, n_prandbit, n_prandint) = {
+        let (n_triples, n_random_shares, n_randbit, n_prandint, n_zero_shares) = {
             let node = self.node.lock().await;
             (
                 node.params.n_triples,
                 node.params.n_random_shares,
-                node.params.n_prandbit,
+                node.params.n_randbit,
                 node.params.n_prandint,
+                node.params.n_zero_shares,
             )
         };
-        let mpc_opts = honeybadger_node_opts_with_truncation(
+        let mut mpc_opts = honeybadger_node_opts_with_truncation(
             self.topology.n_parties(),
             self.topology.threshold(),
             n_triples,
             n_random_shares,
-            n_prandbit,
+            n_randbit,
             n_prandint,
             new_instance_id,
         )?;
+        mpc_opts.set_n_zero_shares(n_zero_shares);
         <HoneyBadgerMPCNode<F, RBCImpl> as MPCProtocol<
             F,
             RobustShare<F>,

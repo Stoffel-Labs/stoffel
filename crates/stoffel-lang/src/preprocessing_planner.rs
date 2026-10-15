@@ -458,6 +458,12 @@ impl<'a> Planner<'a> {
                         .is_some_and(annotation_contains_secret);
                 if declared_secret {
                     value.secrecy = Secrecy::Secret;
+                    // `secret fix64` pins the fixed-point scale even when the
+                    // initialiser (e.g. a user call) does not carry it.
+                    if value.frac_bits.is_none() {
+                        value.frac_bits =
+                            type_annotation.as_deref().and_then(annotation_fixed_frac_bits);
+                    }
                 }
                 env.insert(name.clone(), value);
             }
@@ -843,7 +849,7 @@ impl<'a> Planner<'a> {
                     len: base.len.element(),
                     secrecy: base.secrecy,
                     int: None,
-                    frac_bits: None,
+                    frac_bits: base.frac_bits,
                 }
             }
             AstNode::FieldAccess { object, .. } => {
@@ -928,7 +934,11 @@ impl<'a> Planner<'a> {
                 if left_value.secrecy == Secrecy::Secret
                     && right_value.secrecy == Secrecy::Secret =>
             {
-                demand.add(1, 0, 0, 0);
+                // Secret fixed-point `*` additionally truncates, like `mul`.
+                match fixed_frac_bits(&[left_value.clone(), right_value.clone()]) {
+                    Some(f) if op == "*" => demand.add(1, 0, f as u64, 1),
+                    _ => demand.add(1, 0, 0, 0),
+                }
             }
             // Field access through a user-defined object is not yet represented
             // in the abstract-value environment.  The type checker has already
@@ -1009,9 +1019,18 @@ impl<'a> Planner<'a> {
             // Semantic overload resolution lowers the Share VM primitive to
             // its unqualified bytecode symbol (`mul`) while some compiler
             // paths retain the source-qualified spelling. Count both.
+            // A secret fixed-point multiply also runs the truncation protocol,
+            // consuming `f` random bits + 1 random int on top of the triple.
             "Share.mul" | "mul" => {
-                demand.add(1, 0, 0, 0);
-                AbstractValue::secret()
+                let frac_bits = fixed_frac_bits(&arg_values);
+                match frac_bits {
+                    Some(f) => demand.add(1, 0, f as u64, 1),
+                    None => demand.add(1, 0, 0, 0),
+                }
+                AbstractValue {
+                    frac_bits,
+                    ..AbstractValue::secret()
+                }
             }
             "Share.batch_mul" | "batch_mul" => {
                 let input_len = arg_values
@@ -1133,10 +1152,12 @@ impl<'a> Planner<'a> {
             // --- Client input: a secret scalar share -------------------------
             "ClientStore.take_share"
             | "ClientStore.take_share_bool"
-            | "ClientStore.take_share_fixed"
             | "ClientStore.sum_shares"
-            | "ClientStore.sum_shares_bool"
-            | "ClientStore.sum_shares_fixed" => AbstractValue::secret(),
+            | "ClientStore.sum_shares_bool" => AbstractValue::secret(),
+            "ClientStore.take_share_fixed" | "ClientStore.sum_shares_fixed" => AbstractValue {
+                frac_bits: Some(DEFAULT_FIXED_POINT_FRACTIONAL_BITS),
+                ..AbstractValue::secret()
+            },
 
             // --- Operations that consume random preprocessing material -------
             // random_field always uses the random-share pool. A typed
@@ -1155,12 +1176,26 @@ impl<'a> Planner<'a> {
             }
 
             // --- Free MPC builtins (secrecy effects only, no demand) ---------
+            // Linear ops keep a fixed-point operand's scale.
             "Share.add" | "Share.sub" | "Share.mul_scalar" | "Share.add_constant"
-            | "Share.add_scalar" => AbstractValue::secret(),
-            "Share.from_clear"
-            | "Share.from_clear_int"
-            | "Share.from_clear_uint"
-            | "Share.from_clear_fixed" => AbstractValue::secret(),
+            | "Share.add_scalar" => AbstractValue {
+                frac_bits: fixed_frac_bits(&arg_values),
+                ..AbstractValue::secret()
+            },
+            "Share.from_clear" | "Share.from_clear_int" | "Share.from_clear_uint" => {
+                AbstractValue::secret()
+            }
+            // `Share.from_clear_fixed(value, total_bits, frac_bits)`.
+            "Share.from_clear_fixed" => AbstractValue {
+                frac_bits: Some(
+                    arg_values
+                        .get(2)
+                        .and_then(|value| value.int)
+                        .map(|f| f as usize)
+                        .unwrap_or(DEFAULT_FIXED_POINT_FRACTIONAL_BITS),
+                ),
+                ..AbstractValue::secret()
+            },
             "Share.open" => AbstractValue::clear(),
 
             // --- User functions: recurse with the call's argument shapes -----
@@ -1483,15 +1518,47 @@ fn annotation_contains_secret(annotation: &AstNode) -> bool {
     }
 }
 
+/// Fractional bits of a `secret fix64` / `list[secret fix64]` annotation, or
+/// `None` for any other type. Every fixed-point width uses the project default
+/// scale, matching the runtime's `SecretFixedPoint` precision.
+fn annotation_fixed_frac_bits(annotation: &AstNode) -> Option<usize> {
+    match annotation {
+        AstNode::SecretType(inner) | AstNode::ListType(inner) => {
+            annotation_fixed_frac_bits(inner)
+        }
+        AstNode::Identifier(name, _) => matches!(
+            name.as_str(),
+            "fixed" | "fixed64" | "fix64" | "fixed32" | "fix32"
+        )
+        .then_some(DEFAULT_FIXED_POINT_FRACTIONAL_BITS),
+        _ => None,
+    }
+}
+
+/// Fractional bits of the first secret fixed-point operand, if any: a secret
+/// multiply involving one runs the truncation protocol.
+fn fixed_frac_bits(values: &[AbstractValue]) -> Option<usize> {
+    values
+        .iter()
+        .find(|value| value.secrecy == Secrecy::Secret && value.frac_bits.is_some())
+        .and_then(|value| value.frac_bits)
+}
+
 /// Fractional-bit count of a parameter whose leaf type is a secret fixed-point,
-/// used to size the `/` truncation cost.
-///
-/// The AES examples operate over secret booleans, never secret fixed-point
-/// division, so a precise per-parameter fractional-bit count is not needed here.
-/// Returning `None` makes `/` fall back to the project default, matching the
-/// previous codegen behaviour for fixed-point division.
-fn param_frac_bits(_param: &Parameter) -> Option<usize> {
-    None
+/// used to size `/` and fixed-point multiply truncation cost.
+fn param_frac_bits(param: &Parameter) -> Option<usize> {
+    if !param.is_secret
+        && !param
+            .type_annotation
+            .as_deref()
+            .is_some_and(annotation_contains_secret)
+    {
+        return None;
+    }
+    param
+        .type_annotation
+        .as_deref()
+        .and_then(annotation_fixed_frac_bits)
 }
 
 /// Direct child expressions of a node, for conservative descent into constructs
@@ -1956,6 +2023,52 @@ def main() -> int64:
 "#;
         let demand = demand_for(src);
         assert_eq!(demand.triples, 1);
+        assert_eq!(demand.prandbits, 0);
+        assert_eq!(demand.prandints, 0);
+    }
+
+    /// A secret fixed-point multiply truncates its product, consuming `f`
+    /// random bits + 1 random int per multiply. Standing nodes size their
+    /// per-execution allocation from this manifest alone, so omitting it
+    /// starved `client-prod` ("Error trying to take RandBit shares").
+    #[test]
+    fn fixed_point_multiplication_counts_truncation_material() {
+        let src = r#"
+def main() -> fix64:
+  var n_clients: int64 = 2
+  var i: int64 = 0
+  var result: secret fix64 = Share.from_clear_fixed(1.0, 64, 16)
+
+  while i < n_clients:
+    var input0: secret fix64 = ClientStore.take_share_fixed(i, 0)
+    var input1: secret fix64 = ClientStore.take_share_fixed(i, 1)
+    result = result.mul(input0.add(input1))
+    i = i + 1
+
+  return result.open_fixed()
+"#;
+        let demand = demand_for(src);
+        let f = DEFAULT_FIXED_POINT_FRACTIONAL_BITS as u64;
+        assert_eq!(demand.triples, 2);
+        assert_eq!(demand.prandbits, 2 * f);
+        assert_eq!(demand.prandints, 2);
+    }
+
+    #[test]
+    fn fixed_point_star_operator_counts_truncation_material() {
+        let src = r#"
+def scale(a: secret fix64, b: secret fix64) -> secret fix64:
+  return a * b
+
+def main() -> fix64:
+  var x: secret fix64 = ClientStore.take_share_fixed(0, 0)
+  var y: secret fix64 = ClientStore.take_share_fixed(0, 1)
+  return scale(x, y).open_fixed()
+"#;
+        let demand = demand_for(src);
+        assert_eq!(demand.triples, 1);
+        assert_eq!(demand.prandbits, DEFAULT_FIXED_POINT_FRACTIONAL_BITS as u64);
+        assert_eq!(demand.prandints, 1);
     }
 
     /// Compile each bundled AES-128 example via the real example/bindgen compile

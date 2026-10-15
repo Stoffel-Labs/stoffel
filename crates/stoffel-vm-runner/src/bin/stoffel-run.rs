@@ -3,7 +3,7 @@ use ark_ff::{BigInteger, FftField, PrimeField};
 use ark_std::rand::{rngs::OsRng, RngCore};
 use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -2326,14 +2326,14 @@ async fn send_execution_client_hellos(
     Ok(())
 }
 
-/// Network adapter for MPC servers that remaps sequential client indices
-/// (0, 1, ...) back to transport client IDs for send_to_client().
-/// The MPC protocol uses small indices (because session_id only has 8 bits),
-/// and the network layer exposes clients in canonical sorted transport order.
+/// Network adapter for MPC servers that remaps client protocol IDs
+/// (`n_parties..`, see [`client_protocol_id`]) back to transport client IDs for
+/// send_to_client(). The MPC protocol uses one-byte IDs (because session_id only
+/// has 8 bits), while the network layer addresses clients by transport ID.
 struct ServerClientAdapter {
     inner: ExecutionScopedNetwork,
-    /// Maps sequential index to transport client ID.
-    client_id_map: Vec<ClientId>,
+    /// Maps client protocol ID to transport client ID.
+    client_id_map: HashMap<ClientId, ClientId>,
 }
 #[async_trait::async_trait]
 impl Network for ServerClientAdapter {
@@ -2380,8 +2380,8 @@ impl Network for ServerClientAdapter {
         client: ClientId,
         message: &[u8],
     ) -> Result<usize, stoffelnet::network_utils::NetworkError> {
-        // Remap sequential index to the canonical transport client ID.
-        let transport_id = self.client_id_map.get(client).copied().unwrap_or(client);
+        // Remap the client protocol ID to the canonical transport client ID.
+        let transport_id = self.client_id_map.get(&client).copied().unwrap_or(client);
         self.inner.send_to_client(transport_id, message).await
     }
 
@@ -2390,7 +2390,7 @@ impl Network for ServerClientAdapter {
     }
 
     fn is_client_connected(&self, client: ClientId) -> bool {
-        let transport_id = self.client_id_map.get(client).copied().unwrap_or(client);
+        let transport_id = self.client_id_map.get(&client).copied().unwrap_or(client);
         self.inner.is_client_connected(transport_id)
     }
 
@@ -3046,10 +3046,27 @@ struct PartyClients {
     manifest_driven: bool,
 }
 
+/// MPC protocol identity of the `ordinal`-th admitted client.
+///
+/// The MPC protocols reject client IDs below `n_parties`, so a party can never
+/// pose as a client, and INST carries the ID in one byte. Client IDs therefore
+/// occupy `n_parties..=u8::MAX`.
+fn client_protocol_id(n_parties: usize, ordinal: usize) -> Result<usize, String> {
+    n_parties
+        .checked_add(ordinal)
+        .filter(|id| *id <= usize::from(u8::MAX))
+        .ok_or_else(|| {
+            format!(
+                "client ordinal {ordinal} with {n_parties} parties exceeds the one-byte MPC client ID domain"
+            )
+        })
+}
+
 #[cfg(test)]
 fn bind_admitted_client_slots(
     route_ids: &[ClientId],
     manifest_slots: &[usize],
+    n_parties: usize,
 ) -> Vec<ClientProtocolBinding> {
     debug_assert_eq!(route_ids.len(), manifest_slots.len());
     route_ids
@@ -3058,8 +3075,8 @@ fn bind_admitted_client_slots(
         .zip(manifest_slots.iter().copied())
         .enumerate()
         .map(
-            |(protocol_index, (route_id, manifest_slot))| ClientProtocolBinding {
-                protocol_index,
+            |(ordinal, (route_id, manifest_slot))| ClientProtocolBinding {
+                protocol_index: client_protocol_id(n_parties, ordinal).unwrap(),
                 route_id,
                 manifest_slot,
             },
@@ -3079,6 +3096,7 @@ fn client_binding_route_ids(bindings: &[ClientProtocolBinding]) -> HashSet<Clien
 fn resolve_client_protocol_bindings(
     expected: Option<&[ClientProtocolBinding]>,
     observed: HashSet<ClientId>,
+    n_parties: usize,
 ) -> Result<Vec<ClientProtocolBinding>, String> {
     if let Some(expected) = expected {
         let expected_ids = client_binding_route_ids(expected);
@@ -3101,21 +3119,17 @@ fn resolve_client_protocol_bindings(
     }
 
     let client_ids = normalize_client_ids(observed.into_iter().collect());
-    if client_ids.len() > usize::from(u8::MAX) + 1 {
-        return Err(format!(
-            "{} clients exceed the one-byte MPC client index domain",
-            client_ids.len()
-        ));
-    }
-    Ok(client_ids
+    client_ids
         .into_iter()
         .enumerate()
-        .map(|(protocol_index, route_id)| ClientProtocolBinding {
-            protocol_index,
-            route_id,
-            manifest_slot: protocol_index,
+        .map(|(ordinal, route_id)| {
+            Ok(ClientProtocolBinding {
+                protocol_index: client_protocol_id(n_parties, ordinal)?,
+                route_id,
+                manifest_slot: ordinal,
+            })
         })
-        .collect())
+        .collect()
 }
 
 fn client_input_setup_plan(
@@ -3149,8 +3163,10 @@ async fn prepare_party_clients(
     expected_bindings: Option<&[ClientProtocolBinding]>,
     input_types: &BTreeMap<usize, Vec<ShareType>>,
     fallback_input_count: usize,
+    n_parties: usize,
 ) -> Result<PartyClients, String> {
-    let bindings = admit_execution_clients(client_inbox, expected_count, expected_bindings).await?;
+    let bindings =
+        admit_execution_clients(client_inbox, expected_count, expected_bindings, n_parties).await?;
     let manifest_driven = expected_bindings.is_some();
     Ok(PartyClients {
         input_setup: client_input_setup_plan(
@@ -3409,9 +3425,9 @@ async fn run_hb_client_protocol_for_curve<F: PrimeField>(
     mut msg_rx: mpsc::Receiver<DirectClientInboundMessage>,
 ) -> Result<(), String> {
     let instance_id = honeybadger_protocol_instance_id(config.instance_id);
-    // Use the sequential client_index (0, 1, ...) as the MPC identity,
-    // not the transport-derived cid, because the session_id only has
-    // 8 bits for the client_id field.
+    // Use the INST-assigned client protocol ID (n, n+1, ...) as the MPC
+    // identity, not the transport-derived cid, because the session_id only
+    // has 8 bits for the client_id field.
     let mpc_cid = config.client_index as usize;
     // Input and output cardinalities are independent. In particular, a client
     // may submit one value and remain connected for several output values.
@@ -4581,6 +4597,7 @@ async fn admit_execution_clients(
     client_inbox: &mut mpsc::Receiver<ExecutionInboundMessage>,
     expected_client_count: Option<usize>,
     expected_client_bindings: Option<&[ClientProtocolBinding]>,
+    n_parties: usize,
 ) -> Result<Vec<ClientProtocolBinding>, String> {
     let expected_client_ids = expected_client_bindings.map(client_binding_route_ids);
     let roster_count = expected_client_bindings.map(<[_]>::len);
@@ -4629,9 +4646,10 @@ async fn admit_execution_clients(
                 _ => {}
             }
         }
-        bindings = resolve_client_protocol_bindings(expected_client_bindings, clients)?;
+        bindings = resolve_client_protocol_bindings(expected_client_bindings, clients, n_parties)?;
     } else if expected_client_bindings.is_some() {
-        bindings = resolve_client_protocol_bindings(expected_client_bindings, HashSet::new())?;
+        bindings =
+            resolve_client_protocol_bindings(expected_client_bindings, HashSet::new(), n_parties)?;
     }
 
     Ok(bindings)
@@ -4728,6 +4746,7 @@ where
         expected_client_bindings.as_deref().map(Vec::as_slice),
         client_input_types,
         client_input_count,
+        n,
     )
     .await?;
     let client_bindings = &clients.bindings;
@@ -5060,7 +5079,7 @@ where
             inner: engine.protocol_network().as_ref().clone(),
             client_id_map: client_bindings
                 .iter()
-                .map(|binding| binding.route_id)
+                .map(|binding| (binding.protocol_index, binding.route_id))
                 .collect(),
         });
 
@@ -5230,6 +5249,7 @@ where
         expected_client_bindings.as_deref().map(Vec::as_slice),
         client_input_types,
         client_input_count,
+        n,
     )
     .await?;
     let client_bindings = &clients.bindings;
@@ -5530,7 +5550,7 @@ where
             inner: protocol_network.clone(),
             client_id_map: client_bindings
                 .iter()
-                .map(|binding| binding.route_id)
+                .map(|binding| (binding.protocol_index, binding.route_id))
                 .collect(),
         });
 
@@ -6323,7 +6343,7 @@ impl StandingRunnerExecutionHandler {
         &self,
         admission: &ResolvedStandingExecutionAdmissionV1,
         program: &StandingProgram,
-    ) -> Arc<Vec<ClientProtocolBinding>> {
+    ) -> Result<Arc<Vec<ClientProtocolBinding>>, String> {
         let output_only_slots = program
             .client_io_manifest
             .clients
@@ -6336,19 +6356,20 @@ impl StandingRunnerExecutionHandler {
                 }
             })
             .collect::<HashSet<_>>();
-        Arc::new(
-            admission
-                .clients
-                .iter()
-                .enumerate()
-                .filter(|(_, client)| output_only_slots.contains(&client.manifest_slot))
-                .map(|(client_id, client)| ClientProtocolBinding {
-                    protocol_index: client_id,
+        admission
+            .clients
+            .iter()
+            .enumerate()
+            .filter(|(_, client)| output_only_slots.contains(&client.manifest_slot))
+            .map(|(client_id, client)| {
+                Ok(ClientProtocolBinding {
+                    protocol_index: client_protocol_id(self.parties, client_id)?,
                     route_id: client_id,
                     manifest_slot: client.manifest_slot,
                 })
-                .collect(),
-        )
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map(Arc::new)
     }
 
     async fn warm_reservoirs(
@@ -7149,7 +7170,7 @@ impl StandingRunnerExecutionHandler {
             stoffel_vm::net::derive_instance_id_for_execution(&context.spec.execution_id);
         let preproc_program_id =
             standing_preproc_pool_program_id(self.pool_id, admission.program_id);
-        let expected_client_bindings = self.expected_client_bindings(admission, program);
+        let expected_client_bindings = self.expected_client_bindings(admission, program)?;
         let mut setup = Some(PartySetup {
             net: Arc::clone(&self.network),
             reply_mux: self.mux.clone(),
@@ -9944,8 +9965,8 @@ mod tests {
         band_pow2, bind_admitted_client_slots, canonical_mask_reservation_runs,
         checked_client_input_total, cli_positional_arguments, client_input_completion_quorum,
         client_input_setup_plan, client_output_slot_map, client_program_from_arguments,
-        client_schema_for_reserved_index, client_transport_recipient, collect_bounded,
-        coordinator_execution_already_retired, decode_preprocessing_exchange,
+        client_protocol_id, client_schema_for_reserved_index, client_transport_recipient,
+        collect_bounded, coordinator_execution_already_retired, decode_preprocessing_exchange,
         direct_client_inbound_message, encode_manifest_client_inputs,
         encode_preprocessing_exchange, field_outputs_to_hex, format_coordinator_outputs,
         format_vm_result, group_output_shares_by_client, hb_input_only_completion_proven,
@@ -10840,20 +10861,30 @@ mod tests {
         assert!(hb_input_only_completion_proven(true, 3, 3));
     }
 
+    const TEST_PARTIES: usize = 5;
+
+    #[test]
+    fn client_protocol_ids_start_after_parties_and_fit_one_byte() {
+        assert_eq!(client_protocol_id(5, 0).unwrap(), 5);
+        assert_eq!(client_protocol_id(5, 250).unwrap(), 255);
+        assert!(client_protocol_id(5, 251).is_err());
+    }
+
     #[test]
     fn admitted_client_order_binds_permuted_sparse_manifest_slots() {
-        let bindings = bind_admitted_client_slots(&[900, 100, 700], &[9, 2, 41]);
-        assert_eq!(bindings[0].protocol_index, 0);
+        let bindings = bind_admitted_client_slots(&[900, 100, 700], &[9, 2, 41], TEST_PARTIES);
+        assert_eq!(bindings[0].protocol_index, TEST_PARTIES);
         assert_eq!(bindings[0].route_id, 900);
         assert_eq!(bindings[0].manifest_slot, 9);
-        assert_eq!(bindings[1].protocol_index, 1);
+        assert_eq!(bindings[1].protocol_index, TEST_PARTIES + 1);
         assert_eq!(bindings[1].route_id, 100);
         assert_eq!(bindings[1].manifest_slot, 2);
 
         // Arrival order cannot change protocol indices; the immutable
         // admission order is retained after observing exactly the admitted set.
         let observed = HashSet::from([700, 900, 100]);
-        let resolved = resolve_client_protocol_bindings(Some(&bindings), observed).unwrap();
+        let resolved =
+            resolve_client_protocol_bindings(Some(&bindings), observed, TEST_PARTIES).unwrap();
         assert_eq!(resolved, bindings);
         assert_eq!(
             client_output_slot_map(&resolved),
@@ -10867,17 +10898,21 @@ mod tests {
         ]);
         let plan = client_input_setup_plan(&resolved, &input_types, 99, true);
         assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].protocol_index, 1);
+        assert_eq!(plan[0].protocol_index, TEST_PARTIES + 1);
         assert_eq!(plan[0].input_count, 2);
-        assert_eq!(plan[1].protocol_index, 2);
+        assert_eq!(plan[1].protocol_index, TEST_PARTIES + 2);
         assert_eq!(plan[1].input_count, 1);
     }
 
     #[test]
     fn admitted_client_resolution_rejects_unknown_or_missing_cert_identity() {
-        let bindings = bind_admitted_client_slots(&[10, 20], &[7, 3]);
-        let error = resolve_client_protocol_bindings(Some(&bindings), HashSet::from([10, 999]))
-            .unwrap_err();
+        let bindings = bind_admitted_client_slots(&[10, 20], &[7, 3], TEST_PARTIES);
+        let error = resolve_client_protocol_bindings(
+            Some(&bindings),
+            HashSet::from([10, 999]),
+            TEST_PARTIES,
+        )
+        .unwrap_err();
 
         assert!(error.contains("missing=[20]"));
         assert!(error.contains("unexpected=[999]"));
@@ -10885,7 +10920,7 @@ mod tests {
 
     #[test]
     fn output_only_setup_skips_input_server_plan_but_retains_inst_and_output_targets() {
-        let bindings = bind_admitted_client_slots(&[51, 52], &[8, 27]);
+        let bindings = bind_admitted_client_slots(&[51, 52], &[8, 27], TEST_PARTIES);
         let input_types = BTreeMap::from([(8, Vec::new()), (27, Vec::new())]);
 
         let plan = client_input_setup_plan(&bindings, &input_types, 0, true);
@@ -10905,9 +10940,13 @@ mod tests {
         // These route IDs represent two distinct authenticated certificate
         // principals. Slot 4 submits one input and receives no output; slot 9
         // submits no input and remains connected to receive one output.
-        let admitted = bind_admitted_client_slots(&[0x51, 0xa2], &[4, 9]);
-        let bindings =
-            resolve_client_protocol_bindings(Some(&admitted), HashSet::from([0xa2, 0x51])).unwrap();
+        let admitted = bind_admitted_client_slots(&[0x51, 0xa2], &[4, 9], TEST_PARTIES);
+        let bindings = resolve_client_protocol_bindings(
+            Some(&admitted),
+            HashSet::from([0xa2, 0x51]),
+            TEST_PARTIES,
+        )
+        .unwrap();
         let input_types =
             BTreeMap::from([(4, vec![ShareType::default_secret_int()]), (9, Vec::new())]);
 
@@ -10915,7 +10954,7 @@ mod tests {
         assert_eq!(input_plan.len(), 1);
         assert_eq!(
             mpc_input_protocol_ids(&input_plan),
-            vec![0],
+            vec![TEST_PARTIES],
             "the output-only authenticated client must not hold the InputServer barrier open"
         );
 
@@ -10934,23 +10973,30 @@ mod tests {
         // Protocol indices are admission-order identities. Filtering the input
         // set must not renumber an input client across parties or collide it
         // with the output-only client's authenticated route.
-        let admitted = bind_admitted_client_slots(&[0xa2, 0x51], &[9, 4]);
-        let bindings =
-            resolve_client_protocol_bindings(Some(&admitted), HashSet::from([0x51, 0xa2])).unwrap();
+        let admitted = bind_admitted_client_slots(&[0xa2, 0x51], &[9, 4], TEST_PARTIES);
+        let bindings = resolve_client_protocol_bindings(
+            Some(&admitted),
+            HashSet::from([0x51, 0xa2]),
+            TEST_PARTIES,
+        )
+        .unwrap();
         let input_types =
             BTreeMap::from([(4, vec![ShareType::default_secret_int()]), (9, Vec::new())]);
         let input_plan = client_input_setup_plan(&bindings, &input_types, 0, true);
 
-        assert_eq!(mpc_input_protocol_ids(&input_plan), vec![1]);
+        assert_eq!(mpc_input_protocol_ids(&input_plan), vec![TEST_PARTIES + 1]);
         assert_eq!(client_output_slot_map(&bindings).get(&9), Some(&0xa2));
     }
 
     #[test]
     fn one_shot_client_binding_remains_sorted_ordinal_and_allows_zero_inputs() {
-        let bindings = resolve_client_protocol_bindings(None, HashSet::from([91, 17])).unwrap();
+        let bindings =
+            resolve_client_protocol_bindings(None, HashSet::from([91, 17]), TEST_PARTIES).unwrap();
         assert_eq!(bindings[0].route_id, 17);
+        assert_eq!(bindings[0].protocol_index, TEST_PARTIES);
         assert_eq!(bindings[0].manifest_slot, 0);
         assert_eq!(bindings[1].route_id, 91);
+        assert_eq!(bindings[1].protocol_index, TEST_PARTIES + 1);
         assert_eq!(bindings[1].manifest_slot, 1);
         assert!(client_input_setup_plan(&bindings, &BTreeMap::new(), 0, false).is_empty());
     }

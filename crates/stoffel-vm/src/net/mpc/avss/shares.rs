@@ -215,7 +215,12 @@ where
                 // `AvssMPCNode::process`, and once the last message of a round
                 // has been processed no further traffic would ever drain it —
                 // a waiter must pump the queue itself or hang until timeout.
-                if let Err(e) = node.share_gen_avss.avss.drain_rbc_output().await {
+                if let Err(e) = node
+                    .share_gen_avss
+                    .avss
+                    .drain_rbc_output(self.protocol_net.clone())
+                    .await
+                {
                     tracing::warn!("wait_for_share: drain_rbc_output failed: {e:?}");
                 }
                 let shares = node.share_gen_avss.avss.shares.lock().await;

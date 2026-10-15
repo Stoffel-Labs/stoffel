@@ -156,7 +156,7 @@ async fn individual_random_reservations_transfer_the_upstream_vec_once_in_order(
         .preprocessing_material
         .lock()
         .await
-        .add(None, None, Some(shares.clone()), None, None, None);
+        .add(None, Some(shares.clone()), None, None);
 
     for (index, expected) in shares.iter().enumerate() {
         let taken = engine.reserve_random_share().await.unwrap();
@@ -231,9 +231,7 @@ def main() -> int64:
         .await
         .add(
             None,
-            None,
             Some(vec![expected.clone(); RANDOM_SHARE_COUNT]),
-            None,
             None,
             None,
         );

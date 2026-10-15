@@ -19,7 +19,6 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use stoffel_vm_types::core_types::{ShareData, ShareType};
 use stoffelmpc_mpc::common::PreprocessingMPCProtocol;
-use stoffelmpc_mpc::honeybadger::fpmul::f256::Gf256;
 use stoffelmpc_mpc::honeybadger::preprocessing::HoneyBadgerMPCNodePreprocMaterial;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
@@ -276,7 +275,7 @@ where
         Ok(PoolAvailability {
             beaver: preproc::u32_index(node.params.n_triples as u64, "HB beaver target")?,
             random: preproc::u32_index(node.params.n_random_shares as u64, "HB random target")?,
-            prand_bit: preproc::u32_index(node.params.n_prandbit as u64, "HB prandbit target")?,
+            prand_bit: preproc::u32_index(node.params.n_randbit as u64, "HB randbit target")?,
             prand_int: preproc::u32_index(node.params.n_prandint as u64, "HB prandint target")?,
         })
     }
@@ -340,11 +339,11 @@ where
                     .map_err(|error| error.to_string())
             },
         )?;
-        let prand_bit = decode(
+        let rand_bit = decode(
             bundle.prand_bit,
-            "preallocated PRandBit shares",
+            "preallocated RandBit shares",
             |data, item_size| {
-                preproc::deserialize_prandbit_shares::<F>(data, item_size, 0)
+                preproc::deserialize_robust_shares::<F>(data, item_size, 0)
                     .map_err(|error| error.to_string())
             },
         )?;
@@ -375,7 +374,7 @@ where
             .preprocessing_material
             .lock()
             .await
-            .add(beaver, None, random, None, prand_bit, prand_int);
+            .add(beaver, random, rand_bit, prand_int);
         self.ready.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
@@ -442,18 +441,14 @@ where
         let mut node = self.clone_node().await;
         let chunks = standing_top_up_chunks(needed, self.topology.threshold());
         for (chunk_index, chunk) in chunks.iter().copied().enumerate() {
-            let mask_group_size = self.topology.threshold().saturating_add(1);
-            let mask_cost = usize::try_from(
-                div_ceil_u64(u64::from(chunk.prand_bit), mask_group_size as u64)
-                    .saturating_mul(mask_group_size as u64),
-            )
-            .map_err(|_| "PRandBit top-up cost does not fit usize".to_owned())?;
-            // Big-field RandBit consumes one ordinary triple and random share
-            // per mask. These are generation costs, not part of the program's
+            // RandBit consumes one random share and one degree-2t zero share
+            // per bit. These are generation costs, not part of the program's
             // declared final reservoir, so provision them in addition.
-            node.params.n_triples = (chunk.beaver as usize).saturating_add(mask_cost);
-            node.params.n_random_shares = (chunk.random as usize).saturating_add(mask_cost);
-            node.params.n_prandbit = chunk.prand_bit as usize;
+            node.params.n_triples = chunk.beaver as usize;
+            node.params.n_random_shares =
+                (chunk.random as usize).saturating_add(chunk.prand_bit as usize);
+            node.params.n_randbit = chunk.prand_bit as usize;
+            node.params.n_zero_shares = chunk.prand_bit as usize;
             node.params.n_prandint = chunk.prand_int as usize;
 
             eprintln!(
@@ -500,11 +495,11 @@ where
                 }
                 if chunk.prand_bit > 0 {
                     let items = prep
-                        .take_prandbit_shares(chunk.prand_bit as usize)
+                        .take_randbit_shares(chunk.prand_bit as usize)
                         .map_err(|e| format!("{e:?}"))?;
-                    let (data, item_size) = preproc::serialize_prandbit_shares::<F>(&items)?;
-                    let added = preproc::u32_index(items.len() as u64, "generated prandbit")?;
-                    to_append.push((scope.prand_bit(), item_size, added, data));
+                    let (data, item_size) = preproc::serialize_robust_shares::<F>(&items)?;
+                    let added = preproc::u32_index(items.len() as u64, "generated randbit")?;
+                    to_append.push((scope.rand_bit(), item_size, added, data));
                 }
                 if chunk.prand_int > 0 {
                     let items = prep
@@ -605,7 +600,7 @@ where
             let mut prep = node.preprocessing_material.lock().await;
             let _m = prep.length();
             let (n_bt, n_rs, n_pb, n_pi) =
-                (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
+                (_m.beaver_triples, _m.random_shr, _m.randbit, _m.prandint);
 
             if n_bt > 0 {
                 let items = prep
@@ -631,11 +626,11 @@ where
             }
             if n_pb > 0 {
                 let items = prep
-                    .take_prandbit_shares(n_pb)
+                    .take_randbit_shares(n_pb)
                     .map_err(|e| format!("{e:?}"))?;
-                let (data, item_size) = preproc::serialize_prandbit_shares::<F>(&items)?;
+                let (data, item_size) = preproc::serialize_robust_shares::<F>(&items)?;
                 to_store.push((
-                    scope.prand_bit(),
+                    scope.rand_bit(),
                     PreprocBlob::try_new(data, item_size, items.len())?,
                 ));
                 restore_pb = Some(items);
@@ -652,7 +647,7 @@ where
                 restore_pi = Some(items);
             }
 
-            prep.add(restore_bt, None, restore_rs, None, restore_pb, restore_pi);
+            prep.add(restore_bt, restore_rs, restore_pb, restore_pi);
         }
 
         for (key, blob) in &to_store {
@@ -764,7 +759,6 @@ where
     pub(super) async fn reserve_prandint_shares(
         &self,
         num_shares: usize,
-        ty: ShareType,
     ) -> Result<Vec<RobustShare<F>>, String> {
         loop {
             let attempt = {
@@ -781,7 +775,7 @@ where
                     ));
                 }
                 Err(HoneyBadgerError::NotEnoughPreprocessing) => {
-                    self.regenerate_prandint_shares(num_shares, ty).await?;
+                    self.regenerate_prandint_shares(num_shares).await?;
                     continue;
                 }
                 Err(other) => {
@@ -805,17 +799,17 @@ where
         result
     }
 
-    pub(super) async fn reserve_prandbit_shares(
+    pub(super) async fn reserve_randbit_shares(
         &self,
         num_shares: usize,
-    ) -> Result<Vec<(RobustShare<F>, Gf256)>, String> {
+    ) -> Result<Vec<RobustShare<F>>, String> {
         let node = self.clone_node().await;
         let result = node
             .preprocessing_material
             .lock()
             .await
-            .take_prandbit_shares(num_shares)
-            .map_err(|e| format!("Failed to take PRandBit shares: {:?}", e));
+            .take_randbit_shares(num_shares)
+            .map_err(|e| format!("Failed to take RandBit shares: {:?}", e));
         result
     }
 
@@ -835,17 +829,13 @@ where
             .map_err(|e| format!("Failed to regenerate preprocessing material: {:?}", e))
     }
 
-    async fn regenerate_prandint_shares(&self, needed: usize, ty: ShareType) -> Result<(), String> {
+    async fn regenerate_prandint_shares(&self, needed: usize) -> Result<(), String> {
         let mut node = self.clone_node().await;
         {
             let current = node.preprocessing_material.lock().await.length().prandint;
             let target = current + needed;
             if node.params.n_prandint < target {
                 node.params.n_prandint = target;
-            }
-            if let ShareType::SecretInt { bit_length } | ShareType::SecretUInt { bit_length } = ty {
-                let target_random_bits = bit_length.min(56);
-                node.params.l = target_random_bits.saturating_sub(node.params.k);
             }
         }
 
@@ -874,9 +864,9 @@ where
     /// Pull one pre-generated PRandInt share from the preprocessing pool.
     pub(super) async fn random_integer_share_async_impl(
         &self,
-        ty: ShareType,
+        _ty: ShareType,
     ) -> Result<ShareData, String> {
-        let shares = self.reserve_prandint_shares(1, ty).await?;
+        let shares = self.reserve_prandint_shares(1).await?;
         Self::encode_share(&shares[0]).map(|v| ShareData::Opaque(v.into()))
     }
 }
