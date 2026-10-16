@@ -5,13 +5,19 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLES_DIR="${ROOT_DIR}/examples"
 WORKSPACE_DIR="$(cd "${ROOT_DIR}/../.." && pwd)"
 VM_DIR="${STOFFEL_VM_DIR:-${WORKSPACE_DIR}}"
-COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}}"
+COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:?Set STOFFEL_COORDINATOR_CONTEXT to a stoffel-mpc-coordinator 0.3.0 checkout}}"
 NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}}"
 OUT_DIR="${STOFFEL_EXAMPLES_OUT:-${EXAMPLES_DIR}/dist}"
 COMPOSE_FILE="${EXAMPLES_DIR}/docker-compose.coordinator.yml"
-AUTH_TOKEN="${STOFFEL_AUTH_TOKEN:-stoffel-examples-coord-token}"
 WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-300}"
 EXPECTED_OUTPUT="${EXPECTED_OUTPUT:-315}"
+PROGRAM_NAME="${STOFFEL_PROGRAM_NAME:-mpc_share_arithmetic.stflb}"
+PROGRAM_PATH="/app/examples/${PROGRAM_NAME}"
+ENTRY="${STOFFEL_ENTRY:-main}"
+# One `<inputs>:<outputs>` pair per client slot, in slot order, matching the two
+# client services: both read STOFFEL_CLIENT_INPUT_COUNT inputs, client0 takes
+# STOFFEL_OUTPUTS outputs and client1 takes STOFFEL_CLIENT1_OUTPUTS.
+CLIENT_SLOTS="${STOFFEL_CLIENT_SLOTS:-${STOFFEL_CLIENT_INPUT_COUNT:-1}:${STOFFEL_OUTPUTS:-1},${STOFFEL_CLIENT_INPUT_COUNT:-1}:${STOFFEL_CLIENT1_OUTPUTS:-0}}"
 
 WORKLOAD_CONTAINERS=(
   stoffel-examples-coord-party0
@@ -24,12 +30,48 @@ WORKLOAD_CONTAINERS=(
 )
 
 compose() {
-  STOFFEL_AUTH_TOKEN="$AUTH_TOKEN" \
   STOFFEL_VM_DIR="$VM_DIR" \
   STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
   STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
   STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
+  STOFFEL_EXECUTION_ID="${EXECUTION_ID:-}" \
     docker compose -f "$COMPOSE_FILE" "$@"
+}
+
+# The coordinator decides what runs, so it has to be listening before anything
+# can ask it. It mints the execution identity and publishes the execution to
+# every party; the clients are not on the node roster, so they are handed the
+# identity it printed.
+mint_execution() {
+  compose up --build -d coordinator
+  local deadline=$(( $(date +%s) + 120 ))
+  until compose ps coordinator | grep -q healthy; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "The coordinator did not become healthy." >&2
+      compose logs coordinator >&2 || true
+      return 1
+    fi
+    sleep 2
+  done
+
+  local submitted
+  submitted="$(compose run --rm --no-deps -T \
+    --entrypoint /app/stoffel-coord-ctl party0 \
+    submit \
+    --coordinator coordinator:31415 \
+    --coord-cert /app/ids/server_cert.crt \
+    --cert /app/ids/operator/cert.crt \
+    --key /app/ids/operator/key.der \
+    --program-file "$PROGRAM_PATH" \
+    --entry "$ENTRY" \
+    --client-slots "$CLIENT_SLOTS" \
+    --open-admission)"
+  EXECUTION_ID="$(awk '{print $1}' <<<"$submitted" | tr -d '\r')"
+  if ! [[ "$EXECUTION_ID" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "The coordinator did not mint an execution: ${submitted}" >&2
+    return 1
+  fi
+  echo "Coordinator minted execution ${EXECUTION_ID}"
 }
 
 cleanup() {
@@ -83,7 +125,7 @@ assert_zero_exit_codes() {
   done
 }
 
-if [ ! -f "${OUT_DIR}/${STOFFEL_PROGRAM_NAME:-mpc_share_arithmetic.stflb}" ]; then
+if [ ! -f "${OUT_DIR}/${PROGRAM_NAME}" ]; then
   echo "Compiled coordinator program not found in ${OUT_DIR}." >&2
   echo "Run examples/validate_examples.sh first." >&2
   exit 2
@@ -92,6 +134,7 @@ fi
 trap cleanup EXIT
 
 compose down --remove-orphans -v >/dev/null 2>&1 || true
+mint_execution
 compose up --build -d
 if ! wait_for_workload_exit; then
   capture_logs >&2 || true

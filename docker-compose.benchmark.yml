@@ -1,3 +1,9 @@
+# The coordinator decides what runs: it mints every execution identity and
+# publishes each execution to the node roster, so no party is configured with
+# one. The `registrar` service below asks it to run one execution of the
+# packaged program, so `docker compose -f <this file> up` completes on its own.
+# This stack has no client services.
+
 networks:
   stoffel:
     driver: bridge
@@ -10,7 +16,7 @@ x-party: &party
     context: .
     dockerfile: Dockerfile.benchmark
     additional_contexts:
-      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?Set an absolute coordinator checkout}"
     args:
       PROFILE_BUILD: "${STOFFEL_PROFILE_BUILD:-false}"
   volumes:
@@ -30,17 +36,13 @@ x-party: &party
       exit $$EXIT
 
 x-common-env: &common-env
-  STOFFEL_AUTH_TOKEN: "${STOFFEL_AUTH_TOKEN:-stoffel-benchmark-token}"
   STOFFEL_N_PARTIES: "5"
   STOFFEL_THRESHOLD: "1"
   STOFFEL_ENTRY: main
   STOFFEL_COORD_ADDR: "coordinator.stoffel-coord.local:31415"
-  STOFFEL_TIMESTAMP: "0"
   STOFFEL_PROGRAM: "${STOFFEL_PROGRAM:-/app/programs/mpc_aes128_circuit.stflb}"
   STOFFEL_MPC_BACKEND: ${STOFFEL_MPC_BACKEND:-honeybadger}
   STOFFEL_MPC_CURVE: ${STOFFEL_MPC_CURVE:-bls12-381}
-  # Example-only default; use a fresh nonzero 64-hex ID for each real/overlapping invocation.
-  STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001}"
   RUST_MIN_STACK: ${RUST_MIN_STACK:-67108864}
   RUST_LOG: "${RUST_LOG:-info}"
   RUST_BACKTRACE: "1"
@@ -61,7 +63,7 @@ services:
       context: .
       dockerfile: docker/coordinator.Dockerfile
       additional_contexts:
-        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?Set an absolute coordinator checkout}"
     volumes:
       - ./ids:/app/ids:ro
     entrypoint: ["/bin/sh", "-c"]
@@ -77,17 +79,11 @@ services:
         /app/stoffel-coordinator \
           --bind-addr 0.0.0.0 \
           --port 31415 \
-          --hash 0000000000000000000000000000000000000000000000000000000000000000 \
-          --execution-id ${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001} \
           --server-cert /app/ids/server_cert.crt \
           --server-key /app/ids/server_key.der \
-          --n 5 \
           --t 1 \
-          --mpc-backend ${STOFFEL_MPC_BACKEND:-honeybadger} \
-          --mpc-curve ${STOFFEL_MPC_CURVE:-bls12-381} \
-          --n-inputs 0 \
-          --output-clients /app/ids/clients/cert0.crt \
-          --initial-mpc-nodes /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt &
+          --node-roster /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt \
+          --operator-certs /app/ids/operator/cert.crt &
         COORD_PID=$$!
 
         trap 'kill -TERM "$$COORD_PID" 2>/dev/null; wait "$$COORD_PID"; EXIT=$$?; print_mem; exit "$$EXIT"' TERM INT
@@ -108,20 +104,55 @@ services:
         ipv4_address: 172.29.0.5
         aliases: [coordinator.stoffel-coord.local]
 
+  # One submission, over the operator's own authenticated link. It exits as soon
+  # as the coordinator has minted and published the execution; the parties learn
+  # of it on the subscriptions they already hold and never see this container.
+  registrar:
+    build:
+      context: .
+      dockerfile: Dockerfile.benchmark
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?Set an absolute coordinator checkout}"
+      args:
+        PROFILE_BUILD: "${STOFFEL_PROFILE_BUILD:-false}"
+    volumes:
+      - ./ids:/app/ids:ro
+    entrypoint: ["/app/stoffel-coord-ctl"]
+    command:
+      - submit
+      - --coordinator
+      - coordinator.stoffel-coord.local:31415
+      - --coord-cert
+      - /app/ids/server_cert.crt
+      - --cert
+      - /app/ids/operator/cert.crt
+      - --key
+      - /app/ids/operator/key.der
+      - --program-file
+      - ${STOFFEL_PROGRAM:-/app/programs/mpc_aes128_circuit.stflb}
+      - --entry
+      - main
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      stoffel:
+
   party0:
     <<: *party
     environment:
       <<: *common-env
-      STOFFEL_ROLE: leader
+      STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "0"
       STOFFEL_BIND_ADDR: "0.0.0.0:9000"
+      STOFFEL_PEERS: "party1.stoffel-coord.local:9001,party2.stoffel-coord.local:9002,party3.stoffel-coord.local:9003,party4.stoffel-coord.local:9004"
       STOFFEL_RPC_ADDR: "0.0.0.0:16180"
       STOFFEL_CERT: /app/ids/nodes/cert0.crt
       STOFFEL_KEY: /app/ids/nodes/key0.der
       NET_EXTRA_RTT_MS: "${PARTY0_EXTRA_RTT_MS:-0}"
     ports:
       - "9000:9000"
-      - "10000:10000"
       - "16180:16180"
     depends_on:
       coordinator:
@@ -144,18 +175,16 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "1"
       STOFFEL_BIND_ADDR: "0.0.0.0:9001"
+      STOFFEL_PEERS: "party0.stoffel-coord.local:9000,party2.stoffel-coord.local:9002,party3.stoffel-coord.local:9003,party4.stoffel-coord.local:9004"
       STOFFEL_RPC_ADDR: "0.0.0.0:16181"
       STOFFEL_CERT: /app/ids/nodes/cert1.crt
       STOFFEL_KEY: /app/ids/nodes/key1.der
-      STOFFEL_BOOTSTRAP_ADDR: "party0.stoffel-coord.local:9000"
       NET_EXTRA_RTT_MS: "${PARTY1_EXTRA_RTT_MS:-0}"
     ports:
       - "9001:9001"
       - "16181:16181"
     depends_on:
       coordinator:
-        condition: service_healthy
-      party0:
         condition: service_healthy
     networks:
       stoffel:
@@ -169,18 +198,16 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "2"
       STOFFEL_BIND_ADDR: "0.0.0.0:9002"
+      STOFFEL_PEERS: "party0.stoffel-coord.local:9000,party1.stoffel-coord.local:9001,party3.stoffel-coord.local:9003,party4.stoffel-coord.local:9004"
       STOFFEL_RPC_ADDR: "0.0.0.0:16182"
       STOFFEL_CERT: /app/ids/nodes/cert2.crt
       STOFFEL_KEY: /app/ids/nodes/key2.der
-      STOFFEL_BOOTSTRAP_ADDR: "party0.stoffel-coord.local:9000"
       NET_EXTRA_RTT_MS: "${PARTY2_EXTRA_RTT_MS:-0}"
     ports:
       - "9002:9002"
       - "16182:16182"
     depends_on:
       coordinator:
-        condition: service_healthy
-      party0:
         condition: service_healthy
     networks:
       stoffel:
@@ -194,18 +221,16 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "3"
       STOFFEL_BIND_ADDR: "0.0.0.0:9003"
+      STOFFEL_PEERS: "party0.stoffel-coord.local:9000,party1.stoffel-coord.local:9001,party2.stoffel-coord.local:9002,party4.stoffel-coord.local:9004"
       STOFFEL_RPC_ADDR: "0.0.0.0:16183"
       STOFFEL_CERT: /app/ids/nodes/cert3.crt
       STOFFEL_KEY: /app/ids/nodes/key3.der
-      STOFFEL_BOOTSTRAP_ADDR: "party0.stoffel-coord.local:9000"
       NET_EXTRA_RTT_MS: "${PARTY3_EXTRA_RTT_MS:-0}"
     ports:
       - "9003:9003"
       - "16183:16183"
     depends_on:
       coordinator:
-        condition: service_healthy
-      party0:
         condition: service_healthy
     networks:
       stoffel:
@@ -219,18 +244,16 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "4"
       STOFFEL_BIND_ADDR: "0.0.0.0:9004"
+      STOFFEL_PEERS: "party0.stoffel-coord.local:9000,party1.stoffel-coord.local:9001,party2.stoffel-coord.local:9002,party3.stoffel-coord.local:9003"
       STOFFEL_RPC_ADDR: "0.0.0.0:16184"
       STOFFEL_CERT: /app/ids/nodes/cert4.crt
       STOFFEL_KEY: /app/ids/nodes/key4.der
-      STOFFEL_BOOTSTRAP_ADDR: "party0.stoffel-coord.local:9000"
       NET_EXTRA_RTT_MS: "${PARTY4_EXTRA_RTT_MS:-0}"
     ports:
       - "9004:9004"
       - "16184:16184"
     depends_on:
       coordinator:
-        condition: service_healthy
-      party0:
         condition: service_healthy
     networks:
       stoffel:

@@ -3,11 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_COMPOSE="${ROOT_DIR}/docker-compose.coordinator.reserve-index.yml"
-AUTH_TOKEN="${STOFFEL_AUTH_TOKEN:-coord-test-token}"
 WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-240}"
 COMPOSE_BUILD_FLAG="${COMPOSE_BUILD_FLAG:---build}"
 EXPECTED_OUTPUT="${EXPECTED_OUTPUT:--10}"
-COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}}"
+COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:?Set STOFFEL_COORDINATOR_CONTEXT to a stoffel-mpc-coordinator 0.3.0 checkout}}"
 NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}}"
 WORKLOAD_CONTAINERS=(
     stoffel-coord-party0
@@ -20,7 +19,7 @@ WORKLOAD_CONTAINERS=(
 )
 
 compose() {
-    STOFFEL_AUTH_TOKEN="${AUTH_TOKEN}" \
+    STOFFEL_EXECUTION_ID="${EXECUTION_ID:-}" \
     STOFFEL_COORDINATOR_CONTEXT="${COORDINATOR_CONTEXT}" \
     STOFFEL_NETWORK_CONTEXT="${NETWORK_CONTEXT}" \
         docker compose -f "${BASE_COMPOSE}" "$@"
@@ -88,9 +87,65 @@ require_log() {
     fi
 }
 
+
+# The coordinator decides what runs, so it has to be running before anything
+# can ask it. It mints the execution identity and publishes the execution to
+# every party; the clients are not on the node roster, so they are handed the
+# identity it printed.
+mint_execution() {
+    local program="$1"
+    local entry="$2"
+    local slots="$3"
+    shift 3
+
+    compose up "${COMPOSE_BUILD_FLAG:---build}" -d coordinator
+    local deadline=$(( $(date +%s) + 120 ))
+    until compose ps coordinator | grep -q healthy; do
+        if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "The coordinator did not become healthy." >&2
+            compose logs coordinator >&2
+            return 1
+        fi
+        sleep 2
+    done
+
+    local submitted
+    submitted="$(compose run --rm --no-deps -T \
+        --entrypoint /app/stoffel-coord-ctl party0 \
+        submit \
+        --coordinator coordinator:31415 \
+        --coord-cert /app/ids/server_cert.crt \
+        --cert /app/ids/operator/cert.crt \
+        --key /app/ids/operator/key.der \
+        --program-file "${program}" \
+        --entry "${entry}" \
+        --client-slots "${slots}" \
+        "$@")"
+    # Last non-empty line only: `compose run` writes build progress to STDOUT, so
+    # anything printed ahead of the id is noise. Images are built before the mint.
+    EXECUTION_ID="$(awk 'NF{last=$1} END{print last}' <<<"${submitted}" | tr -d '\r')"
+    if ! [[ "${EXECUTION_ID}" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "The coordinator did not mint an execution: ${submitted}" >&2
+        return 1
+    fi
+    echo "Coordinator minted execution ${EXECUTION_ID}"
+}
+
 trap cleanup EXIT
 
 compose down --remove-orphans -v >/dev/null 2>&1 || true
+# Build before minting, with progress on stderr: mint_execution runs a container,
+# so it would otherwise trigger the build and mix progress into what it parses.
+if [[ "${COMPOSE_BUILD_FLAG}" == "--build" ]]; then
+    compose build >&2
+    COMPOSE_BUILD_FLAG="--no-build"
+fi
+mint_execution \
+    "${STOFFEL_PROGRAM:-/app/programs/client_sub_order.stflb}" \
+    "${STOFFEL_ENTRY:-main}" \
+    "${STOFFEL_CLIENT_SLOTS:-1:1,1:1}" \
+    --open-admission
+export STOFFEL_EXECUTION_ID="${EXECUTION_ID}"
 compose up "${COMPOSE_BUILD_FLAG}" -d
 wait_for_workload_exit
 assert_zero_exit_codes

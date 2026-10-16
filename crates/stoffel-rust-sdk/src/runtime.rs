@@ -125,31 +125,28 @@ impl StoffelRuntime {
 
     /// Create an off-chain client IO config builder from this runtime's typed program metadata.
     ///
-    /// The runtime supplies the MPC backend, topology, and output count for
-    /// `client_slot`. Callers still provide coordinator/node endpoints,
-    /// execution ID, timestamp, and client identity explicitly. The execution
-    /// ID must match the coordinator and every MPC node for that invocation.
+    /// The runtime supplies the MPC backend and the typed inputs and outputs of
+    /// `client_slot`. Callers still provide coordinator/node endpoints, the
+    /// execution ID the coordinator minted, the timestamp and the client
+    /// identity explicitly.
+    ///
+    /// The topology and the input range are deliberately not supplied here. `n`
+    /// and `t` come from the node roster the coordinator serves over the pinned
+    /// connection, and the block of mask indices this client may reserve comes
+    /// from the admission the coordinator grants when the client associates, so
+    /// a client the deployment never listed can take part.
     pub fn offchain_client_config(&self, client_slot: u64) -> Result<OffChainClientConfigBuilder> {
         let client = self.program.client(client_slot).ok_or_else(|| {
             Error::Configuration(format!(
                 "program does not declare ClientStore metadata for client slot {client_slot}"
             ))
         })?;
-        let input_start_index = self
-            .program
-            .clients()
-            .take_while(|schema| schema.client_slot() != client_slot)
-            .map(|schema| schema.input_count() as u64)
-            .sum();
         let mpc_config = self
             .mpc_config
             .as_ref()
             .ok_or_else(|| Error::Configuration("MPC configuration is required".to_owned()))?;
         Ok(OffChainClientConfigBuilder::default()
             .client_slot(client_slot)
-            .input_start_index(input_start_index)
-            .parties(mpc_config.parties)
-            .threshold(mpc_config.threshold)
             .backend(mpc_config.backend)
             .input_types(client.inputs().iter().copied())
             .output_types(client.outputs().iter().copied()))

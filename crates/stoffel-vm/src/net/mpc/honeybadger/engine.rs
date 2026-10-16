@@ -232,16 +232,30 @@ where
         }
     }
 
+    /// Runtime capabilities of *this* engine, as opposed to the backend
+    /// family's static metadata in [`crate::net::backend::MpcBackendKind::capabilities`].
+    ///
+    /// `RESERVATION` is offered only by a standing engine. A one-shot engine
+    /// generates its pool for one execution and takes its masks out of that
+    /// live pool directly, so it has no mask to serve through
+    /// [`MpcEngineReservation`] — see that trait's documentation for why
+    /// serving one out of the store instead is the defect being avoided. The
+    /// deployment mode is fixed when the engine is built, so this is a constant
+    /// per instance.
     fn capabilities(&self) -> MpcCapabilities {
-        MpcCapabilities::MULTIPLICATION
+        let base = MpcCapabilities::MULTIPLICATION
             | MpcCapabilities::OPEN_IN_EXP
             | MpcCapabilities::CLIENT_INPUT
             | MpcCapabilities::CLIENT_OUTPUT
             | MpcCapabilities::CONSENSUS
-            | MpcCapabilities::RESERVATION
             | MpcCapabilities::RANDOMNESS
             | MpcCapabilities::FIELD_OPEN
-            | MpcCapabilities::PREPROC_PERSISTENCE
+            | MpcCapabilities::PREPROC_PERSISTENCE;
+        if self.is_standing() {
+            base | MpcCapabilities::RESERVATION
+        } else {
+            base
+        }
     }
 
     fn as_consensus(&self) -> Option<&dyn MpcEngineConsensus> {
@@ -272,8 +286,12 @@ where
         Some(self)
     }
 
+    /// Standing engines only, matching [`Self::capabilities`]: both must agree,
+    /// or `reservation_ops` reports an engine that advertises reservation
+    /// without implementing it.
     fn as_reservation(&self) -> Option<&dyn MpcEngineReservation> {
-        Some(self)
+        self.is_standing()
+            .then_some(self as &dyn MpcEngineReservation)
     }
 
     fn as_preproc_persistence(&self) -> Option<&dyn MpcEnginePreprocPersistence> {

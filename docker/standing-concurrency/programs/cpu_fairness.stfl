@@ -6,10 +6,20 @@
 # short-before-long completion therefore demonstrates instruction-budget
 # yielding between runnable VM tasks instead of progress only while one task is
 # blocked on the network.
+#
+# The long entry must also be much larger than the delay between the two
+# admissions, which is the part of the sizing that is not about the VM at all.
+# Each execution of a wave is submitted by its own authenticated operator call,
+# so a node is told about the second one some way after the first: measured at
+# 262 ms on the five-party compose stack. A long entry that runs for less than
+# that cannot be overtaken by anything, however fairly the scheduler yields,
+# and the phase would be asserting the submission path rather than the
+# scheduler. 100,000,000 rounds run for several seconds, which leaves the
+# outcome decided by the yielding this phase exists to measure.
 
 def cpu_long() -> int64:
   var accumulator: int64 = 0
-  for round in 0..5000000:
+  for round in 0..100000000:
     accumulator = accumulator + round
   return accumulator
 

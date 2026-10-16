@@ -7,16 +7,26 @@ members = [
     "crates/stoffel-vm",
     "crates/stoffel-vm-runner",
     "crates/stoffel-vm-types",
-    "crates/stoffel-wasm-client",
     "crates/stoffel-lang/examples/mpc_aes128_cbc_client_io",
     "crates/stoffel-lang/examples/mpc_sha256_client_io",
 ]
 resolver = "2"
-exclude = [
-    "vendor/mpc-protocols-limit-test",
-    "vendor/stoffel-mpc-coordinator-browser",
-]
+exclude = ["vendor/mpc-protocols-limit-test"]
 
+# TEMPORARY, until stoffel-mpc-coordinator 0.3.0 is published
+# (docs/design/bootnode-elimination.md §9.F.5, §12.H). The 0.3.0 coordinator is
+# consumed from a sibling checkout of stoffel-mpc-coordinator on branch
+# feature/no-bootnode. Every host-side cargo invocation of this workspace that
+# resolves dependencies requires that path to exist; `cargo fmt` is the measured
+# exception, since it enumerates targets through `cargo metadata --no-deps` and
+# is rc 0 with the path missing while `cargo metadata`, `cargo check` and
+# `cargo clippy` are rc 101 (§9.F.5).
+# docker/coordinator-wrapper/Cargo.toml is its own workspace and
+# carries the same table against the same checkout; the Docker builds override
+# both from .cargo/config.toml with the BuildKit `coordinator` named context.
+# The version here must match the =0.3.0 requirements in
+# crates/stoffel-vm-runner/Cargo.toml and crates/stoffel-rust-sdk/Cargo.toml, or
+# cargo leaves the patch unused and resolves the registry copy with a warning.
 [patch.crates-io]
-stoffel-mpc-coordinator-off-chain = { version = "0.2.0", path = "vendor/stoffel-mpc-coordinator-browser/crates/off-chain" }
-stoffel-mpc-coordinator-shared = { version = "0.2.0", path = "vendor/stoffel-mpc-coordinator-browser/crates/coord-shared" }
+stoffel-mpc-coordinator-off-chain = { version = "0.3.0", path = "../stoffel-mpc-coordinator-roster-admission/crates/off-chain" }
+stoffel-mpc-coordinator-shared = { version = "0.3.0", path = "../stoffel-mpc-coordinator-roster-admission/crates/coord-shared" }

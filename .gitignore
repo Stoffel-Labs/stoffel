@@ -29,3 +29,7 @@ dont look pls
 # Local-only language audit harness (probes + results)
 audit/
 profiles/
+
+# Python bytecode cache of the docker acceptance drivers
+__pycache__/
+*.pyc

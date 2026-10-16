@@ -708,6 +708,9 @@ mod tests {
     use crate::net::mpc::honeybadger_node_opts;
 
     async fn test_server() -> HoneyBadgerQuicServer<Fr> {
+        // Binding a QUIC listener needs a process-level rustls provider, and a
+        // unit test cannot assume another test installed one first.
+        crate::tests::test_utils::init_crypto_provider();
         let (tx, _rx) = mpsc::channel(8);
         let bind_address = "127.0.0.1:0".parse().expect("valid local bind address");
         let opts = honeybadger_node_opts(5, 1, 0, 0, 0).expect("valid HB options");

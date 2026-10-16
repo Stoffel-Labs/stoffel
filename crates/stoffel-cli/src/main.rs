@@ -961,46 +961,27 @@ async fn run_network(args: RunArgs, inputs: Vec<InputArg>) -> Result<()> {
         .map(|input| input.value.clone())
         .collect::<Vec<_>>();
 
-    match read_run_network_config(&config_path)? {
-        RunNetworkConfig::OffChain(config) => {
-            let client_id = client_id_from_u64(args.client_id.unwrap_or(config.client_slot))?;
-            let client = runtime
-                .client()
-                .client_id(client_id)
-                .offchain_io(config)
-                .build()
-                .map_err(|error| {
-                    anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
-                })?;
-            println!("Connected to off-chain MPC coordinator configuration");
-            let result = client.run_function(&args.entry, &inputs).await?;
-            print_values(&result);
-        }
-        RunNetworkConfig::Network(config) => {
-            let summary = config.summary().map_err(|error| {
-                anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
-            })?;
-            let client_id = client_id_from_u64(args.client_id.unwrap_or(0))?;
-            let client = runtime
-                .client()
-                .client_id(client_id)
-                .network_config(&config)
-                .connection_timeout(Duration::from_millis(args.connect_timeout_ms))
-                .connect()
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
-                })?;
-            let client_summary = client.summary();
-            println!(
-                "Connected to MPC network ({} servers, backend {}, threshold {})",
-                client_summary.server_count, summary.backend, summary.threshold
-            );
-            anyhow::bail!(
-                "network config establishes transport connectivity, but computation submission requires an off-chain client config with coordinator/node RPC and client identity"
-            );
-        }
+    let config = read_run_network_config(&config_path)?;
+    let client_id = client_id_from_u64(args.client_id.unwrap_or(config.client_slot))?;
+    // Connecting is reaching the coordinator and taking the node roster it
+    // serves: that roster is what every later node RPC leg is pinned to, so a
+    // client that cannot reach its coordinator has nothing it may talk to.
+    let client = runtime
+        .client()
+        .client_id(client_id)
+        .offchain_io(config)
+        .connection_timeout(Duration::from_millis(args.connect_timeout_ms))
+        .connect()
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
+        })?;
+    match client.pinned_node_count() {
+        Some(nodes) => println!("Connected to the off-chain MPC coordinator ({nodes} nodes)"),
+        None => println!("Connected to the off-chain MPC coordinator"),
     }
+    let result = client.run_function(&args.entry, &inputs).await?;
+    print_values(&result);
     Ok(())
 }
 
@@ -2131,17 +2112,17 @@ fn validate_disassemble_args(args: &BuildArgs) -> Result<()> {
     Ok(())
 }
 
-enum RunNetworkConfig {
-    OffChain(OffChainClientConfig),
-    Network(NetworkConfig),
-}
-
-fn read_run_network_config(path: &Path) -> Result<RunNetworkConfig> {
+/// `stoffel run --network` takes one shape of configuration: an off-chain
+/// client config. A client reaches its nodes only through the coordinator that
+/// serves it the roster those nodes are pinned to, so a node deployment
+/// descriptor — which names bind addresses and peers but no coordinator and no
+/// client identity — is not a configuration a client can run from.
+fn read_run_network_config(path: &Path) -> Result<OffChainClientConfig> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     if looks_like_project_config(&raw) {
         anyhow::bail!(
-            "--config expects an MPC network/off-chain client config, but {} looks like a Stoffel project config; pass the project path as PATH instead",
+            "--config expects an MPC off-chain client config, but {} looks like a Stoffel project config; pass the project path as PATH instead",
             path.display()
         );
     }
@@ -2149,17 +2130,18 @@ fn read_run_network_config(path: &Path) -> Result<RunNetworkConfig> {
         config.validate().map_err(|error| {
             anyhow::anyhow!(clean_repeated_invalid_config_prefix(&error.to_string()))
         })?;
-        return Ok(RunNetworkConfig::OffChain(config));
+        return Ok(config);
     }
-    NetworkConfig::from_toml_str(&raw)
-        .map(RunNetworkConfig::Network)
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "failed to parse {} as off-chain or network config: {}",
-                path.display(),
-                clean_repeated_invalid_config_prefix(&error.to_string())
-            )
-        })
+    if NetworkConfig::from_toml_str(&raw).is_ok() {
+        anyhow::bail!(
+            "{} is a node deployment config. `stoffel run --network --config` takes an off-chain client config: the coordinator's address and certificate, the execution id the coordinator minted, the node RPC addresses and a client identity",
+            path.display()
+        );
+    }
+    Err(anyhow::anyhow!(
+        "failed to parse {} as an off-chain client config",
+        path.display()
+    ))
 }
 
 fn clean_repeated_invalid_config_prefix(error: &str) -> String {

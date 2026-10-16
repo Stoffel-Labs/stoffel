@@ -12,6 +12,20 @@
 //! [`ExecutionInbox`]; it must never call `PeerConnection::receive` itself.
 //! The scanner lease coordinates scanner instances, but cannot intercept an
 //! arbitrary caller that already holds a raw connection and calls `receive`.
+//!
+//! A standing node runs *two* transports — the roster-pinned node mesh and the
+//! client-facing listener that carries no certificate allowlist (design doc §9
+//! rule 3, [`crate::net::roster::NodeListeners`]) — and one mux behind both, so
+//! each scanner is told which connections it may read with
+//! [`ExecutionScannerScope`]. The scope is the thing that keeps an unlisted
+//! certificate off the party inboxes: the client-facing listener authorizes no
+//! certificate at the transport, so a dial that negotiated the *server* ALPN
+//! there must never be attributed to a party.
+//!
+//! The registrations this mux holds are also what that listener admits
+//! connections on: [`ExecutionTransportMux::names_client_certificate`] answers
+//! whether the coordinator has admitted a certificate anywhere on this node,
+//! and `net/client_ingress.rs` refuses every connection it answers `false` for.
 
 use crate::net::session::ExecutionId;
 use async_trait::async_trait;
@@ -222,36 +236,23 @@ pub fn encode_execution_frame(
 pub struct ExecutionScopedNetwork<N = QuicNetworkManager> {
     inner: N,
     execution_id: ExecutionId,
-    tolerate_party_omission: bool,
     kind: ExecutionMessageKind,
     reply_mux: Option<ExecutionTransportMux>,
 }
 
 impl<N> ExecutionScopedNetwork<N> {
+    /// Scope a party's connection manager to one execution.
+    ///
+    /// A party is the only endpoint that holds one: a client reaches a node
+    /// through the coordinator-mediated route, never through an adapter of its
+    /// own.
     pub fn for_party(inner: N, execution_id: ExecutionId) -> Result<Self, ExecutionTransportError> {
-        Self::scoped(inner, execution_id, true)
-    }
-
-    /// Construct an adapter for an external client's connection manager.
-    pub fn for_client(
-        inner: N,
-        execution_id: ExecutionId,
-    ) -> Result<Self, ExecutionTransportError> {
-        Self::scoped(inner, execution_id, false)
-    }
-
-    fn scoped(
-        inner: N,
-        execution_id: ExecutionId,
-        tolerate_party_omission: bool,
-    ) -> Result<Self, ExecutionTransportError> {
         if execution_id.is_zero() {
             return Err(ExecutionTransportError::ZeroExecutionId);
         }
         Ok(Self {
             inner,
             execution_id,
-            tolerate_party_omission,
             kind: ExecutionMessageKind::Mpc,
             reply_mux: None,
         })
@@ -279,8 +280,11 @@ impl<N> ExecutionScopedNetwork<N> {
             .map_err(|_| NetworkError::SendError)
     }
 
+    /// Byzantine omission is protocol input to an MPC round, so a party's MPC
+    /// sends tolerate it. Control-kind sends do not: a lost control frame is a
+    /// local failure the caller has to see.
     fn tolerates_omission(&self) -> bool {
-        self.tolerate_party_omission && self.kind == ExecutionMessageKind::Mpc
+        self.kind == ExecutionMessageKind::Mpc
     }
 }
 
@@ -519,8 +523,6 @@ pub enum ExecutionTransportError {
     ClientCertificateIdentityUnavailable { execution_id: ExecutionId },
     #[error("certificate is not authorized for execution {execution_id}")]
     UnauthorizedClientCertificate { execution_id: ExecutionId },
-    #[error("an authenticated client cannot send to direct client endpoint for {execution_id}")]
-    ClientSourceOnClientEndpoint { execution_id: ExecutionId },
     #[error("execution inbox is full for {execution_id}")]
     InboxFull { execution_id: ExecutionId },
     #[error("queued payload byte capacity exceeded for execution {execution_id}")]
@@ -548,7 +550,6 @@ impl ExecutionIngressLimits {
 /// Central full-ID registry and non-blocking execution demultiplexer.
 #[derive(Clone)]
 pub struct ExecutionTransportMux {
-    direct_client: bool,
     inbox_capacity: usize,
     ingress: Arc<IngressAccounting>,
     entries: Arc<RwLock<HashMap<ExecutionId, Arc<ExecutionInboxSenders>>>>,
@@ -559,26 +560,8 @@ impl ExecutionTransportMux {
         Self::new_with_limits(ExecutionIngressLimits::production(inbox_capacity))
     }
 
-    /// Construct a mux for a direct client receiving party output/control.
-    pub fn new_client(inbox_capacity: usize) -> Result<Self, ExecutionTransportError> {
-        Self::build(ExecutionIngressLimits::production(inbox_capacity), true)
-    }
-
     pub fn new_with_limits(
         limits: ExecutionIngressLimits,
-    ) -> Result<Self, ExecutionTransportError> {
-        Self::build(limits, false)
-    }
-
-    pub fn new_client_with_limits(
-        limits: ExecutionIngressLimits,
-    ) -> Result<Self, ExecutionTransportError> {
-        Self::build(limits, true)
-    }
-
-    fn build(
-        limits: ExecutionIngressLimits,
-        direct_client: bool,
     ) -> Result<Self, ExecutionTransportError> {
         if limits.inbox_capacity == 0
             || limits.execution_byte_capacity == 0
@@ -588,7 +571,6 @@ impl ExecutionTransportMux {
             return Err(ExecutionTransportError::InvalidIngressCapacity);
         }
         Ok(Self {
-            direct_client,
             inbox_capacity: limits.inbox_capacity,
             ingress: Arc::new(IngressAccounting::new(limits)),
             entries: Arc::new(RwLock::new(HashMap::new())),
@@ -672,6 +654,33 @@ impl ExecutionTransportMux {
     /// its lifetime.
     pub fn unregister(&self, execution_id: ExecutionId) -> bool {
         self.entries.write().remove(&execution_id).is_some()
+    }
+
+    /// Whether any registered execution's client roster names this
+    /// certificate.
+    ///
+    /// The weaker of the two questions the coordinator's admissions answer, and
+    /// the only one a freshly accepted connection can be asked, because it
+    /// carries no frame to route yet: has the coordinator admitted this
+    /// certificate anywhere here. A node's client-facing listener keeps a
+    /// connection only for a certificate this answers `true` for
+    /// (`net/client_ingress.rs`), so every client connection a node holds is
+    /// one the coordinator admitted.
+    ///
+    /// It does not move the per-execution decision, which stays in
+    /// [`Self::authorize_client_route_if_registered`] and matches the
+    /// certificate against *that* execution's roster: an admission to one
+    /// execution authorizes no route into another.
+    ///
+    /// An execution registered without a client roster (a one-shot run, which
+    /// has no standing-node roster to install) names no certificate.
+    pub fn names_client_certificate(&self, identity: CertificateIdentity) -> bool {
+        self.entries.read().values().any(|entry| {
+            entry
+                .expected_client_identities
+                .as_ref()
+                .is_some_and(|identities| identities.contains(&identity))
+        })
     }
 
     /// Validate local registration and bind the authenticated physical client
@@ -776,24 +785,25 @@ impl ExecutionTransportMux {
         )
     }
 
+    /// Which inbox a frame belongs in, decided by the source the handshake
+    /// authenticated and never by anything the frame itself claims.
+    ///
+    /// A node is the only endpoint that holds a mux, so the three routes are
+    /// total: a party's MPC rounds, a party's control frames, and everything an
+    /// admitted client sends.
     fn inbox_route(
         &self,
         authenticated_source: ExecutionTransportSource,
         kind: ExecutionMessageKind,
-        execution_id: ExecutionId,
-    ) -> Result<ExecutionInboxRoute, ExecutionTransportError> {
-        match (self.direct_client, authenticated_source, kind) {
-            (false, ExecutionTransportSource::Party(_), ExecutionMessageKind::Control) => {
-                Ok(ExecutionInboxRoute::Control)
+    ) -> ExecutionInboxRoute {
+        match (authenticated_source, kind) {
+            (ExecutionTransportSource::Party(_), ExecutionMessageKind::Control) => {
+                ExecutionInboxRoute::Control
             }
-            (false, ExecutionTransportSource::Party(_), ExecutionMessageKind::Mpc) => {
-                Ok(ExecutionInboxRoute::Party)
+            (ExecutionTransportSource::Party(_), ExecutionMessageKind::Mpc) => {
+                ExecutionInboxRoute::Party
             }
-            (false, ExecutionTransportSource::Client(_), _)
-            | (true, ExecutionTransportSource::Party(_), _) => Ok(ExecutionInboxRoute::Client),
-            (true, ExecutionTransportSource::Client(_), _) => {
-                Err(ExecutionTransportError::ClientSourceOnClientEndpoint { execution_id })
-            }
+            (ExecutionTransportSource::Client(_), _) => ExecutionInboxRoute::Client,
         }
     }
 
@@ -804,7 +814,7 @@ impl ExecutionTransportMux {
         envelope: ExecutionEnvelopeV1<'_>,
     ) -> Result<(), ExecutionTransportError> {
         let execution_id = envelope.execution_id();
-        let route = self.inbox_route(authenticated_source, envelope.kind(), execution_id)?;
+        let route = self.inbox_route(authenticated_source, envelope.kind());
 
         // Keep the registry read lock through the non-blocking send so an
         // unregister cannot race a delivery into a completed execution.
@@ -877,11 +887,7 @@ impl ExecutionTransportMux {
         cancel: &CancellationToken,
         deadline: Instant,
     ) -> Result<(), ExecutionTransportError> {
-        let route = self.inbox_route(
-            authenticated_source,
-            envelope.kind(),
-            envelope.execution_id(),
-        )?;
+        let route = self.inbox_route(authenticated_source, envelope.kind());
         loop {
             match self.route_envelope(authenticated_source, source, envelope) {
                 Err(error @ ExecutionTransportError::InboxFull { .. })
@@ -912,6 +918,39 @@ struct ReceiveTask {
     join: JoinHandle<()>,
 }
 
+/// Which of a transport's connections a scanner may read, and therefore which
+/// authenticated source it may attribute their frames to.
+///
+/// A transport's certificate allowlist decides *who* may connect; the scope
+/// decides what a connection that got in may be. The two have to agree: a
+/// listener with no allowlist (design doc §9 rule 3's client-facing listener)
+/// authorizes nothing at the transport, so reading its peer connections would
+/// let an unlisted certificate that negotiated the server ALPN deliver frames
+/// to a party inbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionScannerScope {
+    /// Peer connections only, as a roster-pinned node mesh carries: every
+    /// admissible certificate is one of the coordinator's nodes.
+    Parties,
+    /// Client connections only, as the client-facing listener carries: no
+    /// certificate is authorized at the transport, so the per-execution client
+    /// roster in [`ExecutionTransportMux`] is the whole check.
+    Clients,
+    /// Both, as a single one-shot transport carries: it binds one socket for
+    /// its party mesh and its clients alike.
+    PartiesAndClients,
+}
+
+impl ExecutionScannerScope {
+    const fn reads_parties(self) -> bool {
+        matches!(self, Self::Parties | Self::PartiesAndClients)
+    }
+
+    const fn reads_clients(self) -> bool {
+        matches!(self, Self::Clients | Self::PartiesAndClients)
+    }
+}
+
 /// Guard for the execution scanner which owns per-connection reader tasks.
 ///
 /// Dropping the guard cancels the scanner and all child receive loops. Use
@@ -928,6 +967,7 @@ impl ExecutionConnectionScanner {
     pub fn spawn(
         network: QuicNetworkManager,
         mux: ExecutionTransportMux,
+        scope: ExecutionScannerScope,
     ) -> Result<Self, ExecutionTransportError> {
         let receive_owner = network
             .try_acquire_execution_scanner_receive_owner()
@@ -935,7 +975,7 @@ impl ExecutionConnectionScanner {
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
         let join = tokio::spawn(async move {
-            run_connection_scanner(network, mux, task_cancel, receive_owner).await;
+            run_connection_scanner(network, mux, scope, task_cancel, receive_owner).await;
         });
         Ok(Self {
             cancel,
@@ -964,6 +1004,7 @@ fn connection_identity(connection: &Arc<dyn PeerConnection>) -> usize {
 async fn run_connection_scanner(
     network: QuicNetworkManager,
     mux: ExecutionTransportMux,
+    scope: ExecutionScannerScope,
     cancel: CancellationToken,
     receive_owner: ExecutionScannerReceiveOwnerLease,
 ) {
@@ -980,25 +1021,44 @@ async fn run_connection_scanner(
                     usize,
                     (ExecutionTransportSource, Arc<dyn PeerConnection>),
                 > = HashMap::new();
-                for (_, connection) in network.get_all_server_connections() {
-                    // Party IDs are the agreed roster positions, not compact
-                    // certificate IDs. Starting a reader before assignment can
-                    // permanently misattribute its first frame.
-                    let Some(party_id) = connection.remote_party_id() else {
-                        continue;
-                    };
-                    connections.entry(connection_identity(&connection))
-                        .or_insert((ExecutionTransportSource::Party(party_id), connection));
+                if scope.reads_parties() {
+                    for (_, connection) in network.get_all_server_connections() {
+                        // Party IDs are the agreed roster positions, not compact
+                        // certificate IDs. Starting a reader before assignment can
+                        // permanently misattribute its first frame.
+                        let Some(party_id) = connection.remote_party_id() else {
+                            continue;
+                        };
+                        connections.entry(connection_identity(&connection))
+                            .or_insert((ExecutionTransportSource::Party(party_id), connection));
+                    }
                 }
-                for (_, connection) in network.get_all_client_connections() {
-                    let Some(client_id) = connection
-                        .authenticated_peer_public_key()
-                        .map(|key| key.derive_id())
-                    else {
-                        continue;
-                    };
-                    connections.entry(connection_identity(&connection))
-                        .or_insert((ExecutionTransportSource::Client(client_id), connection));
+                if scope.reads_clients() {
+                    for (_, connection) in network.get_all_client_connections() {
+                        let Some(client_id) = connection
+                            .authenticated_peer_public_key()
+                            .map(|key| key.derive_id())
+                        else {
+                            // A listener with no certificate allowlist admits a
+                            // connection whose certificate key could not be
+                            // extracted, and that key is fixed when the
+                            // connection is accepted: it never becomes readable
+                            // later. Such a connection can never be authorized
+                            // — `authorize_client_route_if_registered` answers
+                            // `ClientCertificateIdentityUnavailable` for it — so
+                            // skipping it would retain it with no reader and
+                            // therefore no `CLIENT_EXECUTION_HELLO_TIMEOUT`
+                            // deadline to reap it. Refuse it instead.
+                            tracing::debug!(
+                                peer = %connection.remote_address(),
+                                "closing a client connection whose certificate identity is unreadable"
+                            );
+                            let _ = connection.close().await;
+                            continue;
+                        };
+                        connections.entry(connection_identity(&connection))
+                            .or_insert((ExecutionTransportSource::Client(client_id), connection));
+                    }
                 }
 
                 let obsolete: Vec<usize> = tasks.keys()
@@ -1080,6 +1140,7 @@ async fn run_connection_receive_loop_with_owner(
     });
 
     let mut client_admitted = !matches!(authenticated_source, ExecutionTransportSource::Client(_));
+    let mut client_route_refusal_logged = false;
     let client_hello_deadline = Instant::now() + CLIENT_EXECUTION_HELLO_TIMEOUT;
 
     loop {
@@ -1122,7 +1183,35 @@ async fn run_connection_receive_loop_with_owner(
                                 client_admitted |= is_route_hello;
                             }
                             Ok(None) => {}
-                            Err(_) => continue,
+                            Err(error) => {
+                                // The client-facing listener authorizes no
+                                // certificate, so this is the only place a
+                                // client's admission is decided. It used to be
+                                // decided silently, which left the boundary the
+                                // two-listener split rests on unobservable from
+                                // outside the process. The cause belongs in the
+                                // error rather than the message, because a
+                                // refusal here is a certificate the execution
+                                // does not name, a certificate the handshake
+                                // never exposed, or a second physical
+                                // connection claiming one client's route — and
+                                // an operator needs to know which. Log it once
+                                // per physical connection: the hello deadline
+                                // closes an unadmitted connection within
+                                // `CLIENT_EXECUTION_HELLO_TIMEOUT`, so the rate
+                                // is bounded by the listener's occupancy cap
+                                // over that interval.
+                                if !client_route_refusal_logged {
+                                    client_route_refusal_logged = true;
+                                    tracing::warn!(
+                                        execution_id = %envelope.execution_id(),
+                                        peer = %connection.remote_address(),
+                                        %error,
+                                        "refusing a client execution route"
+                                    );
+                                }
+                                continue;
+                            }
                         }
                     }
 
@@ -1242,6 +1331,56 @@ mod tests {
         assert!(mux
             .register_with_client_identities(execution(2), vec![first_identity, first_identity])
             .is_err());
+    }
+
+    /// What the client-facing listener's occupancy policy reads: whether the
+    /// coordinator has admitted a certificate anywhere on this node.
+    ///
+    /// It must follow registration exactly — a certificate is named only while
+    /// an execution naming it is registered — because the reserve it guards
+    /// would otherwise be held for clients that have gone, or denied to clients
+    /// that have arrived.
+    #[test]
+    fn a_certificate_is_named_only_while_an_execution_naming_it_is_registered() {
+        let named = CertificateIdentity::from_bytes([7; 32]);
+        let stranger = CertificateIdentity::from_bytes([8; 32]);
+        let mux = ExecutionTransportMux::new(1).unwrap();
+
+        assert!(
+            !mux.names_client_certificate(named),
+            "nothing is named before any execution is registered"
+        );
+
+        let _inbox = mux
+            .register_with_client_identities(execution(1), vec![named])
+            .unwrap();
+        assert!(mux.names_client_certificate(named));
+        assert!(
+            !mux.names_client_certificate(stranger),
+            "a certificate no roster lists is named by no execution"
+        );
+
+        // A one-shot execution has no standing-node client roster, so it names
+        // nothing — it must not turn the directory into an allow-all.
+        let _one_shot = mux.register(execution(2)).unwrap();
+        assert!(!mux.names_client_certificate(stranger));
+
+        assert!(mux.unregister(execution(1)));
+        assert!(
+            !mux.names_client_certificate(named),
+            "retiring the execution retires its admissions with it"
+        );
+    }
+
+    /// An execution registered with an empty roster is an explicit deny-all, so
+    /// it must name nothing either.
+    #[test]
+    fn an_empty_client_roster_names_no_certificate() {
+        let mux = ExecutionTransportMux::new(1).unwrap();
+        let _inbox = mux
+            .register_with_client_identities(execution(1), Vec::new())
+            .unwrap();
+        assert!(!mux.names_client_certificate(CertificateIdentity::from_bytes([9; 32])));
     }
 
     #[tokio::test]
@@ -1417,16 +1556,18 @@ mod tests {
         assert!(mux.entries.read().contains_key(&execution_id));
     }
 
+    /// An absent peer is protocol input to an MPC round and a local failure to
+    /// a control frame, and the adapter's message kind is the only thing that
+    /// decides which — a party endpoint is the only endpoint there is.
     #[tokio::test]
-    async fn party_send_tolerates_omission_but_client_send_does_not() {
+    async fn mpc_send_tolerates_omission_but_control_send_does_not() {
         let party =
             ExecutionScopedNetwork::for_party(QuicNetworkManager::new(), execution(9)).unwrap();
         assert_eq!(party.send(4, b"quorum message").await, Ok(0));
 
-        let client =
-            ExecutionScopedNetwork::for_client(QuicNetworkManager::new(), execution(9)).unwrap();
+        let control = party.with_message_kind(ExecutionMessageKind::Control);
         assert!(matches!(
-            client.send(4, b"client message").await,
+            control.send(4, b"control message").await,
             Err(NetworkError::PartyNotFound(4))
         ));
     }
@@ -1494,32 +1635,47 @@ mod tests {
         drop(second_inbox);
     }
 
+    /// The authenticated source and the envelope's kind together pick the
+    /// inbox, and nothing a frame claims about itself can move it: a client's
+    /// frame cannot be read as an MPC round however it is labelled, and a
+    /// party's MPC round cannot be read as client input.
     #[tokio::test]
     async fn authenticated_context_selects_the_only_valid_inbox() {
-        let party_mux = ExecutionTransportMux::new(4).unwrap();
-        let mut party_inbox = party_mux.register(execution(3)).unwrap();
-        let party_frame = frame(execution(3), ExecutionMessageKind::Mpc, b"party");
-        party_mux.route_party_frame(1, &party_frame).unwrap();
-        assert_eq!(party_inbox.party.recv().await.unwrap().payload, b"party");
+        let mux = ExecutionTransportMux::new(4).unwrap();
+        let execution_id = execution(3);
+        let mut inbox = mux.register(execution_id).unwrap();
 
-        let client_mux = ExecutionTransportMux::new_client(4).unwrap();
-        let mut client_inbox = client_mux.register(execution(4)).unwrap();
-        let client_frame = frame(execution(4), ExecutionMessageKind::Mpc, b"client");
-        client_mux.route_party_frame(1, &client_frame).unwrap();
-        assert_eq!(client_inbox.client.recv().await.unwrap().payload, b"client");
+        mux.route_party_frame(1, &frame(execution_id, ExecutionMessageKind::Mpc, b"round"))
+            .unwrap();
+        assert_eq!(inbox.party.recv().await.unwrap().payload, b"round");
 
+        mux.route_party_frame(
+            1,
+            &frame(execution_id, ExecutionMessageKind::Control, b"control"),
+        )
+        .unwrap();
+        assert_eq!(inbox.control.recv().await.unwrap().payload, b"control");
+
+        // An admitted client's frame lands on the client inbox even when it
+        // carries the MPC kind a party's round would.
+        let client_frame = frame(execution_id, ExecutionMessageKind::Mpc, b"client input");
         let envelope = ExecutionEnvelopeV1::decode(&client_frame).unwrap();
-        let error = client_mux
-            .route_envelope(
-                ExecutionTransportSource::Client(1),
-                ExecutionTransportSource::Client(1),
-                envelope,
-            )
-            .unwrap_err();
+        mux.route_envelope(
+            ExecutionTransportSource::Client(1),
+            ExecutionTransportSource::Client(1),
+            envelope,
+        )
+        .unwrap();
+        let received = inbox.client.recv().await.unwrap();
+        assert_eq!(received.payload, b"client input");
         assert!(matches!(
-            error,
-            ExecutionTransportError::ClientSourceOnClientEndpoint { .. }
+            received.source,
+            ExecutionTransportSource::Client(1)
         ));
+        assert!(
+            inbox.party.try_recv().is_err(),
+            "a client frame must never reach the party inbox"
+        );
     }
 
     #[tokio::test]

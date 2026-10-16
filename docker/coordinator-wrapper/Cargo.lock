@@ -3245,12 +3245,12 @@ dependencies = [
  "stoffel-mpc-coordinator-shared",
  "stoffelcrypto",
  "tokio",
- "x509-parser 0.18.1",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "stoffel-mpc-coordinator-off-chain"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ff",
@@ -3264,7 +3264,6 @@ dependencies = [
  "rcgen",
  "serde",
  "serde_json",
- "sha2",
  "stoffel-mpc-coordinator-shared",
  "tokio",
  "tracing",
@@ -3272,13 +3271,14 @@ dependencies = [
 
 [[package]]
 name = "stoffel-mpc-coordinator-shared"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
  "ark-ff",
  "ark-serialize",
  "async-trait",
+ "blake3",
  "futures-util",
  "hex",
  "hpke",

@@ -6,6 +6,11 @@ use std::time::Duration;
 
 use stoffel::prelude::*;
 use stoffel_bindgen::{generate_bindings, BindingsConfig};
+use stoffel_mpc_coordinator_off_chain::tests::fake_coord::{
+    HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
+};
+use stoffel_mpc_coordinator_shared::rpc::RpcServerLimits;
+use stoffel_mpc_coordinator_shared::{self_signed_certs, NodeCertificateDer, NodeRoster, SpkiDer};
 use stoffel_vm_types::compiled_binary::{ClientIoManifest, ClientIoSchema, CompiledBinary};
 use stoffel_vm_types::core_types::ShareType;
 use tempfile::tempdir;
@@ -21,8 +26,13 @@ def main(a: int64, b: int64) -> int64:
   return a + b
 "#;
 
+/// Every off-chain client pins the coordinator's certificate, so the shared
+/// builder carries one; `offchain_client_config_requires_a_coordinator_pin`
+/// is what covers leaving it out.
 fn offchain_config_builder() -> OffChainClientConfigBuilder {
-    OffChainClientConfig::builder().execution_id(ExecutionId::from_bytes([0x51; 32]))
+    OffChainClientConfig::builder()
+        .execution_id(ExecutionId::from_bytes([0x51; 32]))
+        .coordinator_cert_der(vec![0xc0, 0x0d])
 }
 
 mod federated_average_bindings {
@@ -2247,12 +2257,15 @@ fn server_builder_captures_operational_configuration() -> stoffel::Result<()> {
     let party_key = dir.path().join("party.key");
     let client_zero_cert = dir.path().join("client-0.pem");
     let client_one_cert = dir.path().join("client-1.pem");
+    let coord_cert = dir.path().join("coordinator.pem");
     std::fs::write(&party_cert, "party cert")?;
     std::fs::write(&party_key, "party key")?;
     std::fs::write(&client_zero_cert, "client zero cert")?;
     std::fs::write(&client_one_cert, "client one cert")?;
+    std::fs::write(&coord_cert, "coordinator cert")?;
     let offchain_coordinator = OffChainServerConfig::builder()
         .coordinator("127.0.0.1:19300")
+        .coordinator_cert(&coord_cert)
         .rpc_bind("127.0.0.1:19310")
         .identity_files(&party_cert, &party_key)
         .timestamp(42)
@@ -2279,7 +2292,6 @@ fn server_builder_captures_operational_configuration() -> stoffel::Result<()> {
         .consensus_timeout(Duration::from_secs(5))
         .runner_path(&runner_path)
         .entry("main")
-        .bootstrap("127.0.0.1:19000")
         .offchain_coordinator(offchain_coordinator.clone());
 
     assert_eq!(builder.configured_party_id(), 0);
@@ -2304,7 +2316,6 @@ fn server_builder_captures_operational_configuration() -> stoffel::Result<()> {
         Some(runner_path.as_path())
     );
     assert_eq!(builder.configured_entry(), "main");
-    assert_eq!(builder.configured_bootstrap(), Some("127.0.0.1:19000"));
     assert_eq!(
         builder.configured_offchain_coordinator(),
         Some(&offchain_coordinator)
@@ -2350,7 +2361,6 @@ fn server_builder_captures_operational_configuration() -> stoffel::Result<()> {
     assert!(server.program().is_some());
     assert_eq!(server.runner_path(), Some(runner_path.as_path()));
     assert_eq!(server.entry(), "main");
-    assert_eq!(server.bootstrap_addr(), Some("127.0.0.1:19000"));
     assert_eq!(server.offchain_coordinator(), Some(&offchain_coordinator));
     assert_eq!(
         server.mpc_config().expect("server mpc config"),
@@ -2461,45 +2471,19 @@ fn stoffel_direct_participant_builders_do_not_require_compilation() -> stoffel::
     Ok(())
 }
 
+/// A client config no longer carries `n` and `t`: both come from the node
+/// roster the coordinator serves over the pinned connection, so there is no
+/// configured topology left to default or to self-check. What the builder still
+/// defaults is the backend.
 #[test]
-fn offchain_client_config_defaults_to_five_party_topology() -> stoffel::Result<()> {
+fn offchain_client_config_defaults_to_the_honeybadger_backend() -> stoffel::Result<()> {
     let config = offchain_config_builder()
         .coordinator("127.0.0.1", 19000)
         .timestamp(1)
         .node_rpc_addresses(["127.0.0.1:19100"])
         .identity_der(vec![1], vec![2])
         .build()?;
-    assert_eq!(config.parties, 5);
-    assert_eq!(config.threshold, 1);
     assert_eq!(config.backend, MpcBackend::HoneyBadger);
-
-    let invalid_topology = offchain_config_builder()
-        .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
-        .parties(4)
-        .threshold(1)
-        .node_rpc_addresses(["127.0.0.1:19100"])
-        .identity_der(vec![1], vec![2])
-        .build()
-        .unwrap_err();
-    assert!(matches!(
-        invalid_topology,
-        stoffel::Error::Configuration(message) if message.contains("at least 5")
-    ));
-
-    let zero_threshold = offchain_config_builder()
-        .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
-        .threshold(0)
-        .node_rpc_addresses(["127.0.0.1:19100"])
-        .identity_der(vec![1], vec![2])
-        .build()
-        .unwrap_err();
-    assert!(matches!(
-        zero_threshold,
-        stoffel::Error::Configuration(message)
-            if message.contains("threshold must be greater than zero")
-    ));
     Ok(())
 }
 
@@ -2571,18 +2555,6 @@ fn offchain_client_config_reports_actionable_validation_errors() {
         }
     );
 
-    let invalid_threshold = offchain_config_builder()
-        .coordinator("127.0.0.1", 19000)
-        .timestamp(1)
-        .parties(5)
-        .threshold(2)
-        .honeybadger()
-        .node_rpc_address("127.0.0.1:19100")
-        .identity_der(vec![1], vec![2])
-        .build()
-        .unwrap_err();
-    assert!(matches!(invalid_threshold, stoffel::Error::Unsupported(_)));
-
     let missing_rpc = offchain_config_builder()
         .coordinator("127.0.0.1", 19000)
         .timestamp(1)
@@ -2615,6 +2587,45 @@ fn offchain_client_config_reports_actionable_validation_errors() {
         zero_timeout,
         stoffel::Error::Configuration(message) if message.contains("timeout")
     ));
+}
+
+/// §9.A: a client that does not pin the coordinator accepts whoever answers at
+/// its address, and that server decides this client's admission, its rounds and
+/// the node roster it reconstructs outputs against. The config refuses to build.
+#[test]
+fn offchain_client_config_requires_a_coordinator_pin() {
+    let unpinned = OffChainClientConfig::builder()
+        .execution_id(ExecutionId::from_bytes([0x51; 32]))
+        .coordinator("127.0.0.1", 19000)
+        .timestamp(1)
+        .node_rpc_address("127.0.0.1:19100")
+        .identity_der(vec![1], vec![2])
+        .build()
+        .unwrap_err();
+    assert!(
+        matches!(
+            &unpinned,
+            stoffel::Error::Configuration(message)
+                if message.contains("coordinator certificate DER is required")
+        ),
+        "expected the missing-pin refusal, got: {unpinned}"
+    );
+
+    let empty_pin = offchain_config_builder()
+        .coordinator_cert_der(Vec::new())
+        .coordinator("127.0.0.1", 19000)
+        .timestamp(1)
+        .node_rpc_address("127.0.0.1:19100")
+        .identity_der(vec![1], vec![2])
+        .build()
+        .unwrap_err();
+    assert!(
+        matches!(
+            &empty_pin,
+            stoffel::Error::Configuration(message) if message.contains("accepts any server")
+        ),
+        "an empty pin is not a pin, got: {empty_pin}"
+    );
 }
 
 #[test]
@@ -2652,8 +2663,6 @@ fn offchain_client_config_round_trips_toml_and_identity_files() -> stoffel::Resu
     let config = offchain_config_builder()
         .coordinator("localhost", 19000)
         .timestamp(42)
-        .parties(5)
-        .threshold(1)
         .backend(MpcBackend::HoneyBadger)
         .node_rpc_addresses(["127.0.0.1:19100", "127.0.0.1:19101"])
         .identity_files(&cert_path, &key_path)
@@ -2753,6 +2762,7 @@ def main() -> int64:
         .offchain_client_config(0)?
         .execution_id(ExecutionId::from_bytes([0x52; 32]))
         .coordinator("127.0.0.1", 9)
+        .coordinator_cert_der(vec![0xc0, 0x0d])
         .timestamp(1)
         .node_rpc_addresses(["127.0.0.1:19100"])
         .identity_der(vec![1], vec![2])
@@ -2791,12 +2801,11 @@ def main() -> int64:
         .offchain_client_config(0)?
         .execution_id(ExecutionId::from_bytes([0x53; 32]))
         .coordinator("127.0.0.1", 19000)
+        .coordinator_cert_der(vec![0xc0, 0x0d])
         .timestamp(1)
         .node_rpc_addresses(["127.0.0.1:19100"])
         .identity_der(vec![1], vec![2])
         .build()?;
-    assert_eq!(config.parties, 5);
-    assert_eq!(config.threshold, 1);
     assert_eq!(
         config.backend,
         MpcBackend::Avss {
@@ -4167,8 +4176,19 @@ async fn client_and_server_lifecycle_validate_real_network_configuration() -> st
         stoffel::Error::Configuration(_)
     ));
 
-    let connect_err = StoffelClient::connect(&[" "]).await.unwrap_err();
-    assert!(matches!(connect_err, stoffel::Error::Configuration(_)));
+    // A client reaches its nodes only through its coordinator, so a client with
+    // no off-chain IO configuration has no node identity to pin and connecting
+    // is refused rather than dialling the configured addresses on trust.
+    let no_coordinator_err = StoffelClient::builder()
+        .server("127.0.0.1:19500")
+        .connect()
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        no_coordinator_err,
+        stoffel::Error::Configuration(message)
+            if message.contains("off-chain client IO configuration")
+    ));
 
     let zero_timeout_err = StoffelClient::builder()
         .server("127.0.0.1:19500")
@@ -4178,13 +4198,27 @@ async fn client_and_server_lifecycle_validate_real_network_configuration() -> st
         .unwrap_err();
     assert!(matches!(zero_timeout_err, stoffel::Error::Configuration(_)));
 
-    let client_err = StoffelClient::builder()
+    // The coordinator pin has to be a certificate a key can be derived from.
+    // A placeholder DER is refused before any connection is opened, because an
+    // unpinned coordinator connection would accept whatever answered.
+    let unusable_pin_err = StoffelClient::builder()
         .server("127.0.0.1:19500")
-        .connection_timeout(Duration::from_millis(50))
+        .offchain_io(
+            offchain_config_builder()
+                .coordinator("127.0.0.1", 9)
+                .timestamp(1)
+                .node_rpc_addresses(["127.0.0.1:19100"])
+                .identity_der(vec![1], vec![2])
+                .timeout(Duration::from_millis(1))
+                .build()?,
+        )
         .connect()
         .await
         .unwrap_err();
-    assert!(matches!(client_err, stoffel::Error::NetworkConnection(_)));
+    assert!(matches!(
+        unusable_pin_err,
+        stoffel::Error::Configuration(message) if message.contains("DER X.509")
+    ));
 
     let runtime = Stoffel::compile(CLEAR_ADD_SOURCE)?.build()?;
     let client_builder = runtime
@@ -4266,6 +4300,16 @@ async fn client_and_server_lifecycle_validate_real_network_configuration() -> st
         .unwrap()
         .contains("not started by a live networking backend"));
 
+    // Every party now requires a coordinator — it is the authority for the
+    // roster the mesh is formed from — so reaching the runner-resolution check
+    // means configuring one.
+    let runner_identity_dir = tempdir()?;
+    let runner_party_cert = runner_identity_dir.path().join("party.pem");
+    let runner_party_key = runner_identity_dir.path().join("party.key");
+    let runner_coord_cert = runner_identity_dir.path().join("coordinator.pem");
+    std::fs::write(&runner_party_cert, "party cert")?;
+    std::fs::write(&runner_party_key, "party key")?;
+    std::fs::write(&runner_coord_cert, "coordinator cert")?;
     let missing_runner = runtime
         .server(0)
         .bind("127.0.0.1:19500")
@@ -4273,6 +4317,15 @@ async fn client_and_server_lifecycle_validate_real_network_configuration() -> st
         .peer(2, "127.0.0.1:19502")
         .peer(3, "127.0.0.1:19503")
         .peer(4, "127.0.0.1:19504")
+        .offchain_coordinator(
+            OffChainServerConfig::builder()
+                .coordinator("127.0.0.1:19730")
+                .coordinator_cert(&runner_coord_cert)
+                .rpc_bind("127.0.0.1:19731")
+                .identity_files(&runner_party_cert, &runner_party_key)
+                .timestamp(9)
+                .build()?,
+        )
         .runner_path(tempdir()?.path().join("missing-stoffel-run"))
         .build()?;
     let start_err = missing_runner.start().await.unwrap_err();
@@ -4310,11 +4363,14 @@ def main() -> int64:
     let party_cert = identity_dir.path().join("party.pem");
     let party_key = identity_dir.path().join("party.key");
     let client_cert = identity_dir.path().join("client.pem");
+    let coord_cert = identity_dir.path().join("coordinator.pem");
     std::fs::write(&party_cert, "party cert")?;
     std::fs::write(&party_key, "party key")?;
     std::fs::write(&client_cert, "client cert")?;
+    std::fs::write(&coord_cert, "coordinator cert")?;
     let offchain_server = OffChainServerConfig::builder()
         .coordinator("127.0.0.1:19700")
+        .coordinator_cert(&coord_cert)
         .rpc_bind("127.0.0.1:19710")
         .identity_files(&party_cert, &party_key)
         .timestamp(7)
@@ -4329,7 +4385,7 @@ def main() -> int64:
         .peer(4, "127.0.0.1:19614")
         .expected_clients(1)
         .runner_path(identity_dir.path().join("missing-stoffel-run"))
-        .offchain_coordinator(offchain_server)
+        .offchain_coordinator(offchain_server.clone())
         .build()?;
     let start_err = client_io_with_coordinator.start().await.unwrap_err();
     assert!(matches!(
@@ -4348,6 +4404,7 @@ def main() -> int64:
         .offchain_coordinator(
             OffChainServerConfig::builder()
                 .coordinator("127.0.0.1:19720")
+                .coordinator_cert(&coord_cert)
                 .rpc_bind("127.0.0.1:19721")
                 .identity_files(&party_cert, &party_key)
                 .timestamp(8)
@@ -4361,7 +4418,12 @@ def main() -> int64:
         stoffel::Error::Configuration(message) if message.contains("expected_clients")
     ));
 
-    let follower_without_bootstrap = runtime
+    // A party forms the mesh its coordinator's roster defines, so a server
+    // with peers but no coordinator has no membership to form it from. The
+    // refusal this replaces was about a follower with no bootstrap address;
+    // there is no bootstrap address any more, and `--peers` is what makes a
+    // process a party.
+    let party_without_coordinator = runtime
         .server(1)
         .bind("127.0.0.1:19501")
         .peer(0, "127.0.0.1:19500")
@@ -4369,11 +4431,33 @@ def main() -> int64:
         .peer(3, "127.0.0.1:19503")
         .peer(4, "127.0.0.1:19504")
         .build()?;
-    let start_err = follower_without_bootstrap.start().await.unwrap_err();
-    assert!(matches!(
-        start_err,
-        stoffel::Error::Configuration(message) if message.contains("bootstrap")
-    ));
+    let start_err = party_without_coordinator.start().await.unwrap_err();
+    assert!(
+        matches!(
+            &start_err,
+            stoffel::Error::Configuration(message) if message.contains("off-chain coordinator")
+        ),
+        "{start_err:?}"
+    );
+
+    // And a party is refused a short seed list at build time: each pair is
+    // dialed from one end only, in an order derived from the certificates, so
+    // a missing address can leave an edge undialed from both ends.
+    let party_with_a_short_seed_list = runtime
+        .server(1)
+        .bind("127.0.0.1:19502")
+        .peer(0, "127.0.0.1:19500")
+        .peer(2, "127.0.0.1:19503")
+        .offchain_coordinator(offchain_server.clone())
+        .build()
+        .unwrap_err();
+    assert!(
+        matches!(
+            &party_with_a_short_seed_list,
+            stoffel::Error::Configuration(message) if message.contains("missing peer address")
+        ),
+        "{party_with_a_short_seed_list:?}"
+    );
 
     let health = HealthStatus::Unhealthy {
         reason: "server has been shut down".to_owned(),
@@ -4397,42 +4481,234 @@ def main() -> int64:
     Ok(())
 }
 
+/// Connecting a client is reaching its *coordinator*, and nothing else. The
+/// node listener below is given to the client as both a `--servers` address and
+/// a node RPC address, and it must still never be dialled: until the
+/// coordinator has served the roster, the client has no certificate to pin
+/// those addresses to, so it has nothing it may safely talk to.
 #[tokio::test]
-async fn client_connect_uses_real_quic_transport() -> stoffel::Result<()> {
-    // The server-side QUIC listener runs before StoffelClient::connect (which
+async fn client_connect_dials_its_coordinator_and_no_node() -> stoffel::Result<()> {
+    // The node-side QUIC listener runs before the connect attempt (which
     // installs the ring provider); under --all-features both rustls providers
     // are compiled in, so rustls cannot auto-select one and panics without an
     // explicit install.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let listener = TcpListener::bind("127.0.0.1:0")?;
-    let address: SocketAddr = listener.local_addr()?;
+    let node_address: SocketAddr = listener.local_addr()?;
+    drop(listener);
+    // A port nothing serves: the coordinator is unreachable on purpose, so the
+    // only question this test asks is who the client tried to talk to.
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let coordinator_address: SocketAddr = listener.local_addr()?;
     drop(listener);
 
-    let mut server_network = QuicNetworkManager::new();
-    server_network
-        .listen(address)
+    let mut node_network = QuicNetworkManager::new();
+    node_network
+        .listen(node_address)
         .await
         .map_err(stoffel::Error::NetworkConnection)?;
-    let accept_task = tokio::spawn(async move {
-        server_network
-            .accept()
-            .await
-            .map(|_| ())
-            .map_err(stoffel::Error::NetworkConnection)
-    });
+    let mut acceptor = node_network.clone();
+    let accept_task = tokio::spawn(async move { acceptor.accept().await.map(|_| ()) });
 
-    let address = address.to_string();
-    let client = StoffelClient::connect(&[address.as_str()]).await?;
+    let identity = self_signed_certs::client_cert();
+    let coordinator_identity = self_signed_certs::server_cert();
+    let error = StoffelClient::builder()
+        .server(node_address.to_string())
+        .connection_timeout(Duration::from_secs(1))
+        .offchain_io(
+            OffChainClientConfig::builder()
+                .execution_id(ExecutionId::from_bytes([0x61; 32]))
+                .coordinator(
+                    coordinator_address.ip().to_string(),
+                    coordinator_address.port(),
+                )
+                .coordinator_cert_der(coordinator_identity.cert.der().to_vec())
+                .timestamp(1)
+                .node_rpc_addresses([node_address.to_string()])
+                .identity_der(
+                    identity.cert.der().to_vec(),
+                    identity.signing_key.serialize_der(),
+                )
+                .timeout(Duration::from_secs(1))
+                .build()?,
+        )
+        .connect()
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(error, stoffel::Error::Configuration(_)),
+        "the failure must be the unreachable coordinator, not configuration: {error:?}"
+    );
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), accept_task)
+            .await
+            .is_err(),
+        "a client must not open a connection to a node before its coordinator served the \
+         roster those nodes are pinned to"
+    );
+    Ok(())
+}
+
+/// Stands up a coordinator on loopback serving `node_roster` under its own
+/// certificate, and returns the port plus the certificate DER a client must pin
+/// to reach it.
+///
+/// Mirrors `local_runner`'s coordinator bring-up: the coordinator is the roster
+/// authority, so the roster is minted here and served from the state the
+/// listener is built with. No execution is registered because connecting a
+/// client reads the roster and nothing else.
+async fn serve_node_roster(
+    node_roster: NodeRoster,
+) -> (
+    u16,
+    Vec<u8>,
+    OffChainCoordinatorServer<HoneyBadgerCoordinatorConnection>,
+) {
+    let certificate = self_signed_certs::server_cert();
+    let cert_der = certificate.cert.der().to_vec();
+    let spki = SpkiDer::from_certificate_der(&cert_der).expect("derive the coordinator pin");
+
+    let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve a coordinator port");
+    let port = reservation
+        .local_addr()
+        .expect("read the reserved coordinator port")
+        .port();
+    drop(reservation);
+
+    let coordinator = OffChainCoordinatorServer::<HoneyBadgerCoordinatorConnection>::start_coord(
+        HoneyBadgerCoordinatorRPCServerSharedBase::new(node_roster, spki),
+        "127.0.0.1",
+        port,
+        cert_der.clone(),
+        certificate.signing_key.serialize_der(),
+        RpcServerLimits::default(),
+    )
+    .await
+    .expect("the coordinator binds its loopback listener");
+
+    (port, cert_der, coordinator)
+}
+
+/// Three distinct node certificates with `t = 1`, which is the smallest roster
+/// `NodeRoster` accepts (`n >= 2t + 1`).
+fn minted_node_roster() -> NodeRoster {
+    let certificates = (0..3)
+        .map(|_| NodeCertificateDer::from_der(self_signed_certs::client_cert().cert.der().to_vec()))
+        .collect();
+    NodeRoster::new(1, certificates).expect("mint a node roster")
+}
+
+/// The success path of a coordinator-mediated connect: against a coordinator
+/// that answers, `connect` reaches `Connected` and keeps the roster it served.
+///
+/// This is the other half of `client_connect_dials_its_coordinator_and_no_node`,
+/// which only pins who a client talks to when the coordinator is unreachable. A
+/// suite in which every `connect` ends in `unwrap_err` cannot tell a working
+/// client from one that never connects, and `pinned_node_count`/`node_roster`
+/// — which `is_connected` now depends on — would be asserted nowhere.
+///
+/// The recomputed §9.B digest is the load-bearing assertion: the client does not
+/// take the coordinator's word for the digest, it recomputes it over the served
+/// certificates (`client_node_roster`), so a roster that passes here is one
+/// whose certificates produce the digest the coordinator published.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_connect_opens_a_pinned_coordinator_link() -> stoffel::Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let served = minted_node_roster();
+    let served_digest = *served.digest().as_bytes();
+    let (port, coordinator_cert_der, _coordinator) = serve_node_roster(served.clone()).await;
+
+    let identity = self_signed_certs::client_cert();
+    // `--servers` and the node RPC addresses are never dialled by `connect` —
+    // the coordinator is what a client connects to — so these are addresses
+    // nothing serves, which is also what makes a stray node dial observable.
+    let client = StoffelClient::builder()
+        .server("127.0.0.1:19700")
+        .connection_timeout(Duration::from_secs(10))
+        .offchain_io(
+            OffChainClientConfig::builder()
+                .execution_id(ExecutionId::from_bytes([0x71; 32]))
+                .coordinator("127.0.0.1".to_string(), port)
+                .coordinator_cert_der(coordinator_cert_der.clone())
+                .timestamp(1)
+                .node_rpc_addresses(["127.0.0.1:19700".to_string()])
+                .identity_der(
+                    identity.cert.der().to_vec(),
+                    identity.signing_key.serialize_der(),
+                )
+                .timeout(Duration::from_secs(10))
+                .build()?,
+        )
+        .connect()
+        .await?;
+
     assert_eq!(client.state(), ClientState::Connected);
     assert!(client.is_connected());
-    assert!(client.network_manager().is_some());
-    assert!(client.transport_client_id().is_some());
-    assert_eq!(client.summary().server_count, 1);
-    assert!(client.summary().connected);
+    assert_eq!(client.pinned_node_count(), Some(served.n() as usize));
 
-    accept_task
+    let roster = client
+        .node_roster()
+        .expect("a connected client holds the roster its coordinator served");
+    assert_eq!(
+        roster.digest(),
+        served_digest,
+        "the roster the client pinned must be the one the coordinator served, \
+         digest recomputed over the served certificates"
+    );
+    assert_eq!(roster.n(), served.n() as usize);
+    assert_eq!(roster.t(), served.t() as usize);
+
+    let summary = client.summary();
+    assert!(summary.connected);
+    assert_eq!(summary.state, ClientState::Connected);
+    assert_eq!(summary.pinned_node_count, Some(served.n() as usize));
+    assert_eq!(summary.server_count, 1);
+    assert!(summary.has_offchain_io);
+    Ok(())
+}
+
+/// The pin is what makes the roster trustworthy, so a client configured with
+/// the wrong coordinator certificate must not connect at all — it must not fall
+/// back to whatever answered the coordinator's address and pin the nodes that
+/// server names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_connect_refuses_a_coordinator_that_is_not_the_pinned_one() -> stoffel::Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let (port, coordinator_cert_der, _coordinator) = serve_node_roster(minted_node_roster()).await;
+    // A well-formed certificate for a key the coordinator does not hold: the
+    // configuration is valid, so the only thing that can refuse this is the pin.
+    let impostor_cert_der = self_signed_certs::server_cert().cert.der().to_vec();
+    assert_ne!(impostor_cert_der, coordinator_cert_der);
+
+    let identity = self_signed_certs::client_cert();
+    let error = StoffelClient::builder()
+        .server("127.0.0.1:19700")
+        .connection_timeout(Duration::from_secs(10))
+        .offchain_io(
+            OffChainClientConfig::builder()
+                .execution_id(ExecutionId::from_bytes([0x72; 32]))
+                .coordinator("127.0.0.1".to_string(), port)
+                .coordinator_cert_der(impostor_cert_der)
+                .timestamp(1)
+                .node_rpc_addresses(["127.0.0.1:19700".to_string()])
+                .identity_der(
+                    identity.cert.der().to_vec(),
+                    identity.signing_key.serialize_der(),
+                )
+                .timeout(Duration::from_secs(10))
+                .build()?,
+        )
+        .connect()
         .await
-        .map_err(|error| stoffel::Error::NetworkConnection(error.to_string()))??;
+        .unwrap_err();
+    assert!(
+        matches!(error, stoffel::Error::Coordinator(_)),
+        "a coordinator that cannot prove the pinned key must be refused by the \
+         pinned link, not by configuration or a timeout: {error:?}"
+    );
     Ok(())
 }
 

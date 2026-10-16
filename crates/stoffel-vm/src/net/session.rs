@@ -1,24 +1,38 @@
-use crate::net::p2p::PeerConnection;
-use bincode;
+//! Execution identity.
+//!
+//! This module holds identity and nothing else. Agreement is
+//! [`crate::net::mesh::join`]'s: it is reached all-to-all over the mesh's own
+//! framed control prefix, and the mesh it agrees carries no session at all,
+//! because many executions ride one.
+//!
+//! [`ExecutionId`] is the coordinator's 256-bit identity for one execution, and
+//! [`derive_instance_id_for_execution`] reduces it to the compact `u64`
+//! namespace the MPC protocols ask for. Freshness therefore comes from the
+//! minted id: every party derives the same namespace from it without agreeing
+//! anything, and an id nobody minted twice cannot be replayed.
+//!
+//! `docs/design/bootnode-elimination.md` §8 records what this module used to
+//! carry and why none of it survived.
+
 use blake3::Hasher;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::net::SocketAddr;
 use std::str::FromStr;
-use std::time::Duration;
-use stoffelnet::network_utils::PartyId;
-
-pub const CONTROL_STREAM_ID: u64 = 1;
-
-pub type SessionResult<T> = Result<T, SessionError>;
 
 /// Coordinator-issued identity for one execution of a program.
 ///
 /// A program may be executed more than once at the same time, so `program_id`
-/// is not a session key.  The full 256-bit execution ID is carried through
-/// discovery and retained in [`SessionInfo`]; the shorter `instance_id` exists
-/// only for protocols that still require a `u64` routing value.
+/// is not a session key. All 256 bits travel with every frame: they are the
+/// execution field of
+/// [`crate::net::execution_transport::ExecutionEnvelopeV1`], and they are the
+/// key [`crate::net::node_supervisor::NodeSupervisor`] holds one running
+/// execution under, so two concurrent executions of one program never share an
+/// inbox or a supervisor entry.
+///
+/// [`derive_instance_id_for_execution`] reduces the same 256 bits to the `u64`
+/// the MPC protocols ask for. That reduction is a protocol argument and nothing
+/// else: no route, no registry key and no admission decision is made from it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ExecutionId(pub [u8; 32]);
@@ -99,116 +113,12 @@ impl FromStr for ExecutionId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum SessionError {
-    #[error("failed to serialize session control message: {reason}")]
-    Encode { reason: String },
-    #[error("failed to deserialize session control message: {reason}")]
-    Decode { reason: String },
-    #[error("session control transport {operation} failed on stream {stream_id}: {reason}")]
-    Transport {
-        operation: &'static str,
-        stream_id: u64,
-        reason: String,
-    },
-    #[error(
-        "timed out waiting for session control message on stream {stream_id} after {timeout:?}"
-    )]
-    Timeout { stream_id: u64, timeout: Duration },
-}
-
-impl From<SessionError> for String {
-    fn from(error: SessionError) -> Self {
-        error.to_string()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionInfo {
-    pub execution_id: ExecutionId,
-    pub program_id: [u8; 32],
-    pub instance_id: u64,
-    pub entry: String,
-    pub parties: Vec<(PartyId, SocketAddr)>,
-    pub n_parties: usize,
-    pub threshold: usize,
-    /// TLS-derived IDs for each party, parallel to `parties`.
-    /// Used by peers to pre-register allowlist entries so that
-    /// `accept()` succeeds with `use_tls: true`.
-    #[serde(default)]
-    pub tls_ids: Vec<(PartyId, PartyId)>,
-    /// Full DER-encoded SPKIs for all logical parties. These identities, not
-    /// the compact `tls_ids`, authorize mesh admission and reconnects.
-    #[serde(default)]
-    pub tls_public_keys: Vec<(PartyId, Vec<u8>)>,
-}
-
-/// Immutable description of the one physical party mesh owned by a standing
-/// node. Execution and program identity deliberately do not appear here:
-/// concurrent programs share this exact, certificate-pinned mesh and carry
-/// their own execution IDs inside transport envelopes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MeshInfo {
-    pub parties: Vec<(PartyId, SocketAddr)>,
-    pub n_parties: usize,
-    pub threshold: usize,
-    /// Complete DER-encoded SPKIs, indexed by logical party ID. These are the
-    /// admission authority; compact transport IDs are an implementation detail
-    /// of the networking layer and are intentionally absent here.
-    pub tls_public_keys: Vec<(PartyId, Vec<u8>)>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SessionMessage {
-    /// Sent by parties to request joining a session
-    SessionRequest {
-        execution_id: ExecutionId,
-        party_id: PartyId,
-        program_id: [u8; 32],
-        entry: String,
-        listen_addr: SocketAddr,
-    },
-    /// Sent by leader/bootnode when all parties are ready
-    SessionAnnounce(SessionInfo),
-    /// Sent by parties to acknowledge session
-    SessionAck {
-        execution_id: ExecutionId,
-        party_id: PartyId,
-        program_id: [u8; 32],
-        instance_id: u64,
-    },
-    /// Sent by bootnode to indicate session is fully confirmed and ready to start
-    SessionStart {
-        execution_id: ExecutionId,
-        instance_id: u64,
-    },
-}
-
-pub fn random_instance_id() -> u64 {
-    let mut b = [0u8; 8];
-    rand::rng().fill_bytes(&mut b);
-    u64::from_le_bytes(b)
-}
-
-/// Derive a deterministic instance_id from program_id and a session nonce.
-/// This ensures all parties that agree on the same program and nonce get the same instance_id.
-pub fn derive_instance_id(program_id: &[u8; 32], session_nonce: u64) -> u64 {
-    let mut hasher = Hasher::new();
-    hasher.update(b"stoffel-session-v1");
-    hasher.update(program_id);
-    hasher.update(&session_nonce.to_le_bytes());
-    let hash = hasher.finalize();
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&hash.as_bytes()[..8]);
-    u64::from_le_bytes(bytes)
-}
-
 /// Derive the compact `u64` protocol routing ID for an execution.
 ///
-/// The bootnode and node supervisor must continue to treat `execution_id` as
-/// the authoritative identity and reject a live collision in this shortened
-/// value.
+/// The full [`ExecutionId`] stays the authoritative identity — it is what the
+/// execution transport's envelope carries and what the node supervisor keys an
+/// execution by — so a live collision in this shortened value must be refused
+/// there rather than tolerated here.
 pub fn derive_instance_id_for_execution(execution_id: &ExecutionId) -> u64 {
     let mut hasher = Hasher::new();
     hasher.update(b"stoffel-execution-instance-v1");
@@ -231,146 +141,9 @@ pub fn derive_execution_id_for_instance(instance_id: u64) -> ExecutionId {
     ExecutionId::from_bytes(*hasher.finalize().as_bytes())
 }
 
-pub async fn send_ctrl(conn: &mut dyn PeerConnection, msg: &impl Serialize) -> SessionResult<()> {
-    let bytes = bincode::serialize(msg).map_err(|error| SessionError::Encode {
-        reason: error.to_string(),
-    })?;
-    conn.send_on_stream(CONTROL_STREAM_ID, &bytes)
-        .await
-        .map_err(|reason| SessionError::Transport {
-            operation: "send",
-            stream_id: CONTROL_STREAM_ID,
-            reason,
-        })
-}
-
-pub async fn recv_ctrl<T: for<'a> serde::Deserialize<'a>>(
-    conn: &mut dyn PeerConnection,
-    timeout: Option<Duration>,
-) -> SessionResult<T> {
-    let buf = if let Some(limit) = timeout {
-        tokio::time::timeout(limit, conn.receive_from_stream(CONTROL_STREAM_ID))
-            .await
-            .map_err(|_| SessionError::Timeout {
-                stream_id: CONTROL_STREAM_ID,
-                timeout: limit,
-            })?
-            .map_err(|reason| SessionError::Transport {
-                operation: "receive",
-                stream_id: CONTROL_STREAM_ID,
-                reason,
-            })?
-    } else {
-        conn.receive_from_stream(CONTROL_STREAM_ID)
-            .await
-            .map_err(|reason| SessionError::Transport {
-                operation: "receive",
-                stream_id: CONTROL_STREAM_ID,
-                reason,
-            })?
-    };
-    let val: T = bincode::deserialize(&buf).map_err(|error| SessionError::Decode {
-        reason: error.to_string(),
-    })?;
-    Ok(val)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::future::Future;
-    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-    use std::pin::Pin;
-
-    struct DelayedMockConnection {
-        response: Vec<u8>,
-        delay: Duration,
-    }
-
-    impl PeerConnection for DelayedMockConnection {
-        fn send<'a>(
-            &'a mut self,
-            _data: &'a [u8],
-        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn receive<'a>(
-            &'a mut self,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>> {
-            let response = self.response.clone();
-            let delay = self.delay;
-            Box::pin(async move {
-                tokio::time::sleep(delay).await;
-                Ok(response)
-            })
-        }
-
-        fn send_on_stream<'a>(
-            &'a mut self,
-            _stream_id: u64,
-            _data: &'a [u8],
-        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn receive_from_stream<'a>(
-            &'a mut self,
-            _stream_id: u64,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>> {
-            let response = self.response.clone();
-            let delay = self.delay;
-            Box::pin(async move {
-                tokio::time::sleep(delay).await;
-                Ok(response)
-            })
-        }
-
-        fn remote_address(&self) -> SocketAddr {
-            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
-        }
-
-        fn close<'a>(
-            &'a mut self,
-        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
-
-    #[tokio::test]
-    async fn recv_ctrl_respects_timeout() {
-        let msg = SessionMessage::SessionStart {
-            execution_id: ExecutionId::from([3u8; 32]),
-            instance_id: 42,
-        };
-        let bytes = bincode::serialize(&msg).expect("serialize session message");
-        let mut conn = DelayedMockConnection {
-            response: bytes,
-            delay: Duration::from_millis(50),
-        };
-
-        let result: SessionResult<SessionMessage> =
-            recv_ctrl(&mut conn, Some(Duration::from_millis(5))).await;
-        assert_eq!(
-            result.unwrap_err(),
-            SessionError::Timeout {
-                stream_id: CONTROL_STREAM_ID,
-                timeout: Duration::from_millis(5),
-            }
-        );
-    }
-
-    #[test]
-    fn derive_instance_id_is_deterministic_and_domain_separated() {
-        let program_id = [7u8; 32];
-
-        let first = derive_instance_id(&program_id, 11);
-        let second = derive_instance_id(&program_id, 11);
-        let different_nonce = derive_instance_id(&program_id, 12);
-
-        assert_eq!(first, second);
-        assert_ne!(first, different_nonce);
-    }
 
     #[test]
     fn execution_instance_id_is_deterministic_and_execution_scoped() {

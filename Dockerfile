@@ -2,15 +2,11 @@
 # Multi-stage Dockerfile for StoffelVM
 # Builds the stoffel-run binary and packages it for distributed MPC execution
 #
-# Build arguments:
-#   ENABLE_NAT - Set to "true" to enable NAT traversal features (requires hole-punching branch)
-#
 # Example:
 #   docker build \
 #     --build-context coordinator=../stoffel-mpc-coordinator \
 #     --build-context networking=../stoffel-networking \
-#     --build-arg ENABLE_NAT=true \
-#     -t stoffelvm:nat .
+#     -t stoffelvm:latest .
 #
 # The coordinator source context is required so the VM and coordinator images
 # are compiled against the same execution-scoped RPC contract.
@@ -22,8 +18,6 @@
 # ============================================================================
 FROM rustlang/rust:nightly-bookworm AS builder
 
-# Build argument to enable NAT traversal feature
-ARG ENABLE_NAT=false
 ARG STOFFEL_VM_PROFILE=false
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -60,21 +54,16 @@ RUN mkdir -p ~/.ssh && \
 
 # Build the release binary
 # Note: If using private repos with SSH, run with: docker build --ssh default .
-# If ENABLE_NAT is true, build with the nat feature
 RUN --mount=type=ssh \
     export RUSTFLAGS="--cfg aes_armv8 --cfg polyval_armv8" && \
     if [ "$STOFFEL_VM_PROFILE" = "true" ]; then \
         export RUSTFLAGS="$RUSTFLAGS -C debuginfo=2 -C force-frame-pointers=yes"; \
     fi && \
-    if [ "$ENABLE_NAT" = "true" ]; then \
-        echo "Building with NAT traversal support..."; \
-        cargo build --release --package stoffel-vm-runner --bin stoffel-run --features nat; \
-    else \
-        echo "Building without NAT traversal support..."; \
-        cargo build --release --package stoffel-vm-runner --bin stoffel-run; \
-    fi && \
+    cargo build --release --package stoffel-vm-runner --bin stoffel-run \
+        --bin stoffel-coord-ctl --example client_listener_probe && \
     if [ "$STOFFEL_VM_PROFILE" != "true" ]; then \
-        strip target/release/stoffel-run; \
+        strip target/release/stoffel-run target/release/stoffel-coord-ctl \
+            target/release/examples/client_listener_probe; \
     fi
 
 # Compile the AES-128 secret-bit circuit example into VM bytecode for compose runs.
@@ -162,6 +151,17 @@ WORKDIR /app
 
 # Copy the binary from builder
 COPY --from=builder /build/target/release/stoffel-run /app/stoffel-run
+# The operator's side of the coordinator's control plane. It ships beside the
+# node binary because it computes a program's content address with the VM's own
+# domain-separated hash, so an operator and a node agree on which program an
+# execution names.
+COPY --from=builder /build/target/release/stoffel-coord-ctl /app/stoffel-coord-ctl
+# The adversarial side of the client-facing listener. It is an example rather
+# than a published binary because nothing in a deployment runs it: the standing
+# concurrency campaign uses it to dial a node's `--client-bind` socket directly,
+# which is the only way to reach the one listener that authorizes no certificate
+# without going through the coordinator first.
+COPY --from=builder /build/target/release/examples/client_listener_probe /app/stoffel-client-listener-probe
 
 # Copy the test bytecode files
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/matrix_average_fixed_point.stflb /app/programs/matrix_average_fixed_point.stflb
@@ -197,23 +197,18 @@ ENV STOFFEL_PROGRAM="/app/programs/mpc_aes128_circuit.stflb"
 ENV STOFFEL_ENTRY="main"
 ENV STOFFEL_ROLE="party"
 ENV STOFFEL_PARTY_ID="0"
-ENV STOFFEL_BOOTSTRAP_ADDR=""
+ENV STOFFEL_PEERS=""
 ENV STOFFEL_COORD_ADDR=""
 ENV STOFFEL_RPC_ADDR=""
 ENV STOFFEL_CERT=""
 ENV STOFFEL_KEY=""
-ENV STOFFEL_TIMESTAMP="0"
-ENV STOFFEL_CLIENT_INDEX=""
+ENV STOFFEL_CLIENT_SLOT=""
 ENV STOFFEL_EXPECTED_CLIENTS=""
-# NAT traversal settings (only effective if built with --features nat)
-ENV STOFFEL_ENABLE_NAT="false"
-ENV STOFFEL_STUN_SERVERS=""
 
-# Expose ports for bootnode, party communication, and RPC
-# Port 9000: bootnode coordination
-# Port 10000: party-to-party communication (leader uses bind_port + 1000)
+# Expose ports for party communication and RPC
+# Port 9000: party-to-party mesh (each node binds the one port it advertises)
 # Port 16180: node RPC server (mask distribution to clients)
-EXPOSE 9000 10000 16180
+EXPOSE 9000 16180
 
 ENTRYPOINT ["/app/entrypoint.sh"]
 
@@ -225,10 +220,14 @@ ENTRYPOINT ["/app/entrypoint.sh"]
 # must not be able to authenticate as another party or client.
 FROM runtime-base AS standing-runtime
 
-RUN mkdir -p /app/ids/nodes /app/ids/clients
+RUN mkdir -p /app/ids/nodes /app/ids/clients /app/ids/operator
 COPY ids/server_cert.crt /app/ids/server_cert.crt
 COPY ids/nodes/*.crt /app/ids/nodes/
 COPY ids/clients/*.crt /app/ids/clients/
+# The operator identity, so a container in this image can submit and abort
+# executions on the coordinator. Only the public certificate is baked in; the
+# private key is supplied as a read-only secret where an operator needs one.
+COPY ids/operator/cert.crt /app/ids/operator/cert.crt
 
 # ============================================================================
 # Stage 4: Legacy runtime

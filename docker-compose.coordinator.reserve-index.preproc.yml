@@ -1,43 +1,204 @@
-# Persistent preprocessing override for the reserve-index coordinator stack.
+# Persistent-preprocessing / STANDING override for the reserve-index stack.
 #
-# Use with docker-compose.coordinator.reserve-index.yml to keep each party's
-# HoneyBadger preprocessing material in a named LMDB volume across runs. This
-# is separate from AVSS local-store persistence in docker-compose.avss.yml.
+# Two changes layered on docker-compose.coordinator.reserve-index.yml, and they
+# belong together:
+#
+#  1. The parties become STANDING nodes — long-lived processes holding one
+#     physical mesh and serving executions the coordinator publishes, instead of
+#     one-shot processes. This is what makes the preprocessing agreement
+#     (Rebuild / Reuse / TopUp) reachable at all: it is gated on
+#     `engine.is_standing()`, so a one-shot party never emits it, and
+#     docker/test-coordinator-preproc-store.sh asserts exactly that line.
+#  2. Each party's HoneyBadger material lives in a named LMDB volume, so it
+#     survives the down/up cycles the suite performs to test fresh / retained /
+#     asymmetric-recovery. Separate from the AVSS local-store persistence in
+#     docker-compose.avss.yml.
+#
+# The base stack stays one-shot on purpose: docker/test-coordinator-reserve-index.sh
+# exercises reservation order there and does not need standing nodes.
+#
+# Consequences for anyone driving THIS layering by hand:
+#   * the party containers never exit — wait on the clients;
+#   * a program is delivered by content id into the shared programs directory
+#     and submitted with `--program <id>`, not `--program-file`;
+#   * admission must be PRE-REGISTERED: a standing node refuses an open policy,
+#     because it holds a program catalog and an open policy would let any
+#     certificate holder bind a slot of a program it holds.
+
+x-standing-node-command: &standing-node-command |
+  exec /app/stoffel-run \
+    --standing-node \
+    --program-dir /var/lib/stoffel/programs \
+    --client-cert-dir /var/lib/stoffel/client-certs \
+    --party-cert-dir /app/ids/nodes \
+    --reservoir-burst-capacity "$${STOFFEL_RESERVOIR_BURST_CAPACITY:-9}" \
+    --pool-id "$${STOFFEL_STANDING_POOL_ID}" \
+    --off-chain-coord 172.29.0.5:31415 \
+    --coord-cert /app/ids/server_cert.crt \
+    --rpc-bind "$${RPC_BIND_ADDR}" \
+    --peers "$${PEERS}" \
+    --party-id "$${PARTY_ID}" \
+    --bind "$${BIND_ADDR}" \
+    --advertise "$${BIND_ADDR}" \
+    --client-bind "$${CLIENT_BIND_ADDR}" \
+    --n-parties 5 \
+    --threshold 1 \
+    --cert "$${CERT_PATH}" \
+    --key "$${KEY_PATH}" \
+    --preproc-store /var/lib/stoffel-preproc \
+    --admitted-store /var/lib/stoffel/admitted \
+    --local-store /var/lib/stoffel/local/vm.redb
+
+x-standing-party: &standing-party
+  entrypoint: ["/bin/sh", "-ec"]
+  command: [*standing-node-command]
+
+x-standing-party-env: &standing-party-env
+  # One physical mesh per pool id, for the life of these processes. Not an
+  # execution identity: the coordinator mints those and publishes them.
+  STOFFEL_STANDING_POOL_ID: "${STOFFEL_STANDING_POOL_ID:-00000000000000000000000000000000000000000000000000000000000000a1}"
+  STOFFEL_RESERVOIR_BURST_CAPACITY: "${STOFFEL_RESERVOIR_BURST_CAPACITY:-9}"
 
 services:
   party0:
+    <<: *standing-party
     environment:
-      STOFFEL_PREPROC_STORE: /var/lib/stoffel-preproc
+      <<: *standing-party-env
+      PARTY_ID: "0"
+      BIND_ADDR: 172.29.0.10:9000
+      CLIENT_BIND_ADDR: 172.29.0.10:9100
+      RPC_BIND_ADDR: 0.0.0.0:16180
+      PEERS: 172.29.0.11:9001,172.29.0.12:9002,172.29.0.13:9003,172.29.0.14:9004
+      CERT_PATH: /app/ids/nodes/cert0.crt
+      KEY_PATH: /app/ids/nodes/key0.der
     volumes:
+      - ./ids:/app/ids:ro
+      # Programs are delivered by content id, so a node resolves what the
+      # operator submitted without the coordinator shipping bytes. A standing
+      # node freezes this catalog at startup, so the harness writes it first.
+      - ${STOFFEL_RESERVE_PROGRAMS_DIR:-./.reserve-index-state/programs}:/var/lib/stoffel/programs:ro
+      # Certificates ONLY: a standing node parses every file here as a
+      # certificate, so ./ids/clients cannot be mounted — it also holds keys.
+      - ${STOFFEL_RESERVE_CLIENT_CERTS_DIR:-./.reserve-index-state/client-certs}:/var/lib/stoffel/client-certs:ro
+      - coordri-admitted-party0:/var/lib/stoffel/admitted
+      - coordri-local-party0:/var/lib/stoffel/local
       - coordri-preproc-party0:/var/lib/stoffel-preproc
-
   party1:
+    <<: *standing-party
     environment:
-      STOFFEL_PREPROC_STORE: /var/lib/stoffel-preproc
+      <<: *standing-party-env
+      PARTY_ID: "1"
+      BIND_ADDR: 172.29.0.11:9001
+      CLIENT_BIND_ADDR: 172.29.0.11:9101
+      RPC_BIND_ADDR: 0.0.0.0:16181
+      PEERS: 172.29.0.10:9000,172.29.0.12:9002,172.29.0.13:9003,172.29.0.14:9004
+      CERT_PATH: /app/ids/nodes/cert1.crt
+      KEY_PATH: /app/ids/nodes/key1.der
     volumes:
+      - ./ids:/app/ids:ro
+      # Programs are delivered by content id, so a node resolves what the
+      # operator submitted without the coordinator shipping bytes. A standing
+      # node freezes this catalog at startup, so the harness writes it first.
+      - ${STOFFEL_RESERVE_PROGRAMS_DIR:-./.reserve-index-state/programs}:/var/lib/stoffel/programs:ro
+      # Certificates ONLY: a standing node parses every file here as a
+      # certificate, so ./ids/clients cannot be mounted — it also holds keys.
+      - ${STOFFEL_RESERVE_CLIENT_CERTS_DIR:-./.reserve-index-state/client-certs}:/var/lib/stoffel/client-certs:ro
+      - coordri-admitted-party1:/var/lib/stoffel/admitted
+      - coordri-local-party1:/var/lib/stoffel/local
       - coordri-preproc-party1:/var/lib/stoffel-preproc
-
   party2:
+    <<: *standing-party
     environment:
-      STOFFEL_PREPROC_STORE: /var/lib/stoffel-preproc
+      <<: *standing-party-env
+      PARTY_ID: "2"
+      BIND_ADDR: 172.29.0.12:9002
+      CLIENT_BIND_ADDR: 172.29.0.12:9102
+      RPC_BIND_ADDR: 0.0.0.0:16182
+      PEERS: 172.29.0.10:9000,172.29.0.11:9001,172.29.0.13:9003,172.29.0.14:9004
+      CERT_PATH: /app/ids/nodes/cert2.crt
+      KEY_PATH: /app/ids/nodes/key2.der
     volumes:
+      - ./ids:/app/ids:ro
+      # Programs are delivered by content id, so a node resolves what the
+      # operator submitted without the coordinator shipping bytes. A standing
+      # node freezes this catalog at startup, so the harness writes it first.
+      - ${STOFFEL_RESERVE_PROGRAMS_DIR:-./.reserve-index-state/programs}:/var/lib/stoffel/programs:ro
+      # Certificates ONLY: a standing node parses every file here as a
+      # certificate, so ./ids/clients cannot be mounted — it also holds keys.
+      - ${STOFFEL_RESERVE_CLIENT_CERTS_DIR:-./.reserve-index-state/client-certs}:/var/lib/stoffel/client-certs:ro
+      - coordri-admitted-party2:/var/lib/stoffel/admitted
+      - coordri-local-party2:/var/lib/stoffel/local
       - coordri-preproc-party2:/var/lib/stoffel-preproc
-
   party3:
+    <<: *standing-party
     environment:
-      STOFFEL_PREPROC_STORE: /var/lib/stoffel-preproc
+      <<: *standing-party-env
+      PARTY_ID: "3"
+      BIND_ADDR: 172.29.0.13:9003
+      CLIENT_BIND_ADDR: 172.29.0.13:9103
+      RPC_BIND_ADDR: 0.0.0.0:16183
+      PEERS: 172.29.0.10:9000,172.29.0.11:9001,172.29.0.12:9002,172.29.0.14:9004
+      CERT_PATH: /app/ids/nodes/cert3.crt
+      KEY_PATH: /app/ids/nodes/key3.der
     volumes:
+      - ./ids:/app/ids:ro
+      # Programs are delivered by content id, so a node resolves what the
+      # operator submitted without the coordinator shipping bytes. A standing
+      # node freezes this catalog at startup, so the harness writes it first.
+      - ${STOFFEL_RESERVE_PROGRAMS_DIR:-./.reserve-index-state/programs}:/var/lib/stoffel/programs:ro
+      # Certificates ONLY: a standing node parses every file here as a
+      # certificate, so ./ids/clients cannot be mounted — it also holds keys.
+      - ${STOFFEL_RESERVE_CLIENT_CERTS_DIR:-./.reserve-index-state/client-certs}:/var/lib/stoffel/client-certs:ro
+      - coordri-admitted-party3:/var/lib/stoffel/admitted
+      - coordri-local-party3:/var/lib/stoffel/local
       - coordri-preproc-party3:/var/lib/stoffel-preproc
-
   party4:
+    <<: *standing-party
     environment:
-      STOFFEL_PREPROC_STORE: /var/lib/stoffel-preproc
+      <<: *standing-party-env
+      PARTY_ID: "4"
+      BIND_ADDR: 172.29.0.14:9004
+      CLIENT_BIND_ADDR: 172.29.0.14:9104
+      RPC_BIND_ADDR: 0.0.0.0:16184
+      PEERS: 172.29.0.10:9000,172.29.0.11:9001,172.29.0.12:9002,172.29.0.13:9003
+      CERT_PATH: /app/ids/nodes/cert4.crt
+      KEY_PATH: /app/ids/nodes/key4.der
     volumes:
+      - ./ids:/app/ids:ro
+      # Programs are delivered by content id, so a node resolves what the
+      # operator submitted without the coordinator shipping bytes. A standing
+      # node freezes this catalog at startup, so the harness writes it first.
+      - ${STOFFEL_RESERVE_PROGRAMS_DIR:-./.reserve-index-state/programs}:/var/lib/stoffel/programs:ro
+      # Certificates ONLY: a standing node parses every file here as a
+      # certificate, so ./ids/clients cannot be mounted — it also holds keys.
+      - ${STOFFEL_RESERVE_CLIENT_CERTS_DIR:-./.reserve-index-state/client-certs}:/var/lib/stoffel/client-certs:ro
+      - coordri-admitted-party4:/var/lib/stoffel/admitted
+      - coordri-local-party4:/var/lib/stoffel/local
       - coordri-preproc-party4:/var/lib/stoffel-preproc
+  client0:
+    environment:
+      # A standing node serves clients on a listener separate from its mesh
+      # bind, so a client needs both: --servers for the node RPC, and
+      # --client-transport-servers for the client-facing socket.
+      STOFFEL_CLIENT_TRANSPORT_SERVERS: 172.29.0.10:9100,172.29.0.11:9101,172.29.0.12:9102,172.29.0.13:9103,172.29.0.14:9104
+
+  client1:
+    environment:
+      STOFFEL_CLIENT_TRANSPORT_SERVERS: 172.29.0.10:9100,172.29.0.11:9101,172.29.0.12:9102,172.29.0.13:9103,172.29.0.14:9104
 
 volumes:
   coordri-preproc-party0:
+  coordri-admitted-party0:
+  coordri-local-party0:
   coordri-preproc-party1:
+  coordri-admitted-party1:
+  coordri-local-party1:
   coordri-preproc-party2:
+  coordri-admitted-party2:
+  coordri-local-party2:
   coordri-preproc-party3:
+  coordri-admitted-party3:
+  coordri-local-party3:
   coordri-preproc-party4:
+  coordri-admitted-party4:
+  coordri-local-party4:

@@ -113,7 +113,7 @@ provided. Use `--output` when compiling a single file.
 stoffel run target/debug/hello-mpc.stflb --entry main --input a=40 --input b=2
 stoffel run --input a=40 --input b=2
 stoffel run program.stfl --local --client-input 0=42 --parties 5 --threshold 1
-stoffel run program.stfl --local --expected-output-clients 2
+stoffel run program.stfl --local --expected-output-clients 2 --client-output-count 0=1 --client-output-count 1=1
 stoffel run target/debug/program.stflb --network --config offchain-client.toml --input x=42
 stoffel run target/debug/program.stflb --network --config party-network.toml --connect-timeout-ms 1000
 ```
@@ -123,7 +123,10 @@ local MPC coordinator; `--local` is accepted as an explicit local mode selector.
 Use `--client-input SLOT=VALUE` for `ClientStore` input providers, and
 `--expected-output-clients N` to declare output-capable local client slots
 `0..N-1` for dynamic output loops or output-only runs (this does not synthesize
-client inputs). `--network --config` uses SDK network configuration: an off-chain
+client inputs). A slot that submits no input needs its output count declared,
+with `--client-output-count SLOT=COUNT` or `[mpc.client_output_counts]` in
+`Stoffel.toml`: the coordinator admits a client for the inputs it submits and
+the outputs it receives, so a slot with neither is not admissible. `--network --config` uses SDK network configuration: an off-chain
 client config executes through the coordinator/node RPC path, while a network
 config validates and connects to real node addresses.
 
@@ -422,59 +425,102 @@ Run a compiled program locally (default entry function is `main`):
 ./target/release/stoffel-run path/to/program.stflb main --trace-instr
 ```
 
-Run a leader node for a 5-party MPC session:
+The coordinator is the trusted party, and it is what decides what runs: it
+mints every execution identity itself and publishes each execution down to the
+node roster. An operator asks it to run something with `stoffel-coord-ctl`,
+which prints the identity the coordinator minted:
 
 ```bash
-export STOFFEL_EXECUTION_ID="$(openssl rand -hex 32)"
-STOFFEL_AUTH_TOKEN=replace-with-random-secret \
+./target/release/stoffel-coord-ctl submit \
+  --coordinator 127.0.0.1:31415 \
+  --coord-cert ids/server_cert.crt \
+  --cert ids/operator/cert.crt \
+  --key ids/operator/key.der \
+  --program-file path/to/program.stflb \
+  --entry main \
+  --client-slots 2:1 \
+  --client 0=ids/clients/cert0.crt
+# prints: <execution id> <registration nonce>
+export STOFFEL_EXECUTION_ID="<the execution id it printed>"
+```
+
+Run one party of a 5-party MPC session. Every party is the same shape: it
+fetches the node roster from its coordinator over a certificate-pinned link,
+installs that roster as its transport's peer allowlist, and dials the addresses
+in `--peers` until the mesh is complete. `--peers` is what makes a process a
+party; there is no bootstrap process and no leader. A party is published the
+execution it runs by its coordinator, so it never names one:
+
+```bash
 ./target/release/stoffel-run path/to/program.stflb main \
-  --leader \
+  --party-id 0 \
   --bind 127.0.0.1:9000 \
+  --peers 127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004 \
   --n-parties 5 \
   --threshold 1 \
-  --execution-id "$STOFFEL_EXECUTION_ID"
+  --off-chain-coord 127.0.0.1:31415 \
+  --coord-cert ids/server_cert.crt \
+  --rpc-bind 127.0.0.1:16180 \
+  --cert ids/nodes/cert0.crt \
+  --key ids/nodes/key0.der
 ```
 
-Join as another party:
+Each of the other four parties runs the same command with its own
+`--party-id`, `--bind`, `--rpc-bind`, `--cert`, `--key` and the other four
+addresses in `--peers`. Pass every party the full `n - 1` list: a pair is
+dialed from one end only, and which end is decided by a digest of the two
+certificates, which no operator can read off a config file.
 
-```bash
-STOFFEL_AUTH_TOKEN=replace-with-random-secret \
-./target/release/stoffel-run path/to/program.stflb main \
-  --party-id 1 \
-  --bootstrap 127.0.0.1:9000 \
-  --bind 127.0.0.1:9002 \
-  --n-parties 5 \
-  --threshold 1 \
-  --execution-id "$STOFFEL_EXECUTION_ID"
-```
-
-Run in client mode to submit inputs to the party servers:
+Run in client mode to submit inputs to the party servers. A client is not on
+the node roster, so the coordinator publishes it nothing by subscription: the
+operator that registered the execution tells its clients which one to join.
+Every client is a coordinator client. It pins the coordinator's certificate,
+reserves its input indices through that coordinator, and pins each node dial to
+a certificate from the roster that coordinator serves — `--servers` supplies
+addresses, never identities. There is no coordinator-less client, so
+`--off-chain-coord`, `--coord-cert`, `--cert` and `--key` are all required:
 
 ```bash
 ./target/release/stoffel-run --client \
+  --program path/to/program.stflb \
+  --client-slot 0 \
   --inputs 10,20 \
-  --servers 127.0.0.1:10000,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004,127.0.0.1:9005 \
+  --servers 127.0.0.1:16180,127.0.0.1:16181,127.0.0.1:16182,127.0.0.1:16183,127.0.0.1:16184 \
   --n-parties 5 \
+  --off-chain-coord 127.0.0.1:31415 \
+  --coord-cert ids/server_cert.crt \
+  --cert ids/clients/cert0.crt \
+  --key ids/clients/key0.der \
   --execution-id "$STOFFEL_EXECUTION_ID"
 ```
 
-AVSS output-client mode can reconstruct private field outputs:
+AVSS output-client mode can reconstruct private field outputs. An output-only
+client additionally passes `--client-transport-servers`, the parties'
+`--client-bind` addresses, because it has to hold an authenticated route on
+each party for the output distribution to reach it:
 
 ```bash
 ./target/release/stoffel-run --client \
   --mpc-backend avss \
   --mpc-curve secp256k1 \
-  --inputs 0x<sha256-tbs-digest-hex> \
+  --program path/to/program.stflb \
+  --client-slot 1 \
   --outputs 2 \
-  --servers 127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004 \
+  --servers 127.0.0.1:16180,127.0.0.1:16181,127.0.0.1:16182,127.0.0.1:16183,127.0.0.1:16184 \
+  --client-transport-servers 127.0.0.1:9100,127.0.0.1:9101,127.0.0.1:9102,127.0.0.1:9103,127.0.0.1:9104 \
   --n-parties 5 \
+  --off-chain-coord 127.0.0.1:31415 \
+  --coord-cert ids/server_cert.crt \
+  --cert ids/clients/cert1.crt \
+  --key ids/clients/key1.der \
   --execution-id "$STOFFEL_EXECUTION_ID"
 ```
 
 Notes:
 
-- `STOFFEL_AUTH_TOKEN` is required for authenticated discovery in bootnode, leader, and party flows
-- All parties and clients in one run must use the same nonzero `--execution-id`; overlapping runs must use different IDs
+- A party's membership, party count and threshold are the coordinator's node roster, so `--peers` requires `--off-chain-coord` and `--coord-cert`. Membership is the certificate allowlist that roster installs and is enforced per connection by mTLS; there is no shared secret anywhere in the flow
+- `--party-id` labels a party's on-disk state. On the wire a party is its rank in the lexicographic order of the roster's certificates, and the join refuses to proceed unless the transport derives the same rank
+- A party is published the execution it runs by its coordinator and has no `--execution-id`; its clients are given the identity the coordinator minted, which `stoffel-coord-ctl submit` printed. Overlapping runs are separate submissions and get separate identities
 - The CLI accepts any file path; this repository conventionally stores compiled fixtures as `.stflb`
 - `--mpc-backend` supports `honeybadger` and `avss` for client mode; `.stflb` party runs use the backend recorded in the program manifest and reject conflicting CLI overrides
 - `--mpc-curve` supports `bls12-381`, `bn254`, `curve25519`, `ed25519`, `secp256k1`, and `p-256` (`secp256r1`) for AVSS
@@ -482,19 +528,29 @@ Notes:
 
 ## Docker Flows
 
-The API/coordinator topology is runnable with the reserve-index compose stack:
+The API/coordinator topology is runnable with the reserve-index compose stack.
+The coordinator mints the execution identity, so the coordinator comes up first,
+an operator submits the execution, and the identity it prints is handed to the
+client services:
 
 ```bash
-STOFFEL_AUTH_TOKEN=replace-with-random-secret \
-STOFFEL_EXECUTION_ID="$(openssl rand -hex 32)" \
+docker compose -f docker-compose.coordinator.reserve-index.yml up -d --build coordinator
+docker compose -f docker-compose.coordinator.reserve-index.yml run --rm --no-deps \
+  --entrypoint /app/stoffel-coord-ctl party0 submit \
+  --coordinator coordinator:31415 \
+  --coord-cert /app/ids/server_cert.crt \
+  --cert /app/ids/operator/cert.crt --key /app/ids/operator/key.der \
+  --program-file /app/programs/client_sub_order.stflb --entry main \
+  --client-slots 1:1,1:1 --open-admission
+export STOFFEL_EXECUTION_ID="<the execution id it printed>"
 docker compose -f docker-compose.coordinator.reserve-index.yml up --build
 ```
 
-That coordinator path runs through the HoneyBadger/BLS12-381 VM path. The AVSS compose stack is separate and covers AVSS curves and local share storage:
+`docker/test-coordinator-reserve-index.sh` runs exactly that sequence end to end.
+
+That coordinator path runs through the HoneyBadger/BLS12-381 VM path. The AVSS compose stack is separate and covers AVSS curves and local share storage. Its `registrar` service submits the packaged program itself, so the stack completes on a plain `up`:
 
 ```bash
-STOFFEL_AUTH_TOKEN=replace-with-random-secret \
-STOFFEL_EXECUTION_ID="$(openssl rand -hex 32)" \
 docker compose -f docker-compose.avss.yml up --build
 ```
 
@@ -535,12 +591,10 @@ defaults are zero RTT and no loss or bandwidth limit.
 The AVSS threshold ECDSA examples mirror the threshold signature fixtures:
 
 ```bash
-STOFFEL_AUTH_TOKEN=replace-with-random-secret \
 STOFFEL_PROGRAM=/app/programs/threshold_ecdsa_secp256k1.stflb \
 STOFFEL_MPC_CURVE=secp256k1 \
 docker compose -f docker-compose.avss.yml up --build
 
-STOFFEL_AUTH_TOKEN=replace-with-random-secret \
 STOFFEL_PROGRAM=/app/programs/threshold_ecdsa_p256.stflb \
 STOFFEL_MPC_CURVE=p-256 \
 docker compose -f docker-compose.avss.yml up --build
@@ -554,27 +608,98 @@ For the AVSS certificate-signing path, run `/app/programs/avss_certificate_keyge
 
 `stoffel-run --standing-node` keeps one authenticated party mesh alive until
 the process receives SIGINT or SIGTERM (SIGKILL stops it immediately). It has
-no finite run count. A trusted controller publishes the same monotonically
-sequenced Prepare/Cancel command into each party's mounted
-`--control-dir`; parties publish acknowledgements and lifecycle events back to
-that mount. This mounted command log is the standing node's admission boundary.
-The shared trusted controller owns deployment concurrency and resource limits;
-nodes intentionally do not make independent local admission decisions, which
-could otherwise make different parties select different executions.
-The MPC coordinator remains execution-scoped protocol infrastructure, not a
-second execution scheduler.
+no finite run count. Without `--standing-node` a node runs the one execution
+its coordinator publishes it and exits.
 
-Programs are immutable content-addressed artifacts. Prepare launches the
+The coordinator is the admission boundary. It mints every execution identity
+and publishes each execution down to the roster on one subscription the node
+opens over the same certificate-pinned link it fetched the roster on, so the
+certificate is the whole authorization: nothing is mounted into a node to tell
+it what to run, and a node never registers an execution upwards. An operator
+submits executions with `stoffel-coord-ctl`, authorized by one of the
+certificates the coordinator was started with in `--operator-certs`. The
+coordinator owns deployment concurrency and resource limits; nodes intentionally
+make no independent local admission decisions, which could otherwise make
+different parties select different executions. A standing node with no execution
+is idle, not failed: it holds its subscription and waits.
+
+A standing node binds two sockets, and the split is the client authorization
+boundary. `--bind` is the party mesh: its certificate allowlist is the
+coordinator's node roster and nothing else, installed before the socket is bound
+and never added to. `--client-bind` is the client ingress, and it authorizes no
+certificate at all, because the transport decides a certificate before it knows
+whether the connection is a peer's or a client's — so a client key on the mesh
+listener would be a key with node-level standing there. Client participation is
+instead the coordinator's per-execution admission, enforced per execution against
+the published client roster. Clients are given the `--client-bind` addresses, not
+the mesh ones (`stoffel-run --client --client-transport-servers`).
+`--client-cert-dir` is the catalog a node resolves a published client identity
+against; it is not a transport allowlist.
+
+Authorization runs the other way too. A client pins the node roster its
+coordinator serves as its own peer allowlist before its first dial, so an
+address that answers with a certificate the roster does not name is refused at
+the handshake instead of being trusted for having answered. That is why a
+client requires `--off-chain-coord` and `--coord-cert`: the addresses in
+`--servers` and `--client-transport-servers` are routing, and the coordinator
+is the only source of the identities behind them.
+
+Authorizing no certificate is not the same as accepting without limit. The
+client socket is reachable by anyone, so what it will hold is bounded
+explicitly: 1024 concurrent connections in total, at most a quarter of them
+from any one certificate, and nothing at all from a handshake that exposed no
+client certificate public key — such a connection could never match a published
+admission, so it is closed rather than kept. The caps are sized well above any
+real deployment's load, because a cap a healthy deployment can reach is an
+outage rather than a bound. Refusals are summarised rather than logged one per
+connection, because log volume is a resource too.
+
+Programs are immutable content-addressed artifacts. An admission launches the
 execution after setup emits Ready; its online task then waits for the admitted
-clients. Every admission
-contains a new full 256-bit execution ID, the program ID and entry point, and an
-exact `clients` list of `{certificate, manifest_slot}` bindings. The
-program manifest supplies the MPC backend, curve, and client input shape; the
-controller does not repeat those values. Each execution receives an isolated
+clients. The coordinator publishes the minted 256-bit execution identity, the
+program's content address, the entry point and one pre-registered client per
+program slot — named by the public key the coordinator reasons about, which the
+node resolves against the certificate catalog it froze at startup. A published
+client the node holds no certificate for refuses the whole admission. Every
+party independently recomputes a commitment over the published admission plus
+its own catalogs and the parties compare it before any correlated preprocessing
+moves, so a coordinator that published different admissions to different parties
+fails closed. The program manifest supplies the MPC backend, curve, and client
+input shape; the coordinator does not repeat those values. An execution identity
+is single use: `--admitted-store` is a durable LMDB index of every identity the
+node has admitted, and it must be retained exactly as long as
+`--preproc-store`. Each execution receives an isolated
 transport inbox and storage scope, with preprocessing material destructively
 allocated from its program reservoir. `--pool-id` must be globally unique for a
-live deployment; never attach copies of one preprocessing volume to two live
-pools. Reservoirs are warmed before readiness and refilled as execution bursts
+live deployment, and the volume is what enforces that rather than trusting it: a
+standing pool's `--preproc-store` volume records the pool and node identity that
+claimed it on its first open, and every later opener presenting a different pool
+or node is refused. Attaching a copy of one volume to a second pool — or sharing
+one volume between two parties — therefore fails at startup rather than letting
+both serve the same correlated material. Two deployments that share *both* a
+pool id and a node identity are indistinguishable to that record, but the key
+namespace is derived from the pool id, so in the protocol's own terms they are
+one node in one pool; a pool-id collision is a separate defect, which is why
+`--pool-id` is required and the all-zero value is refused. A one-shot
+`--preproc-store` volume records no pool at all, so it admits a second one-shot
+opener and refuses every standing pool. What keeps two concurrent one-shot
+openers from serving the same item is not the owner record but the draw itself,
+which removes material from the volume in the same write transaction that hands
+it out. A volume written before a commit became a division of the generated pool
+carries no marker and is refused outright: its material may already have served
+an execution, so it must be deleted and regenerated rather than migrated. The
+marker speaks to how a volume was created, so it is not on its own enough:
+rolling an older image onto a retained volume and then rolling forward would
+leave material a copying commit wrote beside a valid marker. Preprocessing
+material therefore carries a key prefix that older binaries do not write, and a
+volume holding a record under any prefix only an older binary wrote — the old
+material prefix, or the reservation-index namespace such binaries persisted
+beside the material — is refused at startup, on every open rather than only the
+first. Metadata claiming that the first N items of a pool are already spent is
+refused on the same grounds, since material is removed when it is drawn and so
+nothing current writes such a cursor. The practical consequence for operators:
+after a rollback, delete the preprocessing volume (and its `--admitted-store`)
+and let the node regenerate; there is no in-place upgrade, by design. Reservoirs are warmed before readiness and refilled as execution bursts
 consume them. The default nine-execution burst is admitted from ten warm
 bundles before a refill owns the program's preprocessing lane.
 
@@ -589,6 +714,19 @@ docker/test-standing-concurrency.sh
 STOFFEL_COORDINATOR_CONTEXT=/absolute/path/to/stoffel-mpc-coordinator \
 STOFFEL_NETWORK_CONTEXT=/absolute/path/to/stoffel-networking \
 docker/test-standing-adversarial.sh
+```
+
+Both of those run standing nodes. The one-shot `--preproc-store` deployment — a
+party that exits when its execution finishes, over a volume that outlives it —
+is a different code path, and it has its own suite: two sequential
+coordinator-minted executions over retained volumes, asserting that the first
+banks only what it does not keep and that the second therefore finds the banked
+material short of its own targets.
+
+```bash
+STOFFEL_COORDINATOR_CONTEXT=/absolute/path/to/stoffel-mpc-coordinator \
+STOFFEL_NETWORK_CONTEXT=/absolute/path/to/stoffel-networking \
+docker/test-oneshot-preproc-store.sh
 ```
 
 ## C Foreign Function Interface
@@ -607,6 +745,23 @@ Platform-specific library names:
 - Windows: `stoffel_vm.dll`
 
 ## Build and Test
+
+Until `stoffel-mpc-coordinator` `0.3.0` is published, this workspace consumes it
+from a sibling checkout through a `[patch.crates-io]` table in `Cargo.toml`, so
+clone it beside this repository before building. Without it every `cargo`
+invocation stops with `failed to load source for dependency
+stoffel-mpc-coordinator-off-chain`:
+
+```bash
+git clone --branch feature/no-bootnode \
+  https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git \
+  ../stoffel-mpc-coordinator-roster-admission
+```
+
+`docker/coordinator-wrapper` is its own workspace and carries the same table
+against the same checkout. The Docker builds do not use either one: they take
+the coordinator as the `coordinator` build context
+(`STOFFEL_COORDINATOR_CONTEXT`), which must name a `0.3.0` checkout.
 
 Build everything:
 

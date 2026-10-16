@@ -61,7 +61,6 @@ thiserror = "=2.0.18"
 blake3 = "=1.8.5"
 heed = "=0.20.5"
 hex = "=0.4.3"
-dirs = "=5.0.1"
 dashmap = "=5.5.3"
 tokio-util = { version = "=0.7.18", features = ["rt"] }
 bitflags = "=2.13.0"
@@ -73,7 +72,6 @@ curve25519-dalek = { version = "=4.1.3", features = ["alloc"] }
 default = []
 hb_itest = []
 avss_itest = []
-nat = []
 statistics = []
 
 [dev-dependencies]
@@ -87,4 +85,14 @@ turmoil = "=0.7.2"
 [[bench]]
 name = "vm_benchmarks"
 path = "../benches/vm_benchmarks.rs"
+harness = false
+
+# A test that needs two OS processes, not two threads: one preprocessing volume
+# belongs to one standing pool, and across processes that rests on LMDB's own
+# writer lock rather than on anything this crate holds. `harness = false`
+# because the parent re-execs this same binary as its own children, selecting a
+# role from the environment.
+[[test]]
+name = "preproc_volume_two_processes"
+path = "tests/preproc_volume_two_processes.rs"
 harness = false

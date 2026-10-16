@@ -3,11 +3,10 @@ use crate::net::engine_config::{DeploymentMode, MpcSessionConfig};
 use crate::net::mpc_engine::{
     AsyncMpcEngineConsensus, DurableIdentityDigest, MpcEngine, MpcEngineConsensus, MpcPartyId,
 };
-use crate::net::reservation::ReservationRegistry;
 use crate::net::session::ExecutionId;
 use crate::storage::preproc::{
-    self, LmdbPreprocStore, MaterialKind, OwnedPreprocBundle, PreprocBlob, PreprocKeyScope,
-    PreprocStore, TakenPreproc,
+    self, LmdbPreprocStore, MaterialKind, OwnedPreprocBundle, PoolAvailability, PreprocBlob,
+    PreprocKeyScope, PreprocStore, TakenPreproc,
 };
 use ark_ff::UniformRand;
 use ark_std::rand::SeedableRng;
@@ -31,6 +30,28 @@ fn test_engine(
     n: usize,
     t: usize,
 ) -> Arc<HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>> {
+    test_engine_with_targets(
+        open_message_router,
+        instance_id,
+        party_id,
+        n,
+        t,
+        HoneyBadgerPreprocessingConfig::new(1, 1),
+    )
+}
+
+/// [`test_engine`] for the tests whose subject is what this engine declares it
+/// needs: `preprocess` runs the preprocessing protocol unless the pool covers
+/// those counts, so a test that must not reach the network has to declare
+/// counts its fixture can satisfy.
+fn test_engine_with_targets(
+    open_message_router: Arc<crate::net::open_registry::OpenMessageRouter>,
+    instance_id: u64,
+    party_id: usize,
+    n: usize,
+    t: usize,
+    preprocessing: HoneyBadgerPreprocessingConfig,
+) -> Arc<HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>> {
     let session = MpcSessionConfig::try_new(
         instance_id,
         party_id,
@@ -40,7 +61,7 @@ fn test_engine(
     )
     .expect("test topology should be valid")
     .with_open_message_router(open_message_router);
-    let config = HoneyBadgerEngineConfig::new(session, HoneyBadgerPreprocessingConfig::new(1, 1));
+    let config = HoneyBadgerEngineConfig::new(session, preprocessing);
     HoneyBadgerMpcEngine::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>::from_config(config)
         .expect("engine construction should succeed")
 }
@@ -294,19 +315,26 @@ async fn preprocess_reserves_persistent_random_shares_when_loaded() {
         .collect();
     let (data, item_size) = preproc::serialize_robust_shares(&shares).unwrap();
     store
-        .store(
+        .seed_items(
             &key,
             &PreprocBlob::try_new(data, item_size, shares.len()).unwrap(),
         )
         .await
         .unwrap();
 
-    let engine = test_engine(
+    // This execution needs exactly the three random shares the store holds
+    // and no multiplications, so the load covers it and `preprocess` returns
+    // without a preprocessing round. Declaring a triple it cannot load would
+    // make the engine generate the shortfall, which needs the network: see
+    // `a_load_that_does_not_cover_the_targets_is_not_full_provisioning` in
+    // `preprocessing::persisted_item_identity_tests`.
+    let engine = test_engine_with_targets(
         Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
         next_instance_id(),
         party_id,
         n,
         t,
+        HoneyBadgerPreprocessingConfig::new(0, shares.len()),
     );
     engine
         .preproc_persistence_ops()
@@ -325,142 +353,6 @@ async fn preprocess_reserves_persistent_random_shares_when_loaded() {
         store.load(&key).await.unwrap().is_none(),
         "consumed persistent random shares should be evicted after preload"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn get_mask_share_reserves_requested_persistent_index_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(LmdbPreprocStore::open(dir.path()).unwrap());
-    let program_hash = [0x5A; 32];
-    let party_id = 0;
-    let n = 5;
-    let t = 1;
-    let scope = PreprocKeyScope::new(
-        program_hash,
-        crate::net::curve::MpcFieldKind::Bls12_381Fr,
-        n,
-        t,
-        DurableIdentityDigest::from_legacy_party_id(party_id),
-    );
-    let key = scope.random_share();
-
-    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(11);
-    let shares: Vec<_> = (0..2)
-        .map(|_| RobustShare::new(ark_bls12_381::Fr::rand(&mut rng), 1, t))
-        .collect();
-    let (data, item_size) = preproc::serialize_robust_shares(&shares).unwrap();
-    store
-        .store(
-            &key,
-            &PreprocBlob::try_new(data, item_size, shares.len()).unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let engine = test_engine(
-        Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
-        next_instance_id(),
-        party_id,
-        n,
-        t,
-    );
-    engine
-        .preproc_persistence_ops()
-        .unwrap()
-        .set_preproc_store(store.clone(), program_hash)
-        .unwrap();
-    let reservation = engine.reservation_ops().unwrap();
-    reservation
-        .init_reservations(program_hash, shares.len() as u64)
-        .await
-        .unwrap();
-    let first = reservation.get_mask_share(0).await.unwrap();
-    assert!(!first.is_empty());
-    assert_eq!(store.available(&key).await.unwrap(), 1);
-
-    let err = reservation.get_mask_share(0).await.unwrap_err();
-    assert!(
-        err.to_string().contains("preprocessing cursor mismatch"),
-        "unexpected error: {err}"
-    );
-    assert_eq!(
-        store.available(&key).await.unwrap(),
-        1,
-        "rejected duplicate mask retrieval must not consume another share"
-    );
-
-    let second = reservation.get_mask_share(1).await.unwrap();
-    assert!(!second.is_empty());
-    assert_eq!(store.available(&key).await.unwrap(), 0);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn get_mask_shares_reserves_a_contiguous_persistent_batch_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(LmdbPreprocStore::open(dir.path()).unwrap());
-    let program_hash = [0x6B; 32];
-    let party_id = 0;
-    let n = 5;
-    let t = 1;
-    let scope = PreprocKeyScope::new(
-        program_hash,
-        crate::net::curve::MpcFieldKind::Bls12_381Fr,
-        n,
-        t,
-        DurableIdentityDigest::from_legacy_party_id(party_id),
-    );
-    let key = scope.random_share();
-
-    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(17);
-    let shares: Vec<_> = (0..3)
-        .map(|_| RobustShare::new(ark_bls12_381::Fr::rand(&mut rng), 1, t))
-        .collect();
-    let (data, item_size) = preproc::serialize_robust_shares(&shares).unwrap();
-    store
-        .store(
-            &key,
-            &PreprocBlob::try_new(data, item_size, shares.len()).unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let engine = test_engine(
-        Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
-        next_instance_id(),
-        party_id,
-        n,
-        t,
-    );
-    engine
-        .preproc_persistence_ops()
-        .unwrap()
-        .set_preproc_store(store.clone(), program_hash)
-        .unwrap();
-    let reservation = engine.reservation_ops().unwrap();
-    reservation
-        .init_reservations(program_hash, shares.len() as u64)
-        .await
-        .unwrap();
-
-    let encoded = reservation.get_mask_shares(&[0, 1, 2]).await.unwrap();
-    assert_eq!(encoded.len(), shares.len());
-    for (actual, expected) in encoded.iter().zip(&shares) {
-        assert_eq!(
-            HoneyBadgerMpcEngine::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>::decode_share(
-                actual
-            )
-            .unwrap(),
-            *expected
-        );
-    }
-    assert_eq!(store.available(&key).await.unwrap(), 0);
-
-    let error = reservation.get_mask_shares(&[0, 1, 2]).await.unwrap_err();
-    assert!(
-        error.to_string().contains("preprocessing cursor mismatch"),
-        "unexpected error: {error}"
-    );
-    assert_eq!(store.available(&key).await.unwrap(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -490,13 +382,24 @@ async fn standing_mask_reservation_reads_owned_preprocessing_bundle() {
         .collect();
     let (data, item_size) = preproc::serialize_robust_shares(&shares).unwrap();
     store
-        .store(
+        .seed_items(
             &key,
             &PreprocBlob::try_new(data, item_size, shares.len()).unwrap(),
         )
         .await
         .unwrap();
-    store.reserve_at(&key, 0, 1).await.unwrap();
+    // Remove one share the way production draws from a reservoir, so the two
+    // the store still holds are what the assertions below are about.
+    store
+        .take_bundle_from_reservoir(
+            &scope,
+            PoolAvailability {
+                random: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
     let session = MpcSessionConfig::try_new(
         next_instance_id(),
@@ -549,17 +452,8 @@ async fn standing_mask_reservation_reads_owned_preprocessing_bundle() {
     let grant = reservation.reserve_masks(0, 1).await.unwrap();
     assert_eq!(grant.start, 0);
     let mask_share = reservation.get_mask_share(grant.start).await.unwrap();
-    reservation
-        .submit_masked_input(0, grant.start, mask_share.clone())
-        .await
-        .unwrap();
-    let inputs = reservation
-        .consume_masked_inputs(&[grant.start])
-        .await
-        .unwrap();
 
     assert!(!mask_share.is_empty());
-    assert_eq!(inputs.len(), 1);
     assert_eq!(
         store.available(&key).await.unwrap(),
         2,
@@ -619,6 +513,136 @@ async fn standing_mask_reservation_reads_owned_preprocessing_bundle() {
         .unwrap();
     assert!(!restarted_mask.is_empty());
     assert_eq!(store.available(&key).await.unwrap(), 2);
+}
+
+/// A standing node holds its mask shares in process memory and writes nothing
+/// of its own into the volume that holds its preprocessing material.
+///
+/// Three facts keep a client's masked input off that volume. Nothing on
+/// `MpcEngineReservation` accepts one: a client's `x + r` goes to the
+/// coordinator, and the node subtracts its mask share in memory. The
+/// reservation registry has no way to reach disk — the persistence that wrote
+/// it into this very LMDB environment, under `rsv:`, is gone. And a record
+/// under that prefix is now contamination
+/// (`CondemnedNamespace::RetiredReservation`), so a node that somehow grew one
+/// would refuse its own volume on the next open rather than carry it.
+///
+/// Asserted against the volume's keys rather than against an API, because the
+/// typed API has no variant that could name the prefix under test — which is
+/// the property. Re-add a registry write to `reserve_masks` or `retire_masks`
+/// and this test fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_standing_engine_writes_nothing_into_the_volume_holding_its_preprocessing() {
+    type Engine = HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(LmdbPreprocStore::open(dir.path()).unwrap());
+    let program_hash = [0xB1; 32];
+    let execution_id = ExecutionId::from_bytes([0xB2; 32]);
+    let party_id = 0;
+    let n = 5;
+    let t = 1;
+
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(97);
+    let shares: Vec<_> = (0..2)
+        .map(|_| RobustShare::new(ark_bls12_381::Fr::rand(&mut rng), 1, t))
+        .collect();
+
+    // The volume must actually hold this node's preprocessing material, or
+    // "writes nothing of its own beside it" is asserted over an empty volume.
+    let scope = PreprocKeyScope::new(
+        program_hash,
+        crate::net::curve::MpcFieldKind::Bls12_381Fr,
+        n,
+        t,
+        DurableIdentityDigest::from_legacy_party_id(party_id),
+    );
+    let (seed_data, seed_item_size) = preproc::serialize_robust_shares(&shares).unwrap();
+    store
+        .seed_items(
+            &scope.random_share(),
+            &PreprocBlob::try_new(seed_data, seed_item_size, shares.len()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let session = MpcSessionConfig::try_new(
+        next_instance_id(),
+        party_id,
+        n,
+        t,
+        Arc::new(QuicNetworkManager::new()),
+    )
+    .unwrap()
+    .try_with_execution_id(execution_id)
+    .unwrap();
+    let engine = Engine::from_config(
+        HoneyBadgerEngineConfig::new(
+            session,
+            HoneyBadgerPreprocessingConfig::new(0, shares.len()),
+        )
+        .with_deployment_mode(DeploymentMode::Standing),
+    )
+    .unwrap();
+    engine
+        .preproc_persistence_ops()
+        .unwrap()
+        .set_preproc_store(store.clone(), program_hash)
+        .unwrap();
+    let admitted_client = DurableIdentityDigest::from_certificate_identity(
+        CertificateIdentity::from_bytes([0xB3; 32]),
+    );
+    engine
+        .install_standing_client_identities(BTreeMap::from([(0, admitted_client)]))
+        .await
+        .unwrap();
+    let (data, item_size) = preproc::serialize_robust_shares(&shares).unwrap();
+    engine
+        .activate_preallocated_standing(OwnedPreprocBundle {
+            random: Some(TakenPreproc {
+                count: shares.len() as u32,
+                item_size,
+                data,
+            }),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let reservation = engine.reservation_ops().unwrap();
+    reservation
+        .init_reservations(program_hash, shares.len() as u64)
+        .await
+        .unwrap();
+    let grant = reservation
+        .reserve_masks(0, shares.len() as u64)
+        .await
+        .unwrap();
+    // The production end-of-input-phase call, which is where the registry used
+    // to be written out.
+    reservation.retire_masks(&[grant.start]).await.unwrap();
+
+    assert_eq!(
+        engine.reserved_mask_shares.lock().await.len(),
+        shares.len() - 1,
+        "the engine must still be holding the mask share it has not retired, \
+         or this test is asserting about a node that holds no mask material"
+    );
+
+    let keys = store.volume_keys().await.unwrap();
+    assert!(
+        keys.iter()
+            .any(|key| key.starts_with(&scope.random_share().encode().unwrap())),
+        "the volume under test must hold this node's preprocessing material: {keys:?}"
+    );
+    for condemned in preproc::CondemnedNamespace::ALL {
+        assert!(
+            keys.iter()
+                .all(|key| !key.starts_with(condemned.as_bytes())),
+            "a standing engine left a record under {condemned} in the volume that \
+             holds its mask shares"
+        );
+    }
 }
 
 #[tokio::test]
@@ -718,7 +742,7 @@ async fn standing_hb_reservoir_uses_stable_program_scope_despite_execution_trans
         (stable_b.random_share(), 3, 0xB1),
     ] {
         store
-            .store(
+            .seed_items(
                 &key,
                 &PreprocBlob::try_new(vec![fill; count], 1, count).unwrap(),
             )
@@ -796,7 +820,7 @@ async fn standing_hb_activation_requires_complete_owned_bundle_without_top_up() 
         .collect::<Vec<_>>();
     let (data, item_size) = preproc::serialize_robust_shares(&stable_random).unwrap();
     store
-        .store(
+        .seed_items(
             &stable.random_share(),
             &PreprocBlob::try_new(data, item_size, 1).unwrap(),
         )
@@ -874,140 +898,75 @@ async fn standing_hb_activation_requires_complete_owned_bundle_without_top_up() 
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reserve_masks_persists_registry_cursor_for_restart() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(LmdbPreprocStore::open(dir.path()).unwrap());
-    let program_hash = [0x9B; 32];
-    let party_id = 0;
-    let n = 5;
-    let t = 1;
+/// A one-shot engine offers no reservation capability at all.
+///
+/// The reservation lifecycle is a draw: `reserve_masks` removes the mask share
+/// from the live pool and `get_mask_share` serves what it removed. A one-shot
+/// engine generates its pool for one execution and takes its masks straight out
+/// of it, so it has no drawn share to serve — calling `get_mask_share` on one
+/// could only succeed by reading the store and leaving the item where a later
+/// execution could be handed it, which is the defect the division fixed.
+///
+/// So the type says so, rather than the method failing closed one call later:
+/// `as_reservation` and `capabilities` both withhold it, which is what makes
+/// the error "does not support preprocessing reservation" instead of "advertises
+/// reservation but does not implement MpcEngineReservation".
+#[tokio::test]
+async fn a_one_shot_engine_offers_no_reservation_capability() {
+    type Engine = HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>;
 
     let engine = test_engine(
         Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
         next_instance_id(),
-        party_id,
-        n,
-        t,
+        0,
+        5,
+        1,
     );
-    engine
-        .preproc_persistence_ops()
-        .unwrap()
-        .set_preproc_store(store.clone(), program_hash)
-        .unwrap();
-    let reservations = engine.reservation_ops().unwrap();
-    reservations
-        .init_reservations(program_hash, 5)
-        .await
-        .unwrap();
-    let first = reservations.reserve_masks(42, 2).await.unwrap();
-    assert_eq!(first.start, 0);
-    assert_eq!(first.count, 2);
-
-    let restarted = test_engine(
-        Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
-        next_instance_id(),
-        party_id,
-        n,
-        t,
+    assert!(
+        !engine.is_standing(),
+        "this test is about a one-shot engine"
     );
-    restarted
-        .preproc_persistence_ops()
-        .unwrap()
-        .set_preproc_store(store, program_hash)
-        .unwrap();
-    let restarted_reservations = restarted.reservation_ops().unwrap();
-    restarted_reservations
-        .init_reservations(program_hash, 5)
-        .await
-        .unwrap();
 
-    assert_eq!(restarted_reservations.available_masks().await, 3);
-    let second = restarted_reservations.reserve_masks(43, 1).await.unwrap();
-    assert_eq!(
-        second.start, 2,
-        "restart must not reallocate previously reserved mask indices"
+    assert!(
+        !engine
+            .capabilities()
+            .contains(crate::net::mpc_engine::MpcCapabilities::RESERVATION),
+        "a one-shot engine must not advertise a capability it cannot serve"
     );
-}
+    assert!(!engine.supports_reservation());
+    assert!(engine.as_reservation().is_none());
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn consume_masked_inputs_evicts_fully_used_persistent_masks() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(LmdbPreprocStore::open(dir.path()).unwrap());
-    let program_hash = [0x6C; 32];
-    let party_id = 0;
-    let n = 5;
-    let t = 1;
-    let scope = PreprocKeyScope::new(
-        program_hash,
-        crate::net::curve::MpcFieldKind::Bls12_381Fr,
-        n,
-        t,
-        DurableIdentityDigest::from_legacy_party_id(party_id),
+    let error = match engine.reservation_ops() {
+        Ok(_) => panic!("a one-shot engine must not hand out reservation ops"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("does not support preprocessing reservation"),
+        "the refusal must read as an unsupported capability, not a missing impl: {error}"
     );
-    let key = scope.random_share();
 
-    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(19);
-    let shares = vec![RobustShare::new(ark_bls12_381::Fr::rand(&mut rng), 1, t)];
-    let (data, item_size) = preproc::serialize_robust_shares(&shares).unwrap();
-    store
-        .store(
-            &key,
-            &PreprocBlob::try_new(data, item_size, shares.len()).unwrap(),
+    let standing = Engine::from_config(
+        HoneyBadgerEngineConfig::new(
+            MpcSessionConfig::try_new(
+                next_instance_id(),
+                0,
+                5,
+                1,
+                Arc::new(QuicNetworkManager::new()),
+            )
+            .unwrap(),
+            HoneyBadgerPreprocessingConfig::new(1, 1),
         )
-        .await
-        .unwrap();
-
-    let engine = test_engine(
-        Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
-        next_instance_id(),
-        party_id,
-        n,
-        t,
-    );
-    engine
-        .preproc_persistence_ops()
-        .unwrap()
-        .set_preproc_store(store.clone(), program_hash)
-        .unwrap();
-    let reservations = engine.reservation_ops().unwrap();
-    reservations
-        .init_reservations(program_hash, 5)
-        .await
-        .unwrap();
-    let grant = reservations.reserve_masks(42, 1).await.unwrap();
-    assert_eq!(grant.start, 0);
-
-    let mask_share = reservations.get_mask_share(0).await.unwrap();
-    assert_eq!(store.available(&key).await.unwrap(), 0);
-    assert!(
-        store.load(&key).await.unwrap().is_some(),
-        "mask data must remain available until masked input consumption"
-    );
-
-    reservations
-        .submit_masked_input(42, 0, mask_share)
-        .await
-        .unwrap();
-    let unmasked = reservations.consume_masked_inputs(&[0]).await.unwrap();
-    assert_eq!(unmasked.len(), 1);
-    assert!(
-        store.load(&key).await.unwrap().is_none(),
-        "fully consumed persistent masks should be evicted after use"
-    );
-
-    let restored = ReservationRegistry::load(
-        store.as_ref(),
-        &program_hash,
-        DurableIdentityDigest::from_legacy_party_id(party_id),
+        .with_deployment_mode(DeploymentMode::Standing),
     )
-    .await
-    .unwrap()
     .unwrap();
-    let snapshot = restored.snapshot().await;
     assert!(
-        snapshot.masked_inputs.is_empty(),
-        "consumed masked input payloads should be evicted from persisted reservation state"
+        standing
+            .capabilities()
+            .contains(crate::net::mpc_engine::MpcCapabilities::RESERVATION)
+            && standing.as_reservation().is_some(),
+        "a standing engine must still offer the capability, or this test passes \
+         by withholding it from everyone"
     );
 }
 

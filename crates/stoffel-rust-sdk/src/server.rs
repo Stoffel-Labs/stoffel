@@ -93,7 +93,6 @@ pub struct ServerBuilder {
     avss_engine: Option<AvssEngine>,
     verified_ordering: Option<VerifiedOrdering>,
     runner_path: Option<PathBuf>,
-    bootstrap_addr: Option<String>,
     entry: String,
     offchain_coordinator: Option<OffChainServerConfig>,
     config_error: Option<String>,
@@ -115,7 +114,6 @@ impl ServerBuilder {
             avss_engine: None,
             verified_ordering: None,
             runner_path: None,
-            bootstrap_addr: None,
             entry: "main".to_owned(),
             offchain_coordinator: None,
             config_error: None,
@@ -232,14 +230,6 @@ impl ServerBuilder {
         self
     }
 
-    /// Configure this server as a follower of an existing bootnode.
-    ///
-    /// Without a bootstrap address, party 0 starts as the leader/bootnode.
-    pub fn bootstrap(mut self, address: impl Into<String>) -> Self {
-        self.bootstrap_addr = Some(address.into());
-        self
-    }
-
     /// Configure the off-chain coordinator flags passed to `stoffel-run`.
     ///
     /// This is required when the attached program declares ClientStore IO.
@@ -310,10 +300,6 @@ impl ServerBuilder {
 
     pub fn configured_entry(&self) -> &str {
         &self.entry
-    }
-
-    pub fn configured_bootstrap(&self) -> Option<&str> {
-        self.bootstrap_addr.as_deref()
     }
 
     pub fn configured_offchain_coordinator(&self) -> Option<&OffChainServerConfig> {
@@ -488,7 +474,6 @@ impl ServerBuilder {
             state: Arc::new(AtomicU8::new(ServerState::Created.as_u8())),
             verified_ordering: self.verified_ordering,
             runner_path: self.runner_path,
-            bootstrap_addr: self.bootstrap_addr,
             entry: self.entry,
             offchain_coordinator: self.offchain_coordinator,
             process: Arc::new(Mutex::new(None)),
@@ -500,6 +485,12 @@ impl ServerBuilder {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OffChainServerConfig {
     pub coordinator_address: String,
+    /// DER-encoded X.509 certificate the coordinator must prove it holds.
+    ///
+    /// The coordinator is the roster authority — it decides which keys are the
+    /// `n` parties and what `t` is — so an unpinned connection to it accepts a
+    /// roster from any server (design doc §9.A).
+    pub coordinator_cert_path: PathBuf,
     pub rpc_bind_address: String,
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
@@ -520,6 +511,10 @@ impl OffChainServerConfig {
                 "off-chain coordinator timestamp must be greater than zero".to_owned(),
             ));
         }
+        validate_existing_file(
+            "off-chain coordinator certificate",
+            &self.coordinator_cert_path,
+        )?;
         validate_existing_file("off-chain server certificate", &self.cert_path)?;
         validate_existing_file("off-chain server private key", &self.key_path)?;
         for path in &self.expected_client_certs {
@@ -538,6 +533,7 @@ impl OffChainServerConfig {
 #[derive(Debug, Clone, Default)]
 pub struct OffChainServerConfigBuilder {
     coordinator_address: Option<String>,
+    coordinator_cert_path: Option<PathBuf>,
     rpc_bind_address: Option<String>,
     cert_path: Option<PathBuf>,
     key_path: Option<PathBuf>,
@@ -548,6 +544,13 @@ pub struct OffChainServerConfigBuilder {
 impl OffChainServerConfigBuilder {
     pub fn coordinator(mut self, address: impl Into<String>) -> Self {
         self.coordinator_address = Some(address.into());
+        self
+    }
+
+    /// Pin the coordinator's certificate. Required: see
+    /// [`OffChainServerConfig::coordinator_cert_path`].
+    pub fn coordinator_cert(mut self, path: impl AsRef<Path>) -> Self {
+        self.coordinator_cert_path = Some(path.as_ref().to_path_buf());
         self
     }
 
@@ -593,6 +596,13 @@ impl OffChainServerConfigBuilder {
             coordinator_address: self.coordinator_address.ok_or_else(|| {
                 Error::Configuration("off-chain coordinator address is required".to_owned())
             })?,
+            coordinator_cert_path: self.coordinator_cert_path.ok_or_else(|| {
+                Error::Configuration(
+                    "the off-chain coordinator's certificate path is required: the coordinator \
+                     is the roster authority, and an unpinned connection accepts any server"
+                        .to_owned(),
+                )
+            })?,
             rpc_bind_address: self.rpc_bind_address.ok_or_else(|| {
                 Error::Configuration("off-chain node RPC bind address is required".to_owned())
             })?,
@@ -628,7 +638,6 @@ pub struct StoffelServer {
     state: Arc<AtomicU8>,
     verified_ordering: Option<VerifiedOrdering>,
     runner_path: Option<PathBuf>,
-    bootstrap_addr: Option<String>,
     entry: String,
     offchain_coordinator: Option<OffChainServerConfig>,
     process: Arc<Mutex<Option<ServerProcess>>>,
@@ -680,23 +689,21 @@ impl StoffelServer {
         let program = self.program.as_ref().ok_or_else(|| {
             Error::Configuration("server start requires a compiled program".to_owned())
         })?;
-        if (program.has_client_io() || self.expected_clients > 0)
-            && self.offchain_coordinator.is_none()
-        {
-            return Err(Error::Configuration(
-                "server start for ClientStore IO requires off-chain coordinator configuration"
+        // A party forms the mesh its coordinator's roster defines, so there is
+        // no server start without a coordinator: it is the authority for
+        // membership, for the party count and for the threshold (design doc
+        // §9.B), and nothing else can supply them.
+        let coordinator = self.offchain_coordinator.as_ref().ok_or_else(|| {
+            Error::Configuration(
+                "server start requires off-chain coordinator configuration: the coordinator \
+                 serves the node roster this party forms its mesh from"
                     .to_owned(),
-            ));
-        }
+            )
+        })?;
         let mpc_config = self
             .mpc_config
             .as_ref()
             .ok_or_else(|| Error::Configuration("MPC configuration is required".to_owned()))?;
-        if self.party_id != 0 && self.bootstrap_addr.is_none() {
-            return Err(Error::Configuration(
-                "non-leader server start requires a bootstrap address".to_owned(),
-            ));
-        }
 
         let runner_path = resolve_stoffel_run_binary(self.runner_path.as_deref())?;
         eprintln!(
@@ -724,44 +731,44 @@ impl StoffelServer {
         if let Some(curve) = self.backend.curve() {
             command.arg("--mpc-curve").arg(curve.to_string());
         }
-        if let Some(config) = &self.offchain_coordinator {
-            config.validate(self.expected_clients)?;
-            command
-                .arg("--off-chain-coord")
-                .arg(&config.coordinator_address)
-                .arg("--rpc-bind")
-                .arg(&config.rpc_bind_address)
-                .arg("--key")
-                .arg(&config.key_path)
-                .arg("--cert")
-                .arg(&config.cert_path)
-                .arg("--timestamp")
-                .arg(config.timestamp.to_string());
-            if !config.expected_client_certs.is_empty() {
-                command.arg("--expected-clients").arg(
-                    config
-                        .expected_client_certs
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                );
-            }
+        coordinator.validate(self.expected_clients)?;
+        command
+            .arg("--off-chain-coord")
+            .arg(&coordinator.coordinator_address)
+            .arg("--coord-cert")
+            .arg(&coordinator.coordinator_cert_path)
+            .arg("--rpc-bind")
+            .arg(&coordinator.rpc_bind_address)
+            .arg("--key")
+            .arg(&coordinator.key_path)
+            .arg("--cert")
+            .arg(&coordinator.cert_path);
+        if !coordinator.expected_client_certs.is_empty() {
+            command.arg("--expected-clients").arg(
+                coordinator
+                    .expected_client_certs
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
         }
-        if let Some(bootstrap) = &self.bootstrap_addr {
-            command
-                .arg("--party-id")
-                .arg(self.party_id.to_string())
-                .arg("--bootstrap")
-                .arg(bootstrap);
-        } else {
-            command.arg("--leader");
-            if self.party_id != 0 {
-                return Err(Error::Configuration(
-                    "only party 0 can start as leader without bootstrap".to_owned(),
-                ));
-            }
-        }
+        // Seed hints, not membership: `ServerBuilder::build` already requires
+        // an address for every other party, which is exactly the list a first
+        // mesh needs — each pair is dialed from one end only, in an order
+        // derived from the certificates, so a short list would leave an edge
+        // undialed from both ends.
+        command
+            .arg("--party-id")
+            .arg(self.party_id.to_string())
+            .arg("--peers")
+            .arg(
+                self.peers
+                    .iter()
+                    .map(|(_, address)| address.clone())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
 
         let child = command.spawn()?;
         *self.process.lock().map_err(|_| {
@@ -917,10 +924,6 @@ impl StoffelServer {
 
     pub fn runner_path(&self) -> Option<&Path> {
         self.runner_path.as_deref()
-    }
-
-    pub fn bootstrap_addr(&self) -> Option<&str> {
-        self.bootstrap_addr.as_deref()
     }
 
     pub fn offchain_coordinator(&self) -> Option<&OffChainServerConfig> {

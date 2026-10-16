@@ -1,0 +1,90 @@
+# One-shot persistent-preprocessing override for the reserve-index stack.
+#
+# The sibling override, docker-compose.coordinator.reserve-index.preproc.yml,
+# makes the parties STANDING. That is the deployment the agreement protocol
+# (Rebuild / Reuse / TopUp) lives in — and it is also the deployment that can
+# never reach `persist_preproc`, because `preprocess()` routes a standing
+# engine into `preprocess_standing()` first. So nothing exercised the one-shot
+# commit path, which is where the preprocessing reuse defect lived (design doc
+# §9.1 stage V-0, finding S12).
+#
+# This override is that missing configuration, and it is the smallest one that
+# reaches the path. Two changes layered on the base stack, and they belong
+# together:
+#
+#  1. Each party keeps its LMDB preprocessing volume across a `down`. The
+#     parties stay ONE-SHOT — the base stack's processes, which exit when their
+#     execution finishes — so a second execution against the same volume is a
+#     second PROCESS reading what the first one banked. That is exactly the
+#     shape the defect had: run 1 committed, run 2 drew.
+#  2. The program becomes `client_mul.stflb`, because it is the only shipped
+#     program whose preprocessing targets include a Beaver triple
+#     (`--print-program-manifest` reports `triples 1`; client_sub_order.stflb
+#     reports 0). A program with no triple demand would have its targets
+#     covered by whatever random-share slack the banding floor leaves, and a
+#     campaign that cannot run short of material cannot witness the load gate
+#     at all.
+#
+# `STOFFEL_PREPROC_STORE` is the entrypoint's hook for `--preproc-store`
+# (docker/entrypoint.sh), which is the only way to reach the one-shot store
+# from a compose file.
+#
+# Consequences for anyone driving this layering by hand:
+#   * every container exits, parties included — unlike the standing override;
+#   * `down` WITHOUT `-v` between executions is the point. With `-v` the
+#     volumes go and the second execution starts from an empty store, which
+#     is the base stack's behaviour and witnesses nothing;
+#   * each execution needs its own coordinator-minted identity: an identity is
+#     single use.
+#
+# Driven by docker/test-oneshot-preproc-store.sh.
+
+x-oneshot-preproc-env: &oneshot-preproc-env
+  # The only shipped program with a nonzero triple demand. See above.
+  STOFFEL_PROGRAM: /app/programs/client_mul.stflb
+  # Read by docker/entrypoint.sh and passed on as --preproc-store.
+  STOFFEL_PREPROC_STORE: /var/lib/stoffel-preproc
+
+services:
+  party0:
+    environment:
+      <<: *oneshot-preproc-env
+    volumes:
+      - oneshot-preproc-party0:/var/lib/stoffel-preproc
+  party1:
+    environment:
+      <<: *oneshot-preproc-env
+    volumes:
+      - oneshot-preproc-party1:/var/lib/stoffel-preproc
+  party2:
+    environment:
+      <<: *oneshot-preproc-env
+    volumes:
+      - oneshot-preproc-party2:/var/lib/stoffel-preproc
+  party3:
+    environment:
+      <<: *oneshot-preproc-env
+    volumes:
+      - oneshot-preproc-party3:/var/lib/stoffel-preproc
+  party4:
+    environment:
+      <<: *oneshot-preproc-env
+    volumes:
+      - oneshot-preproc-party4:/var/lib/stoffel-preproc
+  # The clients submit inputs for the program the parties run, so they have to
+  # agree on which program that is. They hold no preprocessing.
+  client0:
+    environment:
+      STOFFEL_PROGRAM: /app/programs/client_mul.stflb
+  client1:
+    environment:
+      STOFFEL_PROGRAM: /app/programs/client_mul.stflb
+
+# One volume per party: a preprocessing volume is owned by one node, and
+# `LmdbPreprocStore` refuses a volume another opener marked.
+volumes:
+  oneshot-preproc-party0:
+  oneshot-preproc-party1:
+  oneshot-preproc-party2:
+  oneshot-preproc-party3:
+  oneshot-preproc-party4:

@@ -102,8 +102,11 @@ assert_eq!(result, vec![Value::I64(100)]);
   reconstruction requirements: HoneyBadger uses `2 * t + 1`, AVSS uses
   `t + 1`. This is separate from Byzantine party-count validation
   (`n >= 4 * t + 1`).
-- `StoffelClient::connect` opens real QUIC client connections through
-  `stoffel-networking`. For programs with `ClientStore` metadata,
+- `ClientBuilder::connect` opens the pinned coordinator link and keeps the node
+  roster it serves: a client's node set, and the certificate each of those nodes
+  must prove, come from its coordinator and from nowhere else, so connecting
+  requires an `OffChainClientConfig` and there is no coordinator-less client.
+  For programs with `ClientStore` metadata,
   `runtime.offchain_client_config(slot)` derives the typed client IO settings
   from the compiled program and MPC runtime; callers then provide coordinator
   address, node RPC addresses, a nonzero execution ID, timestamp, and client identity material before
@@ -513,23 +516,25 @@ and operator dashboards. `HealthStatus` also implements `Display`, producing
 compact strings such as `healthy` or `unhealthy: server has been shut down`.
 Lifecycle enums (`ClientState`, `ServerState`, and `ComputationStatus`) also
 implement serde and `FromStr` with readable snake-case values for status APIs.
-Clients can establish real QUIC transport connections, and programs with
-`ClientStore` metadata can submit typed inputs through the configured off-chain
-coordinator and node RPC endpoints:
+A client connects to its coordinator, which is what serves it the node roster
+every later node RPC leg is pinned to; programs with `ClientStore` metadata then
+submit typed inputs through that coordinator and those node RPC endpoints:
 
 ```rust
 # use std::time::Duration;
 # use stoffel::prelude::*;
-# async fn example() -> stoffel::Result<()> {
+# async fn example(offchain_io: OffChainClientConfig) -> stoffel::Result<()> {
 let client = StoffelClient::builder()
     .server("127.0.0.1:19200")
+    .offchain_io(offchain_io)
     .connection_timeout(Duration::from_secs(10))
     .connect()
     .await?;
 
 assert_eq!(client.state(), ClientState::Connected);
 assert!(client.is_connected());
-assert!(client.transport_client_id().is_some());
+// The node certificates this client authorizes, as its coordinator served them.
+assert!(client.pinned_node_count().is_some());
 # Ok(())
 # }
 ```

@@ -238,15 +238,16 @@ STOFFEL_PROGRAM_NAME=mpc_runtime_info.stflb \
   ./examples/validate_examples.sh --docker-mpc
 ```
 
-Docker examples default to git build contexts for the coordinator and
-networking repos:
+The coordinator build context is required and must be a
+`stoffel-mpc-coordinator` 0.3.0 checkout, because the workspace requires
+`= 0.3.0` and the Docker build patches that requirement with the mounted
+context. The networking context defaults to a git ref:
 
 ```sh
-STOFFEL_COORDINATOR_CONTEXT='https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0'
 STOFFEL_NETWORK_CONTEXT='https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1'
 ```
 
-To test local uncommitted changes, point those contexts at local checkouts:
+Point both contexts at local checkouts:
 
 ```sh
 STOFFEL_COORDINATOR_CONTEXT=/path/to/stoffel-mpc-coordinator \

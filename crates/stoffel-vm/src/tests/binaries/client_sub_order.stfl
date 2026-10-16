@@ -1,0 +1,27 @@
+# Client-order-sensitive subtraction, for the coordinator reserve-index and
+# preprocessing-store suites.
+#
+# The program computes `client[0] - client[1]` over secret shares, so swapping
+# which physical client reserves slot 0 versus slot 1 changes the result: with
+# the suites' inputs (15 and 25) it is -10, and a swap would give +10. That
+# asymmetry is the whole point of the fixture — it makes a reservation-index or
+# roster-slot mix-up observable instead of letting a symmetric program hide it.
+#
+# Each client contributes ONE input and receives ONE output, so the suites must
+# register the slot table as `1:1,1:1`.
+#
+# Compiled by `docker/regenerate-client-sub-order.sh`, which emits the
+# client-I/O manifest the client path requires. It replaced a hand-written
+# instruction generator that could not emit one.
+
+def main() -> int64:
+  var a: secret int64 = ClientStore.take_share(0, 0)
+  var b: secret int64 = ClientStore.take_share(1, 0)
+  var diff = Share.sub(a, b)
+
+  if Mpc.has_capability("client-output"):
+    var outputs: list[Share] = [diff]
+    MpcOutput.send_to_client(0, outputs)
+    MpcOutput.send_to_client(1, outputs)
+
+  return Share.open(diff)

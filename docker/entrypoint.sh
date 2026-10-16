@@ -2,30 +2,27 @@
 set -e
 
 # StoffelVM Docker Entrypoint Script
-# Handles both leader and party node startup with proper coordination
+#
+# Two roles: `party` and `client`. Every party is the same shape and starts in
+# any order: it dials the addresses in STOFFEL_PEERS and forms the mesh its
+# coordinator's roster defines. Membership is the certificate allowlist that
+# roster installs, so no shared secret is configured here.
 
+# A party is published the execution it runs by its coordinator. A client is
+# told which execution to join: the operator who registered it reads the
+# identity the coordinator minted and passes it on. Every client is a
+# coordinator client — the coordinator is what tells it which nodes exist and
+# which certificates they must prove — so STOFFEL_COORD_ADDR is required.
 validate_env() {
-    if [ "${STOFFEL_ROLE}" != "client" ] && [ -z "${STOFFEL_AUTH_TOKEN:-}" ]; then
-        echo "ERROR: STOFFEL_AUTH_TOKEN must be set for ${STOFFEL_ROLE} mode."
-        echo "Bootnode and parties require authenticated discovery registration."
-        exit 2
-    fi
-
-    local needs_execution_id=false
-    case "${STOFFEL_ROLE:-}" in
-        leader|party)
-            needs_execution_id=true
-            ;;
-        client)
-            if [ -n "${STOFFEL_COORD_ADDR:-}" ]; then
-                needs_execution_id=true
-            fi
-            ;;
-    esac
-
-    if [ "$needs_execution_id" = true ]; then
+    if [ "${STOFFEL_ROLE:-}" = "client" ]; then
+        if [ -z "${STOFFEL_COORD_ADDR:-}" ]; then
+            echo "ERROR: STOFFEL_COORD_ADDR is required for a client. A client is given its"
+            echo "       node set, and the certificates those nodes must prove, by the"
+            echo "       coordinator it pins; STOFFEL_SERVERS supplies only addresses."
+            exit 2
+        fi
         if [ -z "${STOFFEL_EXECUTION_ID:-}" ]; then
-            echo "ERROR: STOFFEL_EXECUTION_ID is required for ${STOFFEL_ROLE} mode."
+            echo "ERROR: STOFFEL_EXECUTION_ID is required for a client."
             exit 2
         fi
         if ! [[ "${STOFFEL_EXECUTION_ID}" =~ ^[0-9a-fA-F]{64}$ ]] \
@@ -38,7 +35,7 @@ validate_env() {
 
 validate_env
 
-if [ "${STOFFEL_ROLE}" = "leader" ] || [ "${STOFFEL_ROLE}" = "party" ]; then
+if [ "${STOFFEL_ROLE}" = "party" ]; then
     /app/configure-peer-netem.sh
 fi
 
@@ -55,13 +52,12 @@ echo "=========================================="
 echo "Role: ${STOFFEL_ROLE}"
     if [ "${STOFFEL_ROLE}" = "client" ]; then
         echo "Inputs: ${STOFFEL_INPUTS}"
-        echo "Client Index: ${STOFFEL_CLIENT_INDEX:-unset}"
         echo "Manifest Slot: ${STOFFEL_CLIENT_SLOT:-auto}"
         echo "Servers: ${STOFFEL_SERVERS}"
 else
     echo "Party ID: ${STOFFEL_PARTY_ID}"
     echo "Bind Address: ${STOFFEL_BIND_ADDR}"
-    echo "Bootstrap: ${STOFFEL_BOOTSTRAP_ADDR:-N/A}"
+    echo "Peers: ${STOFFEL_PEERS:-N/A}"
     echo "Advertise IP: ${STOFFEL_ADVERTISE_IP}"
     echo "Expected Clients: ${STOFFEL_EXPECTED_CLIENTS:-none}"
 fi
@@ -70,11 +66,9 @@ echo "Threshold: ${STOFFEL_THRESHOLD}"
 echo "Program: ${STOFFEL_PROGRAM}"
 echo "Entry: ${STOFFEL_ENTRY}"
 echo "Coordinator: ${STOFFEL_COORD_ADDR:-N/A}"
-echo "Execution ID: ${STOFFEL_EXECUTION_ID:-N/A}"
 echo "Preproc Store: ${STOFFEL_PREPROC_STORE:-none}"
 echo "Local Store: ${STOFFEL_LOCAL_STORE:-none}"
 echo "Profiler: ${STOFFEL_PROFILE:-none}"
-echo "Auth Token: $( [ -n "${STOFFEL_AUTH_TOKEN:-}" ] && echo "configured" || echo "not set" )"
 echo "=========================================="
 
 # Wait for a host:port to be available (UDP check for QUIC)
@@ -99,7 +93,7 @@ wait_for_host() {
             fi
             # If UDP check is inconclusive, just verify ping works and continue
             # The application will handle connection retries
-            echo "Host ${host} is reachable, assuming bootnode is starting..."
+            echo "Host ${host} is reachable, assuming it is starting..."
             sleep 2
             return 0
         fi
@@ -110,6 +104,27 @@ wait_for_host() {
 
     echo "ERROR: ${host}:${port} did not become available after ${max_attempts} attempts"
     return 1
+}
+
+# Resolve every comma-separated host:port in STOFFEL_PEERS to an address the
+# transport can dial. Seed hints, not membership: a wrong address costs one
+# failed, certificate-pinned handshake.
+resolve_peer_list() {
+    local list=$1
+    local resolved=""
+    local entry
+
+    IFS=',' read -ra entries <<< "$list"
+    for entry in "${entries[@]}"; do
+        entry=$(echo "$entry" | tr -d '[:space:]')
+        [ -z "$entry" ] && continue
+        if [ -z "$resolved" ]; then
+            resolved="$(resolve_socket_addr "$entry")"
+        else
+            resolved="${resolved},$(resolve_socket_addr "$entry")"
+        fi
+    done
+    echo "$resolved"
 }
 
 resolve_socket_addr() {
@@ -138,10 +153,20 @@ build_command() {
     local cmd="/app/stoffel-run"
 
     if [ "${STOFFEL_ROLE}" = "client" ]; then
-        # Client mode: connect to coordinator and submit inputs
+        # Client mode: connect to the coordinator and submit inputs. The
+        # coordinator arguments are unconditional: there is no client that
+        # reaches a node without one.
         cmd="${cmd} --client"
         cmd="${cmd} --inputs ${STOFFEL_INPUTS}"
         cmd="${cmd} --servers ${STOFFEL_SERVERS}"
+        # A standing node serves clients on a listener separate from its mesh
+        # bind, so a client needs both: --servers for the node RPC, and
+        # --client-transport-servers for the client-facing socket. The mesh
+        # admits only the coordinator's node roster, which is why a client key
+        # never reaches it.
+        if [ -n "${STOFFEL_CLIENT_TRANSPORT_SERVERS:-}" ]; then
+            cmd="${cmd} --client-transport-servers ${STOFFEL_CLIENT_TRANSPORT_SERVERS}"
+        fi
         cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
         cmd="${cmd} --threshold ${STOFFEL_THRESHOLD:-1}"
         if [ -n "${STOFFEL_PROGRAM:-}" ]; then
@@ -159,16 +184,11 @@ build_command() {
         if [ -n "${STOFFEL_OUTPUT_FIXED_POINT_FRACTIONAL_BITS:-}" ]; then
             cmd="${cmd} --output-fixed-point-fractional-bits ${STOFFEL_OUTPUT_FIXED_POINT_FRACTIONAL_BITS}"
         fi
-        if [ -n "${STOFFEL_COORD_ADDR:-}" ]; then
-            cmd="${cmd} --off-chain-coord ${STOFFEL_COORD_ADDR}"
-            cmd="${cmd} --execution-id ${STOFFEL_EXECUTION_ID}"
-            cmd="${cmd} --cert ${STOFFEL_CERT}"
-            cmd="${cmd} --key ${STOFFEL_KEY}"
-            cmd="${cmd} --timestamp ${STOFFEL_TIMESTAMP:-0}"
-        fi
-        if [ -n "${STOFFEL_CLIENT_INDEX:-}" ]; then
-            cmd="${cmd} --client-index ${STOFFEL_CLIENT_INDEX}"
-        fi
+        cmd="${cmd} --off-chain-coord ${STOFFEL_COORD_ADDR}"
+        cmd="${cmd} --coord-cert ${STOFFEL_COORD_CERT:-/app/ids/server_cert.crt}"
+        cmd="${cmd} --execution-id ${STOFFEL_EXECUTION_ID}"
+        cmd="${cmd} --cert ${STOFFEL_CERT}"
+        cmd="${cmd} --key ${STOFFEL_KEY}"
         if [ -n "${STOFFEL_MPC_BACKEND:-}" ]; then
             cmd="${cmd} --mpc-backend ${STOFFEL_MPC_BACKEND}"
         fi
@@ -182,78 +202,57 @@ build_command() {
     # Add program path and entry function for non-client modes
     cmd="${cmd} ${STOFFEL_PROGRAM} ${STOFFEL_ENTRY}"
 
-    if [ "${STOFFEL_ROLE}" = "leader" ]; then
-        # Leader mode: runs bootnode + party 0
-        cmd="${cmd} --leader"
-        cmd="${cmd} --bind ${STOFFEL_BIND_ADDR}"
-        cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
-        cmd="${cmd} --threshold ${STOFFEL_THRESHOLD}"
-        BIND_PORT=$(echo "${STOFFEL_BIND_ADDR}" | awk -F: '{print $NF}')
-        ADVERTISE_PORT=$((BIND_PORT + 1000))
-        cmd="${cmd} --advertise ${STOFFEL_ADVERTISE_IP}:${ADVERTISE_PORT}"
-        if [ -n "${STOFFEL_ONE_OFF:-}" ]; then
-            cmd="${cmd} --one-off"
-        fi
-    elif [ "${STOFFEL_ROLE}" = "bootnode" ]; then
-        # Bootnode-only mode (no program execution)
-        cmd="/app/stoffel-run --bootnode"
-        cmd="${cmd} --bind ${STOFFEL_BIND_ADDR}"
-        cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
-    else
-        # Regular party mode
-        RESOLVED_BOOTSTRAP_ADDR=$(resolve_socket_addr "${STOFFEL_BOOTSTRAP_ADDR}")
-        cmd="${cmd} --party-id ${STOFFEL_PARTY_ID}"
-        cmd="${cmd} --bootstrap ${RESOLVED_BOOTSTRAP_ADDR}"
-        cmd="${cmd} --bind ${STOFFEL_BIND_ADDR}"
-        cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
-        cmd="${cmd} --threshold ${STOFFEL_THRESHOLD}"
-        BIND_PORT=$(echo "${STOFFEL_BIND_ADDR}" | awk -F: '{print $NF}')
-        cmd="${cmd} --advertise ${STOFFEL_ADVERTISE_IP}:${BIND_PORT}"
+    # Party mode. `--peers` is the switch that makes this a party of a mesh;
+    # the coordinator serves the roster that mesh is formed from, and the
+    # party count and threshold below are the expectation that roster is
+    # checked against.
+    RESOLVED_PEERS=$(resolve_peer_list "${STOFFEL_PEERS}")
+    cmd="${cmd} --party-id ${STOFFEL_PARTY_ID}"
+    cmd="${cmd} --peers ${RESOLVED_PEERS}"
+    cmd="${cmd} --bind ${STOFFEL_BIND_ADDR}"
+    cmd="${cmd} --n-parties ${STOFFEL_N_PARTIES}"
+    cmd="${cmd} --threshold ${STOFFEL_THRESHOLD}"
+    BIND_PORT=$(echo "${STOFFEL_BIND_ADDR}" | awk -F: '{print $NF}')
+    cmd="${cmd} --advertise ${STOFFEL_ADVERTISE_IP}:${BIND_PORT}"
+    # The coordinator counts retirement acknowledgements per party and requires
+    # n - t of them before an execution is evictable, so every party emits this.
+    # No party is designated: an acknowledgement that arrives after the
+    # execution was already forgotten is a success.
+    if [ -n "${STOFFEL_ONE_OFF:-}" ]; then
+        cmd="${cmd} --one-off"
     fi
 
-    if [ "${STOFFEL_ROLE}" = "leader" ] || [ "${STOFFEL_ROLE}" = "party" ]; then
-        cmd="${cmd} --execution-id ${STOFFEL_EXECUTION_ID}"
-    fi
+    cmd="${cmd} --off-chain-coord ${STOFFEL_COORD_ADDR}"
+    cmd="${cmd} --coord-cert ${STOFFEL_COORD_CERT:-/app/ids/server_cert.crt}"
+    cmd="${cmd} --cert ${STOFFEL_CERT}"
+    cmd="${cmd} --key ${STOFFEL_KEY}"
 
-    # Coordinator flags (for leader, party, and bootnode modes)
-    if [ -n "${STOFFEL_COORD_ADDR:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
-        cmd="${cmd} --off-chain-coord ${STOFFEL_COORD_ADDR}"
-        cmd="${cmd} --cert ${STOFFEL_CERT}"
-        cmd="${cmd} --key ${STOFFEL_KEY}"
-        cmd="${cmd} --timestamp ${STOFFEL_TIMESTAMP:-0}"
-    fi
-
-    if [ -n "${STOFFEL_RPC_ADDR:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+    if [ -n "${STOFFEL_RPC_ADDR:-}" ]; then
         cmd="${cmd} --rpc-bind ${STOFFEL_RPC_ADDR}"
     fi
 
-    if [ -n "${STOFFEL_EXPECTED_CLIENTS:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+    if [ -n "${STOFFEL_EXPECTED_CLIENTS:-}" ]; then
         cmd="${cmd} --expected-clients ${STOFFEL_EXPECTED_CLIENTS}"
     fi
 
-    if [ -n "${STOFFEL_WAIT_FOR_CLIENTS:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+    if [ -n "${STOFFEL_WAIT_FOR_CLIENTS:-}" ]; then
         cmd="${cmd} --wait-for-clients ${STOFFEL_WAIT_FOR_CLIENTS}"
     fi
 
-    if [ -n "${STOFFEL_CLIENT_INPUT_COUNT:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+    if [ -n "${STOFFEL_CLIENT_INPUT_COUNT:-}" ]; then
         cmd="${cmd} --client-input-count ${STOFFEL_CLIENT_INPUT_COUNT}"
     fi
 
-    if [ -n "${STOFFEL_CLIENT_INPUT_TOTAL:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+    if [ -n "${STOFFEL_CLIENT_INPUT_TOTAL:-}" ]; then
         cmd="${cmd} --client-input-total ${STOFFEL_CLIENT_INPUT_TOTAL}"
     fi
 
-    if [ -n "${STOFFEL_PREPROC_STORE:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+    if [ -n "${STOFFEL_PREPROC_STORE:-}" ]; then
         cmd="${cmd} --preproc-store ${STOFFEL_PREPROC_STORE}"
     fi
 
-    if [ -n "${STOFFEL_LOCAL_STORE:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
+    if [ -n "${STOFFEL_LOCAL_STORE:-}" ]; then
         cmd="${cmd} --local-store ${STOFFEL_LOCAL_STORE}"
-    fi
-
-    if [ -z "${STOFFEL_COORD_ADDR:-}" ] && [ -n "${STOFFEL_CERT:-}" ] && [ -n "${STOFFEL_KEY:-}" ] && [ "${STOFFEL_ROLE}" != "bootnode" ]; then
-        cmd="${cmd} --cert ${STOFFEL_CERT}"
-        cmd="${cmd} --key ${STOFFEL_KEY}"
     fi
 
     # Add MPC backend if specified
@@ -275,14 +274,6 @@ build_command() {
     fi
     if [ "${STOFFEL_TRACE_STACK}" = "true" ]; then
         cmd="${cmd} --trace-stack"
-    fi
-
-    # Add NAT traversal flags if enabled
-    if [ "${STOFFEL_ENABLE_NAT}" = "true" ]; then
-        cmd="${cmd} --nat"
-        if [ -n "${STOFFEL_STUN_SERVERS}" ]; then
-            cmd="${cmd} --stun-servers ${STOFFEL_STUN_SERVERS}"
-        fi
     fi
 
     echo "$cmd"
@@ -359,22 +350,9 @@ main() {
         run_command "$CMD"
     fi
 
-    # If we're a party (not leader), wait for the bootnode to be ready
-    if [ "${STOFFEL_ROLE}" = "party" ] && [ -n "${STOFFEL_BOOTSTRAP_ADDR}" ] && [ "${STOFFEL_SKIP_HOST_WAIT:-false}" != "true" ]; then
-        # Parse host and port from bootstrap address
-        BOOTSTRAP_HOST=$(echo "${STOFFEL_BOOTSTRAP_ADDR}" | cut -d: -f1)
-        BOOTSTRAP_PORT=$(echo "${STOFFEL_BOOTSTRAP_ADDR}" | cut -d: -f2)
-
-        # Small fixed delay to let bootnode stabilize
-        echo "Party ${STOFFEL_PARTY_ID}: waiting 2s before connecting..."
-        sleep 2
-
-        # Wait for bootnode to be available
-        if ! wait_for_host "$BOOTSTRAP_HOST" "$BOOTSTRAP_PORT" 120; then
-            echo "Failed to connect to bootnode at ${STOFFEL_BOOTSTRAP_ADDR}"
-            exit 1
-        fi
-    fi
+    # A party starts immediately and waits for nothing: the parties are
+    # symmetric, and the mesh re-dials every peer it is still missing on its own
+    # schedule until the discovery budget runs out.
 
     # Build and execute the command
     CMD=$(build_command)
