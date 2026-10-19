@@ -32,45 +32,24 @@ jobs:
       # (measured 2026-10-16 on a probe crate with a real dependent of a patch
       # pointed at a missing path: fmt rc 0, check and clippy rc 101).
       #
-      # AND WITH IT, TODAY, THE CARGO JOBS STILL GO RED — at E0432, not at
-      # resolution. Measured 2026-10-16 in the coordinator worktree: HEAD and
-      # origin/feature/no-bootnode are both 012f5e3, so this clone gets the
-      # whole pushed branch, but the execution-stream half this repository
-      # imports (ExecutionNotice, CoordinatorIncarnation, PublishedExecution,
-      # Subscription, ExecutionRequest) is 8 files of STAGED, UNCOMMITTED work
-      # there and is in no commit.
-      #
-      # WHERE they go red, measured the same day, because "every cargo step
-      # fails" is both wrong and easy to misread: "Check formatting" PASSES
-      # here too, for the same reason as above, and "Run clippy" is the step
-      # that dies — stoffel-vm-runner, 9 errors in the lib and 19 in its lib
-      # test — so no cargo step after it runs at all. docker-build declares
-      # `needs: [build-and-test]`, so it is skipped rather than red. The gap is
-      # wider than those five names too: admission::PreRegisteredClient,
-      # AbortReason::OperatorRequest, an ExecutionRegistration.request field,
+      # The execution-stream half this repository imports — ExecutionNotice,
+      # CoordinatorIncarnation, PublishedExecution, Subscription,
+      # ExecutionRequest, admission::PreRegisteredClient,
+      # AbortReason::OperatorRequest, ExecutionRegistration.request,
       # CoordinatorLink::subscribe_executions and
-      # CoordinatorRPCServerSharedBase::with_operators are absent from that
-      # commit as well. The last one does NOT show up in the clippy run above:
-      # its caller is docker/coordinator-wrapper, its own workspace, where
-      # "Build the coordinator wrapper" fails on two errors of its own (E0432
-      # ExecutionRequest and E0599 with_operators, measured 2026-10-16). A red
-      # cargo job on this branch is that, not the change under review; the fix
-      # is a commit, a review and a push in the coordinator, and needs no edit
-      # here. §9.F.5 carries the inventory.
+      # CoordinatorRPCServerSharedBase::with_operators — was 8 files of staged,
+      # uncommitted work in that repository until 2026-10-19, so this clone
+      # resolved but every cargo step after "Check formatting" died at E0432.
+      # It is now committed and pushed on feature/no-bootnode as c1d0833, so
+      # this clone carries it. What remains TEMPORARY is only the patch itself:
+      # once stoffel-mpc-coordinator 0.3.0 is published, delete this step and
+      # both [patch.crates-io] tables. §9.F.5 carries the inventory.
       #
-      # AND NOT BY REPOINTING THIS CLONE, the fix this file invites: measured
-      # 2026-10-16 at each pushed SHA of that repository rather than at a
-      # tracking ref, none of its 21 heads or 2 tags carries ExecutionNotice,
-      # CoordinatorIncarnation, PublishedExecution, subscribe_executions or
-      # PreRegisteredClient as whole words, and
-      # `git log --all -S'\b<name>\b' --pickaxe-regex` matches 0 commits for
-      # each. The whole-word form matters: plain -S is a literal substring
-      # search, and -SPreRegisteredClient DOES match, on
-      # RegistrationError::DuplicatePreRegisteredClient, which is a different
-      # and committed name. feature/no-bootnode is the only head carrying even
-      # the committed half (AdmissionPolicy, 5 files, 0 on every other head),
-      # so this branch is already the best target available. §9.F.5 records the
-      # measurement.
+      # If a cargo job here goes red at E0432 or E0599 on one of those names
+      # again, check that branch's tip before suspecting this repository: the
+      # failure mode above was a missing commit there, not a defect here, and
+      # repointing this clone does not fix it — measured 2026-10-16, none of
+      # that repository's other heads or tags carries those names at all.
       - name: Check out the unpublished coordinator beside this repository
         run: |
           git clone --depth 1 --branch feature/no-bootnode \
