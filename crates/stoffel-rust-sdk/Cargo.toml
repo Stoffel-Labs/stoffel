@@ -41,8 +41,8 @@ tracing-opentelemetry = "=0.33.0"
 tracing-subscriber = { version = "=0.3.23", features = ["fmt"] }
 
 stoffellang = { version = "=0.2.0", path = "../stoffel-lang" }
-stoffel-mpc-coordinator-shared = "=0.2.0"
-stoffel-mpc-coordinator-off-chain = "=0.2.0"
+stoffel-mpc-coordinator-shared = "=0.3.0"
+stoffel-mpc-coordinator-off-chain = "=0.3.0"
 stoffel-vm = { version = "=0.2.0", path = "../stoffel-vm" }
 stoffel-vm-runner = { version = "=0.2.0", path = "../stoffel-vm-runner" }
 stoffel-vm-types = { version = "=0.2.0", path = "../stoffel-vm-types" }

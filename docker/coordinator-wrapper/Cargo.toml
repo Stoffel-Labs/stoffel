@@ -23,8 +23,16 @@ clap = { version = "=4.6.1", features = ["derive"] }
 hex = "=0.4.3"
 jsonrpsee = { version = "=0.26.0", features = ["full"] }
 rustls = "=0.23.41"
-stoffel-mpc-coordinator-off-chain = "=0.2.0"
-stoffel-mpc-coordinator-shared = "=0.2.0"
+stoffel-mpc-coordinator-off-chain = "=0.3.0"
+stoffel-mpc-coordinator-shared = "=0.3.0"
 stoffelmpc-mpc = { package = "stoffelcrypto", version = "=0.1.1" }
 tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread", "signal", "time"] }
-x509-parser = "=0.18.1"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+
+# TEMPORARY, until stoffel-mpc-coordinator 0.3.0 is published
+# (docs/design/bootnode-elimination.md §9.F.5, §12.H). This crate is its own
+# workspace, so the root table does not reach it: the path is relative to this
+# manifest and names the same sibling checkout the root workspace uses.
+[patch.crates-io]
+stoffel-mpc-coordinator-off-chain = { version = "0.3.0", path = "../../../stoffel-mpc-coordinator-roster-admission/crates/off-chain" }
+stoffel-mpc-coordinator-shared = { version = "0.3.0", path = "../../../stoffel-mpc-coordinator-roster-admission/crates/coord-shared" }

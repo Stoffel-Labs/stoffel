@@ -175,13 +175,14 @@ impl ExecutionEntry {
 
 /// Standing-node execution supervisor.
 ///
-/// The durable control-plane journal owns replay prevention; terminal entries
-/// leave this in-memory supervisor after their event is emitted. The trusted
-/// command log is the sole admission and flow-control boundary;
-/// a local scheduler could choose different runnable programs on different
-/// parties and split the mesh. Every Prepare launches an independent Tokio task
-/// after setup, so an execution waiting on a faulty peer cannot head-of-line
-/// block another admitted, runnable execution.
+/// A durable index of admitted identities owns replay prevention; terminal
+/// entries leave this in-memory supervisor after their event is emitted. The
+/// coordinator is the sole admission and flow-control boundary: it alone
+/// decides which executions this node runs, because a local scheduler could
+/// choose different runnable programs on different parties and split the mesh.
+/// Every admission launches an independent Tokio task after setup, so an
+/// execution waiting on a faulty peer cannot head-of-line block another
+/// admitted, runnable execution.
 pub struct NodeSupervisor {
     state: Mutex<SupervisorState>,
     events: mpsc::UnboundedSender<NodeEvent>,
@@ -208,7 +209,7 @@ impl NodeSupervisor {
     }
 
     /// Admit one execution and return its immediate acknowledgement. Later
-    /// lifecycle transitions are published to the control-plane event sink.
+    /// lifecycle transitions are published to the node's event sink.
     pub fn prepare<F, Fut>(
         self: &Arc<Self>,
         spec: ExecutionSpecV1,
@@ -244,16 +245,22 @@ impl NodeSupervisor {
             entry
         };
 
-        // Capture the acknowledgement before the new preparation task can
-        // advance concurrently on a multi-threaded runtime.
-        self.spawn_execution(Arc::clone(&entry), prepare);
+        // Publish the acknowledgement before the new preparation task can
+        // advance concurrently on a multi-threaded runtime, so this execution's
+        // events begin with `Preparing` rather than with whatever the task
+        // reaches first. It is published as well as returned for the same
+        // reason as the cancellation acknowledgement: admission is a transition
+        // of the execution's lifecycle, and a watcher of this node's events
+        // learns from it that an execution was admitted here and is now setting
+        // up, which no later event states on its own.
+        let acknowledgement = NodeEvent::new(entry.spec.execution_id, NodeEventKind::Preparing);
+        self.emit(acknowledgement.clone());
 
         // Setup can wait on preprocessing or faulty peers, so it runs outside
         // the serial command pump and launches once its private resources are ready.
-        Ok(NodeEvent::new(
-            entry.spec.execution_id,
-            NodeEventKind::Preparing,
-        ))
+        self.spawn_execution(Arc::clone(&entry), prepare);
+
+        Ok(acknowledgement)
     }
 
     fn spawn_execution<F, Fut>(self: &Arc<Self>, entry: Arc<ExecutionEntry>, prepare: F)
@@ -346,6 +353,28 @@ impl NodeSupervisor {
         });
     }
 
+    /// Every execution this node is currently running.
+    ///
+    /// The coordinator's opening snapshot names every execution it still wants
+    /// this node to run, so reconciling an instance that the snapshot omitted
+    /// needs the set this node believes it is running.
+    pub fn live_executions(&self) -> Vec<ExecutionId> {
+        self.state.lock().executions.keys().copied().collect()
+    }
+
+    /// Whether this node is currently running `execution_id`.
+    pub fn is_live(&self, execution_id: ExecutionId) -> bool {
+        self.state.lock().executions.contains_key(&execution_id)
+    }
+
+    /// Stop one running execution, acknowledging it on the event stream.
+    ///
+    /// The acknowledgement is published as well as returned, because accepting
+    /// a cancellation is a transition of the execution's lifecycle like any
+    /// other and the caller is not the only party interested in it: whoever
+    /// watches this node's events sees that a cancellation reached an execution
+    /// that was running, which is what distinguishes it from one that had
+    /// already ended. The terminal `Cancelled` follows once the work unwinds.
     pub fn cancel(&self, execution_id: ExecutionId) -> Result<NodeEvent, NodeSupervisorError> {
         let entry = self
             .state
@@ -354,7 +383,9 @@ impl NodeSupervisor {
             .get(&execution_id)
             .cloned()
             .ok_or(NodeSupervisorError::UnknownExecution { execution_id })?;
-        Ok(self.request_cancellation(entry))
+        let accepted = self.request_cancellation(entry);
+        self.emit(accepted.clone());
+        Ok(accepted)
     }
 
     fn request_cancellation(&self, entry: Arc<ExecutionEntry>) -> NodeEvent {
@@ -374,6 +405,31 @@ impl NodeSupervisor {
         NodeEvent::new(entry.spec.execution_id, NodeEventKind::CancelAccepted)
     }
 
+    /// Record `event` as this execution's terminal event and emit it.
+    ///
+    /// A cancellation decides the event: an execution whose token was cancelled
+    /// is reported as cancelled, whatever the work it interrupted managed to
+    /// produce first. Every cancellation this supervisor receives is an order
+    /// to stop *this* work — an aborted execution, an omission from the
+    /// coordinator's snapshot that nothing explains, or process shutdown — so
+    /// the order is what the execution ended by, and a watcher that asked for
+    /// it reads that it took effect even when the online phase had already
+    /// finished.
+    ///
+    /// The benign case is excluded before it reaches here rather than tolerated
+    /// here, on every path that can order a stop. The coordinator publishes the
+    /// removal of a *finished* execution to the whole roster as a cancellation
+    /// too, and a node acknowledges its retirement during cleanup — which this
+    /// supervisor runs while the entry is still live — so both the notice and
+    /// the omission it causes race this node's own completion by construction.
+    /// The notice carries `ExecutionOutcome::Finished` and the execution stream
+    /// requests no cancellation for it; every snapshot taken afterwards omits
+    /// the execution, and the stream keeps an instance whose retirement it has
+    /// recorded, whether it recorded it from that notice or from the
+    /// acknowledgement this node sent itself
+    /// (`CoordinatorExecutionStream::reconcile_snapshot` over the shared
+    /// `InstanceLedger`). So a cancelled token here always means an order to
+    /// stop.
     fn finish_terminal(&self, entry: &ExecutionEntry, mut event: NodeEventKind) {
         {
             let mut state = entry.state.lock();
@@ -629,6 +685,20 @@ mod tests {
             tokio::task::yield_now().await;
         }
         handler.release.notify_one();
+        // The admission acknowledgement is published, and it is published
+        // first: this execution's events open with `Preparing`, whatever the
+        // preparation task reaches in the meantime.
+        let admitted = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("the admission acknowledgement is emitted")
+            .expect("supervisor event channel remains open");
+        assert!(matches!(
+            admitted,
+            NodeEvent {
+                execution_id: id,
+                kind: NodeEventKind::Preparing,
+            } if id == execution_id
+        ));
         let ready = tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await
             .expect("ready event is emitted")
@@ -764,5 +834,173 @@ mod tests {
         })
         .await;
         assert_eq!(*handler.started.lock(), vec![1, 3]);
+    }
+
+    /// Succeeds, then parks in cleanup until released, which is where a node
+    /// acknowledges its retirement of the execution to the coordinator.
+    #[derive(Default)]
+    struct RetiringHandler {
+        in_cleanup: AtomicBool,
+        changed: Notify,
+        release_cleanup: Notify,
+    }
+
+    struct RetiringPrepared(Arc<RetiringHandler>);
+
+    #[async_trait]
+    impl PreparedNodeExecution for RetiringPrepared {
+        async fn execute(&mut self) -> Result<VmCooperativeExecutionMetrics, String> {
+            Ok(VmCooperativeExecutionMetrics {
+                instruction_budget_yields: 7,
+                online_effect_yields: 3,
+            })
+        }
+
+        async fn cleanup(&mut self) -> Result<(), String> {
+            self.0.in_cleanup.store(true, Ordering::Release);
+            self.0.changed.notify_waiters();
+            self.0.release_cleanup.notified().await;
+            Ok(())
+        }
+    }
+
+    impl RetiringHandler {
+        async fn prepare(
+            self: Arc<Self>,
+            _context: NodeExecutionContext,
+        ) -> Result<Box<dyn PreparedNodeExecution>, String> {
+            Ok(Box::new(RetiringPrepared(self)))
+        }
+    }
+
+    /// An abort that lands once the online phase has produced its metrics,
+    /// while the execution is still in cleanup, is still an order to stop: the
+    /// execution is reported as cancelled, so an operator who aborted it reads
+    /// that the abort took effect.
+    ///
+    /// The notice that the *coordinator* publishes when an execution finishes
+    /// is a cancellation of the same shape but carries
+    /// `ExecutionOutcome::Finished`, and the execution stream requests no
+    /// cancellation for it -- see
+    /// `execution_stream::tests::a_finished_cancel_retires_the_identity_without_stopping_the_instance`.
+    /// Were it to cancel, this is the ordering that would make the last party
+    /// to finish any execution report a successful run as cancelled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_abort_after_the_online_phase_finished_reports_cancelled() {
+        let handler = Arc::new(RetiringHandler::default());
+        let (supervisor, mut events) = NodeSupervisor::new();
+        let execution = spec(21);
+        let execution_id = execution.execution_id;
+        supervisor
+            .prepare(execution, preparation!(handler))
+            .unwrap();
+        wait_for(&mut events, execution_id, |kind| {
+            matches!(kind, NodeEventKind::Ready)
+        })
+        .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let changed = handler.changed.notified();
+                if handler.in_cleanup.load(Ordering::Acquire) {
+                    return;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("the execution reaches cleanup");
+
+        // Still live, which is why the notice can reach it at all.
+        let accepted = supervisor
+            .cancel(execution_id)
+            .expect("the instance has not left the supervisor yet");
+        assert!(matches!(accepted.kind, NodeEventKind::CancelAccepted));
+        handler.release_cleanup.notify_one();
+
+        let terminal = tokio::time::timeout(Duration::from_secs(1), async {
+            let acknowledgement = events.recv().await.expect("event channel remains open");
+            // The acceptance is published before the terminal event, so a
+            // watcher sees that the cancellation reached a running execution.
+            assert_eq!(acknowledgement.execution_id, execution_id);
+            assert!(matches!(
+                acknowledgement.kind,
+                NodeEventKind::CancelAccepted
+            ));
+            loop {
+                let event = events.recv().await.expect("event channel remains open");
+                if event.execution_id == execution_id {
+                    return event.kind;
+                }
+            }
+        })
+        .await
+        .expect("the execution reaches a terminal event");
+        assert!(
+            matches!(terminal, NodeEventKind::Cancelled),
+            "an aborted execution reported {terminal:?}"
+        );
+    }
+
+    /// The same cancellation, one step earlier: `execute` is still running, so
+    /// it reports its own interruption and the execution is cancelled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancellation_during_the_online_phase_cancels() {
+        struct Interrupted(Arc<RetiringHandler>);
+
+        #[async_trait]
+        impl PreparedNodeExecution for Interrupted {
+            async fn execute(&mut self) -> Result<VmCooperativeExecutionMetrics, String> {
+                self.0.in_cleanup.store(true, Ordering::Release);
+                self.0.changed.notify_waiters();
+                self.0.release_cleanup.notified().await;
+                Err("execution cancelled".to_owned())
+            }
+        }
+
+        let handler = Arc::new(RetiringHandler::default());
+        let (supervisor, mut events) = NodeSupervisor::new();
+        let execution = spec(22);
+        let execution_id = execution.execution_id;
+        let prepared = Arc::clone(&handler);
+        supervisor
+            .prepare(execution, move |_context| {
+                let prepared = Arc::clone(&prepared);
+                async move { Ok(Box::new(Interrupted(prepared)) as Box<dyn PreparedNodeExecution>) }
+            })
+            .unwrap();
+        wait_for(&mut events, execution_id, |kind| {
+            matches!(kind, NodeEventKind::Ready)
+        })
+        .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let changed = handler.changed.notified();
+                if handler.in_cleanup.load(Ordering::Acquire) {
+                    return;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("the execution reaches its online phase");
+
+        supervisor.cancel(execution_id).unwrap();
+        handler.release_cleanup.notify_one();
+        let terminal = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let event = events.recv().await.expect("event channel remains open");
+                if event.execution_id == execution_id
+                    && !matches!(event.kind, NodeEventKind::CancelAccepted)
+                {
+                    return event.kind;
+                }
+            }
+        })
+        .await
+        .expect("the execution reaches a terminal event");
+        assert!(
+            matches!(terminal, NodeEventKind::Cancelled),
+            "an interrupted execution reported {terminal:?}"
+        );
     }
 }

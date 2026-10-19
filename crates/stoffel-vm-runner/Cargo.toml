@@ -14,11 +14,19 @@ publish = true
 name = "stoffel-run"
 path = "src/bin/stoffel-run.rs"
 
+# The operator's side of the coordinator's execution control plane. It lives
+# beside the node binary because it computes a program's content address with
+# the VM's own `program_id_from_bytes`, so an operator and a node always agree
+# on which program an execution names.
+[[bin]]
+name = "stoffel-coord-ctl"
+path = "src/bin/stoffel-coord-ctl.rs"
+
 [dependencies]
 stoffel-vm = { version = "=0.2.0", path = "../stoffel-vm" }
 stoffel-vm-types = { version = "=0.2.0", path = "../stoffel-vm-types" }
-stoffel-mpc-coordinator-shared = "=0.2.0"
-stoffel-mpc-coordinator-off-chain = "=0.2.0"
+stoffel-mpc-coordinator-shared = "=0.3.0"
+stoffel-mpc-coordinator-off-chain = "=0.3.0"
 stoffelmpc-mpc = { package = "stoffelcrypto", version = "=0.1.1", features = ["statistics"] }
 stoffelnet = "=0.1.1"
 ark-bls12-381 = "=0.5.0"

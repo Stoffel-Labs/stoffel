@@ -27,7 +27,7 @@ RUN mkdir -p /build/.cargo && \
       '[net]' \
       'git-fetch-with-cli = true' \
       '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
+      '[patch.crates-io]' \
       'stoffel-mpc-coordinator-off-chain = { path = "/opt/stoffel-coordinator/crates/off-chain" }' \
       'stoffel-mpc-coordinator-shared = { path = "/opt/stoffel-coordinator/crates/coord-shared" }' \
       '' \
@@ -37,7 +37,6 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 
-ARG ENABLE_NAT=false
 ARG PROFILE_BUILD=false
 
 COPY --from=planner /build/recipe.json /build/recipe.json
@@ -50,7 +49,7 @@ RUN mkdir -p ~/.ssh && \
 RUN --mount=type=ssh \
     --mount=type=cache,id=stoffel-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=stoffel-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=stoffel-benchmark-target-${PROFILE_BUILD}-${ENABLE_NAT},target=/build/target,sharing=locked \
+    --mount=type=cache,id=stoffel-benchmark-target-${PROFILE_BUILD},target=/build/target,sharing=locked \
     export RUSTFLAGS="--cfg aes_armv8 --cfg polyval_armv8"; \
     if [ "$PROFILE_BUILD" = "true" ]; then \
         export CARGO_PROFILE_RELEASE_DEBUG=2; \
@@ -67,7 +66,7 @@ RUN mkdir -p /build/.cargo && \
       '[net]' \
       'git-fetch-with-cli = true' \
       '' \
-      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
+      '[patch.crates-io]' \
       'stoffel-mpc-coordinator-off-chain = { path = "/opt/stoffel-coordinator/crates/off-chain" }' \
       'stoffel-mpc-coordinator-shared = { path = "/opt/stoffel-coordinator/crates/coord-shared" }' \
       '' \
@@ -76,27 +75,26 @@ RUN mkdir -p /build/.cargo && \
 RUN --mount=type=ssh \
     --mount=type=cache,id=stoffel-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=stoffel-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=stoffel-benchmark-target-${PROFILE_BUILD}-${ENABLE_NAT},target=/build/target,sharing=locked \
+    --mount=type=cache,id=stoffel-benchmark-target-${PROFILE_BUILD},target=/build/target,sharing=locked \
     export RUSTFLAGS="--cfg aes_armv8 --cfg polyval_armv8"; \
     if [ "$PROFILE_BUILD" = "true" ]; then \
         export CARGO_PROFILE_RELEASE_DEBUG=2; \
         export CARGO_PROFILE_RELEASE_STRIP=none; \
         export RUSTFLAGS="$RUSTFLAGS -C force-frame-pointers=yes"; \
     fi; \
-    if [ "$ENABLE_NAT" = "true" ]; then \
-        cargo build --release --package stoffel-vm-runner --bin stoffel-run --features nat,statistics; \
-    else \
-        cargo build --release --package stoffel-vm-runner --bin stoffel-run --features statistics; \
-    fi; \
+    cargo build --release --package stoffel-vm-runner \
+        --features statistics \
+        --bin stoffel-run \
+        --bin stoffel-coord-ctl; \
     if [ "$PROFILE_BUILD" != "true" ]; then \
-        strip target/release/stoffel-run; \
+        strip target/release/stoffel-run target/release/stoffel-coord-ctl; \
     fi; \
     mkdir -p /build/artifacts && \
-    cp target/release/stoffel-run /build/artifacts/stoffel-run
+    cp target/release/stoffel-run target/release/stoffel-coord-ctl /build/artifacts/
 
 RUN --mount=type=cache,id=stoffel-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=stoffel-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=stoffel-benchmark-target-${PROFILE_BUILD}-${ENABLE_NAT},target=/build/target,sharing=locked \
+    --mount=type=cache,id=stoffel-benchmark-target-${PROFILE_BUILD},target=/build/target,sharing=locked \
     export RUSTFLAGS="--cfg aes_armv8 --cfg polyval_armv8"; \
     if [ "$PROFILE_BUILD" = "true" ]; then \
         export CARGO_PROFILE_RELEASE_DEBUG=2; \
@@ -141,6 +139,9 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY --from=builder /build/artifacts/stoffel-run /app/stoffel-run
+# The operator's side of the coordinator's control plane, so the benchmark
+# stack's registrar can ask the coordinator to run the packaged program.
+COPY --from=builder /build/artifacts/stoffel-coord-ctl /app/stoffel-coord-ctl
 COPY --from=builder /build/programs /app/programs
 COPY docker/entrypoint.sh /app/entrypoint.sh
 COPY docker/configure-peer-netem.sh /app/configure-peer-netem.sh

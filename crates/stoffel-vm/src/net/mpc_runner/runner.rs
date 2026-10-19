@@ -13,7 +13,6 @@ use crate::net::mpc_engine::{
     AsyncMpcEngine, MpcEngine, MpcInstanceId, MpcPartyCount, MpcPartyId, MpcSessionTopology,
     MpcThreshold,
 };
-use crate::storage::preproc::{LmdbPreprocStore, PreprocStore};
 use crate::VirtualMachineResult;
 
 use super::config::{MpcExecutionResult, MpcRunnerConfig};
@@ -276,30 +275,6 @@ where
     /// Get the typed MPC threshold parameter.
     pub fn threshold_param(&self) -> MpcThreshold {
         self.topology().threshold_param()
-    }
-
-    /// Attach a persistent preprocessing store to the MPC engine.
-    ///
-    /// Must be called before `preprocess()` / `start()`. The engine will
-    /// attempt to load existing material from the store before running the MPC
-    /// preprocessing protocol, and persist newly generated material for future
-    /// runs.
-    pub fn set_preproc_store(
-        &self,
-        store: Arc<dyn PreprocStore>,
-        program_hash: [u8; 32],
-    ) -> MpcRunnerResult<()> {
-        self.mpc_engine
-            .preproc_persistence_ops()
-            .map_mpc_runner_backend_err("preproc_persistence_ops")?
-            .set_preproc_store(store, program_hash)
-            .map_mpc_runner_backend_err("set_preproc_store")
-    }
-
-    /// Convenience: open the default LMDB store and attach it.
-    pub fn enable_preproc_persistence(&self, program_hash: [u8; 32]) -> MpcRunnerResult<()> {
-        let store = Arc::new(LmdbPreprocStore::open(LmdbPreprocStore::default_path())?);
-        self.set_preproc_store(store, program_hash)
     }
 }
 

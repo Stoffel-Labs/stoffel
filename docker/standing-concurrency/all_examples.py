@@ -4,6 +4,9 @@
 The campaign deliberately uses one long-lived five-party mesh. Every independent
 example is prepared before clients are started, so the online phases overlap.
 Programs with an ordering dependency are run in a final, explicitly ordered wave.
+
+Executions are submitted to the coordinator, which mints each identity and
+publishes it to the roster; the campaign never names one. See acceptance.py.
 """
 
 from __future__ import annotations
@@ -25,12 +28,12 @@ from acceptance import (
     AcceptanceFailure,
     ClientJob,
     COORDINATOR,
+    COORDINATOR_CERT,
     HEX_ID,
     Harness,
     NODE_CLIENT_TRANSPORT_SERVERS,
     NODE_RPC_SERVERS,
     PARTIES,
-    execution_id,
 )
 
 
@@ -64,6 +67,11 @@ def __standing_example_main() -> int64:
 # end-to-end progress on one persistent mesh. The environment override retains
 # explicit stress testing at any desired fan-out.
 DEFAULT_ALL_EXAMPLES_WAVE_SIZE = 16
+
+# How many `main.stfl` examples the catalog holds. `compile_catalog` refuses to
+# run against any other number, so this is the one place to raise when an
+# example is added.
+CANONICAL_EXAMPLE_COUNT = 191
 
 
 # Examples that intentionally rely on a dedicated SDK/Compose harness rather
@@ -231,8 +239,6 @@ class AllExamplesHarness(Harness):
                 "--volume",
                 f"{self.state / 'programs'}:/run/programs:ro",
                 "--env",
-                f"STOFFEL_AUTH_TOKEN={self.env.get('STOFFEL_AUTH_TOKEN', 'stoffel-standing-compose-token')}",
-                "--env",
                 f"STOFFEL_EXECUTION_COORDINATION_TIMEOUT_SECONDS={self.coordination_seconds}",
                 "--env",
                 f"STOFFEL_MPC_PROTOCOL_TIMEOUT_SECONDS={self.protocol_seconds}",
@@ -260,7 +266,6 @@ class AllExamplesHarness(Harness):
         self.compose(
             "--profile", "tools", "down", "--remove-orphans", "--volumes", check=False
         )
-        self.reset_control()
         self.prepare_client_identities()
         # `programs` is the production catalog mounted into every standing
         # node. Content-addressed artifacts from an earlier campaign are still
@@ -390,8 +395,15 @@ class AllExamplesHarness(Harness):
         compiler = self.root / "target/debug/stoffellang"
         inspector = self.root / "target/debug/stoffel-run"
         sources = sorted(self.examples_dir.rglob("main.stfl"))
-        if len(sources) != 190:
-            raise AcceptanceFailure(f"expected 190 canonical examples, found {len(sources)}")
+        # The whole catalog, counted, so that a glob which silently matches
+        # fewer examples than exist cannot pass for a full run. Adding an
+        # example means raising this number in the same change: it said 190
+        # while `mpc_sha256_client_io` was added beside the other 190, and this
+        # campaign then refused to start for everyone who tried it.
+        if len(sources) != CANONICAL_EXAMPLE_COUNT:
+            raise AcceptanceFailure(
+                f"expected {CANONICAL_EXAMPLE_COUNT} canonical examples, found {len(sources)}"
+            )
         if self.selected_examples is not None:
             by_name = {
                 path.parent.relative_to(self.examples_dir).as_posix(): path for path in sources
@@ -559,12 +571,6 @@ class AllExamplesHarness(Harness):
         inputs = client.get("inputs", [])
         if inputs:
             args.extend(["--inputs", ",".join(str(value) for value in inputs)])
-            input_index = 0
-            for admitted in execution.get("clients", []):
-                if admitted is client:
-                    break
-                input_index += len(admitted.get("inputs", []))
-            args.extend(["--client-index", str(input_index)])
         args.extend(
             [
                 "--outputs",
@@ -575,6 +581,9 @@ class AllExamplesHarness(Harness):
                 NODE_CLIENT_TRANSPORT_SERVERS,
                 "--off-chain-coord",
                 COORDINATOR,
+                # Every coordinator connection pins the coordinator's key.
+                "--coord-cert",
+                COORDINATOR_CERT,
                 "--n-parties",
                 "5",
                 "--threshold",
@@ -636,23 +645,18 @@ class AllExamplesHarness(Harness):
 def run_wave(
     harness: AllExamplesHarness,
     examples: list[dict[str, Any]],
-    first_sequence: int,
-    first_execution: int,
-) -> tuple[int, int]:
+) -> None:
     executions = []
-    sequence = first_sequence
-    number = first_execution
     for example in examples:
         execution = dict(example)
-        execution["execution_id"] = execution_id(number)
-        number += 1
+        # The coordinator mints the identity and publishes the execution to the
+        # roster; `submit` records what it minted on the execution.
+        harness.submit(execution)
         executions.append(execution)
-        harness.publish_prepare(sequence, execution)
-        sequence += 1
 
     print(f"Waiting for {len(executions)} concurrent preparations...", flush=True)
-    for offset, execution in enumerate(executions):
-        harness.expect_ready(first_sequence + offset, execution)
+    for execution in executions:
+        harness.expect_ready(execution)
 
     jobs = [
         harness.start_catalog_client("all", execution, client)
@@ -669,17 +673,16 @@ def run_wave(
             event = harness.terminal(
                 execution["execution_id"], party, {"Completed", "Failed", "Cancelled"}
             )
-            if harness.node_event(event).get("event") != "completed":
+            if event["event"] != "completed":
                 failures.append(
                     {
                         "example": execution["name"],
                         "party": party,
-                        "event": harness.node_event(event),
+                        "event": event,
                     }
                 )
     if failures:
         raise AcceptanceFailure(f"catalog execution failures: {json.dumps(failures, indent=2)}")
-    return sequence, number
 
 
 def run_all_examples(harness: AllExamplesHarness) -> None:
@@ -716,7 +719,6 @@ def run_all_examples(harness: AllExamplesHarness) -> None:
         f"wave(s) of up to {wave_size} ==",
         flush=True,
     )
-    sequence, number = 1, 10_000
     for start in range(0, len(concurrent), wave_size):
         wave = concurrent[start : start + wave_size]
         print(
@@ -724,10 +726,10 @@ def run_all_examples(harness: AllExamplesHarness) -> None:
             f"{len(wave)} examples ==",
             flush=True,
         )
-        sequence, number = run_wave(harness, wave, sequence, number)
+        run_wave(harness, wave)
     if ordered:
         print(f"== Running {len(ordered)} dependency-ordered examples ==", flush=True)
-        run_wave(harness, ordered, sequence, number)
+        run_wave(harness, ordered)
     harness.assert_snapshot(snapshot)
     print(
         f"All {len(harness.catalog)} selected StoffelLang examples completed on the same "

@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLES_DIR="${ROOT_DIR}/examples"
 WORKSPACE_DIR="$(cd "${ROOT_DIR}/../.." && pwd)"
 VM_DIR="${STOFFEL_VM_DIR:-${WORKSPACE_DIR}}"
-COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}}"
+COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:?Set STOFFEL_COORDINATOR_CONTEXT to a stoffel-mpc-coordinator 0.3.0 checkout}}"
 NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}}"
 OUT_DIR="${STOFFEL_EXAMPLES_OUT:-${EXAMPLES_DIR}/dist}"
 RUN_DOCKER_MPC=0
@@ -37,7 +37,8 @@ five local StoffelVM host processes.
 
 Environment:
   STOFFEL_VM_DIR          VM checkout path
-  STOFFEL_COORDINATOR_CONTEXT Coordinator Docker build context; defaults to the git branch
+  STOFFEL_COORDINATOR_CONTEXT Coordinator Docker build context; required, a
+                              stoffel-mpc-coordinator 0.3.0 checkout
   STOFFEL_NETWORK_CONTEXT     Networking Docker build context; defaults to the git branch
   STOFFEL_COORDINATOR_DIR     Backward-compatible local coordinator context override
   STOFFEL_NETWORK_DIR         Backward-compatible local networking context override
@@ -144,16 +145,30 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
 
     echo "Running docker compose MPC example: ${binary_name} (${backend}/${curve})"
     docker_mpc_down
+    # The stack's registrar exits as soon as the coordinator has minted and
+    # published the execution, so the run cannot be bounded by "any container
+    # stopped". Start detached, stream the logs, and take party0's own code.
     if ! (
       cd "$EXAMPLES_DIR"
-      STOFFEL_VM_DIR="$VM_DIR" \
-      STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
-      STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
-      STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
-      STOFFEL_PROGRAM_NAME="$binary_name" \
-      STOFFEL_MPC_BACKEND="$backend" \
-      STOFFEL_MPC_CURVE="$curve" \
-        docker compose -f docker-compose.mpc.yml up --build --abort-on-container-exit --exit-code-from party0
+      mpc_compose() {
+        STOFFEL_VM_DIR="$VM_DIR" \
+        STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
+        STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
+        STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
+        STOFFEL_PROGRAM_NAME="$binary_name" \
+        STOFFEL_MPC_BACKEND="$backend" \
+        STOFFEL_MPC_CURVE="$curve" \
+          docker compose -f docker-compose.mpc.yml "$@"
+      }
+
+      mpc_compose up --build -d || exit 1
+      mpc_compose logs -f --no-color &
+      logs_pid=$!
+      rc=0
+      mpc_compose wait party0 >/dev/null || rc=$?
+      kill "$logs_pid" 2>/dev/null || true
+      wait "$logs_pid" 2>/dev/null || true
+      exit "$rc"
     ); then
       docker_mpc_down
       return 1
@@ -192,8 +207,8 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
   STOFFEL_CLIENT1_OUTPUTS=0 \
   STOFFEL_CLIENT0_INPUT=100 \
   STOFFEL_CLIENT1_INPUT=20 \
-  STOFFEL_CLIENT0_INDEX=0 \
-  STOFFEL_CLIENT1_INDEX=1 \
+  STOFFEL_CLIENT0_SLOT=0 \
+  STOFFEL_CLIENT1_SLOT=1 \
   EXPECTED_OUTPUT=320 \
   WAIT_TIMEOUT_SECS=420 \
     run_coordinator_example mpc_client_private_score.stflb
@@ -205,8 +220,8 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
   STOFFEL_OUTPUT_FIXED_POINT_FRACTIONAL_BITS=16 \
   STOFFEL_CLIENT0_INPUT='65536,131072,196608,262144,327680,393216' \
   STOFFEL_CLIENT1_INPUT='458752,524288,589824,655360,720896,786432' \
-  STOFFEL_CLIENT0_INDEX=0 \
-  STOFFEL_CLIENT1_INDEX=6 \
+  STOFFEL_CLIENT0_SLOT=0 \
+  STOFFEL_CLIENT1_SLOT=1 \
   EXPECTED_OUTPUT='8, 10, 12, 14, 16, 18' \
   WAIT_TIMEOUT_SECS=420 \
     run_coordinator_example mpc_client_federated_average.stflb

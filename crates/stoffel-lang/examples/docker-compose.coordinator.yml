@@ -3,14 +3,28 @@
 # This mirrors StoffelVM's docker-compose.coordinator.reserve-index.yml, but
 # mounts compiled example binaries from examples/dist instead of using the VM's
 # baked-in test fixtures.
-# The default execution ID is example-only; use a fresh shared nonzero 64-hex-character value for
-# each real or overlapping invocation.
+#
+# The coordinator decides what runs: it mints every execution identity and
+# publishes each execution to the node roster, so no party is configured with
+# one. This stack has client services, and a client is not on the node roster,
+# so the coordinator publishes it nothing — the identity has to reach the
+# clients as STOFFEL_EXECUTION_ID. run_coordinator_compose.sh does that for
+# itself: it brings the coordinator up alone, submits, and passes the minted
+# identity to the rest of the stack. To drive this file by hand, do the same:
+#
+#   docker compose -f <this file> up -d coordinator
+#   docker compose -f <this file> run --rm --no-deps --entrypoint /app/stoffel-coord-ctl \
+#     party0 submit --coordinator coordinator:31415 \
+#     --coord-cert /app/ids/server_cert.crt \
+#     --cert /app/ids/operator/cert.crt --key /app/ids/operator/key.der \
+#     --program-file "$STOFFEL_PROGRAM" --entry "$STOFFEL_ENTRY" --open-admission
+#   STOFFEL_EXECUTION_ID=<the identity it printed> docker compose -f <this file> up
 
 x-stoffel-build: &stoffel-build
   context: ${STOFFEL_VM_DIR:-../../..}
   dockerfile: Dockerfile
   additional_contexts:
-    coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+    coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?Set an absolute coordinator checkout}"
     networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
 
 x-party-common: &party-common
@@ -18,16 +32,13 @@ x-party-common: &party-common
   volumes:
     - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
   environment: &party-env
-    STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
     STOFFEL_N_PARTIES: "5"
     STOFFEL_THRESHOLD: "1"
     STOFFEL_PROGRAM: /app/examples/${STOFFEL_PROGRAM_NAME:-mpc_share_arithmetic.stflb}
     STOFFEL_ENTRY: ${STOFFEL_ENTRY:-main}
     STOFFEL_MPC_BACKEND: honeybadger
     STOFFEL_MPC_CURVE: bls12-381
-    STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001}"
     STOFFEL_COORD_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.5:31415
-    STOFFEL_TIMESTAMP: "0"
     STOFFEL_EXPECTED_CLIENTS: /app/ids/clients/cert0.crt,/app/ids/clients/cert1.crt
     STOFFEL_CLIENT_INPUT_COUNT: ${STOFFEL_CLIENT_INPUT_COUNT:-1}
     RUST_LOG: ${RUST_LOG:-info}
@@ -47,9 +58,14 @@ x-client-common: &client-common
     STOFFEL_THRESHOLD: "1"
     STOFFEL_MPC_BACKEND: honeybadger
     STOFFEL_MPC_CURVE: bls12-381
-    STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001}"
+    # The identity the coordinator minted for this execution, as
+    # `stoffel-coord-ctl submit` printed it. A client is not on the node roster,
+    # so nothing publishes it one. There is no default and no placeholder: the
+    # entrypoint refuses a coordinator client with no identity, which keeps the
+    # coordinator startable on its own — it has to be, because the identity does
+    # not exist until it has been asked to mint one.
+    STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-}"
     STOFFEL_COORD_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.5:31415
-    STOFFEL_TIMESTAMP: "0"
     STOFFEL_OUTPUTS: ${STOFFEL_OUTPUTS:-1}
     STOFFEL_OUTPUT_FIXED_POINT_FRACTIONAL_BITS: ${STOFFEL_OUTPUT_FIXED_POINT_FRACTIONAL_BITS:-}
     STOFFEL_CLIENT_DELAY: ${STOFFEL_CLIENT_DELAY:-20}
@@ -64,7 +80,7 @@ services:
       context: ${STOFFEL_VM_DIR:-../../..}
       dockerfile: docker/coordinator.Dockerfile
       additional_contexts:
-        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?Set an absolute coordinator checkout}"
         networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
     container_name: stoffel-examples-coordinator
     hostname: coordinator
@@ -73,26 +89,19 @@ services:
       - 0.0.0.0
       - --port
       - "31415"
-      - --hash
-      - "0000000000000000000000000000000000000000000000000000000000000000"
-      - --execution-id
-      - "${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001}"
       - --server-cert
       - /app/ids/server_cert.crt
       - --server-key
       - /app/ids/server_key.der
-      - --n
-      - "5"
       - --t
       - "1"
-      - --mpc-backend
-      - "${STOFFEL_MPC_BACKEND:-honeybadger}"
-      - --n-inputs
-      - "${STOFFEL_COORDINATOR_N_INPUTS:-2}"
-      - --output-clients
-      - /app/ids/clients/cert0.crt,/app/ids/clients/cert1.crt
-      - --initial-mpc-nodes
+      - --node-roster
       - /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
+      # The only identity allowed to tell this coordinator what to run. It
+      # mints every execution identity itself and publishes each execution
+      # to the roster; the nodes have no say in what is submitted.
+      - --operator-certs
+      - /app/ids/operator/cert.crt
     volumes:
       - ${STOFFEL_VM_DIR:-../../..}/ids:/app/ids:ro
     networks:
@@ -111,9 +120,10 @@ services:
     hostname: party0
     environment:
       <<: *party-env
-      STOFFEL_ROLE: leader
+      STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "0"
       STOFFEL_BIND_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.10:9000
+      STOFFEL_PEERS: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.11:9001,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.12:9002,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.13:9003,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.14:9004
       STOFFEL_RPC_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.10:16180
       STOFFEL_CERT: /app/ids/nodes/cert0.crt
       STOFFEL_KEY: /app/ids/nodes/key0.der
@@ -139,7 +149,7 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "1"
       STOFFEL_BIND_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.11:9001
-      STOFFEL_BOOTSTRAP_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.10:9000
+      STOFFEL_PEERS: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.10:9000,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.12:9002,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.13:9003,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.14:9004
       STOFFEL_RPC_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.11:16181
       STOFFEL_CERT: /app/ids/nodes/cert1.crt
       STOFFEL_KEY: /app/ids/nodes/key1.der
@@ -148,8 +158,6 @@ services:
         ipv4_address: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.11
     depends_on:
       coordinator:
-        condition: service_healthy
-      party0:
         condition: service_healthy
 
   party2:
@@ -161,7 +169,7 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "2"
       STOFFEL_BIND_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.12:9002
-      STOFFEL_BOOTSTRAP_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.10:9000
+      STOFFEL_PEERS: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.10:9000,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.11:9001,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.13:9003,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.14:9004
       STOFFEL_RPC_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.12:16182
       STOFFEL_CERT: /app/ids/nodes/cert2.crt
       STOFFEL_KEY: /app/ids/nodes/key2.der
@@ -170,8 +178,6 @@ services:
         ipv4_address: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.12
     depends_on:
       coordinator:
-        condition: service_healthy
-      party0:
         condition: service_healthy
 
   party3:
@@ -183,7 +189,7 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "3"
       STOFFEL_BIND_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.13:9003
-      STOFFEL_BOOTSTRAP_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.10:9000
+      STOFFEL_PEERS: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.10:9000,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.11:9001,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.12:9002,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.14:9004
       STOFFEL_RPC_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.13:16183
       STOFFEL_CERT: /app/ids/nodes/cert3.crt
       STOFFEL_KEY: /app/ids/nodes/key3.der
@@ -192,8 +198,6 @@ services:
         ipv4_address: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.13
     depends_on:
       coordinator:
-        condition: service_healthy
-      party0:
         condition: service_healthy
 
   party4:
@@ -205,7 +209,7 @@ services:
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "4"
       STOFFEL_BIND_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.14:9004
-      STOFFEL_BOOTSTRAP_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.10:9000
+      STOFFEL_PEERS: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.10:9000,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.11:9001,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.12:9002,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.13:9003
       STOFFEL_RPC_ADDR: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.14:16184
       STOFFEL_CERT: /app/ids/nodes/cert4.crt
       STOFFEL_KEY: /app/ids/nodes/key4.der
@@ -215,8 +219,6 @@ services:
     depends_on:
       coordinator:
         condition: service_healthy
-      party0:
-        condition: service_healthy
 
   client0:
     <<: *client-common
@@ -225,7 +227,7 @@ services:
     environment:
       <<: *client-env
       STOFFEL_INPUTS: ${STOFFEL_CLIENT0_INPUT:-15}
-      STOFFEL_CLIENT_INDEX: ${STOFFEL_CLIENT0_INDEX:-0}
+      STOFFEL_CLIENT_SLOT: ${STOFFEL_CLIENT0_SLOT:-0}
       STOFFEL_CERT: /app/ids/clients/cert0.crt
       STOFFEL_KEY: /app/ids/clients/key0.der
     networks:
@@ -233,8 +235,6 @@ services:
         ipv4_address: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.100
     depends_on:
       coordinator:
-        condition: service_healthy
-      party0:
         condition: service_healthy
       party1:
         condition: service_started
@@ -252,7 +252,7 @@ services:
     environment:
       <<: *client-env
       STOFFEL_INPUTS: ${STOFFEL_CLIENT1_INPUT:-25}
-      STOFFEL_CLIENT_INDEX: ${STOFFEL_CLIENT1_INDEX:-1}
+      STOFFEL_CLIENT_SLOT: ${STOFFEL_CLIENT1_SLOT:-1}
       STOFFEL_OUTPUTS: ${STOFFEL_CLIENT1_OUTPUTS:-0}
       STOFFEL_CERT: /app/ids/clients/cert1.crt
       STOFFEL_KEY: /app/ids/clients/key1.der
@@ -261,8 +261,6 @@ services:
         ipv4_address: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.101
     depends_on:
       coordinator:
-        condition: service_healthy
-      party0:
         condition: service_healthy
       party1:
         condition: service_started

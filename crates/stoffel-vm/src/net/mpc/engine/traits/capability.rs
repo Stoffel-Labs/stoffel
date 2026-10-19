@@ -248,14 +248,36 @@ pub trait MpcEngineClientOutput: MpcEngine {
 
 /// Extended MPC engine trait for preprocessing reservation.
 ///
-/// Engines that support persistent preprocessing and the masked-input protocol
-/// implement this trait. The reservation lifecycle:
+/// Offered by engines whose deployment holds a preprocessing pool across
+/// executions — a *standing* pool. The reservation lifecycle:
 ///
-/// 1. `init_reservations` — set up or restore reservation state
-/// 2. `reserve_masks` — clients reserve index ranges
-/// 3. `get_mask_share` — clients collect per-node mask shares
-/// 4. `submit_masked_input` — clients submit `input + mask`
-/// 5. `consume_masked_inputs` — nodes compute `masked_input − mask_share`
+/// 1. `init_reservations` — set up reservation state for this run
+/// 2. `reserve_masks` — allocate index ranges to clients and, in the same step,
+///    draw the corresponding shares out of the live pool
+/// 3. `get_mask_share` — serve a drawn share to the caller
+/// 4. `retire_masks` — the reservation is marked consumed and the node's
+///    process-local copies of the mask shares are erased
+///
+/// Step 2 is where a mask leaves the pool, and step 3 serves only what step 2
+/// already removed. **An implementor must not serve a mask out of persistent
+/// storage.** A stored item a node hands out while leaving it in place is an
+/// item a later execution can be handed too, and preprocessing material is
+/// correlated: two executions holding the same mask share is the privacy defect
+/// this lifecycle exists to prevent. Reserving is therefore a draw, not a
+/// bookmark — there is no "reserved at index N" record in the store to come
+/// back to, by design.
+///
+/// A deployment that generates its pool per execution does not offer this
+/// capability at all: it takes its masks from the live pool directly, so
+/// `MpcEngine::as_reservation` returns `None` and `MpcEngine::reservation_ops`
+/// reports the capability as unsupported. Pinned by
+/// `a_one_shot_engine_offers_no_reservation_capability`.
+///
+/// The masked input `x + r` itself is not this trait's business. A client sends
+/// it to the coordinator, every node reads the same value from there, and the
+/// node subtracts its own mask share in process memory. Nothing on this trait
+/// accepts or stores a masked input, which keeps a client's input out of the
+/// LMDB environment that holds the mask shares.
 #[async_trait::async_trait]
 pub trait MpcEngineReservation: MpcEngine {
     /// Initialize or restore reservation state for a program.
@@ -280,28 +302,13 @@ pub trait MpcEngineReservation: MpcEngine {
 
     /// Get several mask shares in caller-specified order.
     ///
-    /// Engines with persistent preprocessing should override this to amortize
-    /// store reads and cursor updates. The default preserves compatibility.
-    async fn get_mask_shares(&self, indices: &[u64]) -> MpcEngineResult<Vec<Vec<u8>>> {
-        let mut shares = Vec::with_capacity(indices.len());
-        for &index in indices {
-            shares.push(self.get_mask_share(index).await?);
-        }
-        Ok(shares)
-    }
-
-    /// Accept a masked input at a reserved index.
-    async fn submit_masked_input(
-        &self,
-        client_id: ClientId,
-        index: u64,
-        value: Vec<u8>,
-    ) -> MpcEngineResult<()>;
-
-    /// Compute `input_share = masked_input − mask_share` for each index.
-    ///
-    /// Marks the indices as consumed.
-    async fn consume_masked_inputs(&self, indices: &[u64]) -> MpcEngineResult<Vec<(u64, Vec<u8>)>>;
+    /// Required rather than defaulted, because the only amortization available
+    /// here is taking the lock over the process-local shares once instead of
+    /// per index. There is nothing else to batch: the shares were drawn out of
+    /// the pool by `reserve_masks`, so this is a memory read, and an
+    /// implementation that batched a *store* read would be serving material the
+    /// store still holds — see this trait's documentation.
+    async fn get_mask_shares(&self, indices: &[u64]) -> MpcEngineResult<Vec<Vec<u8>>>;
 
     /// Retire mask material after an external coordinator has completed the
     /// unmasking protocol. This marks the logical reservations consumed and
@@ -310,7 +317,4 @@ pub trait MpcEngineReservation: MpcEngine {
 
     /// Number of unreserved mask slots.
     async fn available_masks(&self) -> u64;
-
-    /// Persist the current reservation state.
-    async fn persist_reservations(&self) -> MpcEngineResult<()>;
 }

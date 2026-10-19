@@ -2035,9 +2035,27 @@ fn run_network_validates_config_path_before_parsing() {
                 .and(predicate::str::contains("does not exist")),
         );
 
+    // An off-chain client config with no coordinator certificate: the path
+    // checks have to run first, and then this field's own refusal has to be
+    // what surfaces — an unpinned coordinator connection accepts any server.
     fs::write(
         temp.path().join("network.toml"),
-        "protocol = \"honeybadger\"\nparties = 5\nthreshold = 1\n",
+        r#"
+execution_id = [81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81, 81]
+coordinator_host = "127.0.0.1"
+coordinator_port = 31415
+coordinator_cert_der = []
+timestamp = 1
+client_slot = 0
+backend = "honeybadger"
+node_rpc_addresses = ["127.0.0.1:19100"]
+cert_der = [1]
+key_der = [2]
+output_count = 0
+input_types = []
+output_types = []
+timeout = 1000
+"#,
     )
     .unwrap();
     let parent = temp.path().parent().unwrap();
@@ -2057,7 +2075,9 @@ fn run_network_validates_config_path_before_parsing() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("missing server address"))
+        .stderr(predicate::str::contains(
+            "requires the coordinator's certificate DER",
+        ))
         .stderr(predicate::str::contains("network config network.toml does not exist").not())
         .stderr(predicate::str::contains("Invalid configuration: Invalid configuration").not());
 
@@ -2343,8 +2363,12 @@ fn run_network_validates_program_before_parsing_config_contents() {
         .stderr(predicate::str::contains("failed to parse").not());
 }
 
+/// A node deployment descriptor is not something a client can run from: a
+/// client's nodes are the ones its coordinator's roster names, and this file
+/// names bind addresses and peers but no coordinator and no client identity.
+/// The refusal says what the mode does take, and names no removed mode.
 #[test]
-fn run_network_accepts_network_config_and_attempts_connection() {
+fn run_network_refuses_a_node_deployment_config() {
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -2398,9 +2422,14 @@ random_shares = 1
         ])
         .assert()
         .failure()
-        .stderr(
-            predicate::str::contains("failed to connect").or(predicate::str::contains("timed out")),
-        );
+        .stderr(predicate::str::contains("is a node deployment config"))
+        .stderr(predicate::str::contains(
+            "takes an off-chain client config: the coordinator's address and certificate",
+        ))
+        // Nothing is dialled: the refusal happens while reading the file, so no
+        // connection attempt to the peers it lists can appear here.
+        .stderr(predicate::str::contains("failed to connect").not())
+        .stderr(predicate::str::contains("timed out").not());
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -2422,7 +2451,7 @@ random_shares = 1
         .stderr(predicate::str::contains(
             "0 is not valid here; use a positive whole number",
         ))
-        .stderr(predicate::str::contains("failed to connect").not());
+        .stderr(predicate::str::contains("is a node deployment config").not());
 }
 
 #[test]

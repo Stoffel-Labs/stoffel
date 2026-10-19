@@ -3,21 +3,22 @@
 
 pub mod avss_server;
 pub(crate) mod broadcast;
+pub mod client_ingress;
 pub mod client_store;
 pub mod curve;
-pub mod discovery;
 pub mod execution_transport;
 pub(crate) mod group_interpolation;
 pub mod hb_server;
+pub mod mesh;
 pub mod mpc;
 pub mod mpc_runner;
 pub mod node_supervisor;
 pub mod open_registry;
 pub use open_registry::{InstanceRegistry, OpenMessageRouter, UNKNOWN_SENDER_ID};
-pub mod p2p;
-pub mod program_sync;
+pub mod program_id;
 pub mod reservation;
 pub(crate) mod reveal_batcher;
+pub mod roster;
 pub mod session;
 pub(crate) mod share_algebra;
 pub(crate) mod share_runtime;
@@ -124,14 +125,11 @@ pub fn block_on_current<T>(
     try_block_on_current(fut).map_err(String::from)
 }
 
-// Re-export key components
-pub use p2p::{
-    NetworkManager, PeerConnection, QuicMessage, QuicNetworkConfig, QuicNetworkManager, QuicNode,
-    QuicPeerConnection,
-};
-
 // Re-export backend selection
 pub use backend::{MpcBackendError, MpcBackendKind, MpcBackendResult};
+pub use client_ingress::{
+    AdmittedClientDirectory, ClientIngressDecision, ClientIngressGate, ClientIngressLimits,
+};
 pub use curve::{
     field_from_i64, field_to_i64, MpcCurveConfig, MpcCurveError, MpcCurveResult, MpcFieldKind,
 };
@@ -139,8 +137,8 @@ pub use engine_config::MpcSessionConfig;
 pub use execution_transport::{
     encode_execution_frame, ExecutionConnectionScanner, ExecutionEnvelopeError,
     ExecutionEnvelopeV1, ExecutionInboundMessage, ExecutionInbox, ExecutionIngressLimits,
-    ExecutionMessageKind, ExecutionScopedNetwork, ExecutionTransportError, ExecutionTransportMux,
-    ExecutionTransportSource, DEFAULT_EXECUTION_INBOX_BYTE_CAPACITY,
+    ExecutionMessageKind, ExecutionScannerScope, ExecutionScopedNetwork, ExecutionTransportError,
+    ExecutionTransportMux, ExecutionTransportSource, DEFAULT_EXECUTION_INBOX_BYTE_CAPACITY,
     DEFAULT_EXECUTION_MUX_BYTE_CAPACITY, EXECUTION_CLIENT_ROUTE_HELLO_V1,
     EXECUTION_ENVELOPE_HEADER_LEN, EXECUTION_ENVELOPE_MAGIC, EXECUTION_ENVELOPE_VERSION,
     MAX_EXECUTION_PAYLOAD_LEN,
@@ -174,20 +172,18 @@ pub use avss_server::{
     AvssPublicKeyEnvelopeError, AvssQuicConfig, AvssQuicServer, Bls12381AvssServer,
     Bn254AvssServer, Curve25519AvssServer, Ed25519AvssServer, P256AvssServer, Secp256k1AvssServer,
 };
-// Re-export discovery helpers
-pub use discovery::{
-    register_and_wait_for_session, run_bootnode_with_config, run_bootnode_with_config_ready,
-    DiscoveryMessage, SessionRegistrationConfig,
+// Re-export the roster-pinned mesh: the join seam, the dial schedule and the
+// peer directory addresses are gossiped through.
+pub use mesh::{
+    dials_towards, join_mesh, JoinRequest, MeshError, MeshJoin, MeshJoinTimeouts, MeshResult,
+    MeshTransport, PeerDirectory, PeerRecord, PexLimits, ReconnectPolicy, ReconnectSupervisor,
+    ReconnectTarget, SeedHints, SessionCommitment, SessionJoin,
 };
-// Re-export program sync + session helpers
-pub use program_sync::{
-    agree_and_sync_program, program_id_from_bytes, ProgramSyncError, ProgramSyncMessage,
-    ProgramSyncResult,
-};
-pub use session::{
-    derive_instance_id, derive_instance_id_for_execution, ExecutionId, SessionError, SessionInfo,
-    SessionMessage, SessionResult, CONTROL_STREAM_ID,
-};
+// Re-export the roster the coordinator serves
+pub use roster::{NodeListener, NodeListeners, Roster, RosterError};
+// Re-export the program content address + execution identity helpers
+pub use program_id::{program_id_from_bytes, PROGRAM_ID_CONTEXT};
+pub use session::{derive_instance_id_for_execution, ExecutionId};
 
 #[cfg(test)]
 mod tests {

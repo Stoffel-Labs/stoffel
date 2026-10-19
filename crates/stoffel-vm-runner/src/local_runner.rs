@@ -2,9 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use ark_bls12_381::Fr;
 use ark_ec::CurveGroup;
@@ -13,11 +12,16 @@ use stoffel_mpc_coordinator_off_chain::tests::fake_coord::{
     HoneyBadgerCoordinatorConnection, HoneyBadgerCoordinatorRPCServerSharedBase,
 };
 use stoffel_mpc_coordinator_off_chain::{
-    node_rpc::NodeRPCClient as OffChainNodeRPCClient, InputAssignment, OffChainCoordinatorClient,
+    node_rpc::NodeRPCClient as OffChainNodeRPCClient, ExecutionRequest, OffChainCoordinatorClient,
     OffChainCoordinatorServer,
 };
+use stoffel_mpc_coordinator_shared::rpc::RpcServerLimits;
 use stoffel_mpc_coordinator_shared::self_signed_certs;
-use stoffel_mpc_coordinator_shared::{Coordinator, ExecutionId as CoordinatorExecutionId};
+use stoffel_mpc_coordinator_shared::{
+    AdmissionPolicy, AssociationRequest, ClientIndex, ClientSlotSpec, ClientSlotTable, Coordinator,
+    ExecutionDeadlines, ExecutionId as CoordinatorExecutionId, NodeCertificateDer, NodeRoster,
+    SpkiDer, UnixSeconds,
+};
 use stoffel_vm_types::compiled_binary::{utils::save_to_file, CompiledBinary};
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
@@ -26,7 +30,6 @@ use tokio::process::{Child, Command};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use x509_parser::prelude::{FromDer, X509Certificate};
 
 use stoffel_vm::net::curve::SupportedMpcField;
 use stoffel_vm::net::program_id_from_bytes;
@@ -36,7 +39,6 @@ use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 use crate::returned_share::{ReturnedShare, ReturnedShareParseError, RETURNED_SHARE_PREFIX_V1};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
-const DEFAULT_AUTH_TOKEN: &str = "stoffel-local-coordinator-runner";
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const PROCESS_EXIT_GRACE: Duration = Duration::from_secs(2);
 const LOG_DRAIN_GRACE: Duration = Duration::from_secs(1);
@@ -112,7 +114,6 @@ pub struct LocalCoordinatorRunner {
     backend: MpcBackendKind,
     curve_config: MpcCurveConfig,
     timeout: Duration,
-    auth_token: String,
     client_inputs: Vec<LocalClientInput>,
     expected_clients: Option<usize>,
     /// Per-client number of output values to receive via `send_to_client`.
@@ -135,7 +136,6 @@ impl LocalCoordinatorRunner {
                 threshold: 1,
                 curve_config,
                 timeout: DEFAULT_TIMEOUT,
-                auth_token: DEFAULT_AUTH_TOKEN.to_owned(),
                 client_inputs: Vec::new(),
                 expected_clients: None,
                 client_output_counts: std::collections::HashMap::new(),
@@ -175,46 +175,81 @@ impl LocalCoordinatorRunner {
         save_to_file(&self.binary, &program_path).map_err(LocalCoordinatorRunnerError::Bytecode)?;
         let program_bytes = self.binary_bytes()?;
         let program_id = program_id_from_bytes(&program_bytes);
-        let execution_id = ExecutionId::new();
 
         let node_identities = write_node_identities(temp.path(), self.parties)?;
-        let node_public_keys = node_identities
-            .iter()
-            .map(|identity| public_key_from_cert(&identity.cert_der))
-            .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?;
         let known_client_inputs = self.known_client_inputs();
-        let mut local_clients = write_client_identities(temp.path(), &known_client_inputs)?;
+        // The slot table is the coordinator's capacity, and `input_range` is
+        // what each client reserves and submits, so the local identities take
+        // their reserved index block from the same table rather than
+        // recomputing a parallel prefix sum.
+        let client_slots = self.coordinator_client_slot_table(&known_client_inputs)?;
+        let mut local_clients =
+            write_client_identities(temp.path(), &known_client_inputs, &client_slots)?;
         for client in local_clients.iter_mut() {
             client.output_count = self.output_count_for_slot(client.client_slot);
         }
-        let client_bindings = local_clients
-            .iter()
-            .map(|client| Ok((client.client_slot, public_key_from_cert(&client.cert_der)?)))
-            .collect::<LocalCoordinatorRunnerResult<Vec<_>>>()?;
+
+        // The coordinator is the roster authority: it holds the one verified
+        // `NodeRoster`, and `n`, `t` and the node identities all come from it.
+        let node_roster = NodeRoster::new(
+            self.threshold as u64,
+            node_identities
+                .iter()
+                .map(|identity| NodeCertificateDer::from_der(identity.cert_der.clone()))
+                .collect(),
+        )
+        .map_err(|error| {
+            LocalCoordinatorRunnerError::Configuration(format!(
+                "build the local node roster: {error}"
+            ))
+        })?;
 
         let coord_reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let coord_port = coord_reservation.local_addr()?.port();
         let coord_cert = self_signed_certs::server_cert();
-        let (n_inputs, output_clients) = self.coordinator_client_io_binding(&client_bindings)?;
-        let coord_state = HoneyBadgerCoordinatorRPCServerSharedBase::new_for_execution(
-            CoordinatorExecutionId::from_bytes(*execution_id.as_bytes()),
-            program_id,
-            self.parties as u64,
-            self.threshold as u64,
-            node_public_keys,
-            n_inputs,
-            output_clients,
-            InputAssignment::default(),
-        )?;
+        let coord_cert_der = coord_cert.cert.der().to_vec();
+        let coord_cert_path = temp.path().join("coordinator.cert.der");
+        std::fs::write(&coord_cert_path, &coord_cert_der)?;
+        let coord_spki = SpkiDer::from_certificate_der(&coord_cert_der).map_err(|error| {
+            LocalCoordinatorRunnerError::Configuration(format!(
+                "derive the local coordinator pin: {error}"
+            ))
+        })?;
+        // Clients bind their slot at run time (`AdmissionPolicy::Open` plus
+        // `associate_client`), so a client the deployment never listed can take
+        // part; the slot table is the capacity and the deadlines bound the wait.
+        let now = UnixSeconds::now();
+        let association_deadline = UnixSeconds(
+            now.0
+                .saturating_add(timeout.as_secs().max(1))
+                .saturating_add(1),
+        );
+        let (coord_state, registered) =
+            HoneyBadgerCoordinatorRPCServerSharedBase::new_for_execution(
+                node_roster.clone(),
+                coord_spki.clone(),
+                ExecutionRequest {
+                    program_hash: program_id,
+                    entry: self.entry.clone(),
+                    client_slots: client_slots.clone(),
+                    admission: AdmissionPolicy::Open,
+                    deadlines: Some(ExecutionDeadlines {
+                        association: association_deadline,
+                        input: association_deadline,
+                    }),
+                },
+            )?;
+        // The coordinator minted the identity; nothing here invents one.
+        let execution_id = ExecutionId::from_bytes(*registered.execution_id.as_bytes());
         let coord = match tokio::time::timeout_at(deadline, async {
             drop(coord_reservation);
             OffChainCoordinatorServer::<HoneyBadgerCoordinatorConnection>::start_coord(
                 coord_state,
                 "127.0.0.1",
                 coord_port,
-                self.threshold as u64,
-                coord_cert.cert.der().to_vec(),
+                coord_cert_der.clone(),
                 coord_cert.signing_key.serialize_der(),
+                RpcServerLimits::default(),
             )
             .await
         })
@@ -235,69 +270,34 @@ impl LocalCoordinatorRunner {
         if cancellation.is_cancelled() {
             return Err(cancelled_run());
         }
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
+        // Every party is the same shape now: there is no leader that also runs
+        // a bootstrap process, so none of them has to be started first and
+        // waited for. Each one is given the other n-1 addresses as seed hints,
+        // which satisfies the directional seed requirement whatever order the
+        // transport derives from the certificates.
         let mut all_markers = Vec::with_capacity(self.parties);
         let mut network_addrs = Vec::with_capacity(self.parties);
         let mut node_rpc_addrs = Vec::with_capacity(self.parties);
         for party in 0..self.parties {
-            let name = if party == 0 { "leader".to_owned() } else { format!("party{party}") };
-            let markers = PartyMarkers::new(temp.path(), &name, party == 0);
-            let (network, rpc) = markers.reserve_ports(party == 0)?;
+            let name = format!("party{party}");
+            let markers = PartyMarkers::new(temp.path(), &name);
+            let (network, rpc) = markers.reserve_ports()?;
             network_addrs.push(network);
             node_rpc_addrs.push(rpc);
             all_markers.push((name, markers));
         }
-        let bootnode = network_addrs[0];
         let mut party_tasks = JoinSet::new();
         let mut party_outputs = Vec::with_capacity(self.parties);
-        let leader_markers = all_markers[0].1.clone();
-        let (leader_name, leader_child) = self.spawn_party(
-            "leader",
-            SpawnPartyContext {
-                program_path: &program_path,
-                identity: &node_identities[0],
-                rpc_addr: node_rpc_addrs[0],
-                local_store_path: temp.path().join("local-node0.redb"),
-                execution_id,
-                role: PartyRole::Leader { bootnode },
-                clients: &local_clients,
-                coord_port,
-                timestamp,
-                markers: &leader_markers,
-            },
-        )?;
-        spawn_party_monitor(
-            &mut party_tasks,
-            leader_name,
-            leader_child,
-            leader_markers.clone(),
-            deadline,
-            timeout,
-            cancellation.clone(),
-        );
-        if let Err(error) = wait_for_readiness(
-            "leader bootnode readiness",
-            &[(
-                "leader",
-                leader_markers.bootnode.as_ref().expect("leader marker"),
-            )],
-            deadline,
-            timeout,
-            &mut party_tasks,
-            &mut party_outputs,
-        )
-        .await
-        {
-            return Err(cleanup_after_failure(error, &cancellation, &mut party_tasks).await);
-        }
 
-        for (party_id, identity) in node_identities.iter().enumerate().skip(1) {
+        for (party_id, identity) in node_identities.iter().enumerate() {
             let (name, markers) = &all_markers[party_id];
             let bind = network_addrs[party_id];
+            let peers = network_addrs
+                .iter()
+                .enumerate()
+                .filter(|(peer, _)| *peer != party_id)
+                .map(|(_, addr)| *addr)
+                .collect::<Vec<_>>();
             let spawned = self.spawn_party(
                 name,
                 SpawnPartyContext {
@@ -305,15 +305,12 @@ impl LocalCoordinatorRunner {
                     identity,
                     rpc_addr: node_rpc_addrs[party_id],
                     local_store_path: temp.path().join(format!("local-node{party_id}.redb")),
-                    execution_id,
-                    role: PartyRole::Follower {
-                        party_id,
-                        bootnode,
-                        bind,
-                    },
+                    party_id,
+                    bind,
+                    peers,
                     clients: &local_clients,
                     coord_port,
-                    timestamp,
+                    coord_cert_path: &coord_cert_path,
                     markers,
                 },
             );
@@ -351,14 +348,13 @@ impl LocalCoordinatorRunner {
             return Err(cleanup_after_failure(error, &cancellation, &mut party_tasks).await);
         }
 
-        let threshold = self.threshold;
         let mut client_tasks = JoinSet::new();
         let client_context = LocalClientRunContext {
             execution_id,
             node_rpc_addrs,
             coord_port,
-            parties: self.parties,
-            threshold,
+            coord_spki: coord_spki.clone(),
+            node_roster: node_roster.clone(),
             deadline,
             timeout,
         };
@@ -517,6 +513,33 @@ impl LocalCoordinatorRunner {
                 "program declares ClientStore slot(s) requiring expected_clients >= {minimum}, but expected_clients is {expected_clients}"
             )));
         }
+        // A client slot is the unit the coordinator admits, and it admits a
+        // slot for the inputs it submits and the outputs it receives. A slot
+        // with neither is not something a client can be bound to, so an output
+        // slot's count has to be declared here rather than discovered while the
+        // program runs.
+        for client_slot in 0..expected_clients as u64 {
+            let has_input = self
+                .binary
+                .client_io_manifest
+                .input_types_for_client_slot(client_slot)
+                .is_some_and(|inputs| !inputs.is_empty())
+                || self
+                    .client_inputs
+                    .iter()
+                    .any(|client| client.client_slot == client_slot && client.has_input());
+            if has_input || self.output_count_for_slot(client_slot) > 0 {
+                continue;
+            }
+            return Err(LocalCoordinatorRunnerError::Configuration(format!(
+                "client slot {client_slot} submits no input and the program declares no output \
+                 for it, so there is nothing for the coordinator to admit it for; give it an \
+                 output count (`stoffel run --client-output-count {client_slot}=<n>`, \
+                 `[mpc.client_output_counts]` in Stoffel.toml, or \
+                 `LocalCoordinatorRunnerBuilder::client_output_count`) or lower \
+                 expected_output_clients"
+            )));
+        }
         Ok(())
     }
 
@@ -652,44 +675,55 @@ impl LocalCoordinatorRunner {
         Ok(bytes)
     }
 
-    fn coordinator_client_io_binding(
+    /// The coordinator's client slot table: one entry per client slot, in slot
+    /// order, with the inputs that slot submits and the outputs it receives.
+    ///
+    /// It is the execution's client capacity, and `ClientSlotTable::input_range`
+    /// is the block each slot reserves — so this is also what fixes every
+    /// client's reserved index block. The input count is the number of values
+    /// the slot actually supplies, because that is what the client reserves and
+    /// submits, and the coordinator refuses a reservation that is not exactly
+    /// the admitted range.
+    fn coordinator_client_slot_table(
         &self,
-        client_bindings: &[(u64, Vec<u8>)],
-    ) -> LocalCoordinatorRunnerResult<(u64, Vec<Vec<u8>>)> {
-        let mut n_inputs = 0_u64;
-        let output_clients = client_bindings
-            .iter()
-            .map(|(_slot, identity)| identity.clone())
-            .collect::<Vec<_>>();
-        if self.binary.client_io_manifest.clients.is_empty() {
-            for input in &self.client_inputs {
-                client_bindings
-                    .iter()
-                    .find(|(slot, _identity)| *slot == input.client_slot)
-                    .ok_or_else(|| {
-                        LocalCoordinatorRunnerError::Configuration(format!(
-                            "client slot {} does not have a local client identity",
-                            input.client_slot
-                        ))
-                    })?;
-                n_inputs += input.values.len() as u64;
+        clients: &[LocalClientInput],
+    ) -> LocalCoordinatorRunnerResult<ClientSlotTable> {
+        let mut by_slot = clients.to_vec();
+        by_slot.sort_by_key(|client| client.client_slot);
+        for (position, client) in by_slot.iter().enumerate() {
+            if client.client_slot != position as u64 {
+                return Err(LocalCoordinatorRunnerError::Configuration(format!(
+                    "client slots must be the contiguous block 0..{}; slot {} is missing",
+                    by_slot.len(),
+                    position
+                )));
             }
-            return Ok((n_inputs, output_clients));
         }
-
         for schema in &self.binary.client_io_manifest.clients {
-            client_bindings
+            if !by_slot
                 .iter()
-                .find(|(slot, _identity)| *slot == schema.client_slot)
-                .ok_or_else(|| {
-                    LocalCoordinatorRunnerError::Configuration(format!(
-                        "client slot {} does not have a local client identity",
-                        schema.client_slot
-                    ))
-                })?;
-            n_inputs += schema.inputs.len() as u64;
+                .any(|client| client.client_slot == schema.client_slot)
+            {
+                return Err(LocalCoordinatorRunnerError::Configuration(format!(
+                    "client slot {} does not have a local client identity",
+                    schema.client_slot
+                )));
+            }
         }
-        Ok((n_inputs, output_clients))
+        let slots = by_slot
+            .iter()
+            .map(|client| ClientSlotSpec {
+                input_count: client.values.len() as u64,
+                output_count: self.output_count_for_slot(client.client_slot),
+            })
+            .collect::<Vec<_>>();
+        let table = ClientSlotTable::new(slots);
+        table.check_bounds().map_err(|error| {
+            LocalCoordinatorRunnerError::Configuration(format!(
+                "the local client slot table is not registrable: {error}"
+            ))
+        })?;
+        Ok(table)
     }
 
     fn spawn_party(
@@ -711,19 +745,29 @@ impl LocalCoordinatorRunner {
             .arg(self.curve_config.name())
             .arg("--off-chain-coord")
             .arg(format!("127.0.0.1:{}", context.coord_port))
+            .arg("--coord-cert")
+            .arg(context.coord_cert_path)
             .arg("--rpc-bind")
             .arg(context.rpc_addr.to_string())
             .arg("--cert")
             .arg(&context.identity.cert_path)
             .arg("--key")
             .arg(&context.identity.key_path)
-            .arg("--timestamp")
-            .arg(context.timestamp.to_string())
             .arg("--local-store")
             .arg(&context.local_store_path)
-            .arg("--execution-id")
-            .arg(context.execution_id.to_string())
-            .env("STOFFEL_AUTH_TOKEN", &self.auth_token)
+            .arg("--party-id")
+            .arg(context.party_id.to_string())
+            .arg("--bind")
+            .arg(context.bind.to_string())
+            .arg("--peers")
+            .arg(
+                context
+                    .peers
+                    .iter()
+                    .map(|addr| addr.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
             .env("STOFFEL_LOCAL_RPC_READY_FILE", &context.markers.rpc)
             .env("STOFFEL_LOCAL_COMPLETION_FILE", &context.markers.completion)
             .env(
@@ -772,36 +816,6 @@ impl LocalCoordinatorRunner {
                 command
                     .arg("--client-input-slots")
                     .arg(input_slots.join(","));
-            }
-        }
-
-        match context.role {
-            PartyRole::Leader { bootnode } => {
-                command
-                    .env(
-                        "STOFFEL_LOCAL_BOOTNODE_READY_FILE",
-                        context
-                            .markers
-                            .bootnode
-                            .as_ref()
-                            .expect("leader has a bootnode readiness marker"),
-                    )
-                    .arg("--leader")
-                    .arg("--bind")
-                    .arg(bootnode.to_string());
-            }
-            PartyRole::Follower {
-                party_id,
-                bootnode,
-                bind,
-            } => {
-                command
-                    .arg("--party-id")
-                    .arg(party_id.to_string())
-                    .arg("--bootstrap")
-                    .arg(bootnode.to_string())
-                    .arg("--bind")
-                    .arg(bind.to_string());
             }
         }
 
@@ -893,11 +907,6 @@ impl LocalCoordinatorRunnerBuilder {
 
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.runner.timeout = timeout;
-        self
-    }
-
-    pub fn auth_token(mut self, auth_token: impl Into<String>) -> Self {
-        self.runner.auth_token = auth_token.into();
         self
     }
 
@@ -1092,8 +1101,13 @@ struct LocalClientRunContext {
     execution_id: ExecutionId,
     node_rpc_addrs: Vec<SocketAddr>,
     coord_port: u16,
-    parties: usize,
-    threshold: usize,
+    /// The key of the certificate the coordinator serves. Every coordinator
+    /// connection pins it, so whoever else answers at the port cannot serve
+    /// rounds, admissions or membership.
+    coord_spki: SpkiDer,
+    /// The coordinator's verified node roster: `n`, `t` and the keys every node
+    /// RPC leg is pinned to.
+    node_roster: NodeRoster,
     deadline: Instant,
     timeout: Duration,
 }
@@ -1106,8 +1120,8 @@ async fn run_honeybadger_offchain_client(
         execution_id,
         node_rpc_addrs,
         coord_port,
-        parties,
-        threshold,
+        coord_spki,
+        node_roster,
         deadline,
         timeout,
     } = context;
@@ -1133,14 +1147,31 @@ async fn run_honeybadger_offchain_client(
             OffChainCoordinatorClient::start_rpc_client_for_execution(
                 "127.0.0.1",
                 coord_port,
-                threshold as u64,
-                parties as u64,
-                client.output_count,
+                &coord_spki,
+                None,
                 CoordinatorExecutionId::from_bytes(*execution_id.as_bytes()),
                 client.cert_der.clone(),
                 std::fs::read(&client.key_path)?,
             )
             .await?;
+
+        // Association is what binds this certificate to its slot, and it
+        // happens now rather than at deployment: the admitted input range is
+        // the coordinator's answer, not something the client assumed.
+        phase = "client association";
+        let admission = coord
+            .associate_client(AssociationRequest {
+                slot: Some(ClientIndex(client.client_slot as u32)),
+            })
+            .await?;
+        let admitted_start = admission.input_range.map(|range| range.start).unwrap_or(0);
+        if admitted_start != client.reserved_index_start {
+            return Err(LocalCoordinatorRunnerError::Configuration(format!(
+                "client slot {} was admitted at input index {admitted_start}, not the {} it \
+                 reserved locally",
+                client.client_slot, client.reserved_index_start
+            )));
+        }
 
         let reserved_indices = (0..input_values.len())
             .map(|offset| client.reserved_index_start + offset as u64)
@@ -1170,8 +1201,7 @@ async fn run_honeybadger_offchain_client(
                 .collect::<Vec<_>>();
             let node_rpc: OffChainNodeRPCClient<Fr, RobustShare<Fr>> =
                 OffChainNodeRPCClient::start_rpc_client_for_execution(
-                    parties,
-                    threshold,
+                    &node_roster,
                     rpc_addrs,
                     CoordinatorExecutionId::from_bytes(*execution_id.as_bytes()),
                     client.cert_der,
@@ -1287,8 +1317,8 @@ where
         execution_id,
         node_rpc_addrs,
         coord_port,
-        parties,
-        threshold,
+        coord_spki,
+        node_roster,
         deadline,
         timeout,
     } = context;
@@ -1310,14 +1340,28 @@ where
             OffChainCoordinatorClient::start_rpc_client_for_execution(
                 "127.0.0.1",
                 coord_port,
-                threshold as u64,
-                parties as u64,
-                client.output_count,
+                &coord_spki,
+                None,
                 CoordinatorExecutionId::from_bytes(*execution_id.as_bytes()),
                 client.cert_der.clone(),
                 std::fs::read(&client.key_path)?,
             )
             .await?;
+
+        phase = "client association";
+        let admission = coord
+            .associate_client(AssociationRequest {
+                slot: Some(ClientIndex(client.client_slot as u32)),
+            })
+            .await?;
+        let admitted_start = admission.input_range.map(|range| range.start).unwrap_or(0);
+        if admitted_start != client.reserved_index_start {
+            return Err(LocalCoordinatorRunnerError::Configuration(format!(
+                "client slot {} was admitted at input index {admitted_start}, not the {} it \
+                 reserved locally",
+                client.client_slot, client.reserved_index_start
+            )));
+        }
 
         let reserved_indices = (0..input_values.len())
             .map(|offset| client.reserved_index_start + offset as u64)
@@ -1344,8 +1388,7 @@ where
                 .collect::<Vec<_>>();
             let node_rpc: OffChainNodeRPCClient<F, FeldmanShamirShare<F, G>> =
                 OffChainNodeRPCClient::start_rpc_client_for_execution(
-                    parties,
-                    threshold,
+                    &node_roster,
                     rpc_addrs,
                     CoordinatorExecutionId::from_bytes(*execution_id.as_bytes()),
                     client.cert_der,
@@ -1623,33 +1666,27 @@ fn parse_input_as_field<F: PrimeField>(value: &str) -> LocalCoordinatorRunnerRes
     Ok(stoffel_vm::net::field_from_i64::<F>(value))
 }
 
-enum PartyRole {
-    Leader {
-        bootnode: SocketAddr,
-    },
-    Follower {
-        party_id: usize,
-        bootnode: SocketAddr,
-        bind: SocketAddr,
-    },
-}
-
 struct SpawnPartyContext<'a> {
     program_path: &'a Path,
     identity: &'a NodeIdentity,
     rpc_addr: SocketAddr,
     local_store_path: PathBuf,
-    execution_id: ExecutionId,
-    role: PartyRole,
+    /// Label for this party's on-disk state and log lines. Not its identity:
+    /// on the wire a party is its rank in the lexicographic order of the
+    /// roster's certificates, which the mesh join verifies.
+    party_id: usize,
+    bind: SocketAddr,
+    /// The other parties' addresses, as seed hints.
+    peers: Vec<SocketAddr>,
     clients: &'a [LocalClientIdentity],
     coord_port: u16,
-    timestamp: u64,
+    /// The certificate each party pins its coordinator connection to.
+    coord_cert_path: &'a Path,
     markers: &'a PartyMarkers,
 }
 
 #[derive(Clone)]
 struct PartyMarkers {
-    bootnode: Option<PathBuf>,
     rpc: PathBuf,
     completion: PathBuf,
     network_handoff: PathBuf,
@@ -1664,9 +1701,8 @@ struct PortReservations {
 }
 
 impl PartyMarkers {
-    fn new(directory: &Path, name: &str, has_bootnode: bool) -> Self {
+    fn new(directory: &Path, name: &str) -> Self {
         Self {
-            bootnode: has_bootnode.then(|| directory.join(format!("{name}.bootnode-ready"))),
             rpc: directory.join(format!("{name}.rpc-ready")),
             completion: directory.join(format!("{name}.complete")),
             network_handoff: directory.join(format!("{name}.network-handoff")),
@@ -1675,12 +1711,13 @@ impl PartyMarkers {
         }
     }
 
-    fn reserve_ports(&self, leader: bool) -> std::io::Result<(SocketAddr, SocketAddr)> {
-        let network = if leader {
-            reserve_udp_port_pair()?
-        } else {
-            vec![UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?]
-        };
+    /// Reserve this party's two ephemeral ports, and hold them until the child
+    /// asks for the handoff.
+    ///
+    /// One UDP socket, not two: a party binds the single port it advertises,
+    /// so there is no second listener to reserve a `bind + 1000` partner for.
+    fn reserve_ports(&self) -> std::io::Result<(SocketAddr, SocketAddr)> {
+        let network = vec![UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?];
         let network_addr = network[0].local_addr()?;
         let rpc = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let rpc_addr = rpc.local_addr()?;
@@ -1718,8 +1755,6 @@ impl PartyMarkers {
             "coordinated execution completion"
         } else if self.rpc.exists() {
             "party RPC listener readiness"
-        } else if self.bootnode.as_ref().is_some_and(|marker| marker.exists()) {
-            "leader bootnode readiness"
         } else {
             "process spawn"
         }
@@ -1787,13 +1822,14 @@ fn write_node_identities(
 fn write_client_identities(
     path: &Path,
     inputs: &[LocalClientInput],
+    client_slots: &ClientSlotTable,
 ) -> LocalCoordinatorRunnerResult<Vec<LocalClientIdentity>> {
     let mut sorted_inputs = inputs.to_vec();
     sorted_inputs.sort_by_key(|input| input.client_slot);
-    // Reserve a contiguous block per client in slot order (clients may supply
-    // different numbers of inputs). The VM groups the returned shares per client
-    // (see `store_reserved_client_inputs`), so no uniform padding is required.
-    let mut next_reserved_index = 0_u64;
+    // The reserved index block is the slot table's own `input_range`, so the
+    // block a client reserves is by construction the block the coordinator
+    // admitted it for. The VM groups the returned shares per client (see
+    // `store_reserved_client_inputs`), so no uniform padding is required.
     sorted_inputs
         .into_iter()
         .map(|input| {
@@ -1804,8 +1840,10 @@ fn write_client_identities(
             let key_path = path.join(format!("client{}.key.der", input.client_slot));
             std::fs::write(&cert_path, &cert_der)?;
             std::fs::write(&key_path, key_der)?;
-            let reserved_index_start = next_reserved_index;
-            next_reserved_index += input.values.len() as u64;
+            let reserved_index_start = client_slots
+                .input_range(ClientIndex(input.client_slot as u32))
+                .map(|range| range.start)
+                .unwrap_or(0);
             Ok(LocalClientIdentity {
                 client_slot: input.client_slot,
                 input,
@@ -1817,13 +1855,6 @@ fn write_client_identities(
             })
         })
         .collect()
-}
-
-fn public_key_from_cert(cert_der: &[u8]) -> LocalCoordinatorRunnerResult<Vec<u8>> {
-    let (_, cert) = X509Certificate::from_der(cert_der).map_err(|error| {
-        LocalCoordinatorRunnerError::Configuration(format!("parse node certificate: {error:?}"))
-    })?;
-    Ok(cert.public_key().subject_public_key.data.as_ref().to_vec())
 }
 
 async fn wait_for_child(
@@ -2108,13 +2139,9 @@ fn cancelled_run() -> LocalCoordinatorRunnerError {
 }
 
 fn party_sort_key(name: &str) -> usize {
-    if name == "leader" {
-        0
-    } else {
-        name.strip_prefix("party")
-            .and_then(|suffix| suffix.parse().ok())
-            .unwrap_or(usize::MAX)
-    }
+    name.strip_prefix("party")
+        .and_then(|suffix| suffix.parse().ok())
+        .unwrap_or(usize::MAX)
 }
 
 struct LogReader {
@@ -2163,36 +2190,6 @@ impl Drop for LogReader {
 fn local_run_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-fn reserve_udp_port_pair() -> std::io::Result<Vec<UdpSocket>> {
-    // Mix the wall-clock nanos with the process id and a per-call counter so
-    // that runner processes launched concurrently (e.g. parallel CLI tests)
-    // and successive calls within one process begin their scan from different
-    // base ports. Retain both UDP sockets until the child requests its bind
-    // handoff, including the leader's required +1000 party socket.
-    static CALL_COUNTER: AtomicU16 = AtomicU16::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.subsec_nanos() as u16)
-        .unwrap_or(0);
-    let pid = std::process::id() as u16;
-    let call = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let seed = nanos
-        .wrapping_add(pid.wrapping_mul(7))
-        .wrapping_add(call.wrapping_mul(1009));
-    for offset in 0..30_000u16 {
-        let port = 20_000 + ((seed.wrapping_add(offset)) % 30_000);
-        if let Ok(bootnode) = UdpSocket::bind((Ipv4Addr::LOCALHOST, port)) {
-            if let Ok(party) = UdpSocket::bind((Ipv4Addr::LOCALHOST, port + 1000)) {
-                return Ok(vec![bootnode, party]);
-            }
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AddrNotAvailable,
-        "could not reserve a localhost bootnode port with a free +1000 party port in 20000..50999",
-    ))
 }
 
 #[cfg(test)]
@@ -2260,10 +2257,9 @@ mod tests {
     #[test]
     fn reservations_are_released_only_for_the_requested_bind_phase() {
         let temp = TempRunDir::new().unwrap();
-        let markers = PartyMarkers::new(temp.path(), "leader", true);
-        let (network, rpc) = markers.reserve_ports(true).unwrap();
+        let markers = PartyMarkers::new(temp.path(), "party0");
+        let (network, rpc) = markers.reserve_ports().unwrap();
         assert!(UdpSocket::bind(network).is_err());
-        assert!(UdpSocket::bind((network.ip(), network.port() + 1000)).is_err());
         assert!(TcpListener::bind(rpc).is_err());
         std::fs::write(&markers.network_handoff, b"ready").unwrap();
         markers.service_bind_handoffs().unwrap();
@@ -2343,9 +2339,6 @@ mod tests {
             format!(
                 r#"#!/bin/sh
 printf '%s' $$ > '{dir}/pid.'$$
-if [ -n "$STOFFEL_LOCAL_BOOTNODE_READY_FILE" ]; then
-  printf ready > "$STOFFEL_LOCAL_BOOTNODE_READY_FILE"
-fi
 printf ready > "$STOFFEL_LOCAL_RPC_READY_FILE"
 printf 'injected party diagnostic\n' >&2
 exec sleep 30
@@ -2488,7 +2481,7 @@ exec sleep 30
     #[tokio::test]
     async fn completed_child_that_stalls_is_reaped_as_shutdown_failure() {
         let temp = TempRunDir::new().unwrap();
-        let markers = PartyMarkers::new(temp.path(), "leader", true);
+        let markers = PartyMarkers::new(temp.path(), "party0");
         std::fs::write(&markers.completion, b"complete").unwrap();
 
         let mut command = Command::new("/bin/sh");
@@ -2504,7 +2497,7 @@ exec sleep 30
         let pid = child.id().unwrap() as i32;
         let started = Instant::now();
         let error = wait_for_child(
-            "leader".to_owned(),
+            "party0".to_owned(),
             child,
             markers,
             Instant::now() + Duration::from_secs(10),
@@ -2529,8 +2522,8 @@ exec sleep 30
         let cancellation = CancellationToken::new();
         let mut tasks = JoinSet::new();
         let mut pids = Vec::new();
-        for name in ["leader", "party1"] {
-            let markers = PartyMarkers::new(temp.path(), name, name == "leader");
+        for name in ["party0", "party1"] {
+            let markers = PartyMarkers::new(temp.path(), name);
             let mut command = Command::new("/bin/sh");
             command
                 .args(["-c", "exec sleep 30"])
@@ -2558,14 +2551,38 @@ exec sleep 30
         }
     }
 
+    /// A slot with no input and no declared output is not something the
+    /// coordinator can admit a client for, and the refusal names the flag that
+    /// fixes it rather than surfacing from slot-table construction.
     #[test]
-    fn expected_clients_create_output_identities_for_dynamic_outputs() {
+    fn expected_output_clients_without_an_output_count_is_refused_with_the_flag_to_set() {
+        let error = test_runner(CompiledBinary::new())
+            .expected_output_clients(2)
+            .build()
+            .expect_err("an output slot with no declared output count is not admissible");
+        let message = error.to_string();
+        assert!(
+            message.contains("client slot 0") && message.contains("--client-output-count 0="),
+            "expected the refusal to name the slot and the flag, got: {message}"
+        );
+    }
+
+    /// The retarget of the output-identity half of
+    /// `expected_clients_create_output_identities_for_dynamic_outputs`: a
+    /// dynamic output slot becomes a registrable slot once its output count is
+    /// supplied, and the table carries that count rather than a bare identity.
+    #[test]
+    fn expected_clients_become_output_slots_once_their_output_count_is_known() {
         let runner = test_runner(CompiledBinary::new())
             .expected_output_clients(2)
+            .client_output_count(0, 3)
+            .client_output_count(1, 1)
             .build()
             .expect("runner");
 
         let known_clients = runner.known_client_inputs();
+        // `--expected-output-clients N` still creates an identity per slot
+        // `0..N-1`, and none of them submits an input.
         assert_eq!(
             known_clients
                 .iter()
@@ -2574,12 +2591,26 @@ exec sleep 30
             vec![0, 1]
         );
         assert!(known_clients.iter().all(|client| client.values.is_empty()));
+        let table = runner
+            .coordinator_client_slot_table(&known_clients)
+            .expect("slot table");
 
-        let (n_inputs, output_clients) = runner
-            .coordinator_client_io_binding(&[(0, vec![10]), (1, vec![11])])
-            .expect("binding");
-        assert_eq!(n_inputs, 0);
-        assert_eq!(output_clients, vec![vec![10], vec![11]]);
+        assert_eq!(table.n_inputs(), 0);
+        assert_eq!(
+            table.slots(),
+            [
+                ClientSlotSpec {
+                    input_count: 0,
+                    output_count: 3,
+                },
+                ClientSlotSpec {
+                    input_count: 0,
+                    output_count: 1,
+                },
+            ]
+        );
+        assert_eq!(table.input_range(ClientIndex(0)), None);
+        assert_eq!(table.input_range(ClientIndex(1)), None);
     }
 
     #[test]
@@ -2657,9 +2688,14 @@ exec sleep 30
             outputs: Vec::new(),
         }];
 
+        // The manifest declares slot 0's input and no outputs, so the output
+        // counts of both slots are the developer-supplied ones. A slot the
+        // coordinator can admit has to own something.
         let runner = test_runner(binary)
             .expected_output_clients(2)
             .client_input(0, [42])
+            .client_output_count(0, 2)
+            .client_output_count(1, 1)
             .build()
             .expect("runner");
 
@@ -2674,10 +2710,29 @@ exec sleep 30
         assert_eq!(known_clients[0].values, vec!["42".to_owned()]);
         assert!(known_clients[1].values.is_empty());
 
-        let (n_inputs, output_clients) = runner
-            .coordinator_client_io_binding(&[(0, vec![10]), (1, vec![11])])
-            .expect("binding");
-        assert_eq!(n_inputs, 1);
-        assert_eq!(output_clients, vec![vec![10], vec![11]]);
+        let table = runner
+            .coordinator_client_slot_table(&known_clients)
+            .expect("slot table");
+        assert_eq!(table.n_inputs(), 1);
+        assert_eq!(
+            table.slots(),
+            [
+                ClientSlotSpec {
+                    input_count: 1,
+                    output_count: 2,
+                },
+                ClientSlotSpec {
+                    input_count: 0,
+                    output_count: 1,
+                },
+            ]
+        );
+        // Slot 0 owns the single global input index, and slot 1 owns none, so
+        // each client's reserved block is exactly what the coordinator admits.
+        assert_eq!(
+            table.input_range(ClientIndex(0)).map(|range| range.start),
+            Some(0)
+        );
+        assert_eq!(table.input_range(ClientIndex(1)), None);
     }
 }

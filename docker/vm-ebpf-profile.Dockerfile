@@ -2,6 +2,18 @@
 
 # Symbolized Linux build of the VM-only profiling workloads. Run this image
 # privileged so bpftrace can sample the process through Linux eBPF.
+#
+# Example:
+#   docker build -f docker/vm-ebpf-profile.Dockerfile \
+#     --build-context coordinator=../stoffel-mpc-coordinator \
+#     --build-context networking=../stoffel-networking \
+#     -t stoffelvm-ebpf-profile .
+#
+# Both source contexts are required even though the profiled binary lives in
+# stoffel-vm: the workspace manifest patches the coordinator and networking
+# crates to sibling checkouts of the host tree, so Cargo cannot resolve the
+# workspace inside any image whose injected [patch.crates-io] table leaves
+# those entries uncovered.
 FROM rustlang/rust:nightly-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,7 +29,10 @@ ENV RUSTUP_TOOLCHAIN=nightly-2026-08-19
 
 WORKDIR /build
 COPY . .
-COPY --from=networking . /build/stoffelnet
+# Keep external workspaces outside /build so Cargo does not attach their
+# workspace-inherited manifests to the Stoffel workspace.
+COPY --from=coordinator . /opt/stoffel-coordinator
+COPY --from=networking . /opt/stoffelnet
 
 RUN mkdir -p /build/.cargo && \
     printf '%s\n' \
@@ -25,7 +40,9 @@ RUN mkdir -p /build/.cargo && \
       'git-fetch-with-cli = true' \
       '' \
       '[patch.crates-io]' \
-      'stoffelnet = { path = "/build/stoffelnet" }' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/opt/stoffel-coordinator/crates/off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/opt/stoffel-coordinator/crates/coord-shared" }' \
+      'stoffelnet = { path = "/opt/stoffelnet" }' \
       > /build/.cargo/config.toml
 
 ENV RUSTFLAGS="--cfg aes_armv8 --cfg polyval_armv8 -C debuginfo=2 -C force-frame-pointers=yes"

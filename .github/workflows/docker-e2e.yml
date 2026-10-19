@@ -1,0 +1,211 @@
+name: Docker E2E
+
+# The six docker/test-*.sh suites are the only live evidence this repository has
+# for the preprocessing-privacy work (design doc §9.1 stage V-0): a unit test
+# holds the items in hand and can compare them, but only a deployment shows a
+# second PROCESS drawing from a volume a first one wrote. Until now none of them
+# ran anywhere but an operator's machine.
+#
+# They cannot run on every pull request. Each needs a five-party deployment, and
+# the dominant cost is not the campaign but the image: a cold release build of
+# this workspace inside Docker. Measured WARM on an operator's machine the four
+# campaigns here are 4m35s + 5m08s + 6m06s + 7m16s = 23 minutes of campaign;
+# the build on top of that is minutes when BuildKit's local cache is warm and
+# an estimated 40-70 minutes cold on a 4-vCPU runner. Compose declares no
+# `cache_from`, so a runner starts cold every time (see "Why no shared cache"
+# below). So:
+#
+#   * every pull request gets the static wiring check in ci.yml, which costs
+#     nothing and catches the breakage that makes these campaigns vacuous;
+#   * the PREPROCESSING-STORE pair runs nightly, and on demand on a pull
+#     request that carries the `docker-e2e` label. It is the cheaper pair and
+#     the one aimed at the defect's own home — the one-shot `--preproc-store`
+#     commit/load path — with the standing suite as its negative control;
+#   * the STANDING pair runs nightly and on demand only. It is the more
+#     expensive pair and the only live AVSS coverage.
+#
+# Nothing here gates merge. These jobs report; `build-and-test` gates.
+#
+# Why no shared cache with ci.yml's docker-build: that job builds with
+# `cache-from/to: type=gha`, but the suites build through `docker compose`, and
+# no compose file in this repository declares `cache_from`. Pointing both at
+# one cache therefore needs a `cache_from: [type=gha]` on every compose build
+# block, which would change what an operator's local run does too. Aligning
+# docker-build's build-contexts with the local clones below is necessary for
+# that and is not sufficient on its own.
+#
+# A note on the `networking` build context, because it looks load-bearing and
+# is not. The Dockerfile copies it to /opt/stoffelnet and repoints the
+# stoffelnet dependency at that directory, but the checkout there declares
+# version 0.1.0 while every VM crate requires `=0.1.1`, so cargo discards the
+# patch — `warning: patch stoffelnet v0.1.0 (/opt/stoffelnet) was not used in
+# the crate graph`, present in every recorded campaign log — and links the
+# registry crate instead. The context is still required (docker-compose
+# .standing-concurrency.yml demands it with `:?`), so it is cloned; it just
+# does not reach the binary. One consequence is good news for attribution: the
+# image built here runs the same networking code as every campaign an operator
+# has run, whatever revision either side names.
+
+on:
+  schedule:
+    # 07:00 UTC, after the day's pushes have settled and before office hours in
+    # either hemisphere this project is worked in.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: Which campaigns to run
+        type: choice
+        default: all
+        options: [all, preproc-store, standing]
+  pull_request:
+    branches: [main, dev]
+    # `labeled` is what makes the label usable after a pull request is opened;
+    # without it the label would only take effect on the next push.
+    types: [opened, synchronize, reopened, labeled]
+
+# One deployment per repository at a time. These campaigns bind host ports and
+# fixed container names (stoffel-coord-party0 and friends), so two in flight on
+# one runner pool is a collision, not parallelism.
+concurrency:
+  group: docker-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preproc-store:
+    name: Preprocessing store (one-shot + standing)
+    runs-on: ubuntu-latest
+    # Budget: an estimated 40-70 min cold build plus ~10 min of campaign.
+    timeout-minutes: 120
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.suites != 'standing') ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'docker-e2e'))
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # A five-party deployment plus a release build inside Docker does not fit
+      # comfortably in the runner's ~14 GB. These two directories are the
+      # largest things on the image that no step here needs.
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc
+          df -h /
+
+      # Both suites need the coordinator as an absolute LOCAL checkout: its
+      # 0.3.0 crates are unpublished, and a build context at another version is
+      # discarded by cargo rather than refused, so a remote URL at the wrong
+      # revision would fail the build late and confusingly.
+      - name: Check out the unpublished coordinator
+        run: |
+          git clone --depth 1 --branch feature/no-bootnode \
+            https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git \
+            "${{ github.workspace }}/../coordinator-checkout"
+
+      # The pair, in this order on purpose. The one-shot suite asserts the
+      # PRESENCE of the commit marker and the standing suite asserts its
+      # ABSENCE on the same image, so each is the other's control; running the
+      # presence side first means a build or image problem shows up on the
+      # assertion that cannot pass vacuously.
+      - name: One-shot --preproc-store commit/load campaign
+        env:
+          STOFFEL_COORDINATOR_CONTEXT: ${{ github.workspace }}/../coordinator-checkout
+        run: ./docker/test-oneshot-preproc-store.sh
+
+      - name: Standing reservoir fresh/load/asymmetric-recovery campaign
+        env:
+          STOFFEL_COORDINATOR_CONTEXT: ${{ github.workspace }}/../coordinator-checkout
+        run: ./docker/test-coordinator-preproc-store.sh
+
+      # Each suite tears its own project down on exit, so anything still here
+      # is a leak and is worth seeing before it is removed. The removal is
+      # unconditional because a cancelled job never reaches a suite's own trap,
+      # and the runner is ephemeral and exclusively ours.
+      - name: Report and remove any surviving deployment
+        if: always()
+        run: |
+          docker ps -a
+          docker volume ls
+          docker ps -aq | xargs -r docker rm -f
+          docker volume prune -f
+
+  standing:
+    name: Standing deployment (concurrency + adversarial)
+    runs-on: ubuntu-latest
+    # Budget: the same cold build plus ~13 min of campaign.
+    timeout-minutes: 150
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.suites != 'preproc-store')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc
+          df -h /
+
+      - name: Check out the unpublished coordinator
+        run: |
+          git clone --depth 1 --branch feature/no-bootnode \
+            https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git \
+            "${{ github.workspace }}/../coordinator-checkout"
+
+      # acceptance.py requires BOTH contexts to be absolute local Git
+      # checkouts, and docker-compose.standing-concurrency.yml demands both
+      # with `:?`. The tag is immutable and is the same revision the bash
+      # suites default to. Cargo discards this one (see the header); it is
+      # cloned to satisfy the harness, not to change the binary.
+      - name: Check out the networking context the harness requires
+        run: |
+          git clone --depth 1 --branch v0.1.1 \
+            https://github.com/Stoffel-Labs/stoffel-networking.git \
+            "${{ github.workspace }}/../networking-checkout"
+
+      - name: Standing concurrency campaign
+        env:
+          STOFFEL_COORDINATOR_CONTEXT: ${{ github.workspace }}/../coordinator-checkout
+          STOFFEL_NETWORK_CONTEXT: ${{ github.workspace }}/../networking-checkout
+        run: ./docker/test-standing-concurrency.sh
+
+      - name: Adversarial standing campaign
+        env:
+          STOFFEL_COORDINATOR_CONTEXT: ${{ github.workspace }}/../coordinator-checkout
+          STOFFEL_NETWORK_CONTEXT: ${{ github.workspace }}/../networking-checkout
+        run: ./docker/test-standing-adversarial.sh
+
+      # These two suites keep their harness state under a mkdtemp directory ON
+      # FAILURE by design, and dump the failing party's log into it. On a
+      # developer's machine that is where you go to look; on a runner it
+      # evaporates with the job, so a failing nightly would otherwise be
+      # undiagnosable.
+      - name: Collect harness state from a failed campaign
+        if: failure()
+        run: |
+          mkdir -p harness-state
+          cp -R "${TMPDIR:-/tmp}"/stoffel-standing-* harness-state/ 2>/dev/null || true
+          ls -R harness-state || true
+
+      - name: Upload harness state
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: standing-harness-state
+          path: harness-state
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # Each suite tears its own project down on exit, so anything still here
+      # is a leak and is worth seeing before it is removed. The removal is
+      # unconditional because a cancelled job never reaches a suite's own trap,
+      # and the runner is ephemeral and exclusively ours.
+      - name: Report and remove any surviving deployment
+        if: always()
+        run: |
+          docker ps -a
+          docker volume ls
+          docker ps -aq | xargs -r docker rm -f
+          docker volume prune -f

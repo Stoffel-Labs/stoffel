@@ -3,6 +3,16 @@
 //! The SDK validates client configuration and program input arity here. Live
 //! submission and ordering verification remain delegated to `stoffel-networking`
 //! and the MPC runtime instead of being simulated in the SDK.
+//!
+//! Every client here is a coordinator client. A client's node set, and the
+//! certificates the dials to that node set are pinned to, come from the roster
+//! the pinned coordinator serves and from nowhere else
+//! (`docs/design/bootnode-elimination.md` §13), so
+//! [`ClientBuilder::connect`] opens the coordinator link and keeps the roster
+//! it served. There is no coordinator-less client and no way to hand this
+//! client a node list to trust on its own: the node RPC legs that carry mask
+//! shares are pinned to that same roster by
+//! `OffChainNodeRPCClient::start_rpc_client_for_execution`.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -16,14 +26,15 @@ use ark_bls12_381::Fr;
 use ark_ff::PrimeField;
 use serde::{Deserialize, Serialize};
 use stoffel_mpc_coordinator_off_chain::{
-    node_rpc::NodeRPCClient as OffChainNodeRPCClient, OffChainCoordinatorClient,
+    node_rpc::NodeRPCClient as OffChainNodeRPCClient, CoordinatorLink, OffChainCoordinatorClient,
 };
-use stoffel_mpc_coordinator_shared::{Coordinator as _, ExecutionId};
+use stoffel_mpc_coordinator_shared::{
+    AssociationRequest, ClientIndex, Coordinator as _, ExecutionId, NodeRoster, SpkiDer,
+};
+use stoffel_vm::net::roster::Roster;
 use stoffel_vm_types::core_types::ShareType;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
-use stoffelnet::network_utils::Network as _;
-use stoffelnet::transports::quic::QuicNetworkManager;
 
 use crate::client_value_codec::{decode_fixed_point_value, encode_fixed_point_value};
 use crate::config::{validate_socket_address, Curve, MpcBackend, NetworkConfig, NetworkDeployment};
@@ -278,44 +289,60 @@ impl ClientBuilder {
             servers: self.servers,
             program: self.program,
             client_id: self.client_id,
-            transport_client_id: None,
             verified_ordering: self.verified_ordering,
-            network: None,
+            node_roster: None,
             offchain_io: self.offchain_io,
             state: ClientState::Disconnected,
         })
     }
 
+    /// Open the pinned coordinator link and keep the node roster it serves.
+    ///
+    /// This is what connecting a client means: the coordinator is the roster
+    /// authority, so it is the coordinator — not `--servers`, not a config file
+    /// — that tells a client which nodes exist and which certificate each one
+    /// must prove. A client that has not reached its coordinator has no node
+    /// identity to pin and therefore nothing it may safely dial, so this
+    /// refuses a client with no off-chain IO configuration rather than opening
+    /// a connection that would accept whatever answered the address.
     #[tracing::instrument(skip_all, fields(server_count = self.servers.len()))]
     pub async fn connect(self) -> Result<StoffelClient> {
         let connection_timeout = self.connection_timeout;
         let mut client = self.build()?;
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let mut network = QuicNetworkManager::new();
-
-        for server in &client.servers {
-            let address = server.parse::<SocketAddr>().map_err(|error| {
-                Error::Configuration(format!("invalid client server address '{server}': {error}"))
+        let config = client.offchain_io.clone().ok_or_else(|| {
+            Error::Configuration(
+                "connecting a client requires off-chain client IO configuration: the coordinator \
+                 is what serves a client the node certificates its dials are pinned to"
+                    .to_owned(),
+            )
+        })?;
+        let coordinator_pin =
+            SpkiDer::from_certificate_der(&config.coordinator_cert_der).map_err(|error| {
+                Error::Configuration(format!(
+                    "the configured coordinator certificate is not a usable DER X.509 \
+                     certificate: {error}"
+                ))
             })?;
-            match tokio::time::timeout(connection_timeout, network.connect_as_client(address)).await
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    return Err(Error::NetworkConnection(format!(
-                        "failed to connect to server '{server}': {error}"
-                    )));
-                }
-                Err(_) => {
-                    return Err(Error::NetworkConnection(format!(
-                        "timed out after {:?} connecting to server '{server}'",
-                        connection_timeout
-                    )));
-                }
-            }
-        }
-
-        client.transport_client_id = Some(network.local_derived_id());
-        client.network = Some(network);
+        let link = tokio::time::timeout(
+            connection_timeout,
+            CoordinatorLink::connect(
+                &config.coordinator_host,
+                config.coordinator_port,
+                &coordinator_pin,
+                None,
+                config.cert_der.clone(),
+                config.key_der.clone(),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            Error::NetworkConnection(format!(
+                "timed out after {connection_timeout:?} connecting to the coordinator at {}:{}",
+                config.coordinator_host, config.coordinator_port
+            ))
+        })?
+        .map_err(Error::Coordinator)?;
+        client.node_roster = Some(client_node_roster(link.node_roster())?);
         client.state = ClientState::Connected;
         Ok(client)
     }
@@ -327,13 +354,14 @@ pub struct OffChainClientConfig {
     pub execution_id: ExecutionId,
     pub coordinator_host: String,
     pub coordinator_port: u16,
+    /// DER of the certificate the coordinator serves. Every coordinator
+    /// connection is pinned to its key, so whoever else answers at the
+    /// coordinator's address cannot serve this client an admission, a round or
+    /// a node roster.
+    pub coordinator_cert_der: Vec<u8>,
     pub timestamp: u64,
     #[serde(default)]
     pub client_slot: u64,
-    #[serde(default)]
-    pub input_start_index: u64,
-    pub parties: usize,
-    pub threshold: usize,
     pub backend: MpcBackend,
     pub node_rpc_addresses: Vec<String>,
     pub cert_der: Vec<u8>,
@@ -366,21 +394,6 @@ impl OffChainClientConfig {
                 "off-chain coordinator timestamp must be greater than zero".to_owned(),
             ));
         }
-        if self.threshold == 0 {
-            return Err(Error::Configuration(
-                "off-chain client threshold must be greater than zero".to_owned(),
-            ));
-        }
-        if self.parties < 5 {
-            return Err(Error::Configuration(
-                "off-chain client parties must be at least 5".to_owned(),
-            ));
-        }
-        if self.parties < 4 * self.threshold + 1 {
-            return Err(Error::Unsupported(
-                "off-chain client IO requires parties >= 4 * threshold + 1".to_owned(),
-            ));
-        }
         if self.node_rpc_addresses.is_empty() {
             return Err(Error::Configuration(
                 "off-chain client IO requires at least one node RPC address".to_owned(),
@@ -388,6 +401,13 @@ impl OffChainClientConfig {
         }
         for (index, address) in self.node_rpc_addresses.iter().enumerate() {
             validate_socket_address(&format!("node RPC address at index {index}"), address)?;
+        }
+        if self.coordinator_cert_der.is_empty() {
+            return Err(Error::Configuration(
+                "off-chain client IO requires the coordinator's certificate DER; an unpinned \
+                 coordinator connection accepts any server"
+                    .to_owned(),
+            ));
         }
         if self.cert_der.is_empty() {
             return Err(Error::Configuration(
@@ -432,11 +452,9 @@ pub struct OffChainClientConfigBuilder {
     execution_id: Option<ExecutionId>,
     coordinator_host: String,
     coordinator_port: Option<u16>,
+    coordinator_cert_der: Option<Vec<u8>>,
     timestamp: Option<u64>,
     client_slot: u64,
-    input_start_index: u64,
-    parties: usize,
-    threshold: usize,
     backend: MpcBackend,
     node_rpc_addresses: Vec<String>,
     cert_der: Option<Vec<u8>>,
@@ -461,6 +479,21 @@ impl OffChainClientConfigBuilder {
         self
     }
 
+    /// Pin the coordinator to the key of this certificate.
+    pub fn coordinator_cert_der(mut self, cert_der: Vec<u8>) -> Self {
+        self.coordinator_cert_der = Some(cert_der);
+        self
+    }
+
+    /// [`Self::coordinator_cert_der`] from a file.
+    pub fn coordinator_cert_file(mut self, cert_path: impl AsRef<Path>) -> Self {
+        match std::fs::read(cert_path) {
+            Ok(cert) => self.coordinator_cert_der = Some(cert),
+            Err(error) => self.config_error = Some(error.to_string()),
+        }
+        self
+    }
+
     pub fn timestamp(mut self, timestamp: u64) -> Self {
         self.timestamp = Some(timestamp);
         self
@@ -468,21 +501,6 @@ impl OffChainClientConfigBuilder {
 
     pub fn client_slot(mut self, client_slot: u64) -> Self {
         self.client_slot = client_slot;
-        self
-    }
-
-    pub fn input_start_index(mut self, input_start_index: u64) -> Self {
-        self.input_start_index = input_start_index;
-        self
-    }
-
-    pub fn parties(mut self, parties: usize) -> Self {
-        self.parties = parties;
-        self
-    }
-
-    pub fn threshold(mut self, threshold: usize) -> Self {
-        self.threshold = threshold;
         self
     }
 
@@ -583,13 +601,17 @@ impl OffChainClientConfigBuilder {
             coordinator_port: self.coordinator_port.ok_or_else(|| {
                 Error::Configuration("off-chain coordinator port is required".to_owned())
             })?,
+            coordinator_cert_der: self.coordinator_cert_der.ok_or_else(|| {
+                Error::Configuration(
+                    "off-chain coordinator certificate DER is required: the connection pins the \
+                     coordinator's key"
+                        .to_owned(),
+                )
+            })?,
             timestamp: self.timestamp.ok_or_else(|| {
                 Error::Configuration("off-chain coordinator timestamp is required".to_owned())
             })?,
             client_slot: self.client_slot,
-            input_start_index: self.input_start_index,
-            parties: self.parties,
-            threshold: self.threshold,
             backend: self.backend,
             node_rpc_addresses: self.node_rpc_addresses,
             cert_der: self.cert_der.ok_or_else(|| {
@@ -614,11 +636,9 @@ impl Default for OffChainClientConfigBuilder {
             execution_id: None,
             coordinator_host: "127.0.0.1".to_owned(),
             coordinator_port: None,
+            coordinator_cert_der: None,
             timestamp: None,
             client_slot: 0,
-            input_start_index: 0,
-            parties: 5,
-            threshold: 1,
             backend: MpcBackend::HoneyBadger,
             node_rpc_addresses: Vec::new(),
             cert_der: None,
@@ -643,9 +663,10 @@ pub struct StoffelClient {
     servers: Vec<String>,
     program: Option<Program>,
     client_id: ClientId,
-    transport_client_id: Option<ClientId>,
     verified_ordering: Option<VerifiedOrdering>,
-    network: Option<QuicNetworkManager>,
+    /// The node certificates this client authorizes, exactly as the
+    /// coordinator it pinned served them. `None` until [`ClientBuilder::connect`].
+    node_roster: Option<Roster>,
     offchain_io: Option<OffChainClientConfig>,
     state: ClientState,
 }
@@ -653,7 +674,9 @@ pub struct StoffelClient {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientSummary {
     pub client_id: ClientId,
-    pub transport_client_id: Option<ClientId>,
+    /// How many node certificates the coordinator's roster named, once this
+    /// client has connected to that coordinator.
+    pub pinned_node_count: Option<usize>,
     pub server_count: usize,
     pub has_program: bool,
     pub has_verified_ordering: bool,
@@ -665,14 +688,6 @@ pub struct ClientSummary {
 impl StoffelClient {
     pub fn builder() -> ClientBuilder {
         ClientBuilder::new()
-    }
-
-    #[tracing::instrument(skip_all, fields(server_count = servers.len()))]
-    pub async fn connect(servers: &[&str]) -> Result<Self> {
-        ClientBuilder::new()
-            .servers(servers.iter().copied())
-            .connect()
-            .await
     }
 
     #[tracing::instrument(skip_all, fields(client_id = self.client_id))]
@@ -850,13 +865,6 @@ impl StoffelClient {
         if let Some(ordering) = &self.verified_ordering {
             return Ok(ordering.clone());
         }
-        if let Some(ordering) = self
-            .network
-            .as_ref()
-            .and_then(|network| network.verified_ordering())
-        {
-            return Ok(ordering);
-        }
         Err(Error::Unsupported(
             "ordering verification is performed by stoffel-networking over live QUIC connections"
                 .to_owned(),
@@ -870,7 +878,7 @@ impl StoffelClient {
     pub fn summary(&self) -> ClientSummary {
         ClientSummary {
             client_id: self.client_id,
-            transport_client_id: self.transport_client_id,
+            pinned_node_count: self.pinned_node_count(),
             server_count: self.servers.len(),
             has_program: self.has_program(),
             has_verified_ordering: self.verified_ordering.is_some(),
@@ -884,8 +892,10 @@ impl StoffelClient {
         self.client_id
     }
 
-    pub fn transport_client_id(&self) -> Option<ClientId> {
-        self.transport_client_id
+    /// How many node certificates the coordinator's roster named, or `None`
+    /// while this client has not reached its coordinator.
+    pub fn pinned_node_count(&self) -> Option<usize> {
+        self.node_roster.as_ref().map(|roster| roster.nodes().len())
     }
 
     pub fn servers(&self) -> &[String] {
@@ -900,8 +910,10 @@ impl StoffelClient {
         self.verified_ordering.as_ref()
     }
 
-    pub fn network_manager(&self) -> Option<&QuicNetworkManager> {
-        self.network.as_ref()
+    /// The node certificates this client authorizes its dials against, as the
+    /// coordinator served them. `None` until it has connected.
+    pub fn node_roster(&self) -> Option<&Roster> {
+        self.node_roster.as_ref()
     }
 
     pub fn offchain_io(&self) -> Option<&OffChainClientConfig> {
@@ -909,7 +921,7 @@ impl StoffelClient {
     }
 
     pub fn is_connected(&self) -> bool {
-        self.state == ClientState::Connected && self.network.is_some()
+        self.state == ClientState::Connected && self.node_roster.is_some()
     }
 
     pub fn has_program(&self) -> bool {
@@ -1144,6 +1156,27 @@ fn sdk_backend_from_program(program: &Program) -> MpcBackend {
     }
 }
 
+/// Build the node allowlist a client pins its dials to from the certificates
+/// its coordinator served.
+///
+/// The §9.B digest is recomputed over those certificates, so a coordinator that
+/// served a digest its own certificates do not produce is refused here rather
+/// than pinned.
+fn client_node_roster(served: &NodeRoster) -> Result<Roster> {
+    let certificates: Vec<&[u8]> = served
+        .node_certificates()
+        .iter()
+        .map(|certificate| certificate.as_bytes())
+        .collect();
+    Roster::from_coordinator(&certificates, served.t(), *served.digest().as_bytes()).map_err(
+        |error| {
+            Error::Configuration(format!(
+                "the coordinator served a node roster this client cannot pin its nodes to: {error}"
+            ))
+        },
+    )
+}
+
 async fn run_offchain_inputs_with_config(
     config: &OffChainClientConfig,
     inputs: &[Value],
@@ -1208,12 +1241,18 @@ where
     S: stoffel_mpc_coordinator_shared::ShareBound<F, ValueType = F>,
 {
     tokio::time::timeout(config.timeout, async {
+        let coordinator_pin =
+            SpkiDer::from_certificate_der(&config.coordinator_cert_der).map_err(|error| {
+                Error::Configuration(format!(
+                    "the configured coordinator certificate is not a usable DER X.509 \
+                     certificate: {error}"
+                ))
+            })?;
         let coord = OffChainCoordinatorClient::<F, S>::start_rpc_client_for_execution(
             &config.coordinator_host,
             config.coordinator_port,
-            config.threshold as u64,
-            config.parties as u64,
-            config.output_count,
+            &coordinator_pin,
+            None,
             config.execution_id,
             config.cert_der.clone(),
             config.key_der.clone(),
@@ -1228,23 +1267,48 @@ where
             )));
         }
         let mut coord = coord;
-        let reserved_indices = (0..inputs.len())
-            .map(|ordinal| config.input_start_index + ordinal as u64)
-            .collect::<Vec<_>>();
+        // This client was not listed when the deployment was built: it binds
+        // its slot now, and the coordinator's answer — not the configuration —
+        // is what fixes the input range it may reserve and submit.
+        let client_index = u32::try_from(config.client_slot).map_err(|_| {
+            Error::Configuration(format!(
+                "off-chain client slot {} exceeds the coordinator's slot index width",
+                config.client_slot
+            ))
+        })?;
+        let admission = coord
+            .associate_client(AssociationRequest {
+                slot: Some(ClientIndex(client_index)),
+            })
+            .await?;
+        let reserved_indices = match admission.input_range {
+            Some(range) => (range.start..range.end()).collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        if reserved_indices.len() != inputs.len() {
+            return Err(Error::Configuration(format!(
+                "the coordinator admitted client slot {} for {} input(s), and {} were supplied",
+                config.client_slot,
+                reserved_indices.len(),
+                inputs.len()
+            )));
+        }
         if !reserved_indices.is_empty() {
             coord.reserve_mask_indices(&reserved_indices).await?;
         }
+        // Each node RPC leg is pinned to a member of the coordinator's verified
+        // roster, which is also where `n` and `t` come from.
         let node_rpc = OffChainNodeRPCClient::<F, S>::start_rpc_client_for_execution(
-            config.parties,
-            config.threshold,
+            coord.node_roster(),
             config.node_rpc_endpoints()?,
             config.execution_id,
             config.cert_der.clone(),
             config.key_der.clone(),
         )
         .await?;
+        let input_start_index = reserved_indices.first().copied().unwrap_or(0);
         let masks = node_rpc
-            .receive_assigned_masks(config.input_start_index, inputs.len() as u64)
+            .receive_assigned_masks(input_start_index, inputs.len() as u64)
             .await?;
         let curve = config.backend.curve().unwrap_or(Curve::Bls12_381);
         let masked_inputs = inputs
@@ -1252,7 +1316,7 @@ where
             .zip(config.input_types.iter())
             .enumerate()
             .map(|(ordinal, (input, share_type))| {
-                let reserved_index = config.input_start_index + ordinal as u64;
+                let reserved_index = input_start_index + ordinal as u64;
                 let mask = masks.get(ordinal).ok_or_else(|| {
                     Error::Coordinator(stoffel_mpc_coordinator_shared::CoordinatorError::JSONError(
                         format!("missing assigned mask for input ordinal {ordinal}"),

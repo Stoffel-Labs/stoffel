@@ -3,8 +3,6 @@
 # Usage:
 #   STOFFEL_PROGRAM_NAME=mpc_runtime_info.stflb \
 #     docker compose -f examples/docker-compose.mpc.yml up --build
-# STOFFEL_EXECUTION_ID defaults to an example-only constant below; use a fresh shared nonzero
-# 64-hex-character value for each real or overlapping invocation.
 #
 # For threshold ECDSA:
 #   STOFFEL_PROGRAM_NAME=threshold_signatures_threshold_ecdsa_secp256k1.stflb \
@@ -12,12 +10,18 @@
 #   STOFFEL_MPC_CURVE=secp256k1 \
 #     docker compose -f examples/docker-compose.mpc.yml up --build
 
+# The coordinator decides what runs: it mints every execution identity and
+# publishes each execution to the node roster, so no party is configured with
+# one. The `registrar` service below asks it to run one execution of the
+# mounted program, so `docker compose -f <this file> up` completes on its own.
+# This stack has no client services.
+
 x-party-common: &party-common
   build:
     context: ${STOFFEL_VM_DIR:-../../..}
     dockerfile: Dockerfile
     additional_contexts:
-      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?Set an absolute coordinator checkout}"
       networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
   volumes:
     - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
@@ -25,28 +29,105 @@ x-party-common: &party-common
   networks:
     stoffel-examples:
   environment: &party-env
-    STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:-stoffel-examples-token}
     STOFFEL_N_PARTIES: ${STOFFEL_N_PARTIES:-5}
     STOFFEL_THRESHOLD: ${STOFFEL_THRESHOLD:-1}
     STOFFEL_PROGRAM: /app/examples/${STOFFEL_PROGRAM_NAME:-mpc_runtime_info.stflb}
     STOFFEL_ENTRY: ${STOFFEL_ENTRY:-main}
     STOFFEL_MPC_BACKEND: ${STOFFEL_MPC_BACKEND:-honeybadger}
     STOFFEL_MPC_CURVE: ${STOFFEL_MPC_CURVE:-bls12-381}
-    STOFFEL_EXECUTION_ID: "${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001}"
     STOFFEL_LOCAL_STORE: /app/local-store/party-${STOFFEL_PARTY_ID:-0}.redb
+    STOFFEL_COORD_ADDR: 172.29.0.5:31415
+    STOFFEL_COORD_CERT: /app/ids/server_cert.crt
     RUST_LOG: ${RUST_LOG:-info}
     RUST_BACKTRACE: "1"
 
 services:
+  # The coordinator is the roster authority: it serves the node certificates
+  # that define the mesh, and the party count and threshold that come with
+  # them.
+  coordinator:
+    build:
+      context: ${STOFFEL_VM_DIR:-../../..}
+      dockerfile: docker/coordinator.Dockerfile
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?Set an absolute coordinator checkout}"
+    hostname: coordinator
+    command:
+      - --bind-addr
+      - 0.0.0.0
+      - --port
+      - "31415"
+      - --server-cert
+      - /app/ids/server_cert.crt
+      - --server-key
+      - /app/ids/server_key.der
+      - --t
+      - "${STOFFEL_THRESHOLD:-1}"
+      - --node-roster
+      - /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
+      # The only identity allowed to tell this coordinator what to run. It
+      # mints every execution identity itself and publishes each execution
+      # to the roster; the nodes have no say in what is submitted.
+      - --operator-certs
+      - /app/ids/operator/cert.crt
+    networks:
+      stoffel-examples:
+        ipv4_address: 172.29.0.5
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -tuln | grep -q ':31415' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  # One submission, over the operator's own authenticated link. It exits as soon
+  # as the coordinator has minted and published the execution; the parties learn
+  # of it on the subscriptions they already hold and never see this container.
+  registrar:
+    build:
+      context: ${STOFFEL_VM_DIR:-../../..}
+      dockerfile: Dockerfile
+      additional_contexts:
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?Set an absolute coordinator checkout}"
+        networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
+    volumes:
+      - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
+    entrypoint: ["/app/stoffel-coord-ctl"]
+    command:
+      - submit
+      - --coordinator
+      - 172.29.0.5:31415
+      - --coord-cert
+      - /app/ids/server_cert.crt
+      - --cert
+      - /app/ids/operator/cert.crt
+      - --key
+      - /app/ids/operator/key.der
+      - --program-file
+      - /app/examples/${STOFFEL_PROGRAM_NAME:-mpc_runtime_info.stflb}
+      - --entry
+      - ${STOFFEL_ENTRY:-main}
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      stoffel-examples:
+
   party0:
     <<: *party-common
     hostname: party0
+    depends_on:
+      coordinator:
+        condition: service_healthy
     environment:
       <<: *party-env
-      STOFFEL_ROLE: leader
+      STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "0"
       STOFFEL_BIND_ADDR: 172.29.0.10:9000
+      STOFFEL_PEERS: 172.29.0.11:9001,172.29.0.12:9002,172.29.0.13:9003,172.29.0.14:9004
       STOFFEL_ADVERTISE_IP: 172.29.0.10
+      STOFFEL_RPC_ADDR: 172.29.0.10:16180
       STOFFEL_LOCAL_STORE: /app/local-store/party-0.redb
       STOFFEL_CERT: /app/ids/nodes/cert0.crt
       STOFFEL_KEY: /app/ids/nodes/key0.der
@@ -58,14 +139,16 @@ services:
     <<: *party-common
     hostname: party1
     depends_on:
-      - party0
+      coordinator:
+        condition: service_healthy
     environment:
       <<: *party-env
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "1"
       STOFFEL_BIND_ADDR: 172.29.0.11:9001
-      STOFFEL_BOOTSTRAP_ADDR: 172.29.0.10:9000
+      STOFFEL_PEERS: 172.29.0.10:9000,172.29.0.12:9002,172.29.0.13:9003,172.29.0.14:9004
       STOFFEL_ADVERTISE_IP: 172.29.0.11
+      STOFFEL_RPC_ADDR: 172.29.0.11:16181
       STOFFEL_LOCAL_STORE: /app/local-store/party-1.redb
       STOFFEL_CERT: /app/ids/nodes/cert1.crt
       STOFFEL_KEY: /app/ids/nodes/key1.der
@@ -77,14 +160,16 @@ services:
     <<: *party-common
     hostname: party2
     depends_on:
-      - party0
+      coordinator:
+        condition: service_healthy
     environment:
       <<: *party-env
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "2"
       STOFFEL_BIND_ADDR: 172.29.0.12:9002
-      STOFFEL_BOOTSTRAP_ADDR: 172.29.0.10:9000
+      STOFFEL_PEERS: 172.29.0.10:9000,172.29.0.11:9001,172.29.0.13:9003,172.29.0.14:9004
       STOFFEL_ADVERTISE_IP: 172.29.0.12
+      STOFFEL_RPC_ADDR: 172.29.0.12:16182
       STOFFEL_LOCAL_STORE: /app/local-store/party-2.redb
       STOFFEL_CERT: /app/ids/nodes/cert2.crt
       STOFFEL_KEY: /app/ids/nodes/key2.der
@@ -96,14 +181,16 @@ services:
     <<: *party-common
     hostname: party3
     depends_on:
-      - party0
+      coordinator:
+        condition: service_healthy
     environment:
       <<: *party-env
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "3"
       STOFFEL_BIND_ADDR: 172.29.0.13:9003
-      STOFFEL_BOOTSTRAP_ADDR: 172.29.0.10:9000
+      STOFFEL_PEERS: 172.29.0.10:9000,172.29.0.11:9001,172.29.0.12:9002,172.29.0.14:9004
       STOFFEL_ADVERTISE_IP: 172.29.0.13
+      STOFFEL_RPC_ADDR: 172.29.0.13:16183
       STOFFEL_LOCAL_STORE: /app/local-store/party-3.redb
       STOFFEL_CERT: /app/ids/nodes/cert3.crt
       STOFFEL_KEY: /app/ids/nodes/key3.der
@@ -115,14 +202,16 @@ services:
     <<: *party-common
     hostname: party4
     depends_on:
-      - party0
+      coordinator:
+        condition: service_healthy
     environment:
       <<: *party-env
       STOFFEL_ROLE: party
       STOFFEL_PARTY_ID: "4"
       STOFFEL_BIND_ADDR: 172.29.0.14:9004
-      STOFFEL_BOOTSTRAP_ADDR: 172.29.0.10:9000
+      STOFFEL_PEERS: 172.29.0.10:9000,172.29.0.11:9001,172.29.0.12:9002,172.29.0.13:9003
       STOFFEL_ADVERTISE_IP: 172.29.0.14
+      STOFFEL_RPC_ADDR: 172.29.0.14:16184
       STOFFEL_LOCAL_STORE: /app/local-store/party-4.redb
       STOFFEL_CERT: /app/ids/nodes/cert4.crt
       STOFFEL_KEY: /app/ids/nodes/key4.der

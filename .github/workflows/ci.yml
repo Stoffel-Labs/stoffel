@@ -22,6 +22,40 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # TEMPORARY, until stoffel-mpc-coordinator 0.3.0 is published
+      # (docs/design/bootnode-elimination.md §9.F.5). The [patch.crates-io]
+      # tables in Cargo.toml and docker/coordinator-wrapper/Cargo.toml consume
+      # the coordinator from this sibling path; without it every cargo step
+      # below fails with "failed to load source for dependency" — except
+      # "Check formatting", which passes, because cargo fmt enumerates targets
+      # through `cargo metadata --no-deps` and never loads a dependency source
+      # (measured 2026-10-16 on a probe crate with a real dependent of a patch
+      # pointed at a missing path: fmt rc 0, check and clippy rc 101).
+      #
+      # The execution-stream half this repository imports — ExecutionNotice,
+      # CoordinatorIncarnation, PublishedExecution, Subscription,
+      # ExecutionRequest, admission::PreRegisteredClient,
+      # AbortReason::OperatorRequest, ExecutionRegistration.request,
+      # CoordinatorLink::subscribe_executions and
+      # CoordinatorRPCServerSharedBase::with_operators — was 8 files of staged,
+      # uncommitted work in that repository until 2026-10-19, so this clone
+      # resolved but every cargo step after "Check formatting" died at E0432.
+      # It is now committed and pushed on feature/no-bootnode as c1d0833, so
+      # this clone carries it. What remains TEMPORARY is only the patch itself:
+      # once stoffel-mpc-coordinator 0.3.0 is published, delete this step and
+      # both [patch.crates-io] tables. §9.F.5 carries the inventory.
+      #
+      # If a cargo job here goes red at E0432 or E0599 on one of those names
+      # again, check that branch's tip before suspecting this repository: the
+      # failure mode above was a missing commit there, not a defect here, and
+      # repointing this clone does not fix it — measured 2026-10-16, none of
+      # that repository's other heads or tags carries those names at all.
+      - name: Check out the unpublished coordinator beside this repository
+        run: |
+          git clone --depth 1 --branch feature/no-bootnode \
+            https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git \
+            "${{ github.workspace }}/../stoffel-mpc-coordinator-roster-admission"
+
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@master
         with:
@@ -48,21 +82,49 @@ jobs:
       - name: Build release runner
         run: cargo build --release --package stoffel-vm-runner --bin stoffel-run
 
+      # docker/coordinator-wrapper is its own [workspace], so --workspace does
+      # not reach it and its patch table is its own.
+      - name: Build the coordinator wrapper
+        run: cargo build --manifest-path docker/coordinator-wrapper/Cargo.toml
+
       - name: Run tests
         run: |
           cargo test --workspace --all-features -- \
             --skip tests::avss_e2e_integration \
             --skip tests::avss_integration::test_e2e \
             --skip tests::dkg_primitives \
-            --skip tests::leader_bootnode_integration \
             --skip tests::mpc_multiplication_integration \
-            --skip tests::p2p_integration \
             --skip tests::threshold_signatures \
             --skip turmoil_ \
             --skip tests::vm_mesh_integration \
             --skip tests::vm_mpc_integration \
             --skip tests::vm_turmoil_e2e \
             --skip optimized_aes_at_o3_matches_nist_vector
+
+      # Runs every `#[ignore]`d test in `-p stoffel-vm --lib` (3 today), so an
+      # `#[ignore]`d reproduction added there is not silently invisible to CI
+      # — which is how the one-shot `--preproc-store` reuse defect stayed
+      # green. The preprocessing privacy properties themselves (design doc
+      # §9.1 stage V-0) are NOT ignored, so the `--workspace --all-features`
+      # step above is what runs them; this step is the safety net for the next
+      # one, not their home.
+      #
+      # `--all-features` is load-bearing, not decoration. The crate is
+      # `default = []` and `src/tests/mod.rs` gates each integration module on
+      # its feature, so under default features the `#[ignore]`d tests in those
+      # modules are never compiled and this step listed exactly 1 test instead
+      # of 3. It is also cheaper here than the default-feature invocation was,
+      # because the step above already built this feature set.
+      #
+      # Residual, stated rather than discovered: every feature-gated module is
+      # also named in that step's `--skip` patterns, so an `#[ignore]`d test
+      # added inside one of them is run by THIS step while its non-ignored
+      # siblings are run by neither. If the two mesh-driving tests here ever
+      # turn flaky on a shared runner, keep `--all-features` and add
+      # `--skip tests::threshold_signatures --skip tests::vm_mesh_integration`;
+      # that still buys the compile coverage.
+      - name: Run ignored stoffel-vm unit tests serially
+        run: cargo test -p stoffel-vm --lib --all-features -- --ignored --test-threads=1
 
       - name: Run heavyweight CLI integration tests serially
         run: cargo test -p stoffel-cli --test cli -- --ignored --test-threads=1
@@ -77,6 +139,37 @@ jobs:
           name: stoffel-run-${{ matrix.os }}
           path: target/release/stoffel-run
           retention-days: 7
+
+  # The six docker/test-*.sh suites are the only LIVE evidence this repository
+  # has for the preprocessing-privacy work, and none of them can run here: each
+  # needs a five-party deployment and tens of minutes (measured warm, on an
+  # operator's machine: coordinator-preproc-store 4m35s, oneshot-preproc-store
+  # 5m08s, standing-concurrency 6m06s, standing-adversarial 7m16s, plus the
+  # image build). .github/workflows/docker-e2e.yml runs them nightly and on a
+  # `docker-e2e` label. This job is the part of that evidence that costs
+  # nothing, and it guards the class of breakage that makes a campaign VACUOUS
+  # rather than red: a suite that no longer parses, a constant an assertion
+  # greps for that was renamed, a compose project that no longer resolves, or
+  # per-party preprocessing volumes collapsed onto one name. The script's own
+  # header lists every check.
+  #
+  # Deliberately no `needs:`. It shares nothing with the cargo jobs, and while
+  # the coordinator half this branch compiles against is uncommitted — not
+  # merely unpublished; see the clone step above and design doc §9.F.5 — those
+  # jobs fail before they run anything, so a `needs:` would make this report
+  # nothing in exactly the situation where it is the only thing that can
+  # report.
+  harness-wiring:
+    name: Docker Harness Wiring
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check the docker harness wiring
+        run: ./docker/check-harness-wiring.sh
 
   docker-build:
     name: Docker Build
@@ -95,7 +188,7 @@ jobs:
         with:
           context: .
           build-contexts: |
-            coordinator=https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#dffffd6e8422dcd107de79730dc4c018cf21415b
+            coordinator=https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#feature/no-bootnode
             networking=https://github.com/Stoffel-Labs/stoffel-networking.git#49a237aa5df3211224aedf97ab0bf084ad1c8d31
           push: false
           tags: stoffelvm:test
@@ -116,7 +209,7 @@ jobs:
         with:
           context: .
           build-contexts: |
-            coordinator=https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#dffffd6e8422dcd107de79730dc4c018cf21415b
+            coordinator=https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#feature/no-bootnode
             networking=https://github.com/Stoffel-Labs/stoffel-networking.git#49a237aa5df3211224aedf97ab0bf084ad1c8d31
           push: true
           tags: |

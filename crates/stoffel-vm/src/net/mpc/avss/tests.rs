@@ -429,7 +429,7 @@ async fn preprocess_reserves_persistent_avss_random_shares_when_loaded() {
     let shares = generate_feldman_shares(Fr::from(77u64), 3, t);
     let (data, item_size) = preproc::serialize_feldman_shares::<Fr, G1>(&shares).unwrap();
     store
-        .store(
+        .seed_items(
             &key,
             &PreprocBlob::try_new(data, item_size, shares.len()).unwrap(),
         )
@@ -439,11 +439,16 @@ async fn preprocess_reserves_persistent_avss_random_shares_when_loaded() {
     let net = Arc::new(QuicNetworkManager::new());
     let public_keys = Arc::new(vec![G1::generator(); n]);
     let session = MpcSessionConfig::try_new(9_000_000, party_id, n, t, net).unwrap();
-    let engine = AvssMpcEngine::<Fr, G1>::from_config(AvssEngineConfig::new(
-        session,
-        Fr::from(5u64),
-        public_keys,
-    ))
+    // This execution needs exactly the three random shares the store holds
+    // and no triples, so the load covers it and `preprocess` returns without a
+    // preprocessing round. The defaults (16 shares, 8 triples) would leave a
+    // shortfall for the engine to generate, which needs the network: see
+    // `a_load_that_does_not_cover_the_targets_is_not_full_provisioning` in
+    // `preprocessing::persisted_item_identity_tests`.
+    let engine = AvssMpcEngine::<Fr, G1>::from_config(
+        AvssEngineConfig::new(session, Fr::from(5u64), public_keys)
+            .with_preprocessing_counts(shares.len(), 0),
+    )
     .await
     .unwrap();
     engine
@@ -487,7 +492,7 @@ async fn standing_avss_consumption_uses_owned_bundle_without_touching_reservoir(
     let (reservoir_data, reservoir_item_size) =
         preproc::serialize_feldman_shares::<Fr, G1>(&shares_b).unwrap();
     store
-        .store(
+        .seed_items(
             &reservoir.random_share(),
             &PreprocBlob::try_new(reservoir_data, reservoir_item_size, shares_b.len()).unwrap(),
         )
@@ -646,7 +651,7 @@ async fn standing_avss_reservoir_uses_stable_program_scope_despite_execution_tra
         (stable_b.random_share(), 3, 0xB2),
     ] {
         store
-            .store(
+            .seed_items(
                 &key,
                 &PreprocBlob::try_new(vec![fill; count], 1, count).unwrap(),
             )
@@ -724,7 +729,7 @@ async fn standing_avss_activation_requires_complete_owned_bundle_without_top_up(
     let execution_random = generate_feldman_shares(Fr::from(43u64), 1, t);
     let (data, item_size) = preproc::serialize_feldman_shares::<Fr, G1>(&stable_random).unwrap();
     store
-        .store(
+        .seed_items(
             &stable.random_share(),
             &PreprocBlob::try_new(data, item_size, 1).unwrap(),
         )
