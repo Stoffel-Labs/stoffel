@@ -27,7 +27,7 @@ assert_eq!(result[0].as_i64(), Some(100));
 
 For local MPC smoke runs, use the same builder and call `execute_local().await`.
 This starts real localhost VM parties through `stoffel-vm`'s local coordinator
-runner when a built `stoffel-run` binary is available:
+runner when a built `stoffel` binary is available (its `run-node` subcommand runs each party):
 
 ```rust
 use stoffel::prelude::*;
@@ -39,7 +39,7 @@ let result = Stoffel::compile(
 .parties(5)
 .threshold(1)
 .honeybadger()
-.local_runner_path("target/debug/stoffel-run")
+.local_runner_path("target/debug/stoffel")
 .with_inputs(&[("a", 42_i64), ("b", 58_i64)])
 .execute_local()
 .await?;
@@ -55,10 +55,10 @@ assert_eq!(result, vec![Value::I64(100)]);
   `stoffel-vm` and is intended for fast local development of clear logic.
 - `execute_local()` uses `stoffel-vm`'s real local coordinator runner for
   local HoneyBadger and AVSS smoke runs. Build
-  `stoffel-run` first with `cargo build -p stoffel-vm-runner --bin stoffel-run`, or
+  `stoffel run-node` first with `cargo build -p stoffel-cli --bin stoffel`, or
   set `STOFFEL_RUN_BIN` or `local_runner_path(...)`. Relative runner paths are
   resolved from the process working directory first and then from the workspace
-  root, so `target/debug/stoffel-run` works for normal workspace runs. Named
+  root, so `target/debug/stoffel` works for normal workspace runs. Named
   `with_inputs` values are adapted into local coordinator client input for
   source, file, and loaded-bytecode programs; source/file functions returning a
   `secret` value are opened by the generated wrapper so `execute_local()`
@@ -79,7 +79,7 @@ assert_eq!(result, vec![Value::I64(100)]);
   let result = runtime
       .local_network()
       .entry("main")
-      .runner_path("target/debug/stoffel-run")
+      .runner_path("target/debug/stoffel")
       .timeout(Duration::from_secs(180))
       .run()
       .await?;
@@ -114,11 +114,11 @@ assert_eq!(result, vec![Value::I64(100)]);
   or `client.submit(...)`. Server launch for those programs uses
   `ServerBuilder::offchain_coordinator(...)` to pass the
   coordinator address, node RPC bind address, party identity files, timestamp,
-  and expected client certificates through to `stoffel-run`.
+  and expected client certificates through to `stoffel run-node`.
 - AVSS protocol operations are owned by `stoffel-vm` and `mpc-protocols`.
   The SDK exposes the intended API boundary but does not implement an in-memory
   AVSS substitute. Local AVSS programs on any supported curve delegate through the real
-  `stoffel-run` coordinator path:
+  `stoffel run-node` coordinator path:
 
   ```rust
   use stoffel::prelude::*;
@@ -126,7 +126,7 @@ assert_eq!(result, vec![Value::I64(100)]);
   # async fn example() -> stoffel::Result<()> {
   let result = Stoffel::compile("def main() -> int64:\n  return 7")?
       .avss(Curve::Bls12_381)
-      .local_runner_path("target/debug/stoffel-run")
+      .local_runner_path("target/debug/stoffel")
       .execute_local()
       .await?;
   # let _ = result;
@@ -620,7 +620,6 @@ dependencies first:
 
 - `stoffellang`
 - `stoffel-vm`
-- `stoffel-vm-runner`
 - `stoffel-vm-types`
 - `stoffelnet`
 - `stoffelmpc-mpc`
@@ -660,7 +659,7 @@ The local MPC examples use the real localhost coordinator/party runner. Build
 the VM runner first, then run them:
 
 ```sh
-cargo build -p stoffel-vm-runner --bin stoffel-run
+cargo build -p stoffel-cli --bin stoffel
 cargo run -p stoffel-rust-sdk --example quickstart_mpc
 cargo run -p stoffel-rust-sdk --example local_mpc_client_input
 cargo run -p stoffel-rust-sdk --example local_mpc_named_inputs

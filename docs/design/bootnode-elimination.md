@@ -1,5 +1,12 @@
 # Eliminating the Bootnode: Roster-Pinned Mesh + Coordinator
 
+> **Later change (not part of this design).** The `stoffel-run` and
+> `stoffel-coord-ctl` binaries named throughout are now `stoffel run-node` and
+> `stoffel coord-ctl`, subcommands of the `stoffel` CLI with the same flags, and
+> the `stoffel-vm-runner` crate's code (`crates/stoffel-vm-runner/src/...`) now
+> lives in `stoffel-rust-sdk` under `src/node/` (`stoffel::node`). Its tests moved
+> to `crates/stoffel-cli/tests/run_node_*`. The text below is kept as written.
+
 Status: implemented in both repositories, except where §9.I says otherwise. §9.I is the
 status of record; the rest of this document is the contract the code was built to, and the
 few places where the code deliberately differs are listed there. §9.I is a **chronological

@@ -22,7 +22,6 @@ language and compiler down to the runtime and the networking/MPC layer:
 
 Supporting crates:
 
-- `crates/stoffel-vm-runner`: the `stoffel-run` binary — local runner and distributed MPC party/client node
 - `crates/stoffel-vm-types`: shared VM types, the instruction set, runtime `Value`s, and the compiled bytecode format
 - `crates/stoffel-bindgen`: build-time generation of typed Rust bindings for Stoffel programs
 - `include/`: the public C header and FFI notes for embedding the VM from C-compatible environments
@@ -32,7 +31,7 @@ StoffelLang source (.stfl)
         │  stoffel build / stoffel-lang
         ▼
 Compiled bytecode (.stflb)        ← stoffel-vm-types::compiled_binary
-        │  stoffel run / stoffel-run / Stoffel SDK
+        │  stoffel run / stoffel run-node / Stoffel SDK
         ▼
 Stoffel VM  ── local execution  (clear or simulated MPC)
             └─ distributed MPC  (HoneyBadger / AVSS over QUIC)
@@ -61,10 +60,10 @@ cd hello-mpc
 stoffel run --input a=40 --input b=2
 ```
 
-> **Runner caveat:** local runs need the `stoffel-run` MPC runner. The installer
+> **Runner caveat:** local runs need the `stoffel run-node` MPC runner. The installer
 > drops it next to `stoffel`, and the CLI discovers it automatically. If you
-> installed `stoffel` another way, Stoffel also looks for `stoffel-run` on your
-> `PATH` (e.g. after `cargo install stoffel-vm-runner`), or
+> installed `stoffel` another way, Stoffel also looks for `stoffel run-node` on your
+> `PATH` (e.g. after `cargo install stoffel-cli`), or
 > you can point at a specific binary with `--runner <path>` or the
 > `STOFFEL_RUN_BIN` environment variable.
 
@@ -77,11 +76,11 @@ It reads `Stoffel.toml`, defaults to `src/main.stfl`, and writes bytecode to
 `target/debug/<package>.stflb` or `target/release/<package>.stflb`.
 
 > **Local runner:** local execution (`stoffel run` without `--network`, and
-> `stoffel dev`) drives the `stoffel-run` MPC runner. Stoffel resolves it in order:
+> `stoffel dev`) drives the `stoffel run-node` MPC runner. Stoffel resolves it in order:
 > an explicit `--runner <path>`, the `STOFFEL_RUN_BIN` environment variable, a
-> `stoffel-run` sitting next to the `stoffel` binary (where the installer puts it),
-> a `stoffel-run` on your `PATH` (e.g. via `cargo install stoffel-vm-runner`),
-> then a `stoffel-run` built in the current
+> `stoffel run-node` sitting next to the `stoffel` binary (where the installer puts it),
+> a `stoffel` on your `PATH` (e.g. via `cargo install stoffel-cli`),
+> then a `stoffel` built in the current
 > Cargo workspace. See [Build and Test](#build-and-test) to build one from source.
 
 ### Create a project
@@ -211,7 +210,7 @@ assert_eq!(result[0].as_i64(), Some(100));
 
 For local MPC smoke runs, use the same builder and call `execute_local().await`.
 This starts real localhost VM parties through `stoffel-vm`'s local coordinator
-runner when a built `stoffel-run` binary is available:
+runner when a built `stoffel` binary is available (its `run-node` subcommand runs each party):
 
 ```rust
 use stoffel::prelude::*;
@@ -408,30 +407,32 @@ let binary = CompiledBinary::from_vm_functions(&functions);
 save_to_file(&binary, "program.stflb").unwrap();
 ```
 
-## VM Runner CLI (`stoffel-run`)
+## MPC node (`stoffel run-node`)
 
-`stoffel-vm-runner` provides `stoffel-run`, which executes a compiled Stoffel
-bytecode file locally or as part of a distributed MPC session.
+`stoffel run-node` executes a compiled Stoffel bytecode file locally or as one
+party (or client) of a distributed MPC session. It is a subcommand of the
+`stoffel` CLI; the node driver itself lives in the SDK as `stoffel::node`, which
+also runs the local coordinator for `stoffel run --local`.
 
 ```bash
-cargo build --release -p stoffel-vm-runner
-cargo run -p stoffel-vm-runner --bin stoffel-run -- --help
+cargo build --release -p stoffel-cli
+cargo run -p stoffel-cli --bin stoffel -- run-node --help
 ```
 
 Run a compiled program locally (default entry function is `main`):
 
 ```bash
-./target/release/stoffel-run path/to/program.stflb
-./target/release/stoffel-run path/to/program.stflb main --trace-instr
+./target/release/stoffel run-node path/to/program.stflb
+./target/release/stoffel run-node path/to/program.stflb main --trace-instr
 ```
 
 The coordinator is the trusted party, and it is what decides what runs: it
 mints every execution identity itself and publishes each execution down to the
-node roster. An operator asks it to run something with `stoffel-coord-ctl`,
+node roster. An operator asks it to run something with `stoffel coord-ctl`,
 which prints the identity the coordinator minted:
 
 ```bash
-./target/release/stoffel-coord-ctl submit \
+./target/release/stoffel coord-ctl submit \
   --coordinator 127.0.0.1:31415 \
   --coord-cert ids/server_cert.crt \
   --cert ids/operator/cert.crt \
@@ -452,7 +453,7 @@ party; there is no bootstrap process and no leader. A party is published the
 execution it runs by its coordinator, so it never names one:
 
 ```bash
-./target/release/stoffel-run path/to/program.stflb main \
+./target/release/stoffel run-node path/to/program.stflb main \
   --party-id 0 \
   --bind 127.0.0.1:9000 \
   --peers 127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004 \
@@ -481,7 +482,7 @@ addresses, never identities. There is no coordinator-less client, so
 `--off-chain-coord`, `--coord-cert`, `--cert` and `--key` are all required:
 
 ```bash
-./target/release/stoffel-run --client \
+./target/release/stoffel run-node --client \
   --program path/to/program.stflb \
   --client-slot 0 \
   --inputs 10,20 \
@@ -500,7 +501,7 @@ client additionally passes `--client-transport-servers`, the parties'
 each party for the output distribution to reach it:
 
 ```bash
-./target/release/stoffel-run --client \
+./target/release/stoffel run-node --client \
   --mpc-backend avss \
   --mpc-curve secp256k1 \
   --program path/to/program.stflb \
@@ -520,7 +521,7 @@ Notes:
 
 - A party's membership, party count and threshold are the coordinator's node roster, so `--peers` requires `--off-chain-coord` and `--coord-cert`. Membership is the certificate allowlist that roster installs and is enforced per connection by mTLS; there is no shared secret anywhere in the flow
 - `--party-id` labels a party's on-disk state. On the wire a party is its rank in the lexicographic order of the roster's certificates, and the join refuses to proceed unless the transport derives the same rank
-- A party is published the execution it runs by its coordinator and has no `--execution-id`; its clients are given the identity the coordinator minted, which `stoffel-coord-ctl submit` printed. Overlapping runs are separate submissions and get separate identities
+- A party is published the execution it runs by its coordinator and has no `--execution-id`; its clients are given the identity the coordinator minted, which `stoffel coord-ctl submit` printed. Overlapping runs are separate submissions and get separate identities
 - The CLI accepts any file path; this repository conventionally stores compiled fixtures as `.stflb`
 - `--mpc-backend` supports `honeybadger` and `avss` for client mode; `.stflb` party runs use the backend recorded in the program manifest and reject conflicting CLI overrides
 - `--mpc-curve` supports `bls12-381`, `bn254`, `curve25519`, `ed25519`, `secp256k1`, and `p-256` (`secp256r1`) for AVSS
@@ -536,7 +537,7 @@ client services:
 ```bash
 docker compose -f docker-compose.coordinator.reserve-index.yml up -d --build coordinator
 docker compose -f docker-compose.coordinator.reserve-index.yml run --rm --no-deps \
-  --entrypoint /app/stoffel-coord-ctl party0 submit \
+  --entrypoint /app/stoffel party0 coord-ctl submit \
   --coordinator coordinator:31415 \
   --coord-cert /app/ids/server_cert.crt \
   --cert /app/ids/operator/cert.crt --key /app/ids/operator/key.der \
@@ -554,7 +555,7 @@ That coordinator path runs through the HoneyBadger/BLS12-381 VM path. The AVSS c
 docker compose -f docker-compose.avss.yml up --build
 ```
 
-`docker-compose.avss.yml` mounts a per-party local data volume and forwards `STOFFEL_LOCAL_STORE` to `stoffel-run`.
+`docker-compose.avss.yml` mounts a per-party local data volume and forwards `STOFFEL_LOCAL_STORE` to `stoffel run-node`.
 
 ### Peer RTT emulation
 
@@ -606,7 +607,7 @@ For the AVSS certificate-signing path, run `/app/programs/avss_certificate_keyge
 
 ## Standing concurrent nodes
 
-`stoffel-run --standing-node` keeps one authenticated party mesh alive until
+`stoffel run-node --standing-node` keeps one authenticated party mesh alive until
 the process receives SIGINT or SIGTERM (SIGKILL stops it immediately). It has
 no finite run count. Without `--standing-node` a node runs the one execution
 its coordinator publishes it and exits.
@@ -616,7 +617,7 @@ and publishes each execution down to the roster on one subscription the node
 opens over the same certificate-pinned link it fetched the roster on, so the
 certificate is the whole authorization: nothing is mounted into a node to tell
 it what to run, and a node never registers an execution upwards. An operator
-submits executions with `stoffel-coord-ctl`, authorized by one of the
+submits executions with `stoffel coord-ctl`, authorized by one of the
 certificates the coordinator was started with in `--operator-certs`. The
 coordinator owns deployment concurrency and resource limits; nodes intentionally
 make no independent local admission decisions, which could otherwise make
@@ -632,7 +633,7 @@ whether the connection is a peer's or a client's — so a client key on the mesh
 listener would be a key with node-level standing there. Client participation is
 instead the coordinator's per-execution admission, enforced per execution against
 the published client roster. Clients are given the `--client-bind` addresses, not
-the mesh ones (`stoffel-run --client --client-transport-servers`).
+the mesh ones (`stoffel run-node --client --client-transport-servers`).
 `--client-cert-dir` is the catalog a node resolves a published client identity
 against; it is not a transport allowlist.
 
@@ -776,7 +777,7 @@ cargo test
 # Generated-Cargo and local-MPC CLI tests share one heavyweight serial group.
 cargo test -p stoffel-cli --test cli -- --ignored --test-threads=1
 # Run the coordinator lifecycle regressions as a separate serial step.
-cargo test -p stoffel-vm-runner --test local_coordinator_e2e -- --ignored --test-threads=1 --skip optimized_aes --skip batch_mul
+cargo test -p stoffel-cli --test run_node_local_coordinator_e2e -- --ignored --test-threads=1 --skip optimized_aes --skip batch_mul
 ```
 
 The ordinary suite remains parallel. Keep the heavyweight CLI group in its
@@ -786,7 +787,7 @@ timeout-sensitive local MPC subprocesses; CI uses the same split.
 Build the runtime and CLI in release mode:
 
 ```bash
-cargo build --release -p stoffel-vm -p stoffel-vm-runner
+cargo build --release -p stoffel-vm -p stoffel-cli
 ```
 
 HoneyBadger and AVSS backend code is built by default. Distributed party runs

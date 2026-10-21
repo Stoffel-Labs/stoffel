@@ -2,15 +2,15 @@
 set -euo pipefail
 
 # Host-process MPC run of one compiled example: a coordinator and one
-# `stoffel-run` party per node, all on 127.0.0.1.
+# `stoffel run-node` party per node, all on 127.0.0.1.
 #
 # The coordinator is the trusted party and decides what runs: this script asks
-# it to run the example with `stoffel-coord-ctl`, it mints the execution's
+# it to run the example with `stoffel coord-ctl`, it mints the execution's
 # identity, and it publishes that identity to every party. No party is given an
 # identity and none invents one.
 #
 # Every party of a mesh takes its membership from a coordinator: the coordinator
-# is the only roster authority, and `stoffel-run` refuses `--peers` without
+# is the only roster authority, and `stoffel run-node` refuses `--peers` without
 # `--off-chain-coord` (docs/design/bootnode-elimination.md section 9.D). The
 # coordinator here is docker/coordinator-wrapper run as a host process — the
 # only coordinator `main` this repository has, in its own Cargo workspace. It
@@ -66,13 +66,12 @@ done
 COORD_CERT="${IDS_DIR}/server_cert.crt"
 COORD_KEY="${IDS_DIR}/server_key.der"
 
-RUNNER="${VM_DIR}/target/debug/stoffel-run"
-# The operator's side of the coordinator's control plane.
-CTL="${VM_DIR}/target/debug/stoffel-coord-ctl"
-if [ ! -x "$RUNNER" ] || [ ! -x "$CTL" ]; then
-  echo "Building StoffelVM runner..."
-  cargo build --quiet --manifest-path "${VM_DIR}/Cargo.toml" -p stoffel-vm-runner \
-    --bin stoffel-run --bin stoffel-coord-ctl
+# One binary: each party is `stoffel run-node`, and the operator's side of the
+# coordinator's control plane is `stoffel coord-ctl`.
+STOFFEL="${VM_DIR}/target/debug/stoffel"
+if [ ! -x "$STOFFEL" ]; then
+  echo "Building the stoffel CLI..."
+  cargo build --quiet --manifest-path "${VM_DIR}/Cargo.toml" -p stoffel-cli --bin stoffel
 fi
 WRAPPER_DIR="${VM_DIR}/docker/coordinator-wrapper"
 COORDINATOR="${WRAPPER_DIR}/target/debug/stoffel-coordinator-docker"
@@ -130,7 +129,7 @@ done
 # The coordinator mints the execution's identity and publishes it to the roster;
 # this script only needs to know that it succeeded.
 echo "Submitting the execution to the coordinator" >&2
-if ! SUBMITTED="$("$CTL" submit \
+if ! SUBMITTED="$("$STOFFEL" coord-ctl submit \
   --coordinator "127.0.0.1:${COORD_PORT}" \
   --coord-cert "$COORD_CERT" \
   --cert "${IDS_DIR}/operator/cert.crt" \
@@ -174,7 +173,7 @@ peers_for() {
 for ((party_id = 0; party_id < N_PARTIES; party_id++)); do
   party_port="$((BASE_PORT + party_id))"
   run_party "party${party_id}" \
-    "$RUNNER" "$PROGRAM" "$ENTRY" \
+    "$STOFFEL" run-node "$PROGRAM" "$ENTRY" \
     --party-id "$party_id" \
     --bind "127.0.0.1:${party_port}" \
     --peers "$(peers_for "$party_id")" \

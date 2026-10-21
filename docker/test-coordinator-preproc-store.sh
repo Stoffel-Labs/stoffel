@@ -236,8 +236,8 @@ mint_execution() {
     # `submitted` and the id parse would read "#1" instead of the execution id.
     # (`compose run` has no --no-build flag, hence the ordering rather than a flag.)
     submitted="$(compose run --rm --no-deps -T \
-        --entrypoint /app/stoffel-coord-ctl party0 \
-        submit \
+        --entrypoint /app/stoffel party0 \
+        coord-ctl submit \
         --coordinator coordinator:31415 \
         --coord-cert /app/ids/server_cert.crt \
         --cert /app/ids/operator/cert.crt \
@@ -285,8 +285,8 @@ deliver_program() {
     # `--print-program-id` writes the id on stdout; compose build progress goes
     # there too, so the images are built first and only the last id is taken.
     printed="$(compose run --rm --no-deps -T \
-        --entrypoint /app/stoffel-run party0 \
-        --print-program-id /app/programs/client_sub_order.stflb)"
+        --entrypoint /app/stoffel party0 \
+        run-node --print-program-id /app/programs/client_sub_order.stflb)"
     PROGRAM_ID="$(grep -oE '[0-9a-f]{64}' <<<"${printed}" | tail -1)"
     if [[ -z "${PROGRAM_ID}" ]]; then
         echo "Could not derive the program id: ${printed}" >&2

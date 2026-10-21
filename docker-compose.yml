@@ -94,7 +94,7 @@ services:
         coordinator: "${STOFFEL_COORDINATOR_CONTEXT:?Set an absolute coordinator checkout}"
         networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
     container_name: stoffel-registrar
-    entrypoint: ["/app/stoffel-coord-ctl"]
+    entrypoint: ["/app/stoffel", "coord-ctl"]
     command:
       - submit
       - --coordinator

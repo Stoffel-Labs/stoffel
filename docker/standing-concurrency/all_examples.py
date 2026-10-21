@@ -292,7 +292,7 @@ class AllExamplesHarness(Harness):
                 "-p",
                 "stoffellang",
                 "-p",
-                "stoffel-vm-runner",
+                "stoffel-cli",
                 "--bins",
             ]
         )
@@ -385,7 +385,7 @@ class AllExamplesHarness(Harness):
                 "-p",
                 "stoffellang",
                 "-p",
-                "stoffel-vm-runner",
+                "stoffel-cli",
                 "--bins",
             ]
         )
@@ -393,7 +393,7 @@ class AllExamplesHarness(Harness):
 
     def compile_catalog(self) -> None:
         compiler = self.root / "target/debug/stoffellang"
-        inspector = self.root / "target/debug/stoffel-run"
+        inspector = self.root / "target/debug/stoffel"
         sources = sorted(self.examples_dir.rglob("main.stfl"))
         # The whole catalog, counted, so that a glob which silently matches
         # fewer examples than exist cannot pass for a full run. Adding an
@@ -559,7 +559,8 @@ class AllExamplesHarness(Harness):
             "docker",
             "exec",
             container,
-            "/app/stoffel-run",
+            "/app/stoffel",
+            "run-node",
             "--client",
             "--execution-id",
             execution["execution_id"],

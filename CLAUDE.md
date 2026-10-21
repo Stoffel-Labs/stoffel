@@ -33,7 +33,7 @@ cargo test -p stoffel-vm-types
 cargo build --release -p stoffel-vm
 
 # Run a compiled program
-./target/release/stoffel-run path/to/program.stfbin [entry_function]
+./target/release/stoffel run-node path/to/program.stfbin [entry_function]
 
 # Format and lint
 cargo fmt
@@ -54,7 +54,7 @@ StoffelVM/
 │   ├── stoffel-vm/              # VM runtime crate
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       ├── main.rs          # CLI entry point (stoffel-run)
+│   │       ├── main.rs          # CLI entry point (stoffel run-node)
 │   │       ├── lib.rs           # Library exports
 │   │       ├── core_vm.rs       # VirtualMachine implementation
 │   │       ├── functions.rs     # VMFunction definition
@@ -271,7 +271,7 @@ cargo test -p stoffel-vm
 cargo test -p stoffel-vm-types
 
 # Test with a compiled program
-./target/release/stoffel-run examples/hello_world.stfbin
+./target/release/stoffel run-node examples/hello_world.stfbin
 ```
 
 ## Dependencies

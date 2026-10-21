@@ -20,14 +20,14 @@ runtime rounds to its privacy band of 81,920.
 
 ```sh
 stoffel build --release
-STOFFEL_RUN_BIN=../../../../target/release/stoffel-run cargo run --release
+STOFFEL_RUN_BIN=../../../../target/release/stoffel cargo run --release
 ```
 
 From the repository root:
 
 ```sh
-cargo build --release -p stoffel-vm-runner
-STOFFEL_RUN_BIN=target/release/stoffel-run \
+cargo build --release -p stoffel-cli
+STOFFEL_RUN_BIN=target/release/stoffel \
   cargo run --release --manifest-path crates/stoffel-lang/examples/mpc_sha256_client_io/Cargo.toml
 ```
 

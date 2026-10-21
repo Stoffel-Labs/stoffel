@@ -111,8 +111,8 @@ mint_execution() {
 
     local submitted
     submitted="$(compose run --rm --no-deps -T \
-        --entrypoint /app/stoffel-coord-ctl party0 \
-        submit \
+        --entrypoint /app/stoffel party0 \
+        coord-ctl submit \
         --coordinator coordinator:31415 \
         --coord-cert /app/ids/server_cert.crt \
         --cert /app/ids/operator/cert.crt \

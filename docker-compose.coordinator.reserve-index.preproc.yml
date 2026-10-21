@@ -26,7 +26,7 @@
 #     certificate holder bind a slot of a program it holds.
 
 x-standing-node-command: &standing-node-command |
-  exec /app/stoffel-run \
+  exec /app/stoffel run-node \
     --standing-node \
     --program-dir /var/lib/stoffel/programs \
     --client-cert-dir /var/lib/stoffel/client-certs \

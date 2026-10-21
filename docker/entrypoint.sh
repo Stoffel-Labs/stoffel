@@ -150,7 +150,7 @@ resolve_socket_addr() {
 
 # Build command based on role
 build_command() {
-    local cmd="/app/stoffel-run"
+    local cmd="/app/stoffel run-node"
 
     if [ "${STOFFEL_ROLE}" = "client" ]; then
         # Client mode: connect to the coordinator and submit inputs. The
