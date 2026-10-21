@@ -1,7 +1,7 @@
 use std::time::Duration;
 
+use stoffel::node::{LocalCoordinatorRunOutput, LocalCoordinatorRunner};
 use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
-use stoffel_vm_runner::{LocalCoordinatorRunOutput, LocalCoordinatorRunner};
 use stoffel_vm_types::compiled_binary::{CompiledBinary, MpcBackend};
 use stoffel_vm_types::core_types::{ShareDataFormat, ShareType};
 
@@ -62,7 +62,7 @@ fn assert_unrevealed_return_shares(
 #[ignore = "starts a real localhost coordinator and HoneyBadger MPC party mesh"]
 async fn honeybadger_returns_an_opaque_share_without_auto_reveal() {
     let binary = compile_returned_share_program(MpcBackend::HoneyBadger);
-    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .backend(MpcBackendKind::HoneyBadger)
         .parties(5)
         .threshold(1)
@@ -80,7 +80,7 @@ async fn honeybadger_returns_an_opaque_share_without_auto_reveal() {
 #[ignore = "starts a real localhost coordinator and AVSS MPC party mesh"]
 async fn avss_returns_a_feldman_share_without_auto_reveal() {
     let binary = compile_returned_share_program(MpcBackend::Avss);
-    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .backend(MpcBackendKind::Avss)
         .curve(MpcCurveConfig::Bls12_381)
         .parties(5)

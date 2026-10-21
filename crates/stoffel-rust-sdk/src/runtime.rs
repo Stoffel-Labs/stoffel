@@ -318,7 +318,7 @@ impl StoffelRuntime {
         self
     }
 
-    /// Set the `stoffel-run` binary path used by local coordinator execution.
+    /// Set the `stoffel` binary whose `run-node` subcommand runs each party of local coordinator execution.
     pub fn local_runner_path(mut self, path: impl AsRef<Path>) -> Self {
         self.local_runner_path = Some(path.as_ref().to_path_buf());
         self
@@ -440,7 +440,7 @@ impl<'a> LocalNetworkBuilder<'a> {
         self
     }
 
-    /// Override the `stoffel-run` binary path for this local run.
+    /// Override the `stoffel` binary whose `run-node` subcommand runs each party of this local run.
     pub fn runner_path(mut self, path: impl AsRef<Path>) -> Self {
         self.runner_path = Some(path.as_ref().to_path_buf());
         self

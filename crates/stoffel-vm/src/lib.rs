@@ -13,6 +13,7 @@ pub mod mpc_builtins;
 mod mpc_values;
 pub mod net;
 pub mod output;
+pub mod probes;
 mod program;
 mod reveal_destination;
 pub mod runtime_hooks;

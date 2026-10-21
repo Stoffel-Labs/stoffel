@@ -24,17 +24,17 @@ use stoffel_mpc_coordinator_shared::{
 };
 use stoffel_vm::net::program_id_from_bytes;
 
-const USAGE: &str = r#"stoffel-coord-ctl — tell an off-chain coordinator what to run
+const USAGE: &str = r#"stoffel coord-ctl — tell an off-chain coordinator what to run
 
 Usage:
-  stoffel-coord-ctl submit --coordinator <host:port> --coord-cert <path>
+  stoffel coord-ctl submit --coordinator <host:port> --coord-cert <path>
                            --cert <path> --key <path>
                            (--program <64-hex> | --program-file <path>)
                            [--entry <name>] [--client-slots <in:out,...>]
                            [--client <slot>=<cert path> ...]
                            [--association-timeout-secs <n>] [--input-timeout-secs <n>]
 
-  stoffel-coord-ctl abort  --coordinator <host:port> --coord-cert <path>
+  stoffel coord-ctl abort  --coordinator <host:port> --coord-cert <path>
                            --cert <path> --key <path> --execution <64-hex>
 
 The coordinator mints every execution identity itself and publishes it to the
@@ -66,9 +66,16 @@ fn fail(message: impl AsRef<str>) -> ! {
     exit(2);
 }
 
+/// Usage on stderr, exit 2: the arguments were wrong.
 fn usage() -> ! {
     eprint!("{USAGE}");
     exit(2);
+}
+
+/// Usage on stdout, exit 0: `--help` asked for it.
+fn help() -> ! {
+    print!("{USAGE}");
+    exit(0);
 }
 
 #[derive(Default)]
@@ -121,7 +128,7 @@ fn parse_flags(arguments: &[String]) -> Flags {
                 flags.input_timeout_secs = parse_seconds("--input-timeout-secs", &value())
             }
             "--open-admission" => flags.open_admission = true,
-            "-h" | "--help" => usage(),
+            "-h" | "--help" => help(),
             other => fail(format!("unknown argument {other}")),
         }
     }
@@ -147,18 +154,29 @@ fn required(flag: &str, value: Option<String>) -> String {
     value.unwrap_or_else(|| fail(format!("{flag} is required")))
 }
 
-#[tokio::main]
-async fn main() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("install rustls crypto provider");
+/// `stoffel coord-ctl`: submit an execution to, or abort one on, an off-chain
+/// coordinator.
+///
+/// A process entry point. It parses `args` (everything after `coord-ctl`) and
+/// calls [`std::process::exit`] on any error, so it must run as the body of its
+/// own process — never from embedding code.
+pub async fn run(args: Vec<std::ffi::OsString>) -> std::process::ExitCode {
+    // A process installs one provider; a second install is refused, not fatal.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let arguments = args
+        .into_iter()
+        .map(|argument| {
+            argument.into_string().unwrap_or_else(|argument| {
+                fail(format!("argument {argument:?} is not valid UTF-8"))
+            })
+        })
+        .collect::<Vec<_>>();
     let Some((command, rest)) = arguments.split_first() else {
         usage();
     };
     if command == "-h" || command == "--help" {
-        usage();
+        help();
     }
     let flags = parse_flags(rest);
 
@@ -193,6 +211,7 @@ async fn main() {
         "abort" => abort(&link, &flags).await,
         other => fail(format!("unknown command {other}")),
     }
+    std::process::ExitCode::SUCCESS
 }
 
 async fn submit(link: &CoordinatorLink, flags: &Flags) {

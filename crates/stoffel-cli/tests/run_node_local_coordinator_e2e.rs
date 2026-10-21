@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
-use stoffel_vm_runner::{
+use stoffel::node::{
     LocalClientInput, LocalCoordinatorRunOutput, LocalCoordinatorRunner, LocalPartyOutput,
 };
+use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 use stoffel_vm_types::compiled_binary::{ClientIoManifest, ClientIoSchema, CompiledBinary};
 use stoffel_vm_types::core_types::{ShareDataFormat, ShareType, Value};
 use stoffel_vm_types::functions::VMFunction;
@@ -58,7 +58,7 @@ async fn local_offchain_coordinator_runs_networked_vm_without_docker_compose() {
     );
     let binary = CompiledBinary::from_vm_functions(&[function]);
 
-    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .parties(5)
         .threshold(1)
         .timeout(Duration::from_secs(180))
@@ -94,7 +94,7 @@ async fn local_offchain_coordinator_runs_avss_networked_vm_without_docker_compos
     let mut binary = CompiledBinary::from_vm_functions(&[function]);
     binary.client_io_manifest.mpc_backend = stoffel_vm_types::compiled_binary::MpcBackend::Avss;
 
-    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .backend(MpcBackendKind::Avss)
         .curve(MpcCurveConfig::Bls12_381)
         .parties(5)
@@ -136,7 +136,7 @@ async fn local_offchain_coordinator_runs_compiled_avss_networked_vm_without_dock
         stoffel_vm_types::compiled_binary::MpcBackend::Avss
     );
 
-    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .backend(MpcBackendKind::Avss)
         .curve(MpcCurveConfig::Bls12_381)
         .parties(5)
@@ -171,7 +171,7 @@ def main() -> int64:
         .expect("compile AVSS client input program");
     let binary = stoffellang::convert_to_binary(&compiled);
 
-    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .backend(MpcBackendKind::Avss)
         .curve(MpcCurveConfig::Bls12_381)
         .parties(5)
@@ -208,7 +208,7 @@ def main() -> int64:
         .expect("compile client input program");
     let binary = stoffellang::convert_to_binary(&compiled);
 
-    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .parties(5)
         .threshold(1)
         .timeout(Duration::from_secs(180))
@@ -252,7 +252,7 @@ async fn local_offchain_coordinator_runs_optimized_aes_circuit_without_docker_co
         .join()
         .expect("AES compile thread panicked");
 
-    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .parties(5)
         .threshold(1)
         .timeout(Duration::from_secs(1800))
@@ -287,7 +287,7 @@ def main() -> int64:
         .expect("compile batch mul 40");
     let binary = stoffellang::convert_to_binary(&compiled);
 
-    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .parties(5)
         .threshold(1)
         .timeout(Duration::from_secs(900))
@@ -410,7 +410,7 @@ def main() -> int64:
     let compiled = stoffellang::compile(source, "<indexed-local-inputs>", &options)
         .expect("compile asymmetric client inputs");
     let output = LocalCoordinatorRunner::builder(
-        env!("CARGO_BIN_EXE_stoffel-run"),
+        env!("CARGO_BIN_EXE_stoffel"),
         stoffellang::convert_to_binary(&compiled),
     )
     .client_inputs([
@@ -448,7 +448,7 @@ async fn local_output_only_runs_finalize_without_client_inputs() {
         )
         .unwrap();
         let output = LocalCoordinatorRunner::builder(
-            env!("CARGO_BIN_EXE_stoffel-run"),
+            env!("CARGO_BIN_EXE_stoffel"),
             stoffellang::convert_to_binary(&compiled),
         )
         .timeout(Duration::from_secs(120))
@@ -490,7 +490,7 @@ fn local_runner_rejects_missing_clientstore_inputs_before_spawning_parties() {
         dynamic_client_inputs: Vec::new(),
     };
 
-    let err = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let err = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .build()
         .unwrap_err();
 
@@ -523,7 +523,7 @@ fn local_runner_accepts_static_output_only_clients_without_inputs() {
         dynamic_client_inputs: Vec::new(),
     };
 
-    LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .build()
         .expect("output-only client manifests should not require client input");
 }
@@ -551,7 +551,7 @@ fn local_runner_rejects_expected_output_clients_below_static_manifest_slots() {
         dynamic_client_inputs: Vec::new(),
     };
 
-    let err = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let err = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .expected_output_clients(2)
         .build()
         .unwrap_err();
@@ -585,7 +585,7 @@ fn local_runner_rejects_duplicate_client_input_slots() {
         dynamic_client_inputs: Vec::new(),
     };
 
-    let err = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+    let err = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary)
         .client_inputs([LocalClientInput::new(0, [1]), LocalClientInput::new(0, [2])])
         .build()
         .unwrap_err();

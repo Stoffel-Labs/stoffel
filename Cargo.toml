@@ -5,7 +5,6 @@ members = [
     "crates/stoffel-lang",
     "crates/stoffel-rust-sdk",
     "crates/stoffel-vm",
-    "crates/stoffel-vm-runner",
     "crates/stoffel-vm-types",
     "crates/stoffel-lang/examples/mpc_aes128_cbc_client_io",
     "crates/stoffel-lang/examples/mpc_sha256_client_io",
@@ -24,8 +23,8 @@ exclude = ["vendor/mpc-protocols-limit-test"]
 # docker/coordinator-wrapper/Cargo.toml is its own workspace and
 # carries the same table against the same checkout; the Docker builds override
 # both from .cargo/config.toml with the BuildKit `coordinator` named context.
-# The version here must match the =0.3.0 requirements in
-# crates/stoffel-vm-runner/Cargo.toml and crates/stoffel-rust-sdk/Cargo.toml, or
+# The version here must match the =0.3.0 requirement in
+# crates/stoffel-rust-sdk/Cargo.toml, or
 # cargo leaves the patch unused and resolves the registry copy with a warning.
 [patch.crates-io]
 stoffel-mpc-coordinator-off-chain = { version = "0.3.0", path = "../stoffel-mpc-coordinator-roster-admission/crates/off-chain" }

@@ -2194,7 +2194,7 @@ fn run_rejects_mixed_local_and_network_only_options() {
             "--config",
             "network.toml",
             "--runner",
-            "stoffel-run",
+            "stoffel",
         ])
         .assert()
         .failure()
@@ -2215,7 +2215,7 @@ fn run_dev_and_test_validate_explicit_runner_paths_early() {
         .assert()
         .success();
 
-    let missing_runner = temp.path().join("missing-stoffel-run");
+    let missing_runner = temp.path().join("missing-stoffel");
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("run")
@@ -4372,7 +4372,7 @@ fn test_rejects_run_only_flags_with_actionable_guidance() {
         .unwrap()
         .arg("test")
         .arg(temp.path())
-        .args(["--runner", "stoffel-run"])
+        .args(["--runner", "stoffel"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(

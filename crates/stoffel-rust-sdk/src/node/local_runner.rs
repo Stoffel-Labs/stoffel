@@ -36,7 +36,7 @@ use stoffel_vm::net::program_id_from_bytes;
 use stoffel_vm::net::session::ExecutionId;
 use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 
-use crate::returned_share::{ReturnedShare, ReturnedShareParseError, RETURNED_SHARE_PREFIX_V1};
+use super::returned_share::{ReturnedShare, ReturnedShareParseError, RETURNED_SHARE_PREFIX_V1};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -457,7 +457,7 @@ impl LocalCoordinatorRunner {
     fn validate(&self) -> LocalCoordinatorRunnerResult<()> {
         if !self.runner_path.exists() {
             return Err(LocalCoordinatorRunnerError::Configuration(format!(
-                "stoffel-run binary does not exist at {}",
+                "stoffel binary (for `stoffel run-node`) does not exist at {}",
                 self.runner_path.display()
             )));
         }
@@ -733,6 +733,7 @@ impl LocalCoordinatorRunner {
     ) -> LocalCoordinatorRunnerResult<(String, Child)> {
         let mut command = Command::new(&self.runner_path);
         command
+            .arg(super::RUN_NODE_SUBCOMMAND)
             .arg(context.program_path)
             .arg(&self.entry)
             .arg("--n-parties")
@@ -741,7 +742,7 @@ impl LocalCoordinatorRunner {
             .arg(self.threshold.to_string())
             .arg("--mpc-backend")
             .arg(self.backend.name())
-            .arg("--curve")
+            .arg("--mpc-curve")
             .arg(self.curve_config.name())
             .arg("--off-chain-coord")
             .arg(format!("127.0.0.1:{}", context.coord_port))
@@ -779,8 +780,12 @@ impl LocalCoordinatorRunner {
             // handles a graceful drop, and the parent-death watchdog (keyed off
             // this env var) covers the case where the runner is force-killed
             // (SIGKILL) and cannot run drop cleanup, preventing orphaned parties.
+            // The watchdog exits the party once its stdin reaches EOF, so stdin
+            // is piped and its write end held by `wait_for_child` for the
+            // party's whole life.
             .env("STOFFEL_DIE_WITH_PARENT", "1")
             .kill_on_drop(true)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if !context.clients.is_empty() {
@@ -1865,6 +1870,10 @@ async fn wait_for_child(
     timeout: Duration,
     cancellation: CancellationToken,
 ) -> LocalCoordinatorRunnerResult<LocalPartyOutput> {
+    // The write end of the party's stdin: its die-with-parent watchdog exits
+    // once stdin reaches EOF, so it stays bound until this function returns.
+    // (Taken out of the child because `Child::wait` closes a stdin it holds.)
+    let _stdin = child.stdin.take();
     let (Some(stdout_pipe), Some(stderr_pipe)) = (child.stdout.take(), child.stderr.take()) else {
         terminate_child(&mut child).await;
         return Err(LocalCoordinatorRunnerError::Configuration(
@@ -2194,6 +2203,17 @@ fn local_run_lock() -> &'static tokio::sync::Mutex<()> {
 
 #[cfg(test)]
 mod tests {
+    /// `kill -0 <pid>`: whether `pid` names a live (or unreaped) process. A
+    /// subprocess rather than `libc::kill`, because this crate forbids `unsafe`.
+    fn process_exists(pid: i32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
     use super::*;
     use std::collections::HashMap;
     use stoffel_vm_types::compiled_binary::{ClientIoSchema, CompiledFunction, FunctionType};
@@ -2316,7 +2336,7 @@ mod tests {
         let _ = run.await;
         tokio::time::timeout(CLEANUP_GRACE, async {
             loop {
-                let exited = unsafe { libc::kill(pid, 0) } == -1;
+                let exited = !process_exists(pid);
                 let closed = tokio::net::TcpStream::connect(&coordinator).await.is_err();
                 if exited && closed {
                     break;
@@ -2371,7 +2391,7 @@ exec sleep 30
                 .starts_with("pid.")
             {
                 let pid: i32 = std::fs::read_to_string(path).unwrap().parse().unwrap();
-                assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+                assert!(!process_exists(pid));
                 parties += 1;
             }
         }
@@ -2512,7 +2532,7 @@ exec sleep 30
             LocalCoordinatorRunnerError::PartyShutdown { .. }
         ));
         assert!(started.elapsed() < Duration::from_secs(5));
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child must be reaped");
+        assert!(!process_exists(pid), "child must be reaped");
     }
 
     #[cfg(unix)]
@@ -2547,7 +2567,7 @@ exec sleep 30
 
         assert!(tasks.is_empty());
         for pid in pids {
-            assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child must be reaped");
+            assert!(!process_exists(pid), "child must be reaped");
         }
     }
 

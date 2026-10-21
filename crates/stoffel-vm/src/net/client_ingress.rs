@@ -49,7 +49,7 @@
 //! and has to dial again — the refusal is a closed connection rather than a
 //! handshake failure, because the gate runs after the handshake, so a client
 //! must treat a dropped connection as retryable
-//! (`stoffel-vm-runner`'s `establish_coordinator_output_client_routes` does).
+//! (the SDK node driver's `establish_coordinator_output_client_routes` does).
 //! Nothing admits such a client early: admission is re-read on every accept,
 //! so the retry is admitted the moment the registration lands, and in the
 //! ordinary flow there is nothing to retry, because the coordinator publishes
