@@ -35,7 +35,7 @@ cargo build --release -p stoffel-rust-sdk --example oprf
 Run the exact artifact through the release runner:
 
 ```sh
-STOFFEL_RUN_BIN=target/release/stoffel-run \
+STOFFEL_RUN_BIN=target/release/stoffel \
 STOFFEL_LOCAL_RUNNER_TEE=1 \
 target/release/examples/oprf
 ```

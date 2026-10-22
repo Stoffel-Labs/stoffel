@@ -13,8 +13,8 @@
 # identity to the rest of the stack. To drive this file by hand, do the same:
 #
 #   docker compose -f <this file> up -d coordinator
-#   docker compose -f <this file> run --rm --no-deps --entrypoint /app/stoffel-coord-ctl \
-#     party0 submit --coordinator coordinator:31415 \
+#   docker compose -f <this file> run --rm --no-deps --entrypoint /app/stoffel \
+#     party0 coord-ctl submit --coordinator coordinator:31415 \
 #     --coord-cert /app/ids/server_cert.crt \
 #     --cert /app/ids/operator/cert.crt --key /app/ids/operator/key.der \
 #     --program-file "$STOFFEL_PROGRAM" --entry "$STOFFEL_ENTRY" --open-admission
@@ -59,7 +59,7 @@ x-client-common: &client-common
     STOFFEL_MPC_BACKEND: honeybadger
     STOFFEL_MPC_CURVE: bls12-381
     # The identity the coordinator minted for this execution, as
-    # `stoffel-coord-ctl submit` printed it. A client is not on the node roster,
+    # `stoffel coord-ctl submit` printed it. A client is not on the node roster,
     # so nothing publishes it one. There is no default and no placeholder: the
     # entrypoint refuses a coordinator client with no identity, which keeps the
     # coordinator startable on its own — it has to be, because the identity does

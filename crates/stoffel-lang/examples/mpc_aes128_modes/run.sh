@@ -42,7 +42,7 @@ emit_bits() {
 ARGS="$(emit_bits 0 "$PLAINTEXT_HEX")$(emit_bits 1 "$KEY_HEX")"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
-RUNNER="${STOFFEL_RUN_BIN:-$REPO_ROOT/target/release/stoffel-run}"
+RUNNER="${STOFFEL_RUN_BIN:-$REPO_ROOT/target/release/stoffel}"
 STOFFEL="${STOFFEL_BIN:-$REPO_ROOT/target/release/stoffel}"
 
 # shellcheck disable=SC2086

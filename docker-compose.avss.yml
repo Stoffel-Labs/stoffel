@@ -5,7 +5,7 @@
 # commitment[0]. All parties should output the same public key.
 #
 # This stack is also the local-store persistence testbed: each party mounts a
-# named /app/data volume and passes STOFFEL_LOCAL_STORE to stoffel-run. The
+# named /app/data volume and passes STOFFEL_LOCAL_STORE to stoffel run-node. The
 # API/coordinator compose path is separate and currently uses the
 # HoneyBadger/BLS12-381 coordinator flow.
 #
@@ -42,8 +42,8 @@
 # the node roster and the coordinator publishes it nothing.
 #
 #   docker compose -f <this file> up -d --scale registrar=0 coordinator
-#   docker compose -f <this file> run --rm --no-deps --entrypoint /app/stoffel-coord-ctl \
-#     party0 submit --coordinator coordinator:31415 \
+#   docker compose -f <this file> run --rm --no-deps --entrypoint /app/stoffel \
+#     party0 coord-ctl submit --coordinator coordinator:31415 \
 #     --coord-cert /app/ids/server_cert.crt \
 #     --cert /app/ids/operator/cert.crt --key /app/ids/operator/key.der \
 #     --program-file "$STOFFEL_PROGRAM" --entry "$STOFFEL_ENTRY" \
@@ -101,7 +101,7 @@ services:
   registrar:
     build: *stoffel-build
     container_name: stoffel-avss-registrar
-    entrypoint: ["/app/stoffel-coord-ctl"]
+    entrypoint: ["/app/stoffel", "coord-ctl"]
     command:
       - submit
       - --coordinator

@@ -9,7 +9,7 @@ use std::str::FromStr;
 
 use stoffel_vm_types::core_types::{ShareData, ShareDataFormat, ShareType, Value};
 
-/// Versioned prefix used by `stoffel-run` for an unrevealed share return.
+/// Versioned prefix used by `stoffel run-node` for an unrevealed share return.
 pub const RETURNED_SHARE_PREFIX_V1: &str = "share:v1[";
 
 /// One party's opaque VM return share.

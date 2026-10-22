@@ -37,7 +37,7 @@ target/release/stoffel build crates/stoffel-lang/examples/mpc_dh_psi --release
 Then run the end-to-end client against that exact `.stflb`:
 
 ```sh
-STOFFEL_RUN_BIN=target/release/stoffel-run \
+STOFFEL_RUN_BIN=target/release/stoffel \
 STOFFEL_LOCAL_RUNNER_TEE=1 \
 cargo run --release -p stoffel-rust-sdk --example dh_psi
 ```

@@ -14,7 +14,7 @@
 # Ciphertext : 69c4e0d86a7b0430d8cdb78070b4c55a
 #              = [105,196,224,216,106,123,4,48,216,205,183,128,112,180,197,90]
 #
-# Usage: ./run.sh   (run from this directory, repo built with stoffel-run)
+# Usage: ./run.sh   (run from this directory, repo built with stoffel run-node)
 set -euo pipefail
 
 PLAINTEXT_HEX="00112233445566778899aabbccddeeff"
@@ -38,7 +38,7 @@ emit_bits() {
 ARGS="$(emit_bits 0 "$PLAINTEXT_HEX")$(emit_bits 1 "$KEY_HEX")"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
-RUNNER="${STOFFEL_RUN_BIN:-$REPO_ROOT/target/release/stoffel-run}"
+RUNNER="${STOFFEL_RUN_BIN:-$REPO_ROOT/target/release/stoffel}"
 STOFFEL="${STOFFEL_BIN:-$REPO_ROOT/target/release/stoffel}"
 
 # shellcheck disable=SC2086

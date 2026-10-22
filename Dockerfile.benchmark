@@ -82,15 +82,14 @@ RUN --mount=type=ssh \
         export CARGO_PROFILE_RELEASE_STRIP=none; \
         export RUSTFLAGS="$RUSTFLAGS -C force-frame-pointers=yes"; \
     fi; \
-    cargo build --release --package stoffel-vm-runner \
+    cargo build --release --package stoffel-cli \
         --features statistics \
-        --bin stoffel-run \
-        --bin stoffel-coord-ctl; \
+        --bin stoffel; \
     if [ "$PROFILE_BUILD" != "true" ]; then \
-        strip target/release/stoffel-run target/release/stoffel-coord-ctl; \
+        strip target/release/stoffel; \
     fi; \
     mkdir -p /build/artifacts && \
-    cp target/release/stoffel-run target/release/stoffel-coord-ctl /build/artifacts/
+    cp target/release/stoffel /build/artifacts/
 
 RUN --mount=type=cache,id=stoffel-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=stoffel-cargo-git,target=/usr/local/cargo/git,sharing=locked \
@@ -138,10 +137,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY --from=builder /build/artifacts/stoffel-run /app/stoffel-run
+COPY --from=builder /build/artifacts/stoffel /app/stoffel
 # The operator's side of the coordinator's control plane, so the benchmark
 # stack's registrar can ask the coordinator to run the packaged program.
-COPY --from=builder /build/artifacts/stoffel-coord-ctl /app/stoffel-coord-ctl
 COPY --from=builder /build/programs /app/programs
 COPY docker/entrypoint.sh /app/entrypoint.sh
 COPY docker/configure-peer-netem.sh /app/configure-peer-netem.sh

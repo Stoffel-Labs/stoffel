@@ -542,8 +542,9 @@ test -z "$(find /app /run/secrets -type f \( -name '*.der' -o -name '*.key' \) !
                 "run",
                 "--rm",
                 "--entrypoint",
-                "/app/stoffel-run",
+                "/app/stoffel",
                 self.image,
+                "run-node",
                 "--print-program-id",
                 fixture,
             ],
@@ -617,7 +618,7 @@ test -z "$(find /app /run/secrets -type f \( -name '*.der' -o -name '*.key' \) !
         the agreement line has no marker constant to read (the three that do
         are the preprocessing-store markers), `reservoir_rebuild_count`
         immediately above already depends on the same two substrings, and the
-        alternative is a change to crates/stoffel-vm-runner, which this harness
+        alternative is a change to the node driver (stoffel::node), which this harness
         does not own. If that line ever gains a `program=` field or a marker
         constant, both of these should move onto it.
         """
@@ -860,7 +861,7 @@ test -z "$(find /app /run/secrets -type f \( -name '*.der' -o -name '*.key' \) !
         # `docker compose run` narrates the one-off operator container on the
         # same stream this harness captures, so the minted identity is the last
         # line of the output rather than the whole of it. The line itself is
-        # still required to be exactly what `stoffel-coord-ctl submit` prints:
+        # still required to be exactly what `stoffel coord-ctl submit` prints:
         # the execution identity and the registration nonce, nothing else.
         lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
         minted = lines[-1].split() if lines else []
@@ -1077,8 +1078,9 @@ test -z "$(find /app /run/secrets -type f \( -name '*.der' -o -name '*.key' \) !
             "--name",
             container,
             "--entrypoint",
-            "/app/stoffel-run",
+            "/app/stoffel",
             f"client{identity_slot}",
+            "run-node",
             "--client",
             "--execution-id",
             execution["execution_id"],
@@ -1833,8 +1835,9 @@ tc qdisc del dev "$interface" root 2>/dev/null || true
                 "--no-deps",
                 "-T",
                 "--entrypoint",
-                "/app/stoffel-run",
+                "/app/stoffel",
                 service,
+                "run-node",
                 *common,
                 "--party-cert-dir",
                 roster,
@@ -2150,7 +2153,7 @@ def run_concurrency(harness: Harness) -> None:
         ),
     ]
     # Nine allocations is what crosses `availability_reached_refill_threshold`
-    # (stoffel-run.rs), because the restart warmed the scope to
+    # (stoffel run-node.rs), because the restart warmed the scope to
     # `per_execution x (burst_capacity + 1)` and the gate fires when what is
     # left has fallen to one execution's worth. Reaching it drives
     # `spawn_synchronized_reservoir_refill` — a top-up running CONCURRENTLY

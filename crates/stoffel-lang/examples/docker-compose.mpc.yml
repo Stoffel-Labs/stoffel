@@ -92,7 +92,7 @@ services:
         networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
     volumes:
       - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
-    entrypoint: ["/app/stoffel-coord-ctl"]
+    entrypoint: ["/app/stoffel", "coord-ctl"]
     command:
       - submit
       - --coordinator

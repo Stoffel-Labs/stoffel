@@ -218,19 +218,19 @@ impl ServerBuilder {
         self
     }
 
-    /// Override the `stoffel-run` binary used by [`StoffelServer::start`].
+    /// Override the `stoffel` binary whose `run-node` subcommand [`StoffelServer::start`] runs.
     pub fn runner_path(mut self, path: impl AsRef<Path>) -> Self {
         self.runner_path = Some(path.as_ref().to_path_buf());
         self
     }
 
-    /// Set the entrypoint passed to `stoffel-run`. Default is `main`.
+    /// Set the entrypoint passed to `stoffel run-node`. Default is `main`.
     pub fn entry(mut self, entry: impl Into<String>) -> Self {
         self.entry = entry.into();
         self
     }
 
-    /// Configure the off-chain coordinator flags passed to `stoffel-run`.
+    /// Configure the off-chain coordinator flags passed to `stoffel run-node`.
     ///
     /// This is required when the attached program declares ClientStore IO.
     pub fn offchain_coordinator(mut self, config: OffChainServerConfig) -> Self {
@@ -705,9 +705,10 @@ impl StoffelServer {
             .as_ref()
             .ok_or_else(|| Error::Configuration("MPC configuration is required".to_owned()))?;
 
-        let runner_path = resolve_stoffel_run_binary(self.runner_path.as_deref())?;
+        let runner_path =
+            crate::node::resolve_stoffel_binary(self.runner_path.as_deref(), "server start")?;
         eprintln!(
-            "[stoffel] using stoffel-run binary: {}",
+            "[stoffel] using stoffel binary for run-node: {}",
             runner_path.display()
         );
         let tempdir = tempfile::tempdir()?;
@@ -716,6 +717,7 @@ impl StoffelServer {
 
         let mut command = Command::new(runner_path);
         command
+            .arg(crate::node::RUN_NODE_SUBCOMMAND)
             .arg(&program_path)
             .arg(&self.entry)
             .arg("--n-parties")
@@ -944,37 +946,6 @@ fn server_backend_name(backend: MpcBackend) -> &'static str {
         MpcBackend::HoneyBadger => "honeybadger",
         MpcBackend::Avss { .. } => "avss",
     }
-}
-
-fn resolve_stoffel_run_binary(explicit_path: Option<&Path>) -> Result<PathBuf> {
-    if let Some(path) = explicit_path {
-        return path.exists().then(|| path.to_path_buf()).ok_or_else(|| {
-            Error::Unsupported(format!(
-                "server start requires an existing stoffel-run binary; configured path does not exist: {}",
-                path.display()
-            ))
-        });
-    }
-    if let Some(path) = std::env::var_os("STOFFEL_RUN_BIN").map(PathBuf::from) {
-        return path.exists().then_some(path.clone()).ok_or_else(|| {
-            Error::Unsupported(format!(
-                "server start requires an existing stoffel-run binary; STOFFEL_RUN_BIN points to a missing path: {}",
-                path.display()
-            ))
-        });
-    }
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map(|root| root.join("target").join("debug").join("stoffel-run"));
-    candidate
-        .filter(|path| path.exists())
-        .ok_or_else(|| {
-            Error::Unsupported(
-                "server start requires a built stoffel-run binary; set STOFFEL_RUN_BIN, call runner_path, or build `cargo build -p stoffel-vm-runner --bin stoffel-run`"
-                    .to_owned(),
-            )
-        })
 }
 
 fn validate_existing_file(label: &str, path: &Path) -> Result<()> {

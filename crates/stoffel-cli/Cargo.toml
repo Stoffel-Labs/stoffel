@@ -19,7 +19,15 @@ stoffel-rust-sdk = { version = "=0.2.0", path = "../stoffel-rust-sdk" }
 tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread"] }
 toml = "=0.8.23"
 
+[features]
+# Protocol-round statistics from `stoffel run-node` parties.
+statistics = ["stoffel-rust-sdk/statistics"]
+
 [dev-dependencies]
 assert_cmd = "=2.2.2"
+blake3 = "=1.8.5"
 predicates = "=3.1.4"
+stoffel-vm = { version = "=0.2.0", path = "../stoffel-vm" }
+stoffel-vm-types = { version = "=0.2.0", path = "../stoffel-vm-types" }
+stoffellang = { version = "=0.2.0", path = "../stoffel-lang" }
 tempfile = "=3.27.0"

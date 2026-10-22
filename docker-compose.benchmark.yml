@@ -117,7 +117,7 @@ services:
         PROFILE_BUILD: "${STOFFEL_PROFILE_BUILD:-false}"
     volumes:
       - ./ids:/app/ids:ro
-    entrypoint: ["/app/stoffel-coord-ctl"]
+    entrypoint: ["/app/stoffel", "coord-ctl"]
     command:
       - submit
       - --coordinator

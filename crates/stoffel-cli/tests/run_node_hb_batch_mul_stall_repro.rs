@@ -8,7 +8,7 @@
 //!
 //! This runs the *same program* the failure came from —
 //! `examples/mpc_aes128_circuit/main.stfl`, which `docker-compose.yml` ships as
-//! `mpc_aes128_circuit.stflb` — against real `stoffel-run` party processes, so
+//! `mpc_aes128_circuit.stflb` — against real `stoffel run-node` party processes, so
 //! the real execution transport, inbox pump and QUIC mesh are exercised. (An
 //! in-process harness would bypass the pump, which is the component the log
 //! evidence puts under suspicion.) 5 parties / t=1 / HoneyBadger / bls12-381,
@@ -26,13 +26,13 @@
 //! STOFFEL_REPRO_ITERATIONS=100 \
 //! STOFFEL_MPC_PROTOCOL_TIMEOUT_SECONDS=20 \
 //! TOKIO_WORKER_THREADS=2 \
-//! cargo test --release -p stoffel-vm-runner --test hb_batch_mul_stall_repro -- --ignored --nocapture
+//! cargo test --release -p stoffel-cli --test run_node_hb_batch_mul_stall_repro -- --ignored --nocapture
 //!
 //! # cheap proxy, higher iteration count
 //! STOFFEL_REPRO_PROGRAM=batchmul STOFFEL_REPRO_ITERATIONS=500 \
 //! STOFFEL_MPC_PROTOCOL_TIMEOUT_SECONDS=15 \
 //! STOFFEL_HB_MUL_MAX_PAIRS_PER_SESSION=16 TOKIO_WORKER_THREADS=1 \
-//! cargo test --release -p stoffel-vm-runner --test hb_batch_mul_stall_repro -- --ignored --nocapture
+//! cargo test --release -p stoffel-cli --test run_node_hb_batch_mul_stall_repro -- --ignored --nocapture
 //! ```
 //!
 //! Knobs that matter, and why:
@@ -62,8 +62,8 @@
 
 use std::time::{Duration, Instant};
 
+use stoffel::node::LocalCoordinatorRunner;
 use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
-use stoffel_vm_runner::LocalCoordinatorRunner;
 
 /// Default secret-pair multiplications issued in the single `Share.batch_mul`.
 ///
@@ -216,17 +216,16 @@ async fn run_iterations(
 
     for iteration in 1..=iterations {
         let started = Instant::now();
-        let output =
-            LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary.clone())
-                .parties(5)
-                .threshold(1)
-                .backend(MpcBackendKind::HoneyBadger)
-                .curve(MpcCurveConfig::Bls12_381)
-                .timeout(run_timeout)
-                .build()
-                .expect("local runner config")
-                .run()
-                .await;
+        let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel"), binary.clone())
+            .parties(5)
+            .threshold(1)
+            .backend(MpcBackendKind::HoneyBadger)
+            .curve(MpcCurveConfig::Bls12_381)
+            .timeout(run_timeout)
+            .build()
+            .expect("local runner config")
+            .run()
+            .await;
 
         let elapsed = started.elapsed();
 

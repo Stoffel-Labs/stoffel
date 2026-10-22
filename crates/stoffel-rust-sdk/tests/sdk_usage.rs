@@ -1774,7 +1774,7 @@ def main() -> int64:
 #[test]
 fn runtime_preserves_local_runner_path_override() -> stoffel::Result<()> {
     let dir = tempdir()?;
-    let runner_path = dir.path().join("stoffel-run");
+    let runner_path = dir.path().join("stoffel");
 
     let runtime = Stoffel::compile("def main() -> int64:\n  return 7")?
         .parties(5)
@@ -1787,7 +1787,7 @@ fn runtime_preserves_local_runner_path_override() -> stoffel::Result<()> {
         Some(runner_path.as_path())
     );
 
-    let other_path = dir.path().join("other-stoffel-run");
+    let other_path = dir.path().join("other-stoffel");
     let runtime = runtime.local_runner_path(&other_path);
     assert_eq!(
         runtime.local_runner_binary_path(),
@@ -1799,7 +1799,7 @@ fn runtime_preserves_local_runner_path_override() -> stoffel::Result<()> {
 #[tokio::test]
 async fn local_runner_path_override_is_validated_before_spawning() -> stoffel::Result<()> {
     let dir = tempdir()?;
-    let runner_path = dir.path().join("missing-stoffel-run");
+    let runner_path = dir.path().join("missing-stoffel");
 
     let err = Stoffel::compile("def main() -> int64:\n  return 7")?
         .parties(5)
@@ -1820,7 +1820,7 @@ async fn local_runner_path_override_is_validated_before_spawning() -> stoffel::R
 #[tokio::test]
 async fn local_network_builder_runner_path_is_validated_before_spawning() -> stoffel::Result<()> {
     let dir = tempdir()?;
-    let runner_path = dir.path().join("missing-stoffel-run");
+    let runner_path = dir.path().join("missing-stoffel");
     let runtime = Stoffel::compile("def main() -> int64:\n  return 7")?
         .parties(5)
         .threshold(1)
@@ -2252,7 +2252,7 @@ fn network_config_server_addresses_require_all_parties() -> stoffel::Result<()> 
 #[test]
 fn server_builder_captures_operational_configuration() -> stoffel::Result<()> {
     let dir = tempdir()?;
-    let runner_path = dir.path().join("stoffel-run");
+    let runner_path = dir.path().join("stoffel");
     let party_cert = dir.path().join("party.pem");
     let party_key = dir.path().join("party.key");
     let client_zero_cert = dir.path().join("client-0.pem");
@@ -3328,7 +3328,7 @@ random_shares = 6
 #[tokio::test]
 async fn loaded_bytecode_named_inputs_are_adapted_before_runner_lookup() -> stoffel::Result<()> {
     let dir = tempfile::tempdir()?;
-    let runner_path = dir.path().join("missing-stoffel-run");
+    let runner_path = dir.path().join("missing-stoffel");
     let bytecode = Stoffel::compile(ADD_SOURCE)?
         .build()?
         .program()
@@ -3342,13 +3342,13 @@ async fn loaded_bytecode_named_inputs_are_adapted_before_runner_lookup() -> stof
 
     assert!(matches!(
         err,
-        stoffel::Error::Unsupported(message) if message.contains("stoffel-run")
+        stoffel::Error::Unsupported(message) if message.contains("stoffel run-node")
     ));
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "starts a real localhost coordinator and MPC party mesh; requires stoffel-run"]
+#[ignore = "starts a real localhost coordinator and MPC party mesh; requires the stoffel binary"]
 async fn execute_local_uses_real_local_coordinator_runner() -> stoffel::Result<()> {
     let result = Stoffel::compile("def main() -> int64:\n  return 7")?
         .parties(5)
@@ -3361,12 +3361,12 @@ async fn execute_local_uses_real_local_coordinator_runner() -> stoffel::Result<(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "starts a real localhost coordinator and MPC party mesh; requires target/debug/stoffel-run"]
+#[ignore = "starts a real localhost coordinator and MPC party mesh; requires target/debug/stoffel"]
 async fn execute_local_accepts_workspace_relative_runner_path() -> stoffel::Result<()> {
     let result = Stoffel::compile("def main() -> int64:\n  return 7")?
         .parties(5)
         .threshold(1)
-        .local_runner_path("target/debug/stoffel-run")
+        .local_runner_path("target/debug/stoffel")
         .execute_local()
         .await?;
 
@@ -3375,14 +3375,14 @@ async fn execute_local_accepts_workspace_relative_runner_path() -> stoffel::Resu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "starts a real localhost coordinator and AVSS MPC party mesh; requires target/debug/stoffel-run"]
+#[ignore = "starts a real localhost coordinator and AVSS MPC party mesh; requires target/debug/stoffel"]
 async fn execute_local_uses_real_local_avss_coordinator_runner_for_no_input_program(
 ) -> stoffel::Result<()> {
     let result = Stoffel::compile("def main() -> int64:\n  return 7")?
         .parties(5)
         .threshold(1)
         .avss(Curve::Bls12_381)
-        .local_runner_path("target/debug/stoffel-run")
+        .local_runner_path("target/debug/stoffel")
         .execute_local()
         .await?;
 
@@ -3391,7 +3391,7 @@ async fn execute_local_uses_real_local_avss_coordinator_runner_for_no_input_prog
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "starts a real localhost coordinator and AVSS MPC party mesh; requires target/debug/stoffel-run"]
+#[ignore = "starts a real localhost coordinator and AVSS MPC party mesh; requires target/debug/stoffel"]
 async fn execute_local_preserves_party_local_opaque_return_shares() -> stoffel::Result<()> {
     let result = Stoffel::compile(
         "def main() -> secret int64:\n  var share: secret int64 = Share.random()\n  return share",
@@ -3399,7 +3399,7 @@ async fn execute_local_preserves_party_local_opaque_return_shares() -> stoffel::
     .parties(5)
     .threshold(1)
     .avss(Curve::Bls12_381)
-    .local_runner_path("target/debug/stoffel-run")
+    .local_runner_path("target/debug/stoffel")
     .execute_local_returning_party_shares()
     .await?;
 
@@ -3435,7 +3435,7 @@ def main() -> int64:
     .threshold(1)
     .avss(Curve::Bls12_381)
     .with_client_input(0, &[42_i64])
-    .local_runner_path("target/debug/stoffel-run")
+    .local_runner_path("target/debug/stoffel")
     .execute_local()
     .await?;
 
@@ -3459,7 +3459,7 @@ def main() -> int64:
     .threshold(1)
     .avss(Curve::Bn254)
     .with_client_input(0, &[42_i64])
-    .local_runner_path("target/debug/stoffel-run")
+    .local_runner_path("target/debug/stoffel")
     .execute_local()
     .await?;
 
@@ -3470,7 +3470,7 @@ def main() -> int64:
 #[tokio::test]
 async fn secret_parameter_named_inputs_are_adapted_before_runner_lookup() -> stoffel::Result<()> {
     let dir = tempfile::tempdir()?;
-    let runner_path = dir.path().join("missing-stoffel-run");
+    let runner_path = dir.path().join("missing-stoffel");
 
     let err = Stoffel::compile(ADD_SOURCE)?
         .parties(5)
@@ -3484,7 +3484,7 @@ async fn secret_parameter_named_inputs_are_adapted_before_runner_lookup() -> sto
     assert!(
         matches!(
         err,
-            stoffel::Error::Unsupported(ref message) if message.contains("stoffel-run")
+            stoffel::Error::Unsupported(ref message) if message.contains("stoffel run-node")
         ),
         "unexpected error: {err:?}"
     );
@@ -3494,7 +3494,7 @@ async fn secret_parameter_named_inputs_are_adapted_before_runner_lookup() -> sto
 #[tokio::test]
 async fn secret_list_named_inputs_are_adapted_before_runner_lookup() -> stoffel::Result<()> {
     let dir = tempfile::tempdir()?;
-    let runner_path = dir.path().join("missing-stoffel-run");
+    let runner_path = dir.path().join("missing-stoffel");
 
     let err = Stoffel::compile(
         r#"
@@ -3513,7 +3513,7 @@ def main(values: list[Share]) -> int64:
     assert!(
         matches!(
         err,
-            stoffel::Error::Unsupported(ref message) if message.contains("stoffel-run")
+            stoffel::Error::Unsupported(ref message) if message.contains("stoffel run-node")
         ),
         "unexpected error: {err:?}"
     );
@@ -3524,7 +3524,7 @@ def main(values: list[Share]) -> int64:
 async fn mixed_clear_and_secret_list_named_inputs_are_adapted_before_runner_lookup(
 ) -> stoffel::Result<()> {
     let dir = tempfile::tempdir()?;
-    let runner_path = dir.path().join("missing-stoffel-run");
+    let runner_path = dir.path().join("missing-stoffel");
 
     let err = Stoffel::compile(
         r#"
@@ -3544,7 +3544,7 @@ def main(n: int64, values: list[Share]) -> int64:
     assert!(
         matches!(
         err,
-            stoffel::Error::Unsupported(ref message) if message.contains("stoffel-run")
+            stoffel::Error::Unsupported(ref message) if message.contains("stoffel run-node")
         ),
         "unexpected error: {err:?}"
     );
@@ -3557,7 +3557,7 @@ async fn file_secret_parameter_named_inputs_are_adapted_before_runner_lookup() -
     let dir = tempfile::tempdir()?;
     let source_path = dir.path().join("private_add.stfl");
     std::fs::write(&source_path, ADD_SOURCE)?;
-    let runner_path = dir.path().join("missing-stoffel-run");
+    let runner_path = dir.path().join("missing-stoffel");
 
     let err = Stoffel::compile_file(&source_path)?
         .parties(5)
@@ -3571,7 +3571,7 @@ async fn file_secret_parameter_named_inputs_are_adapted_before_runner_lookup() -
     assert!(
         matches!(
         err,
-            stoffel::Error::Unsupported(ref message) if message.contains("stoffel-run")
+            stoffel::Error::Unsupported(ref message) if message.contains("stoffel run-node")
         ),
         "unexpected error: {err:?}"
     );
@@ -3701,7 +3701,7 @@ def reveal_client_value() -> int64:
     let result = runtime
         .local_network()
         .entry("reveal_client_value")
-        .runner_path("target/debug/stoffel-run")
+        .runner_path("target/debug/stoffel")
         .timeout(Duration::from_secs(180))
         .run()
         .await?;
@@ -4326,12 +4326,12 @@ async fn client_and_server_lifecycle_validate_real_network_configuration() -> st
                 .timestamp(9)
                 .build()?,
         )
-        .runner_path(tempdir()?.path().join("missing-stoffel-run"))
+        .runner_path(tempdir()?.path().join("missing-stoffel"))
         .build()?;
     let start_err = missing_runner.start().await.unwrap_err();
     assert!(matches!(
         start_err,
-        stoffel::Error::Unsupported(message) if message.contains("stoffel-run")
+        stoffel::Error::Unsupported(message) if message.contains("stoffel run-node")
     ));
 
     let client_io_runtime = Stoffel::compile(
@@ -4384,13 +4384,13 @@ def main() -> int64:
         .peer(3, "127.0.0.1:19613")
         .peer(4, "127.0.0.1:19614")
         .expected_clients(1)
-        .runner_path(identity_dir.path().join("missing-stoffel-run"))
+        .runner_path(identity_dir.path().join("missing-stoffel"))
         .offchain_coordinator(offchain_server.clone())
         .build()?;
     let start_err = client_io_with_coordinator.start().await.unwrap_err();
     assert!(matches!(
         start_err,
-        stoffel::Error::Unsupported(message) if message.contains("stoffel-run")
+        stoffel::Error::Unsupported(message) if message.contains("stoffel run-node")
     ));
 
     let mismatch = client_io_runtime

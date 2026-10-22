@@ -1,3 +1,8 @@
+use super::{
+    AdmittedExecution, CoordinatorExecutionStream, CoordinatorLinkSource, InstanceLedger,
+    LinkFailure, ReturnedShare, StandingClientCatalog, StandingExecutionHandler, StandingProgram,
+    StandingProgramCatalog,
+};
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{FftField, PrimeField};
 use ark_std::rand::{rngs::OsRng, RngCore};
@@ -56,11 +61,6 @@ use stoffel_vm::storage::preproc::{
     PreprocKeyScope, PreprocStore, StandingPreprocSnapshot,
 };
 use stoffel_vm::storage::{LocalStorage, RedbLocalStorage, RetiredExecutionIndex};
-use stoffel_vm_runner::{
-    AdmittedExecution, CoordinatorExecutionStream, CoordinatorLinkSource, InstanceLedger,
-    LinkFailure, ReturnedShare, StandingClientCatalog, StandingExecutionHandler, StandingProgram,
-    StandingProgramCatalog,
-};
 use stoffel_vm_types::compiled_binary::{
     BinaryError, ClientIoManifest, CompiledBinary, MPC_BACKEND_MANIFEST_FORMAT_VERSION,
     MPC_CURVE_MANIFEST_FORMAT_VERSION,
@@ -371,19 +371,10 @@ enum InputPathPhase {
     Complete = 16,
 }
 
-/// No-op uprobe target used by the eBPF input-path profiler.
-///
-/// Exporting one stable C symbol avoids relying on unstable Rust async symbol
-/// names. With no tracer attached, this is only one non-inlined function call
-/// at each coarse phase boundary and does not perform timing or logging.
-#[no_mangle]
-#[inline(never)]
-pub extern "C" fn stoffel_input_path_probe(phase: u64, clients: u64, inputs: u64) {
-    std::hint::black_box((phase, clients, inputs));
-}
-
+/// Marks a phase boundary for the eBPF input-path profiler, through the
+/// stable uprobe symbol [`stoffel_vm::probes::stoffel_input_path_probe`].
 fn mark_input_path_phase(phase: InputPathPhase, clients: usize, inputs: usize) {
-    stoffel_input_path_probe(
+    stoffel_vm::probes::stoffel_input_path_probe(
         phase as u64,
         u64::try_from(clients).unwrap_or(u64::MAX),
         u64::try_from(inputs).unwrap_or(u64::MAX),
@@ -3052,7 +3043,7 @@ fn validate_forbidden_cli_parameters(
     }
 }
 
-/// The three modes `stoffel-run` has, and what selects each.
+/// The three modes `stoffel run-node` has, and what selects each.
 ///
 /// `--peers` is what makes a process a party of a mesh: it has no bootstrap
 /// process to register with and no leader to be, so there is nothing else left
@@ -3085,7 +3076,7 @@ fn exit_on_cli_configuration_error(result: Result<(), String>) {
 /// Resolve the compiled artifact used for semantic client I/O.
 ///
 /// Client mode historically accepted options before the positional program
-/// path (`stoffel-run --client program.stflb ...`), but semantic I/O only
+/// path (`stoffel run-node --client program.stflb ...`), but semantic I/O only
 /// inspected argv[1]. Walk the arguments with their arity so option values are
 /// not mistaken for the program. An explicit `--program` remains authoritative.
 fn client_program_from_arguments(raw_args: &[String]) -> Option<PathBuf> {
@@ -7549,9 +7540,13 @@ async fn run_standing_node(raw_args: &[String]) -> Result<(), String> {
     result
 }
 
-// Use a Tokio runtime for async operations
-#[tokio::main]
-async fn main() {
+/// `stoffel run-node`: one MPC party, client, or local run.
+///
+/// A process entry point. It parses `args` (everything after `run-node`),
+/// installs the process's tracing subscriber, and calls [`std::process::exit`]
+/// on configuration and protocol errors, so it must run as the body of its own
+/// process on a multi-threaded Tokio runtime — never from embedding code.
+pub async fn run_node(args: Vec<std::ffi::OsString>) -> std::process::ExitCode {
     // The MPC protocol code (honeybadger/avss engines, preprocessing, etc.) emits
     // `tracing` events, but nothing consumes them unless a subscriber is installed.
     // RUST_LOG controls the level/target filter (e.g. `RUST_LOG=stoffel_vm=debug`);
@@ -7568,26 +7563,26 @@ async fn main() {
     // to its parent: if the parent (the test/CLI/SDK process) dies — including a
     // SIGKILL, where the parent's `kill_on_drop` cleanup cannot run — this party
     // would otherwise be re-parented to init/launchd and leak as an orphaned MPC
-    // process. Poll the parent PID and exit promptly once it changes.
+    // process. The parent spawns this process with a piped stdin and holds the
+    // write end for the child's whole lifetime, so stdin reaching EOF (or
+    // failing) means the parent is gone. Opt-in, because a node started by hand
+    // (a compose service, say) often has stdin at `/dev/null`, which is EOF
+    // immediately.
     if std::env::var_os("STOFFEL_DIE_WITH_PARENT").is_some() {
-        // SAFETY: `getppid` is always safe to call and takes no arguments.
-        let original_parent = unsafe { libc::getppid() };
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                // SAFETY: see above.
-                let current = unsafe { libc::getppid() };
-                if current != original_parent || current <= 1 {
-                    eprintln!(
-                        "[watchdog] parent process exited (ppid {original_parent} -> {current}); shutting down"
-                    );
-                    std::process::exit(0);
-                }
-            }
-        });
+        spawn_parent_stdin_watchdog();
     }
 
-    let raw_args = env::args().skip(1).collect::<Vec<_>>();
+    let raw_args = match args
+        .into_iter()
+        .map(std::ffi::OsString::into_string)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(raw_args) => raw_args,
+        Err(argument) => {
+            eprintln!("Error: argument {argument:?} is not valid UTF-8");
+            exit(2);
+        }
+    };
     exit_on_cli_configuration_error(validate_cli_option_values(&raw_args));
     let positional_client_program = client_program_from_arguments(&raw_args);
 
@@ -7601,7 +7596,7 @@ async fn main() {
             exit(2);
         });
         println!("{}", hex::encode(program_id_from_bytes(&bytes)));
-        return;
+        return std::process::ExitCode::SUCCESS;
     }
 
     if let Some(index) = raw_args
@@ -7647,7 +7642,7 @@ async fn main() {
             "{}",
             serde_json::to_string(&report).expect("program manifest report is serializable")
         );
-        return;
+        return std::process::ExitCode::SUCCESS;
     }
 
     if is_flag_present(&raw_args, "--standing-node") {
@@ -7655,7 +7650,7 @@ async fn main() {
             eprintln!("Standing node failed: {error}");
             exit(13);
         }
-        return;
+        return std::process::ExitCode::SUCCESS;
     }
 
     if raw_args.is_empty() {
@@ -7711,7 +7706,7 @@ async fn main() {
 
     for arg in &raw_args {
         if arg == "-h" || arg == "--help" {
-            print_usage_and_exit();
+            print_help_and_exit();
         } else if arg == "--trace-instr" {
             trace_instr = true;
         } else if arg == "--trace-regs" {
@@ -8298,7 +8293,7 @@ async fn main() {
                 coordinator_client_slot: client_manifest_slot,
             })
             .await;
-            return;
+            return std::process::ExitCode::SUCCESS;
         }
 
         let party_count = n_parties.unwrap_or(server_addrs.len());
@@ -8335,7 +8330,7 @@ async fn main() {
             client_manifest_slot,
         )
         .await;
-        return;
+        return std::process::ExitCode::SUCCESS;
     }
 
     let path_opt = if !positional.is_empty() {
@@ -9232,7 +9227,7 @@ async fn main() {
                         eprintln!("[party {}] AVSS coordinator execution failed: {}", my_id, e);
                         exit(13);
                     }
-                    return;
+                    return std::process::ExitCode::SUCCESS;
                 }
 
                 let (mux, inbox, registration, scanner) =
@@ -9418,9 +9413,7 @@ async fn main() {
                         }
 
                         let mut submissions = Vec::with_capacity(output_ids.len());
-                        for (cid, output_shares) in
-                            output_ids.iter().zip(output_shares_by_client.into_iter())
-                        {
+                        for (cid, output_shares) in output_ids.iter().zip(output_shares_by_client) {
                             if output_shares.is_empty() {
                                 continue;
                             }
@@ -9499,14 +9492,53 @@ async fn main() {
     } else if let Some(counters) = avss_node_counters.as_ref() {
         eprintln!("AVSS statistics:\n{}", counters.snapshot());
     }
+    std::process::ExitCode::SUCCESS
 }
 
-fn print_usage_and_exit() -> ! {
-    eprintln!(
-        r#"Stoffel VM Runner
+/// Exits the process once stdin reaches EOF or fails: the die-with-parent
+/// watchdog `run_node` installs under `STOFFEL_DIE_WITH_PARENT`.
+///
+/// A detached OS thread rather than a task on `tokio::io::stdin`: Tokio reads
+/// stdin on its blocking pool, and a runtime waits for its blocking pool when it
+/// shuts down, so a node that finished normally would hang until its parent
+/// closed stdin — while the parent waits for the node to exit.
+fn spawn_parent_stdin_watchdog() {
+    let spawned = std::thread::Builder::new()
+        .name("stoffel-parent-watchdog".to_owned())
+        .spawn(|| {
+            use std::io::Read;
+            let mut stdin = std::io::stdin().lock();
+            let mut buf = [0u8; 256];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            // Never `eprintln!` here: when the parent dies, the read end of a
+            // piped stderr dies with it, the write fails with EPIPE (Rust
+            // ignores SIGPIPE), and `eprintln!` panics — unwinding this thread
+            // before `exit` and orphaning the node this watchdog exists to stop.
+            {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[watchdog] parent process closed stdin; shutting down"
+                );
+            }
+            exit(0);
+        });
+    if let Err(error) = spawned {
+        eprintln!("[watchdog] could not start the parent watchdog: {error}");
+    }
+}
+
+const USAGE: &str = r#"stoffel run-node — run one MPC party, client, or local program
 
 Usage:
-  stoffel-run <path-to-compiled-binary> [entry_function] [flags]
+  stoffel run-node <path-to-compiled-binary> [entry_function] [flags]
 
 Flags:
   --standing-node         Run a long-lived concurrent execution host. It serves the
@@ -9644,22 +9676,22 @@ Multi-Party Execution:
 
 Examples:
   # Local execution (no MPC)
-  stoffel-run program.stfbin
-  stoffel-run program.stfbin main --trace-instr
+  stoffel run-node program.stfbin
+  stoffel run-node program.stfbin main --trace-instr
 
   # Multi-party execution (3 parties, threshold 1). The coordinator is the
   # roster authority: it mints the execution identity and publishes it to every
   # party, so no party names one. --peers are hints, and each party's party
   # count and threshold are checked against the roster it is served.
-  stoffel-run program.stfbin main --party-id 0 --bind 127.0.0.1:9001 \
+  stoffel run-node program.stfbin main --party-id 0 --bind 127.0.0.1:9001 \
     --peers 127.0.0.1:9002,127.0.0.1:9003 --n-parties 3 --threshold 1 \
     --off-chain-coord 127.0.0.1:7000 --coord-cert ids/server_cert.crt \
     --rpc-bind 127.0.0.1:8001 --cert ids/nodes/cert0.crt --key ids/nodes/key0.der
-  stoffel-run program.stfbin main --party-id 1 --bind 127.0.0.1:9002 \
+  stoffel run-node program.stfbin main --party-id 1 --bind 127.0.0.1:9002 \
     --peers 127.0.0.1:9001,127.0.0.1:9003 --n-parties 3 --threshold 1 \
     --off-chain-coord 127.0.0.1:7000 --coord-cert ids/server_cert.crt \
     --rpc-bind 127.0.0.1:8002 --cert ids/nodes/cert1.crt --key ids/nodes/key1.der
-  stoffel-run program.stfbin main --party-id 2 --bind 127.0.0.1:9003 \
+  stoffel run-node program.stfbin main --party-id 2 --bind 127.0.0.1:9003 \
     --peers 127.0.0.1:9001,127.0.0.1:9002 --n-parties 3 --threshold 1 \
     --off-chain-coord 127.0.0.1:7000 --coord-cert ids/server_cert.crt \
     --rpc-bind 127.0.0.1:8003 --cert ids/nodes/cert2.crt --key ids/nodes/key2.der
@@ -9667,14 +9699,23 @@ Examples:
   # Client mode: provide inputs to the MPC network. A client dials the party
   # servers pinned to the certificates its coordinator's roster served; it is
   # not a member of the mesh and never enters the mesh's allowlist.
-  stoffel-run --client --program program.stflb --client-slot 0 --inputs 10,20 \
+  stoffel run-node --client --program program.stflb --client-slot 0 --inputs 10,20 \
     --servers 127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003 --n-parties 3 \
     --off-chain-coord 127.0.0.1:7000 --coord-cert ids/server_cert.crt \
     --cert ids/clients/cert0.crt --key ids/clients/key0.der --execution-id $EXEC
     # $EXEC is what the coordinator printed when the execution was registered.
-"#
-    );
+"#;
+
+/// Usage on stderr, exit 1: the arguments were wrong.
+fn print_usage_and_exit() -> ! {
+    eprintln!("{USAGE}");
     exit(1);
+}
+
+/// Usage on stdout, exit 0: `--help` asked for it.
+fn print_help_and_exit() -> ! {
+    println!("{USAGE}");
+    exit(0);
 }
 
 #[cfg(test)]
@@ -9701,6 +9742,7 @@ mod tests {
         PreprocessingExchangeMessage, PreprocessingExchangePhase, ReservoirAllocationSnapshot,
         StandingPreprocessingProposal,
     };
+    use crate::node::LinkFailure;
     use std::collections::{BTreeMap, HashSet};
     use std::num::NonZeroU64;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -9716,7 +9758,6 @@ mod tests {
     use stoffel_vm::net::session::ExecutionId;
     use stoffel_vm::storage::preproc::PreprocMeta;
     use stoffel_vm::storage::preproc::{PoolAvailability, StandingPreprocSnapshot};
-    use stoffel_vm_runner::LinkFailure;
     use stoffel_vm_types::compiled_binary::{
         ClientIoManifest, ClientIoSchema, CompiledBinary, DynamicClientInputSchema,
         PreprocessingDemand,

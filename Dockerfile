@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.4
 # Multi-stage Dockerfile for StoffelVM
-# Builds the stoffel-run binary and packages it for distributed MPC execution
+# Builds the stoffel binary and packages it for distributed MPC execution (stoffel run-node)
 #
 # Example:
 #   docker build \
@@ -59,11 +59,10 @@ RUN --mount=type=ssh \
     if [ "$STOFFEL_VM_PROFILE" = "true" ]; then \
         export RUSTFLAGS="$RUSTFLAGS -C debuginfo=2 -C force-frame-pointers=yes"; \
     fi && \
-    cargo build --release --package stoffel-vm-runner --bin stoffel-run \
-        --bin stoffel-coord-ctl --example client_listener_probe && \
+    cargo build --release --package stoffel-cli --bin stoffel && \
+    cargo build --release --package stoffel-rust-sdk --example client_listener_probe && \
     if [ "$STOFFEL_VM_PROFILE" != "true" ]; then \
-        strip target/release/stoffel-run target/release/stoffel-coord-ctl \
-            target/release/examples/client_listener_probe; \
+        strip target/release/stoffel target/release/examples/client_listener_probe; \
     fi
 
 # Compile the AES-128 secret-bit circuit example into VM bytecode for compose runs.
@@ -149,13 +148,12 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy the binary from builder
-COPY --from=builder /build/target/release/stoffel-run /app/stoffel-run
-# The operator's side of the coordinator's control plane. It ships beside the
-# node binary because it computes a program's content address with the VM's own
-# domain-separated hash, so an operator and a node agree on which program an
+# Copy the binary from builder. One stoffel binary is both the node
+# (`stoffel run-node`) and the operator's side of the coordinator's control plane
+# (`stoffel coord-ctl`), so an operator and a node compute a program's content
+# address with the same domain-separated hash and agree on which program an
 # execution names.
-COPY --from=builder /build/target/release/stoffel-coord-ctl /app/stoffel-coord-ctl
+COPY --from=builder /build/target/release/stoffel /app/stoffel
 # The adversarial side of the client-facing listener. It is an example rather
 # than a published binary because nothing in a deployment runs it: the standing
 # concurrency campaign uses it to dial a node's `--client-bind` socket directly,

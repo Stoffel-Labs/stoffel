@@ -198,7 +198,7 @@ execution-isolation boundaries.
 ## Driver contract
 
 Programs are immutable, content-addressed `.stflb` files. The driver submits
-each execution to the coordinator with `stoffel-coord-ctl`, which names the
+each execution to the coordinator with `stoffel coord-ctl`, which names the
 program, the entry point and one certificate-to-slot binding per client; the
 coordinator mints the identity, publishes the execution, and the driver learns
 the identity from what it submitted. Node lifecycle is then observed in the
@@ -211,7 +211,7 @@ coordinator be the party that refuses it: a certificate presented without its
 own key is refused locally by TLS and would prove nothing about authorization.
 
 ```bash
-stoffel-coord-ctl submit \
+stoffel coord-ctl submit \
   --coordinator coordinator:31415 --coord-cert /app/ids/server_cert.crt \
   --cert /app/ids/operator/cert.crt --key /run/secrets/stoffel_operator.key \
   --program <content digest> --entry main \

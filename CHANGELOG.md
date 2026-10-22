@@ -2,6 +2,19 @@
 
 All notable changes to the Stoffel crates are tracked here.
 
+## [Unreleased]
+
+#### Changed
+
+- The `stoffel-run` and `stoffel-coord-ctl` binaries are now subcommands of the `stoffel` CLI: `stoffel run-node` (one MPC party, client, or local run; same flags) and `stoffel coord-ctl` (submit or abort an execution). The Docker images ship one `/app/stoffel` binary.
+- The `stoffel-vm-runner` crate is merged into `stoffel-rust-sdk` as `stoffel::node` (`LocalCoordinatorRunner`, the execution stream, returned shares, and the node driver) and is no longer published. `STOFFEL_RUN_BIN` keeps its name and now names a `stoffel` binary; `stoffel run --local`, `dev` and `test --local` run their parties from the `stoffel` executable itself.
+- `install.sh` installs only `stoffel`; `--runner-only` and `--component` are gone, and the `stoffel-run-v*` and `stoffel-vm-runner` release workflows are deleted.
+
+#### Fixed
+
+- Local coordinator runs passed the curve as `--curve`, which the party driver does not parse, so a party never saw the runner's curve: it took its program manifest's curve (or the default, for a binary without one) and never checked the two against each other. Runs now pass `--mpc-curve`, which the party checks against the manifest.
+- The die-with-parent watchdog no longer needs `unsafe`: a party exits once the stdin its runner holds reaches EOF, so a SIGKILLed runner cannot orphan its parties, and a failed stderr write can no longer stop the exit.
+
 ## [0.2.0] - 2026-09-03
 
 #### Added

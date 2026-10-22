@@ -14,7 +14,7 @@ case "$target_pid" in
     ;;
 esac
 
-target_binary=${2:-/proc/$target_pid/root/app/stoffel-run}
+target_binary=${2:-/proc/$target_pid/root/app/stoffel}
 raw_output=${3:-stoffel-input-path-$target_pid.txt}
 case "$target_binary" in
   *'#'*)

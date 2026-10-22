@@ -40,7 +40,7 @@ x-node-environment: &node-environment
 
 x-node-command: &node-command |
   /app/configure-peer-netem.sh
-  exec /app/stoffel-run \
+  exec /app/stoffel run-node \
     --standing-node \
     --program-dir /var/lib/stoffel/programs \
     --client-cert-dir "$${STOFFEL_STANDING_CLIENT_CERT_DIR:-/var/lib/stoffel/client-certs}" \
@@ -89,7 +89,7 @@ x-operator: &operator
   image: ${STOFFEL_STANDING_NODE_IMAGE:-stoffel-standing-node:local}
   build: *build
   profiles: ["tools"]
-  entrypoint: ["/app/stoffel-coord-ctl"]
+  entrypoint: ["/app/stoffel", "coord-ctl"]
   volumes:
     # The same client certificates the nodes hold. The operator names which of
     # them an execution admits, and the node resolves that name against its own

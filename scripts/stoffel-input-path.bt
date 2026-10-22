@@ -5,7 +5,7 @@
  *
  * Replace __TARGET_BINARY__ with the executable visible through the target
  * process's mount namespace (for example,
- * /proc/1234/root/app/stoffel-run). Argument 1 is the target's host PID.
+ * /proc/1234/root/app/stoffel). Argument 1 is the target's host PID.
  *
  * Wall time comes from uprobe boundaries; aggregate process CPU is estimated
  * from 199 Hz on-CPU sampling and can exceed 100% when several runtime threads

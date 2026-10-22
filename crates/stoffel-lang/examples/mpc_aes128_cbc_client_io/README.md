@@ -24,13 +24,13 @@ secret client inputs, runs both entrypoints in the local 5-party runner, and
 reconstructs only the **client-received** output shares:
 
 ```sh
-STOFFEL_RUN_BIN=../../../../target/release/stoffel-run cargo run --release
+STOFFEL_RUN_BIN=../../../../target/release/stoffel cargo run --release
 ```
 
 From the repository root, the same example can be run with:
 
 ```sh
-STOFFEL_RUN_BIN=target/release/stoffel-run \
+STOFFEL_RUN_BIN=target/release/stoffel \
   cargo run --release --manifest-path crates/stoffel-lang/examples/mpc_aes128_cbc_client_io/Cargo.toml
 ```
 

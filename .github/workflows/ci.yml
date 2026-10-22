@@ -79,8 +79,9 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Build release runner
-        run: cargo build --release --package stoffel-vm-runner --bin stoffel-run
+      # One binary: MPC parties run as `stoffel run-node`.
+      - name: Build release stoffel binary
+        run: cargo build --release --package stoffel-cli --bin stoffel
 
       # docker/coordinator-wrapper is its own [workspace], so --workspace does
       # not reach it and its patch table is its own.
@@ -130,14 +131,14 @@ jobs:
         run: cargo test -p stoffel-cli --test cli -- --ignored --test-threads=1
 
       - name: Run local coordinator lifecycle regressions serially
-        run: cargo test -p stoffel-vm-runner --test local_coordinator_e2e -- --ignored --test-threads=1 --skip optimized_aes --skip batch_mul
+        run: cargo test -p stoffel-cli --test run_node_local_coordinator_e2e -- --ignored --test-threads=1 --skip optimized_aes --skip batch_mul
 
       - name: Upload VM binary
         if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: stoffel-run-${{ matrix.os }}
-          path: target/release/stoffel-run
+          name: stoffel-${{ matrix.os }}
+          path: target/release/stoffel
           retention-days: 7
 
   # The six docker/test-*.sh suites are the only LIVE evidence this repository
