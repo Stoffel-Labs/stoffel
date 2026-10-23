@@ -2952,72 +2952,6 @@ async fn connect_to_all_servers(
         .collect()
 }
 
-async fn establish_coordinator_output_client_routes(
-    execution_id: ExecutionId,
-    server_addrs: &[SocketAddr],
-    cert_der: Vec<u8>,
-    key_der: Vec<u8>,
-) -> Arc<tokio::sync::Mutex<QuicNetworkManager>> {
-    let mut client_network = QuicNetworkManager::new();
-    client_network
-        .set_local_certificate_der(cert_der, key_der)
-        .unwrap_or_else(|error| {
-            eprintln!("Error: failed to configure coordinator-client certificate: {error}");
-            exit(2);
-        });
-    let network = Arc::new(tokio::sync::Mutex::new(client_network));
-    for (party_id, &address) in server_addrs.iter().enumerate() {
-        network
-            .lock()
-            .await
-            .add_node_with_party_id(party_id, address);
-    }
-    let hello_frame = stoffel_vm::net::encode_execution_frame(
-        execution_id,
-        ExecutionMessageKind::Control,
-        EXECUTION_CLIENT_HELLO_V1,
-    )
-    .unwrap_or_else(|error| {
-        eprintln!("[client] Failed to encode coordinator execution route: {error}");
-        exit(24);
-    });
-    let mut last_error = None;
-    for attempt in 1..=10 {
-        let connections = connect_to_all_servers(&network, server_addrs).await;
-        let mut send_result = Ok(());
-        for (party_id, connection) in connections.iter().enumerate() {
-            if let Err(error) = connection.send(&hello_frame).await {
-                send_result = Err(format!(
-                    "failed to send execution hello to party {party_id}: {error}"
-                ));
-                break;
-            }
-        }
-        match send_result {
-            Ok(()) => {
-                for _ in 0..2 {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    for connection in &connections {
-                        let _ = connection.send(&hello_frame).await;
-                    }
-                }
-                return network;
-            }
-            Err(error) => {
-                eprintln!(
-                    "[client] Coordinator execution route attempt {attempt}/10 failed: {error}"
-                );
-                last_error = Some(error);
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        }
-    }
-    eprintln!(
-        "[client] Failed to establish coordinator execution route: {}",
-        last_error.as_deref().unwrap_or("unknown transport failure")
-    );
-    exit(24)
-}
 fn normalize_client_ids(mut ids: Vec<ClientId>) -> Vec<ClientId> {
     ids.sort_unstable();
     ids.dedup();
@@ -4079,7 +4013,6 @@ struct AvssOffchainCoordinatorClientArgs {
     client_outputs: Option<usize>,
     output_format: CoordinatorOutputFormat,
     server_addrs: Vec<SocketAddr>,
-    client_transport_addrs: Vec<SocketAddr>,
     coord_addr: (String, u16),
     cert_der: Vec<u8>,
     key_der: Vec<u8>,
@@ -4099,7 +4032,6 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
         client_outputs,
         output_format,
         server_addrs,
-        client_transport_addrs,
         coord_addr,
         cert_der,
         key_der,
@@ -4170,28 +4102,11 @@ async fn run_avss_offchain_coordinator_client_for_curve<F, G>(
         None
     };
     if input_values.is_empty() && output_len > 0 {
-        if client_transport_addrs.len() != server_addrs.len() {
-            eprintln!(
-                "Error: output-only coordinator clients require one --client-transport-servers address per RPC server (got {} transport addresses for {} servers)",
-                client_transport_addrs.len(),
-                server_addrs.len()
-            );
-            exit(2);
-        }
-        // Subscribe for the result before releasing the parties' authenticated
-        // client-transport barrier. Fast programs can otherwise finish and be
-        // retired between the route handshake and the first output RPC.
-        let output_wait = async {
-            coord.wait_for_round(Round::Preprocessing).await.unwrap();
-            coord.obtain_outputs().await.unwrap()
-        };
-        let route_wait = establish_coordinator_output_client_routes(
-            execution_id,
-            &client_transport_addrs,
-            cert_der.clone(),
-            key_der.clone(),
-        );
-        let (outputs, _output_client_routes) = tokio::join!(output_wait, route_wait);
+        // Output-only clients only read from the coordinator: parties capture
+        // output shares and submit them there by this client's public key, and
+        // the coordinator retains them for clients that arrive late.
+        coord.wait_for_round(Round::Preprocessing).await.unwrap();
+        let outputs = coord.obtain_outputs().await.unwrap();
         println!(
             "outputs: {}",
             format_coordinator_outputs(&outputs, &output_format)
@@ -4315,7 +4230,6 @@ async fn run_hb_coordinator_client_for_field<F>(
     client_outputs: Option<usize>,
     output_format: CoordinatorOutputFormat,
     server_addrs: Vec<SocketAddr>,
-    client_transport_addrs: Vec<SocketAddr>,
     coord_addr: Option<(String, u16)>,
     contract_addr: Option<String>,
     cert_der: Vec<u8>,
@@ -4399,28 +4313,11 @@ async fn run_hb_coordinator_client_for_field<F>(
         None
     };
     if input_values.is_empty() && output_len > 0 {
-        if client_transport_addrs.len() != server_addrs.len() {
-            eprintln!(
-                "Error: output-only coordinator clients require one --client-transport-servers address per RPC server (got {} transport addresses for {} servers)",
-                client_transport_addrs.len(),
-                server_addrs.len()
-            );
-            exit(2);
-        }
-        // Subscribe for the result before releasing the parties' authenticated
-        // client-transport barrier. Fast programs can otherwise finish and be
-        // retired between the route handshake and the first output RPC.
-        let output_wait = async {
-            coord.wait_for_round(Round::Preprocessing).await.unwrap();
-            coord.obtain_outputs().await.unwrap()
-        };
-        let route_wait = establish_coordinator_output_client_routes(
-            execution_id,
-            &client_transport_addrs,
-            cert_der.clone(),
-            key_der.clone(),
-        );
-        let (outputs, _output_client_routes) = tokio::join!(output_wait, route_wait);
+        // Output-only clients only read from the coordinator: parties capture
+        // output shares and submit them there by this client's public key, and
+        // the coordinator retains them for clients that arrive late.
+        coord.wait_for_round(Round::Preprocessing).await.unwrap();
+        let outputs = coord.obtain_outputs().await.unwrap();
         println!(
             "outputs: {}",
             format_coordinator_outputs(&outputs, &output_format)
@@ -4538,7 +4435,6 @@ async fn run_hb_coordinator_client(
     client_outputs: Option<usize>,
     output_format: CoordinatorOutputFormat,
     server_addrs: Vec<SocketAddr>,
-    client_transport_addrs: Vec<SocketAddr>,
     coord_addr: Option<(String, u16)>,
     contract_addr: Option<String>,
     cert_der: Vec<u8>,
@@ -4556,7 +4452,6 @@ async fn run_hb_coordinator_client(
                 client_outputs,
                 output_format,
                 server_addrs,
-                client_transport_addrs,
                 coord_addr,
                 contract_addr,
                 cert_der,
@@ -6319,38 +6214,6 @@ impl StandingRunnerExecutionHandler {
         )
     }
 
-    fn expected_client_bindings(
-        &self,
-        admission: &ResolvedStandingExecutionAdmissionV1,
-        program: &StandingProgram,
-    ) -> Arc<Vec<ClientProtocolBinding>> {
-        let output_only_slots = program
-            .client_io_manifest
-            .clients
-            .iter()
-            .filter_map(|schema| {
-                if schema.inputs.is_empty() && !schema.outputs.is_empty() {
-                    usize::try_from(schema.client_slot).ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<HashSet<_>>();
-        Arc::new(
-            admission
-                .clients
-                .iter()
-                .enumerate()
-                .filter(|(_, client)| output_only_slots.contains(&client.manifest_slot))
-                .map(|(client_id, client)| ClientProtocolBinding {
-                    protocol_index: client_id,
-                    route_id: client_id,
-                    manifest_slot: client.manifest_slot,
-                })
-                .collect(),
-        )
-    }
-
     async fn warm_reservoirs(
         &mut self,
         programs: impl IntoIterator<Item = Arc<StandingProgram>>,
@@ -7149,7 +7012,6 @@ impl StandingRunnerExecutionHandler {
             stoffel_vm::net::derive_instance_id_for_execution(&context.spec.execution_id);
         let preproc_program_id =
             standing_preproc_pool_program_id(self.pool_id, admission.program_id);
-        let expected_client_bindings = self.expected_client_bindings(admission, program);
         let mut setup = Some(PartySetup {
             net: Arc::clone(&self.network),
             reply_mux: self.mux.clone(),
@@ -7161,7 +7023,12 @@ impl StandingRunnerExecutionHandler {
             t: self.threshold,
             instance_id,
             expected_client_count: None,
-            expected_client_bindings: Some(expected_client_bindings),
+            // Standing executions bind no clients to MPC protocol IDs: inputs
+            // arrive as coordinator masked inputs and outputs are captured and
+            // delivered through the coordinator by public key, so no client
+            // is waited for (no hello barrier), sent an INST, or limited to the
+            // one-byte client ID domain. Some(empty) keeps setup manifest-driven.
+            expected_client_bindings: Some(Arc::new(Vec::new())),
             expected_client_reservation_identities: Some(
                 self.expected_client_identities(admission),
             ),
@@ -8470,21 +8337,10 @@ async fn main() {
                 &[("--client-index", coordinator_client_index.is_some())],
             ));
         }
-        if has_coordinator && input_count == 0 && output_count > 0 {
-            exit_on_cli_configuration_error(validate_required_cli_parameters(
-                "coordinator output-only client mode",
-                &[(
-                    "--client-transport-servers",
-                    !client_transport_addrs.is_empty(),
-                )],
-            ));
-            if client_transport_addrs.len() != server_addrs.len() {
-                exit_on_cli_configuration_error(Err(format!(
-                    "coordinator output-only client mode requires exactly one --client-transport-servers address per --servers address (got {}, expected {})",
-                    client_transport_addrs.len(),
-                    server_addrs.len()
-                )));
-            }
+        if has_coordinator && !client_transport_addrs.is_empty() {
+            eprintln!(
+                "Warning: --client-transport-servers is deprecated and ignored; output-only clients receive outputs through the coordinator"
+            );
         }
 
         if coord_addr.is_some()
@@ -8520,7 +8376,6 @@ async fn main() {
                 client_outputs,
                 output_format: coordinator_output_format,
                 server_addrs,
-                client_transport_addrs,
                 coord_addr: coord_addr.clone().unwrap(),
                 cert_der: cert_der.clone().expect("--cert required in client mode"),
                 key_der: key_der.clone().expect("--key required in client mode"),
@@ -8561,7 +8416,6 @@ async fn main() {
                     client_outputs,
                     coordinator_output_format,
                     server_addrs,
-                    client_transport_addrs,
                     coord_addr,
                     None,
                     cert_der.expect("--cert required in client mode"),
@@ -9836,8 +9690,8 @@ Flags:
                           with n fractional bits instead of raw field integers
   --servers <addrs>       Exactly one comma-separated server address per MPC party
   --client-transport-servers <addrs>
-                          Coordinator-mode QUIC addresses used to authenticate
-                          output-only clients with each standing execution
+                          Deprecated and ignored: output-only coordinator clients
+                          receive outputs through the coordinator
   --wait-for-clients <n>
                           Number of client inputs to collect before starting computation
                           (HoneyBadger only; ALPN handles routing, this controls coordination)

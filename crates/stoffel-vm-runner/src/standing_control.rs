@@ -686,16 +686,14 @@ fn validate_standing_preprocessing_manifest(
 /// client manifest exactly. Input-bearing slots and their per-client counts are
 /// deliberately not repeated in the admission: execution setup derives them
 /// from this same content-addressed manifest.
+///
+/// There is no one-byte client-count cap here: standing executions route every
+/// client's input and output through the coordinator, keyed by public key and
+/// u64 mask index, and never assign clients a one-byte MPC protocol ID.
 fn validate_client_io_admission(
     clients: &[StandingClientAdmissionV1],
     manifest: &ClientIoManifest,
 ) -> Result<(), StandingControlError> {
-    if clients.len() > usize::from(u8::MAX) + 1 {
-        return Err(StandingControlError::InvalidCommand(format!(
-            "{} clients exceed the one-byte MPC client index domain",
-            clients.len()
-        )));
-    }
     let mut roster_slots = HashSet::with_capacity(clients.len());
     for client in clients {
         if !roster_slots.insert(client.manifest_slot) {
@@ -1005,10 +1003,14 @@ mod tests {
         let missing_slot = vec![client("client0.crt", 0)];
         assert!(validate_client_io_admission(&missing_slot, &manifest(&[0, 1])).is_err());
 
-        let too_many = (0..257)
-            .map(|slot| client("client.crt", slot))
+        // Larger than the one-byte MPC client ID domain the direct client
+        // protocols use; standing admission does not depend on it.
+        let slots = (0..4096).collect::<Vec<u64>>();
+        let large = slots
+            .iter()
+            .map(|slot| client("client.crt", *slot as usize))
             .collect::<Vec<_>>();
-        assert!(validate_client_io_admission(&too_many, &ClientIoManifest::default()).is_err());
+        validate_client_io_admission(&large, &manifest(&slots)).unwrap();
     }
 
     #[test]

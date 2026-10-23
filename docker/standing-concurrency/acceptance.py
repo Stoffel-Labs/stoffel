@@ -28,10 +28,6 @@ PARTIES = [f"party{party}" for party in range(5)]
 NODE_RPC_SERVERS = ",".join(
     f"172.33.0.{party + 10}:16180" for party in range(5)
 )
-NODE_CLIENT_TRANSPORT_SERVERS = ",".join(
-    ["172.33.0.10:10000"]
-    + [f"172.33.0.{party + 10}:{9000 + party}" for party in range(1, 5)]
-)
 COORDINATOR = "coordinator:31415"
 HEX_ID = re.compile(r"^[0-9a-f]{64}$")
 
@@ -726,8 +722,6 @@ test -z "$(find /app /run/secrets -type f \( -name '*.der' -o -name '*.key' \) !
                 str(client["outputs"]),
                 "--servers",
                 NODE_RPC_SERVERS,
-                "--client-transport-servers",
-                NODE_CLIENT_TRANSPORT_SERVERS,
                 "--off-chain-coord",
                 COORDINATOR,
                 "--n-parties",
