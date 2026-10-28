@@ -12,4 +12,4 @@ publish = true
 
 [dependencies]
 stoffellang = { version = "=0.2.0", path = "../stoffel-lang" }
-thiserror = "=2.0.18"
+thiserror = "=2.0.12"
