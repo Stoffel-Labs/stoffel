@@ -44,6 +44,11 @@ pub enum StandingRunError {
         #[source]
         source: LocalCoordinatorRunnerError,
     },
+    #[error("execution {execution_id}: {detail}")]
+    Result {
+        execution_id: ExecutionId,
+        detail: String,
+    },
     #[error("execution {execution_id}: timed out after {timeout:?}")]
     Timeout {
         execution_id: ExecutionId,
@@ -72,6 +77,9 @@ impl Default for StandingRunTimeouts {
 #[derive(Debug, Clone)]
 pub struct StandingRunOutput {
     pub execution_id: ExecutionId,
+    /// The VM's return value as every party printed it, in the same form as
+    /// [`crate::LocalCoordinatorRunOutput::consistent_returned_values`].
+    pub returned_value: String,
     /// Outputs of every client slot that receives any, by slot.
     pub client_outputs: Vec<ClientOutputRecord>,
 }
@@ -116,16 +124,66 @@ pub async fn run_on_standing_mesh(
         .await?;
     eprintln!("[stoffel] admitted execution {execution_id}");
 
-    let result = drive_clients(info, &program, execution_id, clients, request.timeouts).await;
+    let deadline = Instant::now() + request.timeouts.execution;
+    let result = async {
+        let client_outputs = drive_clients(
+            info,
+            &program,
+            execution_id,
+            clients,
+            deadline,
+            request.timeouts,
+        )
+        .await?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        admitter
+            .wait_until_completed(execution_id, remaining)
+            .await?;
+        let returned_value = collect_returned_value(info, execution_id)?;
+        Ok(StandingRunOutput {
+            execution_id,
+            returned_value,
+            client_outputs,
+        })
+    }
+    .await;
     if result.is_err() {
         let _ = admitter
             .cancel(execution_id, request.timeouts.admission.acknowledgement)
             .await;
     }
-    result.map(|client_outputs| StandingRunOutput {
-        execution_id,
-        client_outputs,
-    })
+    result
+}
+
+/// Read the VM return every party recorded for `execution_id`, require them to
+/// agree, and remove the records.
+fn collect_returned_value(
+    info: &StandingMeshInfo,
+    execution_id: ExecutionId,
+) -> StandingRunResult<String> {
+    let mut returned = Vec::with_capacity(info.parties);
+    for party in 0..info.parties {
+        let path = info
+            .layout
+            .result_dir(party)
+            .join(format!("{execution_id}.txt"));
+        let value = std::fs::read_to_string(&path).map_err(|error| StandingRunError::Result {
+            execution_id,
+            detail: format!(
+                "party {party} recorded no result at {}: {error}",
+                path.display()
+            ),
+        })?;
+        let _ = std::fs::remove_file(&path);
+        returned.push(value);
+    }
+    if returned.iter().any(|value| *value != returned[0]) {
+        return Err(StandingRunError::Result {
+            execution_id,
+            detail: format!("parties returned different values: {returned:?}"),
+        });
+    }
+    Ok(returned.swap_remove(0))
 }
 
 fn load_program(
@@ -233,9 +291,9 @@ async fn drive_clients(
     program: &StandingProgram,
     execution_id: ExecutionId,
     clients: Vec<LocalClientIdentity>,
+    deadline: Instant,
     timeouts: StandingRunTimeouts,
 ) -> StandingRunResult<Vec<ClientOutputRecord>> {
-    let deadline = Instant::now() + timeouts.execution;
     let context = LocalClientRunContext {
         execution_id,
         node_rpc_addrs: info.node_rpc.clone(),

@@ -2652,6 +2652,29 @@ fn print_vm_result(vm: &mut VirtualMachine, result: Value) {
     println!("Program returned: {}", format_vm_result(vm, &result));
 }
 
+/// Print a standing execution's VM return like any other party does, and, when
+/// `STOFFEL_STANDING_RESULT_DIR` is set, also record it under the execution's
+/// identity. A standing node runs executions concurrently, so its log alone
+/// cannot say which execution a printed result belongs to.
+fn record_standing_result(
+    vm: &mut VirtualMachine,
+    execution_id: ExecutionId,
+    result: Value,
+) -> Result<(), String> {
+    let formatted = format_vm_result(vm, &result);
+    println!("Program returned: {formatted}");
+    let Some(directory) = std::env::var_os("STOFFEL_STANDING_RESULT_DIR") else {
+        return Ok(());
+    };
+    let directory = PathBuf::from(directory);
+    let path = directory.join(format!("{execution_id}.txt"));
+    let temporary = path.with_extension("tmp");
+    fs::create_dir_all(&directory)
+        .and_then(|()| fs::write(&temporary, formatted.as_bytes()))
+        .and_then(|()| fs::rename(&temporary, &path))
+        .map_err(|error| format!("record standing result at {}: {error}", path.display()))
+}
+
 fn format_vm_result(vm: &mut VirtualMachine, result: &Value) -> String {
     let returned_share = ReturnedShare::from_vm_value(result).or_else(|| {
         matches!(result, Value::Object(_))
@@ -6960,7 +6983,7 @@ impl StandingRunnerExecutionHandler {
         }
         eprintln!("[party {}] proposing ProgramFinished", self.party_id);
         finish_hb_execution(&lifecycle_coord).await?;
-        print_vm_result(vm, result);
+        record_standing_result(vm, admission.execution_id, result)?;
         Ok(metrics)
     }
 
@@ -7151,7 +7174,7 @@ impl StandingRunnerExecutionHandler {
         }
         eprintln!("[party {}] proposing ProgramFinished", self.party_id);
         finish_avss_execution(&lifecycle_coord).await?;
-        print_vm_result(vm, result);
+        record_standing_result(vm, admission.execution_id, result)?;
         Ok(metrics)
     }
 

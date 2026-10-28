@@ -126,6 +126,11 @@ impl StandingMeshLayout {
         self.node_dir(party).join("control")
     }
 
+    /// Where a party records each execution's VM return, `<execution id>.txt`.
+    pub fn result_dir(&self, party: usize) -> PathBuf {
+        self.node_dir(party).join("results")
+    }
+
     /// The lock every [`StandingAdmitter`] of this mesh publishes under.
     pub fn admission_lock(&self) -> PathBuf {
         self.root.join("admit.lock")
@@ -506,6 +511,7 @@ impl StandingMesh {
             .arg(node_dir.join("local.redb"))
             .env("STOFFEL_AUTH_TOKEN", &state.auth_token)
             .env("STOFFEL_STANDING_READY_FILE", &ready_marker)
+            .env("STOFFEL_STANDING_RESULT_DIR", layout.result_dir(party))
             // Tie the party to this process's lifetime, including a SIGKILL of
             // this process, where `kill_on_drop` cannot run.
             .env("STOFFEL_DIE_WITH_PARENT", "1")
