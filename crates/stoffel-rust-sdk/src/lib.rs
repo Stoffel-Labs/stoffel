@@ -108,7 +108,19 @@ pub use types::{
     GeneratedProgramManifest, GroupElement, MaskIndex, PartyId, ProgramArgs, PublicKey, Round,
     Share, TypedClientInputs, TypedClientOutputs, Value, ValueSummary,
 };
-pub use vm::{LocalClientOutput, LocalPartyShareOutput, LocalShareExecutionOutput, OpaqueShare};
+pub use vm::{
+    LocalClientOutput, LocalPartyShareOutput, LocalShareExecutionOutput, OpaqueShare,
+    StandingExecutionOutput,
+};
+
+/// Standing meshes: long-running MPC parties that many executions share. Start
+/// one with [`mesh::StandingMesh::start`] and run programs on it with
+/// [`vm::execute_on_standing_mesh`].
+pub mod mesh {
+    pub use stoffel_vm_runner::{
+        StandingMesh, StandingMeshConfig, StandingMeshError, StandingMeshInfo, StandingMeshLayout,
+    };
+}
 
 #[derive(Debug, Clone)]
 enum ProgramSource {

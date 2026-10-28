@@ -103,6 +103,9 @@ pub async fn run_on_standing_mesh(
     info: &StandingMeshInfo,
     request: StandingRunRequest,
 ) -> StandingRunResult<StandingRunOutput> {
+    // The clients open TLS connections; a process that has not chosen a
+    // provider yet would panic there.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let program = load_program(info, request.program_id)?;
     let clients = plan_clients(info, &program, &request)?;
     let roster = clients
