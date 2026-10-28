@@ -1432,9 +1432,12 @@ impl CompiledBinary {
             writer.write_all(&[0u8])?; // No parent
         }
 
-        // Write labels
+        // Write labels in a stable order, so that serializing the same program
+        // always yields the same bytes and therefore the same content address.
         write_usize_as_u16(writer, function.labels.len(), "label count")?;
-        for (label, &offset) in &function.labels {
+        let mut labels = function.labels.iter().collect::<Vec<_>>();
+        labels.sort_unstable_by_key(|(label, _)| *label);
+        for (label, &offset) in labels {
             write_len_prefixed_str_u16(writer, label, "label name length")?;
             write_usize_as_u32(writer, offset, "label offset")?;
         }
@@ -2868,6 +2871,35 @@ pub mod utils {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn serializing_a_program_does_not_depend_on_label_map_order() {
+        let serialize_with_labels = |labels: &[(String, usize)]| {
+            let labels = labels.iter().cloned().collect::<HashMap<_, _>>();
+            let function = VMFunction::new(
+                "main".to_owned(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                1,
+                vec![Instruction::LDI(0, Value::I64(1)), Instruction::RET(0)],
+                labels,
+            );
+            let mut bytes = Vec::new();
+            CompiledBinary::from_vm_functions(&[function])
+                .serialize(&mut Cursor::new(&mut bytes))
+                .unwrap();
+            bytes
+        };
+        let labels = (0..32)
+            .map(|index| (format!("label_{index}"), index % 2))
+            .collect::<Vec<_>>();
+        let reversed = labels.iter().rev().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            serialize_with_labels(&labels),
+            serialize_with_labels(&reversed)
+        );
+    }
 
     fn assert_invalid_data<T>(result: BinaryResult<T>, expected: &str) {
         match result {
