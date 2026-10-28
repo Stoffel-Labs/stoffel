@@ -237,6 +237,28 @@ impl StandingAdmitter {
         execution_id: ExecutionId,
         timeout: Duration,
     ) -> StandingAdmitResult<()> {
+        self.wait_for_lifecycle(execution_id, "ready", "prepare the execution", timeout)
+            .await
+    }
+
+    /// Wait until every party reports the execution completed, or the first
+    /// one reports it failed or cancelled.
+    pub async fn wait_until_completed(
+        &self,
+        execution_id: ExecutionId,
+        timeout: Duration,
+    ) -> StandingAdmitResult<()> {
+        self.wait_for_lifecycle(execution_id, "completed", "finish the execution", timeout)
+            .await
+    }
+
+    async fn wait_for_lifecycle(
+        &self,
+        execution_id: ExecutionId,
+        phase: &'static str,
+        doing: &'static str,
+        timeout: Duration,
+    ) -> StandingAdmitResult<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut pending = (0..self.parties()).collect::<Vec<_>>();
         while !pending.is_empty() {
@@ -244,18 +266,18 @@ impl StandingAdmitter {
             for party in pending {
                 let events = self.events_dir(party);
                 if events
-                    .join(format!("async-{execution_id}-ready.json"))
+                    .join(format!("async-{execution_id}-{phase}.json"))
                     .is_file()
                 {
                     continue;
                 }
-                for phase in ["failed", "cancelled"] {
-                    let path = events.join(format!("async-{execution_id}-{phase}.json"));
+                for failure in ["failed", "cancelled"] {
+                    let path = events.join(format!("async-{execution_id}-{failure}.json"));
                     if let Some(outcome) = read_outcome(&path)? {
                         return Err(StandingAdmitError::Lifecycle {
                             party,
                             execution_id,
-                            phase,
+                            phase: failure,
                             detail: outcome_detail(&outcome),
                         });
                     }
@@ -267,7 +289,7 @@ impl StandingAdmitter {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(StandingAdmitError::Timeout {
                         party,
-                        phase: "prepare the execution",
+                        phase: doing,
                         timeout,
                     });
                 }

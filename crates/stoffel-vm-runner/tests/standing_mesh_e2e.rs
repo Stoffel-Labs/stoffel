@@ -21,6 +21,9 @@ def main() -> int64:
   return sum.open()
 "#;
 
+/// No clients at all; the result is only the VM return.
+const NO_CLIENTS: &str = "def main() -> int64:\n  var share = Share.from_clear_int(6, 64)\n  var product = share.mul(Share.from_clear_int(7, 64))\n  return product.open()";
+
 /// A client that only receives.
 const OUTPUT_ONLY: &str = "def main() -> int64:\n  var share = Share.from_clear_int(7, 64)\n  MpcOutput.send_to_client(0, [share])\n  return 7";
 
@@ -67,6 +70,9 @@ async fn parallel_executions_share_one_standing_mesh_and_survive_a_restart() {
     let output_only = layout
         .install_program(&compile(OUTPUT_ONLY, MpcBackend::HoneyBadger))
         .unwrap();
+    let no_clients = layout
+        .install_program(&compile(NO_CLIENTS, MpcBackend::HoneyBadger))
+        .unwrap();
 
     let mut mesh = StandingMesh::start(config(&layout))
         .await
@@ -109,6 +115,16 @@ async fn parallel_executions_share_one_standing_mesh_and_survive_a_restart() {
     assert_eq!(first.client_outputs[0].values, vec![6]);
     assert_eq!(second.client_outputs[0].values, vec![60]);
     assert_eq!(third.client_outputs[0].values, vec![7]);
+    assert_eq!(first.returned_value, "6");
+    assert_eq!(second.returned_value, "60");
+    assert_eq!(third.returned_value, "7");
+
+    // A program without any client still reports what it returned.
+    let clientless = run_on_standing_mesh(&info, request(no_clients, Vec::new()))
+        .await
+        .expect("client-free run");
+    assert!(clientless.client_outputs.is_empty());
+    assert_eq!(clientless.returned_value, "42");
 
     // Bad inputs are refused before anything is admitted.
     let error = run_on_standing_mesh(&info, request(sum, vec![LocalClientInput::new(0, [1])]))
@@ -136,5 +152,6 @@ async fn parallel_executions_share_one_standing_mesh_and_survive_a_restart() {
     .await
     .expect("sum after restart");
     assert_eq!(again.client_outputs[0].values, vec![15]);
+    assert_eq!(again.returned_value, "15");
     mesh.shutdown().await;
 }
