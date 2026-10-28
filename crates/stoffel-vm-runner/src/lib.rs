@@ -1,5 +1,6 @@
 pub mod local_runner;
 pub mod returned_share;
+pub mod standing_admit;
 pub mod standing_control;
 
 pub use local_runner::{
@@ -8,6 +9,9 @@ pub use local_runner::{
     LocalPartyOutput,
 };
 pub use returned_share::{ReturnedShare, ReturnedShareParseError, RETURNED_SHARE_PREFIX_V1};
+pub use standing_admit::{
+    AdmitTimeouts, StandingAdmitError, StandingAdmitResult, StandingAdmitter,
+};
 pub use standing_control::{
     ResolvedStandingExecutionAdmissionV1, StandingClientAdmissionV1, StandingClientCatalog,
     StandingControlCommandV1, StandingControlError, StandingControlOutcomeV1,
