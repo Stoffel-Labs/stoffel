@@ -1076,29 +1076,29 @@ struct NodeIdentity {
 }
 
 #[derive(Clone)]
-struct LocalClientIdentity {
-    input: LocalClientInput,
-    cert_path: PathBuf,
-    key_path: PathBuf,
-    cert_der: Vec<u8>,
-    reserved_index_start: u64,
-    client_slot: u64,
+pub(crate) struct LocalClientIdentity {
+    pub(crate) input: LocalClientInput,
+    pub(crate) cert_path: PathBuf,
+    pub(crate) key_path: PathBuf,
+    pub(crate) cert_der: Vec<u8>,
+    pub(crate) reserved_index_start: u64,
+    pub(crate) client_slot: u64,
     /// Number of output values this client receives via `send_to_client`.
-    output_count: u64,
+    pub(crate) output_count: u64,
 }
 
 #[derive(Clone)]
-struct LocalClientRunContext {
-    execution_id: ExecutionId,
-    node_rpc_addrs: Vec<SocketAddr>,
-    coord_port: u16,
-    parties: usize,
-    threshold: usize,
-    deadline: Instant,
-    timeout: Duration,
+pub(crate) struct LocalClientRunContext {
+    pub(crate) execution_id: ExecutionId,
+    pub(crate) node_rpc_addrs: Vec<SocketAddr>,
+    pub(crate) coord_port: u16,
+    pub(crate) parties: usize,
+    pub(crate) threshold: usize,
+    pub(crate) deadline: Instant,
+    pub(crate) timeout: Duration,
 }
 
-async fn run_honeybadger_offchain_client(
+pub(crate) async fn run_honeybadger_offchain_client(
     client: LocalClientIdentity,
     context: LocalClientRunContext,
 ) -> LocalCoordinatorRunnerResult<Option<ClientOutputRecord>> {
@@ -1409,7 +1409,7 @@ where
     })
 }
 
-async fn run_avss_offchain_client_for_curve(
+pub(crate) async fn run_avss_offchain_client_for_curve(
     curve_config: MpcCurveConfig,
     client: LocalClientIdentity,
     context: LocalClientRunContext,
@@ -2165,7 +2165,7 @@ fn local_run_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-fn reserve_udp_port_pair() -> std::io::Result<Vec<UdpSocket>> {
+pub(crate) fn reserve_udp_port_pair() -> std::io::Result<Vec<UdpSocket>> {
     // Mix the wall-clock nanos with the process id and a per-call counter so
     // that runner processes launched concurrently (e.g. parallel CLI tests)
     // and successive calls within one process begin their scan from different

@@ -2,6 +2,8 @@ pub mod local_runner;
 pub mod returned_share;
 pub mod standing_admit;
 pub mod standing_control;
+pub mod standing_mesh;
+pub mod standing_run;
 
 pub use local_runner::{
     ClientOutputRecord, LocalClientInput, LocalCoordinatorRunOutput, LocalCoordinatorRunner,
@@ -17,4 +19,12 @@ pub use standing_control::{
     StandingControlCommandV1, StandingControlError, StandingControlOutcomeV1,
     StandingExecutionAdmissionV1, StandingExecutionHandler, StandingNodeControl, StandingProgram,
     StandingProgramCatalog,
+};
+pub use standing_mesh::{
+    StandingMesh, StandingMeshConfig, StandingMeshError, StandingMeshInfo, StandingMeshLayout,
+    StandingMeshResult,
+};
+pub use standing_run::{
+    run_on_standing_mesh, StandingRunError, StandingRunOutput, StandingRunRequest,
+    StandingRunResult, StandingRunTimeouts,
 };

@@ -156,21 +156,30 @@ fn read_trimmed_u64(path: &str) -> Option<u64> {
 /// `LocalCoordinatorRunner`. The marker is written through a sibling temporary
 /// file and renamed so the supervisor never observes a partial acknowledgement.
 fn write_local_runner_marker_or_exit(variable: &str, phase: &str) {
+    if let Err(error) = write_runner_marker(variable, phase) {
+        eprintln!("{error}");
+        exit(13);
+    }
+}
+
+/// [`write_local_runner_marker_or_exit`] for callers that propagate errors, such
+/// as a standing node supervised by `StandingMesh`.
+fn write_runner_marker(variable: &str, phase: &str) -> Result<(), String> {
     let Ok(path) = std::env::var(variable) else {
-        return;
+        return Ok(());
     };
     let path = PathBuf::from(path);
     let temporary = path.with_extension("tmp");
-    if let Err(error) =
-        fs::write(&temporary, phase.as_bytes()).and_then(|()| fs::rename(&temporary, &path))
-    {
-        eprintln!(
-            "Failed to acknowledge {phase} to the local runner at '{}': {error}",
-            path.display()
-        );
-        exit(13);
-    }
+    fs::write(&temporary, phase.as_bytes())
+        .and_then(|()| fs::rename(&temporary, &path))
+        .map_err(|error| {
+            format!(
+                "Failed to acknowledge {phase} to the local runner at '{}': {error}",
+                path.display()
+            )
+        })?;
     eprintln!("[party] local runner acknowledged {phase}");
+    Ok(())
 }
 
 async fn local_bind_handoff(variable: &str) {
@@ -7548,12 +7557,21 @@ async fn run_standing_node(raw_args: &[String]) -> Result<(), String> {
 
     let (bootnode, party_bind) = if as_leader {
         let bootnode = bind;
+        let (bootnode_ready_tx, bootnode_ready_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            if let Err(error) = run_bootnode_with_config(bootnode, parties).await {
+            if let Err(error) =
+                run_bootnode_with_config_ready(bootnode, parties, Some(bootnode_ready_tx)).await
+            {
                 eprintln!("standing bootnode failed: {error}");
             }
         });
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        bootnode_ready_rx
+            .await
+            .map_err(|_| "standing bootnode stopped before its listener became ready".to_owned())?;
+        write_runner_marker(
+            "STOFFEL_LOCAL_BOOTNODE_READY_FILE",
+            "bootnode listener readiness",
+        )?;
         let party_bind = SocketAddr::new(bind.ip(), bind.port().saturating_add(1000));
         let connect = if bind.ip().is_unspecified() {
             SocketAddr::new("127.0.0.1".parse().unwrap(), bind.port())
@@ -7673,6 +7691,7 @@ async fn run_standing_node(raw_args: &[String]) -> Result<(), String> {
     eprintln!(
         "[party {protocol_party_id}] standing node ready: reservoir_burst_capacity={reservoir_burst_capacity}"
     );
+    write_runner_marker("STOFFEL_STANDING_READY_FILE", "standing node readiness")?;
     let mut control_task = {
         let cancellation = cancellation.clone();
         tokio::spawn(async move { control.run(cancellation).await })
