@@ -1,3 +1,4 @@
+mod mesh;
 mod project;
 
 use std::collections::BTreeMap;
@@ -74,6 +75,10 @@ enum Command {
     Run(RunArgs),
     /// Watch a project and rerun it on local MPC when files change.
     Dev(DevArgs),
+    /// Start a named standing MPC mesh that `stoffel run --mesh` runs programs on.
+    StartMesh(mesh::StartMeshArgs),
+    /// Stop a standing MPC mesh started with `stoffel start-mesh`.
+    StopMesh(mesh::StopMeshArgs),
     /// Run no-argument Stoffel test functions.
     Test(TestArgs),
     /// Show project health and environment status.
@@ -325,6 +330,9 @@ struct RunArgs {
     /// MPC network/off-chain client TOML file. Do not pass project Stoffel.toml here.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Run on the standing mesh with this name, started with `stoffel start-mesh`.
+    #[arg(long, value_name = "NAME")]
+    mesh: Option<String>,
     /// Print function/instruction metadata before executing.
     #[arg(long = "program-info", visible_aliases = ["inspect", "info"])]
     program_info: bool,
@@ -412,6 +420,25 @@ impl RunBuildArgs {
             threshold: self.threshold,
             instance_id: self.instance_id,
         }
+    }
+}
+
+impl BuildArgs {
+    /// Arguments that compile or load `path` the way `stoffel run <path>` does.
+    fn for_path(path: PathBuf) -> Self {
+        RunBuildArgs {
+            path: Some(path),
+            print_ir: false,
+            opt_level: None,
+            optimize: false,
+            release: false,
+            backend: None,
+            field: None,
+            parties: None,
+            threshold: None,
+            instance_id: None,
+        }
+        .to_build_args()
     }
 }
 
@@ -668,6 +695,8 @@ async fn main() -> Result<()> {
         Command::Build(args) => build("stoffel build", args.to_build_args()),
         Command::Run(args) => run(args).await,
         Command::Dev(args) => dev(args).await,
+        Command::StartMesh(args) => mesh::start_mesh(args).await,
+        Command::StopMesh(args) => mesh::stop_mesh(args).await,
         Command::Test(args) => test(args).await,
         Command::Status(args) => status(args),
         Command::Clean(args) => clean(args),
@@ -702,8 +731,23 @@ fn unknown_command(command: &str) -> Result<()> {
 
 fn closest_cli_command(command: &str) -> Option<&'static str> {
     const COMMANDS: &[&str] = &[
-        "init", "new", "check", "compile", "build", "run", "exec", "execute", "dev", "test",
-        "status", "doctor", "clean", "update", "upgrade",
+        "init",
+        "new",
+        "check",
+        "compile",
+        "build",
+        "run",
+        "exec",
+        "execute",
+        "dev",
+        "test",
+        "start-mesh",
+        "stop-mesh",
+        "status",
+        "doctor",
+        "clean",
+        "update",
+        "upgrade",
     ];
     COMMANDS
         .iter()
@@ -903,6 +947,15 @@ async fn run(args: RunArgs) -> Result<()> {
     for (slot, count) in &args.client_output_counts {
         builder = builder.client_output_count(*slot, *count);
     }
+    if let Some(name) = &args.mesh {
+        return mesh::run_on_mesh(
+            name,
+            builder,
+            &args.entry,
+            Duration::from_secs(args.timeout_secs),
+        )
+        .await;
+    }
     if let Some(path) = args.runner {
         builder = builder.local_runner_path(path);
     }
@@ -1018,6 +1071,27 @@ fn validate_run_args(args: &RunArgs) -> Result<()> {
     )?;
     if args.local && args.network {
         anyhow::bail!("--local and --network select different execution modes; remove one of them");
+    }
+    if args.mesh.is_some() {
+        let conflicts = [
+            ("--local", args.local),
+            ("--network", args.network),
+            ("--config", args.config.is_some()),
+            ("--runner", args.runner.is_some()),
+            ("--client-id", args.client_id.is_some()),
+            (
+                "--expected-output-clients",
+                args.expected_output_clients.is_some(),
+            ),
+        ];
+        if let Some((flag, _)) = conflicts.iter().find(|(_, present)| *present) {
+            anyhow::bail!("--mesh runs on a standing mesh; remove {flag}");
+        }
+        if !args.inputs.is_empty() || !args.input_files.is_empty() {
+            anyhow::bail!(
+                "--mesh runs programs exactly as the mesh loaded them, so it takes ClientStore inputs only; pass them with --client-input SLOT=VALUE instead of --input"
+            );
+        }
     }
     if args.local && args.config.is_some() {
         anyhow::bail!(

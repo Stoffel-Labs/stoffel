@@ -461,9 +461,23 @@ async fn execute_local_details_with_options(
             .map(|value| parse_runner_return_value(value))
             .collect::<Result<Vec<_>>>()?
     };
+    let client_outputs = decode_client_outputs(runtime, &output.client_outputs)?;
+    Ok(LocalExecutionDetails {
+        values,
+        program_output,
+        party_outputs,
+        client_outputs,
+    })
+}
+
+/// Decode the raw values each client received through the program's
+/// client-IO manifest.
+fn decode_client_outputs(
+    runtime: &StoffelRuntime,
+    records: &[stoffel_vm_runner::ClientOutputRecord],
+) -> Result<Vec<LocalClientOutput>> {
     let manifest = runtime.program().client_io_manifest();
-    let client_outputs = output
-        .client_outputs
+    records
         .iter()
         .map(|record| {
             let output_types = manifest
@@ -487,13 +501,79 @@ async fn execute_local_details_with_options(
                 raw: record.values.clone(),
             })
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(LocalExecutionDetails {
-        values,
-        program_output,
-        party_outputs,
-        client_outputs,
+        .collect()
+}
+
+/// The result of one execution on a standing mesh.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StandingExecutionOutput {
+    /// The identity the execution ran under, as 64 hexadecimal characters.
+    pub execution_id: String,
+    /// The VM's public return values, as for [`execute_local`].
+    pub values: Vec<Value>,
+    /// What each client slot received, decoded through the client-IO manifest.
+    pub client_outputs: Vec<LocalClientOutput>,
+}
+
+/// The bytes a standing mesh identifies `runtime`'s program by. Install a
+/// program into a mesh from these bytes so that runs of the same program find
+/// it.
+pub fn standing_program_bytes(runtime: &StoffelRuntime) -> Result<Vec<u8>> {
+    runtime.program().to_bytecode()
+}
+
+/// Run `function_name` once on a running standing mesh.
+///
+/// The mesh must have loaded this program when it started; see
+/// [`standing_program_bytes`]. Client inputs come from the runtime's
+/// `with_client_input` values, as for [`execute_local`].
+pub async fn execute_on_standing_mesh(
+    runtime: &StoffelRuntime,
+    function_name: &str,
+    mesh: &stoffel_vm_runner::StandingMeshInfo,
+    timeout: Duration,
+) -> Result<StandingExecutionOutput> {
+    if runtime.program().function(function_name).is_none() {
+        return Err(Error::FunctionNotFound(function_name.to_owned()));
+    }
+    if !runtime.input_values_for_function(function_name)?.is_empty() {
+        return Err(Error::Unsupported(
+            "standing mesh execution does not support direct function parameters; use a no-argument entrypoint and `with_client_input` for ClientStore values"
+                .to_owned(),
+        ));
+    }
+    let flattened_client_inputs = flatten_local_client_inputs(runtime.client_inputs())?;
+    validate_flattened_local_client_inputs(runtime, &flattened_client_inputs)?;
+    let client_inputs =
+        local_client_inputs_for_runner(runtime.program(), &flattened_client_inputs)?;
+    let program_bytes = standing_program_bytes(runtime)?;
+    let output = stoffel_vm_runner::run_on_standing_mesh(
+        mesh,
+        stoffel_vm_runner::StandingRunRequest {
+            program_id: stoffel_vm::net::program_id_from_bytes(&program_bytes),
+            entry: function_name.to_owned(),
+            client_inputs,
+            client_output_counts: runtime.client_output_counts().clone(),
+            timeouts: stoffel_vm_runner::StandingRunTimeouts {
+                execution: timeout,
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .map_err(|error| Error::Computation(error.to_string()))?;
+    Ok(StandingExecutionOutput {
+        execution_id: output.execution_id.to_string(),
+        values: vec![parse_runner_return_value(&output.returned_value)?],
+        client_outputs: decode_client_outputs(runtime, &output.client_outputs)?,
     })
+}
+
+/// Find the `stoffel-run` binary local runs and standing meshes start parties
+/// with: `explicit` if given, else `STOFFEL_RUN_BIN`, a sibling of this
+/// executable, the workspace build, or `PATH`.
+pub fn resolve_runner_binary(explicit: Option<&Path>) -> Result<PathBuf> {
+    resolve_stoffel_run_binary(explicit)
 }
 
 fn validate_party_share_returns(
