@@ -16,7 +16,3 @@ exclude = [
     "vendor/mpc-protocols-limit-test",
     "vendor/stoffel-mpc-coordinator-browser",
 ]
-
-[patch.crates-io]
-stoffel-mpc-coordinator-off-chain = { version = "0.2.0", path = "vendor/stoffel-mpc-coordinator-browser/crates/off-chain" }
-stoffel-mpc-coordinator-shared = { version = "0.2.0", path = "vendor/stoffel-mpc-coordinator-browser/crates/coord-shared" }

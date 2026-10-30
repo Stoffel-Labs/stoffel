@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 stoffel = { package = "stoffel-rust-sdk", version = "=0.2.0", path = "../../../stoffel-rust-sdk" }
-tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.46.1", features = ["macros", "rt-multi-thread"] }
 
 [build-dependencies]
 stoffel-bindgen = { version = "=0.2.0", path = "../../../stoffel-bindgen" }

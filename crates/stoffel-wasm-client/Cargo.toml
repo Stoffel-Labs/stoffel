@@ -34,4 +34,4 @@ wasm-bindgen = "0.2.104"
 
 [dev-dependencies]
 rand = "0.9"
-stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.1" }
+stoffelmpc-mpc = { package = "stoffelcrypto", version = "0.1.2" }
