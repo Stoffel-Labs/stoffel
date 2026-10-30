@@ -156,21 +156,30 @@ fn read_trimmed_u64(path: &str) -> Option<u64> {
 /// `LocalCoordinatorRunner`. The marker is written through a sibling temporary
 /// file and renamed so the supervisor never observes a partial acknowledgement.
 fn write_local_runner_marker_or_exit(variable: &str, phase: &str) {
+    if let Err(error) = write_runner_marker(variable, phase) {
+        eprintln!("{error}");
+        exit(13);
+    }
+}
+
+/// [`write_local_runner_marker_or_exit`] for callers that propagate errors, such
+/// as a standing node supervised by `StandingMesh`.
+fn write_runner_marker(variable: &str, phase: &str) -> Result<(), String> {
     let Ok(path) = std::env::var(variable) else {
-        return;
+        return Ok(());
     };
     let path = PathBuf::from(path);
     let temporary = path.with_extension("tmp");
-    if let Err(error) =
-        fs::write(&temporary, phase.as_bytes()).and_then(|()| fs::rename(&temporary, &path))
-    {
-        eprintln!(
-            "Failed to acknowledge {phase} to the local runner at '{}': {error}",
-            path.display()
-        );
-        exit(13);
-    }
+    fs::write(&temporary, phase.as_bytes())
+        .and_then(|()| fs::rename(&temporary, &path))
+        .map_err(|error| {
+            format!(
+                "Failed to acknowledge {phase} to the local runner at '{}': {error}",
+                path.display()
+            )
+        })?;
     eprintln!("[party] local runner acknowledged {phase}");
+    Ok(())
 }
 
 async fn local_bind_handoff(variable: &str) {
@@ -2641,6 +2650,29 @@ fn client_program_from_arguments(raw_args: &[String]) -> Option<PathBuf> {
 
 fn print_vm_result(vm: &mut VirtualMachine, result: Value) {
     println!("Program returned: {}", format_vm_result(vm, &result));
+}
+
+/// Print a standing execution's VM return like any other party does, and, when
+/// `STOFFEL_STANDING_RESULT_DIR` is set, also record it under the execution's
+/// identity. A standing node runs executions concurrently, so its log alone
+/// cannot say which execution a printed result belongs to.
+fn record_standing_result(
+    vm: &mut VirtualMachine,
+    execution_id: ExecutionId,
+    result: Value,
+) -> Result<(), String> {
+    let formatted = format_vm_result(vm, &result);
+    println!("Program returned: {formatted}");
+    let Some(directory) = std::env::var_os("STOFFEL_STANDING_RESULT_DIR") else {
+        return Ok(());
+    };
+    let directory = PathBuf::from(directory);
+    let path = directory.join(format!("{execution_id}.txt"));
+    let temporary = path.with_extension("tmp");
+    fs::create_dir_all(&directory)
+        .and_then(|()| fs::write(&temporary, formatted.as_bytes()))
+        .and_then(|()| fs::rename(&temporary, &path))
+        .map_err(|error| format!("record standing result at {}: {error}", path.display()))
 }
 
 fn format_vm_result(vm: &mut VirtualMachine, result: &Value) -> String {
@@ -6951,7 +6983,7 @@ impl StandingRunnerExecutionHandler {
         }
         eprintln!("[party {}] proposing ProgramFinished", self.party_id);
         finish_hb_execution(&lifecycle_coord).await?;
-        print_vm_result(vm, result);
+        record_standing_result(vm, admission.execution_id, result)?;
         Ok(metrics)
     }
 
@@ -7142,7 +7174,7 @@ impl StandingRunnerExecutionHandler {
         }
         eprintln!("[party {}] proposing ProgramFinished", self.party_id);
         finish_avss_execution(&lifecycle_coord).await?;
-        print_vm_result(vm, result);
+        record_standing_result(vm, admission.execution_id, result)?;
         Ok(metrics)
     }
 
@@ -7548,12 +7580,21 @@ async fn run_standing_node(raw_args: &[String]) -> Result<(), String> {
 
     let (bootnode, party_bind) = if as_leader {
         let bootnode = bind;
+        let (bootnode_ready_tx, bootnode_ready_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            if let Err(error) = run_bootnode_with_config(bootnode, parties).await {
+            if let Err(error) =
+                run_bootnode_with_config_ready(bootnode, parties, Some(bootnode_ready_tx)).await
+            {
                 eprintln!("standing bootnode failed: {error}");
             }
         });
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        bootnode_ready_rx
+            .await
+            .map_err(|_| "standing bootnode stopped before its listener became ready".to_owned())?;
+        write_runner_marker(
+            "STOFFEL_LOCAL_BOOTNODE_READY_FILE",
+            "bootnode listener readiness",
+        )?;
         let party_bind = SocketAddr::new(bind.ip(), bind.port().saturating_add(1000));
         let connect = if bind.ip().is_unspecified() {
             SocketAddr::new("127.0.0.1".parse().unwrap(), bind.port())
@@ -7673,6 +7714,7 @@ async fn run_standing_node(raw_args: &[String]) -> Result<(), String> {
     eprintln!(
         "[party {protocol_party_id}] standing node ready: reservoir_burst_capacity={reservoir_burst_capacity}"
     );
+    write_runner_marker("STOFFEL_STANDING_READY_FILE", "standing node readiness")?;
     let mut control_task = {
         let cancellation = cancellation.clone();
         tokio::spawn(async move { control.run(cancellation).await })

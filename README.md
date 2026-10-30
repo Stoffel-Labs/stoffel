@@ -127,6 +127,34 @@ client inputs). `--network --config` uses SDK network configuration: an off-chai
 client config executes through the coordinator/node RPC path, while a network
 config validates and connects to real node addresses.
 
+### Run on a standing mesh
+
+A local run starts its own coordinator and parties and stops them afterwards. A
+standing mesh keeps one set of parties running, so many runs, including
+parallel ones, share it:
+
+```bash
+stoffel start-mesh programs --name dev --detach
+stoffel run programs/sum.stfl --mesh dev --client-input 0=1 --client-input 1=2 --client-input 1=3 &
+stoffel run programs/sum.stfl --mesh dev --client-input 0=10 --client-input 1=20 --client-input 1=30 &
+wait
+stoffel stop-mesh dev
+```
+
+`start-mesh` takes a directory of `.stfl` sources or `.stflb` bytecode, compiled
+the same way `stoffel run` compiles them, and starts an in-process coordinator
+plus one `stoffel-run --standing-node` process per party (`--parties`,
+`--threshold`, default 5 and 1). The programs, and one client identity per
+client slot they declare, are fixed while the mesh runs; restart it to change
+them. Without `--detach` it runs in the foreground until Ctrl-C. Everything lives
+in `$STOFFEL_HOME/meshes/<name>/` (default `~/.stoffel/meshes/<name>/`),
+including party logs under `nodes/`; identities and preprocessing persist across
+restarts of the same mesh.
+
+`run --mesh <name>` runs one execution and prints the VM return and what each
+client slot received. Programs on a mesh run exactly as it loaded them, so they
+take `ClientStore` inputs (`--client-input`) rather than named `--input` values.
+
 ### Develop with live reload
 
 ```bash
@@ -551,6 +579,10 @@ The Stoffel source for these programs lives in `crates/stoffel-lang/examples/thr
 For the AVSS certificate-signing path, run `/app/programs/avss_certificate_keygen.stflb` with `STOFFEL_MPC_CURVE=secp256k1` or `STOFFEL_MPC_CURVE=p-256` to persist each party's CA signing share. Keygen is idempotent: it loads the existing share if the storage key already exists and only generates on first use. Then run `/app/programs/avss_certificate_sign.stflb` with `STOFFEL_WAIT_FOR_CLIENTS=1`; the client submits the real SHA-256 TBS digest and reconstructs fixed-width threshold ECDSA `r || s` material with `--outputs 2`. The corresponding Stoffel source lives in `crates/stoffel-lang/examples/avss_certificate/keygen/main.stfl` and `crates/stoffel-lang/examples/avss_certificate/sign/main.stfl`.
 
 ## Standing concurrent nodes
+
+To run a standing mesh on one machine, use `stoffel start-mesh` (see
+[Run on a standing mesh](#run-on-a-standing-mesh)). The rest of this section
+describes the node itself.
 
 `stoffel-run --standing-node` keeps one authenticated party mesh alive until
 the process receives SIGINT or SIGTERM (SIGKILL stops it immediately). It has
