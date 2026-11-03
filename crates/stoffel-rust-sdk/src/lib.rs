@@ -730,7 +730,6 @@ impl Stoffel {
                     .to_owned(),
             ));
         }
-        let source_parameter_types = local_source_parameter_types(&self.source, name)?;
         let mut probe = self.clone();
         probe.inputs.clear();
         let probe_runtime = probe.build()?;
@@ -752,21 +751,19 @@ impl Stoffel {
             .iter()
             .enumerate()
             .map(|(index, value)| {
-                let source_marks_secret = source_parameter_types
-                    .as_ref()
-                    .and_then(|types| types.get(index))
-                    .map(|ty| local_parameter_type_is_secret(ty));
-                let bytecode_marks_secret = function
+                // A clear input is embedded in the wrapper binary's constant
+                // pool, which every local party loads. Only take that path when
+                // the compiled parameter type is known to be clear; anything
+                // the metadata cannot vouch for (object or unresolved type
+                // names, type variables, missing metadata) is shared instead.
+                let known_clear = function
                     .parameter_types()
                     .get(index)
-                    .map(function_type_is_secret);
-                if source_marks_secret
-                    .or(bytecode_marks_secret)
-                    .unwrap_or(true)
-                {
-                    crate::program::LocalInputShape::secret_from_value(value)
-                } else {
+                    .is_some_and(function_type_is_known_clear);
+                if known_clear {
                     crate::program::LocalInputShape::clear_from_value(value)
+                } else {
+                    crate::program::LocalInputShape::secret_from_value(value)
                 }
             })
             .collect::<Vec<_>>();
@@ -829,98 +826,30 @@ fn flatten_local_named_input(
     }
 }
 
-fn local_source_parameter_types(
-    source: &Option<ProgramSource>,
-    function_name: &str,
-) -> Result<Option<Vec<String>>> {
-    let Some(source) = source else {
-        return Ok(None);
-    };
-    let source = match source {
-        ProgramSource::Source { source, .. } => source.clone(),
-        ProgramSource::File { path } => std::fs::read_to_string(path)?,
-        ProgramSource::Bytecode(_) | ProgramSource::Program(_) => return Ok(None),
-    };
-    Ok(parse_function_parameter_types(&source, function_name))
-}
-
-fn parse_function_parameter_types(source: &str, function_name: &str) -> Option<Vec<String>> {
-    let prefix = format!("def {function_name}(");
-    let start = source.find(&prefix)? + prefix.len();
-    let mut depth = 1usize;
-    let mut end = start;
-    for (offset, character) in source[start..].char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    end = start + offset;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    if depth != 0 {
-        return None;
-    }
-
-    let params = &source[start..end];
-    let mut types = Vec::new();
-    for param in split_parameter_list(params) {
-        let (_, ty) = param.split_once(':')?;
-        types.push(ty.trim().to_owned());
-    }
-    Some(types)
-}
-
-fn split_parameter_list(params: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut depth = 0usize;
-    for (index, character) in params.char_indices() {
-        match character {
-            '[' | '(' => depth += 1,
-            ']' | ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                let part = params[start..index].trim();
-                if !part.is_empty() {
-                    parts.push(part);
-                }
-                start = index + character.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    let part = params[start..].trim();
-    if !part.is_empty() {
-        parts.push(part);
-    }
-    parts
-}
-
-fn local_parameter_type_is_secret(ty: &str) -> bool {
-    ty.split(|character: char| {
-        !(character.is_ascii_alphanumeric()
-            || character == '_'
-            || character == '['
-            || character == ']')
-    })
-    .any(|token| token == "secret" || token == "Share" || token.contains("secret"))
-}
-
-fn function_type_is_secret(ty: &stoffel_vm_types::compiled_binary::FunctionType) -> bool {
+/// Whether a compiled parameter type is guaranteed to carry no secret data,
+/// so the SDK may pass the input as a clear constant. Object and unresolved
+/// type names are not: their secrecy (fields, aliases from other modules) is
+/// not recorded in function metadata.
+fn function_type_is_known_clear(ty: &stoffel_vm_types::compiled_binary::FunctionType) -> bool {
     use stoffel_vm_types::compiled_binary::FunctionType;
 
     match ty {
-        FunctionType::Secret(_) => true,
-        FunctionType::List(element) => function_type_is_secret(element),
+        FunctionType::Int { .. }
+        | FunctionType::Float
+        | FunctionType::Fixed { .. }
+        | FunctionType::String
+        | FunctionType::Bool
+        | FunctionType::Nil => true,
+        FunctionType::List(element) => function_type_is_known_clear(element),
         FunctionType::Dict(key, value) => {
-            function_type_is_secret(key) || function_type_is_secret(value)
+            function_type_is_known_clear(key) && function_type_is_known_clear(value)
         }
-        FunctionType::Generic(_, arguments) => arguments.iter().any(function_type_is_secret),
-        _ => false,
+        FunctionType::Secret(_)
+        | FunctionType::Object(_)
+        | FunctionType::Generic(..)
+        | FunctionType::TypeVar(_)
+        | FunctionType::Void
+        | FunctionType::Unknown => false,
     }
 }
 
@@ -1016,4 +945,74 @@ fn validate_bytecode_backend(program: &Program, expected: MpcBackend) -> Result<
 fn validate_program_network_config(program: &Program, config: &NetworkConfig) -> Result<()> {
     config.validate_server_addresses()?;
     program.validate_expected_clients(config.network.expected_clients)
+}
+
+#[cfg(test)]
+mod local_named_input_tests {
+    use super::*;
+    use crate::program::LocalInputShape;
+    use stoffel_vm_types::compiled_binary::FunctionType;
+
+    const SECRET_VALUE: i64 = 424_242;
+    const CLEAR_VALUE: i64 = 515_151;
+
+    fn constants_contain(runtime: &StoffelRuntime, needle: i64) -> bool {
+        format!("{:?}", runtime.program().binary().constants).contains(&needle.to_string())
+    }
+
+    /// A parameter that is secret only through a type alias must reach the
+    /// local wrapper as a share, never as a constant in the shared binary.
+    #[test]
+    fn secret_alias_parameter_is_not_embedded_as_clear_constant() -> Result<()> {
+        let (runtime, entry) = Stoffel::compile(
+            r#"
+type Amount = secret int64
+
+def main(a: Amount, b: secret int64, n: int64) -> secret int64:
+  return a + b + n
+"#,
+        )?
+        .with_inputs(&[("a", SECRET_VALUE), ("b", 7), ("n", CLEAR_VALUE)])
+        .build_for_local_execution("main")?;
+
+        assert_ne!(
+            entry, "main",
+            "named inputs should go through the local wrapper"
+        );
+        assert!(
+            !constants_contain(&runtime, SECRET_VALUE),
+            "secret alias input leaked into the constant pool"
+        );
+        assert!(
+            constants_contain(&runtime, CLEAR_VALUE),
+            "clear int64 input should still be passed as a clear constant"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn only_known_clear_parameter_types_take_the_clear_path() {
+        let int64 = FunctionType::int64();
+        assert!(function_type_is_known_clear(&int64));
+        assert!(function_type_is_known_clear(&FunctionType::List(Box::new(
+            int64.clone()
+        ))));
+        for ty in [
+            FunctionType::Secret(Box::new(int64.clone())),
+            FunctionType::List(Box::new(FunctionType::Secret(Box::new(int64.clone())))),
+            FunctionType::Object("Amount".to_owned()),
+            FunctionType::TypeVar("T".to_owned()),
+            FunctionType::Unknown,
+        ] {
+            assert!(
+                !function_type_is_known_clear(&ty),
+                "{ty:?} must not be clear"
+            );
+        }
+        // Sanity check that the shape helpers used by the adapter agree.
+        assert!(matches!(
+            LocalInputShape::secret_from_value(&Value::I64(1)),
+            LocalInputShape::Share(_)
+        ));
+    }
 }
