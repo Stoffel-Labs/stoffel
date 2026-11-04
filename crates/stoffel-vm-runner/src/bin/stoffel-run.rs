@@ -3307,6 +3307,16 @@ fn standing_client_key(
         .find_map(|(client, key)| (client.manifest_slot == manifest_slot).then_some(key))
 }
 
+/// Install the run's client slot table in the VM. Every runner path stores a
+/// client's shares under its manifest slot, so each slot maps to itself.
+fn install_vm_client_slots<I>(vm: &VirtualMachine, slots: I) -> Result<(), String>
+where
+    I: IntoIterator<Item = usize>,
+{
+    vm.set_client_slots(slots.into_iter().map(|slot| (slot, slot)))
+        .map_err(|error| format!("invalid client slot table: {error}"))
+}
+
 fn input_client_bindings_from_output_ids(
     output_ids: &[Vec<u8>],
     client_roster: &[usize],
@@ -4878,6 +4888,16 @@ where
         engine.set_client_output_id_map(input_ids.clone()).await;
     }
     vm.set_mpc_engine(engine.clone());
+    // Resolve `ClientStore` reads through the same bindings as output routing.
+    // Without admission the bindings are dense sorted ordinals, so this keeps
+    // positional addressing; with sparse manifest slots it is what makes
+    // `take_share(k, ..)` read slot k.
+    if !client_bindings.is_empty() {
+        install_vm_client_slots(
+            vm,
+            client_bindings.iter().map(|binding| binding.manifest_slot),
+        )?;
+    }
 
     eprintln!("[party {}] Starting execution inbox pump...", my_id);
     let mut server_rx = execution_inbox.party;
@@ -5419,6 +5439,12 @@ where
         .await
         .map_err(|e| format!("Failed to start AVSS engine: {}", e))?;
     vm.set_mpc_engine(engine.clone());
+    if !client_bindings.is_empty() {
+        install_vm_client_slots(
+            vm,
+            client_bindings.iter().map(|binding| binding.manifest_slot),
+        )?;
+    }
 
     // ---- Phase 4: Route backend traffic from the mux's MPC inbox.
     let mut client_rx = execution_inbox.client;
@@ -6838,10 +6864,14 @@ impl StandingRunnerExecutionHandler {
         G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
     {
         // Installing the MPC engine clears engine-scoped VM state, including
-        // ClientStore. Restore the admitted roster only after setup so
-        // output-only clients remain visible to the Stoffel program.
+        // ClientStore. Install the admitted slot table only after setup: it
+        // keeps output-only clients visible and makes `take_share(k, ..)` read
+        // manifest slot k, the slot outputs addressed to k are routed to.
         if !admission.clients.is_empty() {
-            vm.set_client_roster(admission.clients.iter().map(|client| client.manifest_slot));
+            install_vm_client_slots(
+                vm,
+                admission.clients.iter().map(|client| client.manifest_slot),
+            )?;
         }
         let execution_id = coordinator_execution_id(admission.execution_id);
         let mut coord = HbOffChainCoordinator::<F>::start_rpc_client_for_execution(
@@ -6985,10 +7015,14 @@ impl StandingRunnerExecutionHandler {
         G: CurveGroup<ScalarField = F> + PrimeGroup + Send + Sync + 'static,
     {
         // Installing the MPC engine clears engine-scoped VM state, including
-        // ClientStore. Restore the admitted roster only after setup so
-        // output-only clients remain visible to the Stoffel program.
+        // ClientStore. Install the admitted slot table only after setup: it
+        // keeps output-only clients visible and makes `take_share(k, ..)` read
+        // manifest slot k, the slot outputs addressed to k are routed to.
         if !admission.clients.is_empty() {
-            vm.set_client_roster(admission.clients.iter().map(|client| client.manifest_slot));
+            install_vm_client_slots(
+                vm,
+                admission.clients.iter().map(|client| client.manifest_slot),
+            )?;
         }
         let execution_id = coordinator_execution_id(admission.execution_id);
         let coord = AvssOffChainCoordinator::<F, G>::start_rpc_client_for_execution(
@@ -9712,7 +9746,7 @@ async fn main() {
     }
 
     eprintln!("Starting VM execution of '{}'...", agreed_entry);
-    if !client_roster.is_empty() {
+    if !client_roster.is_empty() && vm.client_slots().is_none() {
         vm.set_client_roster(client_roster.clone());
     }
 
@@ -10044,10 +10078,11 @@ mod tests {
         encode_preprocessing_exchange, field_outputs_to_hex, format_coordinator_outputs,
         format_vm_result, group_output_shares_by_client, hb_input_only_completion_proven,
         input_client_ids_from_output_ids, input_client_slot_map_from_output_ids,
-        load_client_manifest_semantics, manifest_client_input_slots, manifest_client_input_types,
-        mpc_input_protocol_ids, plan_preprocessing, preprocessing_transcript_ack_if_complete,
-        preprocessing_transcript_digest, record_preprocessing_exchange_value,
-        render_fixed_point_i64, resolve_client_protocol_bindings, standing_preproc_pool_program_id,
+        install_vm_client_slots, load_client_manifest_semantics, manifest_client_input_slots,
+        manifest_client_input_types, mpc_input_protocol_ids, plan_preprocessing,
+        preprocessing_transcript_ack_if_complete, preprocessing_transcript_digest,
+        record_preprocessing_exchange_value, render_fixed_point_i64,
+        resolve_client_protocol_bindings, standing_preproc_pool_program_id,
         standing_reservoir_plan, standing_reservoir_refill_execution_id, validate_cli_mode_flags,
         validate_cli_option_values, validate_client_server_count, validate_preprocessing_proposals,
         validate_required_cli_parameters, validate_reservoir_allocation_admission,
@@ -11072,6 +11107,14 @@ mod tests {
         assert_eq!(bindings[1].protocol_index, TEST_PARTIES + 1);
         assert_eq!(bindings[1].manifest_slot, 1);
         assert!(client_input_setup_plan(&bindings, &BTreeMap::new(), 0, false).is_empty());
+    }
+
+    #[test]
+    fn vm_client_slot_table_matches_sparse_admission() {
+        let vm = VirtualMachine::new();
+        install_vm_client_slots(&vm, [0, 2, 3]).expect("distinct slots");
+        assert_eq!(vm.client_slots(), Some(vec![(0, 0), (2, 2), (3, 3)]));
+        assert!(install_vm_client_slots(&vm, [2, 2]).is_err());
     }
 
     #[test]

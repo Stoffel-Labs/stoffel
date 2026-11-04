@@ -42,6 +42,26 @@ impl VirtualMachine {
         self.state.set_client_roster(clients);
     }
 
+    /// Install the run's client slot table used by `ClientStore` reads.
+    ///
+    /// Each `(slot, client)` pair binds a program's client number to the key
+    /// that client's shares are stored under. Runners that bind clients to
+    /// manifest slots must install the same bindings they route outputs with,
+    /// so `take_share(k, ..)` and `send_to_client(.., k)` name the same client.
+    /// Like the roster, the table belongs to engine-scoped state: install it
+    /// after the MPC engine.
+    pub fn set_client_slots<I>(&self, slots: I) -> VirtualMachineResult<()>
+    where
+        I: IntoIterator<Item = (usize, stoffelnet::network_utils::ClientId)>,
+    {
+        Ok(self.state.set_client_slots(slots)?)
+    }
+
+    /// The installed client slot table in slot order, if a runner set one.
+    pub fn client_slots(&self) -> Option<Vec<(usize, stoffelnet::network_utils::ClientId)>> {
+        self.state.client_input_store().snapshot_client_slots()
+    }
+
     pub(crate) fn client_input_store_for_async_engine<E: AsyncMpcEngine + ?Sized>(
         &self,
         engine: &E,

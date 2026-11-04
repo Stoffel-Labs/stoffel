@@ -3,6 +3,10 @@ use stoffelnet::network_utils::ClientId;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientInputStoreError {
+    #[error("client slot table assigns slot {slot} more than once")]
+    DuplicateClientSlot { slot: usize },
+    #[error("client slot table assigns client {client_id} to more than one slot")]
+    DuplicateSlotClient { client_id: ClientId },
     #[error(
         "client {client_id} provided {share_count} shares but {type_count} share types were declared"
     )]

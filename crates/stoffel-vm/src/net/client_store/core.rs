@@ -1,4 +1,8 @@
-use super::{ClientInputEntry, ClientInputIndex, ClientInputStore, ClientShare, ClientShareIndex};
+use super::{
+    ClientInputEntry, ClientInputIndex, ClientInputStore, ClientInputStoreError, ClientShare,
+    ClientShareIndex,
+};
+use std::collections::{BTreeMap, HashSet};
 use std::time::SystemTime;
 use stoffelnet::network_utils::ClientId;
 
@@ -114,11 +118,7 @@ impl ClientInputStore {
         share_index: ClientShareIndex,
     ) -> Option<(ClientId, ClientShare)> {
         let state = self.state.read();
-        let client_id = if state.client_roster.is_empty() {
-            state.entries.keys().nth(client_index.index()).copied()
-        } else {
-            state.client_roster.get(client_index.index()).copied()
-        }?;
+        let client_id = state.client_for_slot(client_index)?;
         state
             .entries
             .get(&client_id)
@@ -126,29 +126,20 @@ impl ClientInputStore {
             .map(|share| (client_id, share))
     }
 
-    /// Snapshot one input column in deterministic client-slot order.
+    /// Snapshot one input column for client slots `0..client_count`.
     ///
     /// This is the execution-oriented bulk read used by semantic share
-    /// reductions. All returned payloads come from the same store snapshot.
+    /// reductions. All returned payloads come from the same store snapshot,
+    /// and each slot resolves through the same rule as single-share reads.
     pub fn snapshot_share_column(
         &self,
         share_index: ClientShareIndex,
         client_count: usize,
     ) -> Option<Vec<ClientShare>> {
         let state = self.state.read();
-        let ids = if state.client_roster.is_empty() {
-            state.entries.keys().copied().collect::<Vec<_>>()
-        } else {
-            state.client_roster.clone()
-        };
-        let count = client_count.max(1);
-        if count > ids.len() {
-            return None;
-        }
-
-        ids.into_iter()
-            .take(count)
-            .map(|client_id| {
+        (0..client_count.max(1))
+            .map(|slot| {
+                let client_id = state.client_for_slot(ClientInputIndex::new(slot))?;
                 state
                     .entries
                     .get(&client_id)
@@ -209,6 +200,7 @@ impl ClientInputStore {
         let mut state = self.state.write();
         state.entries.clear();
         state.client_roster.clear();
+        state.client_slots = None;
     }
 
     /// Get the total number of known clients in the store.
@@ -236,20 +228,25 @@ impl ClientInputStore {
         self.len() == 0
     }
 
-    /// Return the client ID at a given index in sorted order.
+    /// Resolve a program-visible client number to the client it names.
+    ///
+    /// With a slot table installed this is the client bound to that slot (or
+    /// `None` for a slot the run did not admit); otherwise it is the client at
+    /// that position in sorted order.
     pub fn client_id_at(&self, index: ClientInputIndex) -> Option<ClientId> {
-        let state = self.state.read();
-        if state.client_roster.is_empty() {
-            state.entries.keys().nth(index.index()).copied()
-        } else {
-            state.client_roster.get(index.index()).copied()
-        }
+        self.state.read().client_for_slot(index)
     }
 
     /// Resolve a program's literal manifest slot. An explicit roster contains
     /// slot identities, not a dense array of interchangeable input positions.
+    ///
+    /// A slot table installed by [`Self::set_client_slots`] takes precedence,
+    /// so this agrees with [`Self::client_id_at`] whenever one is installed.
     pub fn client_id_for_slot(&self, slot: ClientInputIndex) -> Option<ClientId> {
         let state = self.state.read();
+        if let Some(table) = &state.client_slots {
+            return table.get(&slot.index()).copied();
+        }
         if state.client_roster.is_empty() {
             // Legacy embedders without a manifest roster use positional input.
             state.entries.keys().nth(slot.index()).copied()
@@ -273,6 +270,9 @@ impl ClientInputStore {
     }
 
     /// Replace the VM-facing known client roster.
+    ///
+    /// Client numbers then resolve by position in sorted roster order. This
+    /// removes any slot table installed by [`Self::set_client_slots`].
     pub fn set_client_roster<I>(&self, clients: I)
     where
         I: IntoIterator<Item = ClientId>,
@@ -280,7 +280,48 @@ impl ClientInputStore {
         let mut clients = clients.into_iter().collect::<Vec<_>>();
         clients.sort_unstable();
         clients.dedup();
-        self.state.write().client_roster = clients;
+        let mut state = self.state.write();
+        state.client_roster = clients;
+        state.client_slots = None;
+    }
+
+    /// Install the run's slot table: each `(slot, client)` pair binds the
+    /// number a program passes to `ClientStore` builtins to the key that
+    /// client's shares are stored under.
+    ///
+    /// Every admitted client becomes a known client (so output-only clients
+    /// count), and a slot outside the table is rejected by reads instead of
+    /// falling back to a position.
+    pub fn set_client_slots<I>(&self, slots: I) -> Result<(), ClientInputStoreError>
+    where
+        I: IntoIterator<Item = (usize, ClientId)>,
+    {
+        let mut table = BTreeMap::new();
+        let mut clients = HashSet::new();
+        for (slot, client_id) in slots {
+            if table.insert(slot, client_id).is_some() {
+                return Err(ClientInputStoreError::DuplicateClientSlot { slot });
+            }
+            if !clients.insert(client_id) {
+                return Err(ClientInputStoreError::DuplicateSlotClient { client_id });
+            }
+        }
+        let mut roster = table.values().copied().collect::<Vec<_>>();
+        roster.sort_unstable();
+
+        let mut state = self.state.write();
+        state.client_roster = roster;
+        state.client_slots = Some(table);
+        Ok(())
+    }
+
+    /// Snapshot the installed slot table, if any, in slot order.
+    pub fn snapshot_client_slots(&self) -> Option<Vec<(usize, ClientId)>> {
+        self.state
+            .read()
+            .client_slots
+            .as_ref()
+            .map(|table| table.iter().map(|(&slot, &id)| (slot, id)).collect())
     }
 
     /// Add one known client while preserving deterministic client-slot order.

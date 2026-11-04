@@ -1,6 +1,8 @@
 use super::*;
 use crate::foreign_functions::ForeignFunctionCallbackError;
-use crate::net::client_store::{ClientOutputShareCount, ClientShare, ClientShareIndex};
+use crate::net::client_store::{
+    ClientInputIndex, ClientOutputShareCount, ClientShare, ClientShareIndex,
+};
 use crate::net::mpc_engine::{
     AsyncMpcEngine, AsyncMpcEngineConsensus, MpcCapabilities, MpcEngine, MpcEngineClientOutput,
     MpcEngineConsensus, MpcEngineError, MpcEngineFieldOpen, MpcEngineMultiplication,
@@ -7153,4 +7155,196 @@ fn compiled_multifile_member_aliases_execute_the_correct_functions() {
             );
         }
     }
+}
+
+/// Standing admission accepts sparse manifest slots (e.g. `[0, 2, 3]`) and
+/// hydrates each client's shares under its manifest slot ID. A program read of
+/// `ClientStore.take_share*(2, i)` names manifest slot 2, so it must load slot
+/// 2's share, not the share of whichever client sits at roster position 2.
+#[test]
+fn client_store_reads_resolve_sparse_manifest_slots_by_identity() {
+    let mut vm = compile_vm_source(
+        r#"
+def read_int() -> secret int64:
+  return ClientStore.take_share(2, 0)
+
+def read_bool() -> secret bool:
+  return ClientStore.take_share_bool(2, 1)
+
+def read_fixed() -> secret fix64:
+  return ClientStore.take_share_fixed(2, 2)
+"#,
+    );
+
+    let slots = [0usize, 2, 3];
+    // What the standing runner installs: each admitted manifest slot, bound
+    // to the key its shares are hydrated under (the slot itself).
+    vm.set_client_slots(slots.map(|slot| (slot, slot)))
+        .expect("admitted slots are distinct");
+    vm.replace_client_shares(slots.map(|slot| {
+        let marker = u8::try_from(slot).expect("small test slot");
+        (
+            slot,
+            vec![
+                ClientShare::typed(
+                    ShareType::default_secret_int(),
+                    ShareData::Opaque(vec![marker, 0].into()),
+                ),
+                ClientShare::typed(
+                    ShareType::boolean(),
+                    ShareData::Opaque(vec![marker, 1].into()),
+                ),
+                ClientShare::typed(
+                    ShareType::default_secret_fixed_point(),
+                    ShareData::Opaque(vec![marker, 2].into()),
+                ),
+            ],
+        )
+    }));
+
+    let mut wrong_reads = Vec::new();
+    for (function, share_index) in [("read_int", 0u8), ("read_bool", 1), ("read_fixed", 2)] {
+        let value = vm
+            .execute(function)
+            .unwrap_or_else(|error| panic!("{function} should load slot 2: {error}"));
+        let Value::Share(_, data) = value else {
+            panic!("{function} returned a non-share value: {value:?}");
+        };
+        let expected = ShareData::Opaque(vec![2, share_index].into());
+        if data != expected {
+            wrong_reads.push(format!("{function}: expected {expected:?}, got {data:?}"));
+        }
+    }
+    assert!(
+        wrong_reads.is_empty(),
+        "reads of manifest slot 2 loaded another client's share:\n{}",
+        wrong_reads.join("\n")
+    );
+}
+
+/// A slot the run did not admit must be rejected, never resolved by position:
+/// with slots `[0, 2, 3]`, position 1 holds slot 2's share.
+#[test]
+fn client_store_reads_reject_unadmitted_slots() {
+    let mut vm = compile_vm_source(
+        r#"
+def read_int() -> secret int64:
+  return ClientStore.take_share(1, 0)
+
+def read_bool() -> secret bool:
+  return ClientStore.take_share_bool(1, 0)
+"#,
+    );
+    let slots = [0usize, 2, 3];
+    vm.set_client_slots(slots.map(|slot| (slot, slot)))
+        .expect("admitted slots are distinct");
+    vm.replace_client_shares(slots.map(|slot| {
+        (
+            slot,
+            vec![ClientShare::untyped(ShareData::Opaque(
+                vec![slot as u8].into(),
+            ))],
+        )
+    }));
+
+    for function in ["read_int", "read_bool"] {
+        let result = vm.execute(function);
+        assert!(
+            result.is_err(),
+            "{function} must reject unadmitted slot 1, got {result:?}"
+        );
+    }
+}
+
+/// Without a slot table, an explicit roster holds slot identities: a client
+/// number names the roster entry equal to it, never a position in the roster.
+#[test]
+fn client_store_reads_without_slot_table_match_roster_identity() {
+    let mut vm = compile_vm_source(
+        r#"
+def read_position() -> secret int64:
+  return ClientStore.take_share(0, 0)
+
+def read_slot() -> secret int64:
+  return ClientStore.take_share(20, 0)
+"#,
+    );
+    vm.set_client_roster([20, 10, 30]);
+    vm.replace_client_shares([10usize, 20, 30].map(|client| {
+        (
+            client,
+            vec![ClientShare::untyped(ShareData::Opaque(
+                vec![client as u8].into(),
+            ))],
+        )
+    }));
+
+    assert!(
+        vm.execute("read_position").is_err(),
+        "client number 0 is not on the roster"
+    );
+    let Value::Share(_, data) = vm.execute("read_slot").expect("slot 20 is on the roster") else {
+        panic!("read_slot returned a non-share value");
+    };
+    assert_eq!(data, ShareData::Opaque(vec![20].into()));
+}
+
+/// Column reductions (`ClientStore.sum_shares*`) cover slots `0..n` through the
+/// same slot table, so a sparse table cannot silently substitute slot 3 for an
+/// absent slot 1.
+#[test]
+fn client_store_columns_resolve_through_slot_table() {
+    let vm = compile_vm_source("def main() -> int64:\n  return 0\n");
+    vm.set_client_slots([(0, 0), (1, 1), (3, 3)])
+        .expect("admitted slots are distinct");
+    vm.replace_client_shares([0usize, 1, 3].map(|slot| {
+        (
+            slot,
+            vec![ClientShare::untyped(ShareData::Opaque(
+                vec![slot as u8].into(),
+            ))],
+        )
+    }));
+    let store = vm.state.client_input_store();
+
+    let column = store
+        .snapshot_share_column(ClientShareIndex::new(0), 2)
+        .expect("slots 0 and 1 are admitted");
+    assert_eq!(
+        column
+            .iter()
+            .map(|share| share.data().clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ShareData::Opaque(vec![0].into()),
+            ShareData::Opaque(vec![1].into()),
+        ]
+    );
+    assert!(
+        store
+            .snapshot_share_column(ClientShareIndex::new(0), 3)
+            .is_none(),
+        "slot 2 is not admitted, so a 3-client column must not use slot 3"
+    );
+}
+
+#[test]
+fn client_slot_table_rejects_duplicates_and_survives_cloning() {
+    let vm = compile_vm_source("def main() -> int64:\n  return 0\n");
+    assert!(vm.set_client_slots([(2, 2), (2, 3)]).is_err());
+    assert!(vm.set_client_slots([(2, 7), (3, 7)]).is_err());
+
+    vm.set_client_slots([(0, 0), (2, 2), (3, 3)])
+        .expect("admitted slots are distinct");
+    vm.replace_client_shares([(
+        2,
+        vec![ClientShare::untyped(ShareData::Opaque(vec![2].into()))],
+    )]);
+    let cloned = vm
+        .try_clone_with_independent_state()
+        .expect("clone VM with slot table");
+    let store = cloned.state.client_input_store();
+    assert_eq!(store.client_id_at(ClientInputIndex::new(2)), Some(2));
+    assert_eq!(store.client_id_at(ClientInputIndex::new(1)), None);
+    assert_eq!(store.output_client_count(), 3);
 }

@@ -83,7 +83,14 @@ impl VMState {
         self.mpc_runtime.set_client_roster(clients);
     }
 
-    /// Get a client ID by index in sorted order.
+    pub(crate) fn set_client_slots<I>(&self, slots: I) -> VmResult<()>
+    where
+        I: IntoIterator<Item = (usize, ClientId)>,
+    {
+        self.mpc_runtime.set_client_slots(slots)
+    }
+
+    /// Resolve a program-visible client number to a client ID.
     pub(crate) fn client_id_at_index(&self, index: ClientInputIndex) -> Option<ClientId> {
         self.mpc_runtime.client_id_at_index(index)
     }
