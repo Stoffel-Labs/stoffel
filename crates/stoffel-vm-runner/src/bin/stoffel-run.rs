@@ -3307,6 +3307,18 @@ fn standing_client_key(
         .find_map(|(client, key)| (client.manifest_slot == manifest_slot).then_some(key))
 }
 
+/// Manifest slot bound to each coordinator client certificate, by its position
+/// in `--expected-clients`: `--client-roster` entry `i` when given, otherwise
+/// `i`. Input binding and the VM's client slot table use this rule, and
+/// [`coordinator_output_submissions`] routes outputs by the same one, so a
+/// program's client number names the same client for `take_share` and
+/// `send_to_client`.
+fn coordinator_client_slots(client_count: usize, client_roster: &[usize]) -> Vec<usize> {
+    (0..client_count)
+        .map(|ordinal| client_roster.get(ordinal).copied().unwrap_or(ordinal))
+        .collect()
+}
+
 /// Install the run's client slot table in the VM. Every runner path stores a
 /// client's shares under its manifest slot, so each slot maps to itself.
 fn install_vm_client_slots<I>(vm: &VirtualMachine, slots: I) -> Result<(), String>
@@ -3326,29 +3338,17 @@ fn input_client_bindings_from_output_ids(
     if client_input_count == 0 {
         return Vec::new();
     }
+    let slots = coordinator_client_slots(output_ids.len(), client_roster);
     if client_input_slots.is_empty() {
-        return output_ids
-            .iter()
-            .enumerate()
-            .map(|(ordinal, client_id)| {
-                (
-                    client_id.clone(),
-                    client_roster.get(ordinal).copied().unwrap_or(ordinal),
-                )
-            })
-            .collect();
+        return output_ids.iter().cloned().zip(slots).collect();
     }
 
     let input_slots = client_input_slots.iter().copied().collect::<HashSet<_>>();
     output_ids
         .iter()
-        .enumerate()
-        .filter_map(|(ordinal, client_id)| {
-            let slot = client_roster.get(ordinal).copied().unwrap_or(ordinal);
-            input_slots
-                .contains(&slot)
-                .then(|| (client_id.clone(), slot))
-        })
+        .cloned()
+        .zip(slots)
+        .filter(|(_, slot)| input_slots.contains(slot))
         .collect()
 }
 
@@ -5854,6 +5854,12 @@ where
         },
     )
     .await?;
+    // Setup installs the MPC engine, which resets client state; bind the
+    // coordinator clients' slots afterwards, matching input storage and the
+    // output routing below.
+    if !input_ids.is_empty() {
+        install_vm_client_slots(vm, coordinator_client_slots(input_ids.len(), client_roster))?;
+    }
     engine.enable_client_output_capture().await;
 
     // expected_clients includes output-only identities. Use the declared
@@ -9746,7 +9752,18 @@ async fn main() {
     }
 
     eprintln!("Starting VM execution of '{}'...", agreed_entry);
-    if !client_roster.is_empty() && vm.client_slots().is_none() {
+    if !output_ids.is_empty() {
+        // Coordinator clients: the table binds each `--expected-clients`
+        // certificate's slot, the same slots their inputs were stored under and
+        // their outputs are routed to below.
+        if let Err(error) = install_vm_client_slots(
+            &vm,
+            coordinator_client_slots(output_ids.len(), &client_roster),
+        ) {
+            eprintln!("{error}");
+            exit(13);
+        }
+    } else if !client_roster.is_empty() && vm.client_slots().is_none() {
         vm.set_client_roster(client_roster.clone());
     }
 
@@ -10073,7 +10090,8 @@ mod tests {
         checked_client_input_total, cli_positional_arguments, client_input_completion_quorum,
         client_input_setup_plan, client_output_slot_map, client_program_from_arguments,
         client_protocol_id, client_schema_for_reserved_index, client_transport_recipient,
-        collect_bounded, coordinator_execution_already_retired, decode_preprocessing_exchange,
+        collect_bounded, coordinator_client_slots, coordinator_execution_already_retired,
+        coordinator_output_submissions, decode_preprocessing_exchange,
         direct_client_inbound_message, encode_manifest_client_inputs,
         encode_preprocessing_exchange, field_outputs_to_hex, format_coordinator_outputs,
         format_vm_result, group_output_shares_by_client, hb_input_only_completion_proven,
@@ -11107,6 +11125,38 @@ mod tests {
         assert_eq!(bindings[1].protocol_index, TEST_PARTIES + 1);
         assert_eq!(bindings[1].manifest_slot, 1);
         assert!(client_input_setup_plan(&bindings, &BTreeMap::new(), 0, false).is_empty());
+    }
+
+    #[test]
+    fn coordinator_client_slots_follow_roster_or_certificate_position() {
+        assert_eq!(coordinator_client_slots(3, &[]), vec![0, 1, 2]);
+        assert_eq!(coordinator_client_slots(3, &[0, 2, 3]), vec![0, 2, 3]);
+    }
+
+    /// With certificates bound to sparse slots `[0, 2, 3]`, an output the
+    /// program addresses to slot 2 belongs to the second certificate, the
+    /// client whose inputs are stored as slot 2, not the third.
+    #[test]
+    fn coordinator_outputs_route_sparse_slots_to_their_bound_certificate() {
+        let roster = [0, 2, 3];
+        let certs = vec![vec![0xa0], vec![0xa2], vec![0xa3]];
+        let routed = coordinator_output_submissions(&certs, &roster, [(2, vec![7]), (3, vec![9])])
+            .expect("slots 2 and 3 are bound");
+        let recipient_of = |share| {
+            routed
+                .iter()
+                .find(|(_, shares)| shares.contains(&share))
+                .map(|(cert, _)| cert.clone())
+        };
+        assert_eq!(recipient_of(7), Some(certs[1].clone()));
+        assert_eq!(recipient_of(9), Some(certs[2].clone()));
+        assert!(coordinator_output_submissions(&certs, &roster, [(1, vec![5])]).is_err());
+
+        // The certificate receiving slot 2's output is the one whose inputs
+        // are stored as slot 2.
+        let input_slots =
+            input_client_slot_map_from_output_ids(&certs, &roster, &[], 1).expect("distinct slots");
+        assert_eq!(input_slots.get(&certs[1]), Some(&2));
     }
 
     #[test]

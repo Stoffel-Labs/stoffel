@@ -3877,6 +3877,32 @@ def main() -> int64:
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "starts a real localhost coordinator, MPC party mesh, and two coordinator clients"]
+async fn execute_local_reads_sparse_client_slots_by_slot() -> stoffel::Result<()> {
+    // Slots 0 and 2 only: the VM must read slot 2 as slot 2, not as the
+    // client at position 2 of the sorted slot list (which does not exist).
+    let result = Stoffel::compile(
+        r#"
+def main() -> int64:
+  var first_share = ClientStore.take_share(0, 0)
+  var third_share = ClientStore.take_share(2, 0)
+  var first: int64 = first_share.open()
+  var third: int64 = third_share.open()
+  return first * 100 + third
+"#,
+    )?
+    .parties(5)
+    .threshold(1)
+    .with_client_input(0, &[4_i64])
+    .with_client_input(2, &[7_i64])
+    .execute_local()
+    .await?;
+
+    assert_eq!(result, vec![Value::I64(407)]);
+    Ok(())
+}
+
 #[test]
 fn consensus_types_are_reexported_from_networking() {
     let ordering = VerifiedOrdering::new(vec![], vec![]);
