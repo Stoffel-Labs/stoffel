@@ -62,6 +62,26 @@ fn open_exp_test_payload(
 }
 
 #[test]
+fn open_in_exponent_capability_matches_the_session_threshold() {
+    use crate::net::mpc_engine::MpcCapabilities;
+
+    for (parties, threshold, supported) in [(5, 0, true), (5, 1, false)] {
+        let engine = test_engine(
+            Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
+            next_instance_id(),
+            0,
+            parties,
+            threshold,
+        );
+        assert_eq!(
+            engine.capabilities().contains(MpcCapabilities::OPEN_IN_EXP),
+            supported
+        );
+        assert_eq!(engine.as_open_in_exp().is_some(), supported);
+    }
+}
+
+#[test]
 fn robust_open_requires_full_bft_quorum() {
     type Engine = HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>;
 

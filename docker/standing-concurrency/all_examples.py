@@ -389,8 +389,8 @@ class AllExamplesHarness(Harness):
         compiler = self.root / "target/debug/stoffellang"
         inspector = self.root / "target/debug/stoffel-run"
         sources = sorted(self.examples_dir.rglob("main.stfl"))
-        if len(sources) != 190:
-            raise AcceptanceFailure(f"expected 190 canonical examples, found {len(sources)}")
+        if len(sources) != 191:
+            raise AcceptanceFailure(f"expected 191 canonical examples, found {len(sources)}")
         if self.selected_examples is not None:
             by_name = {
                 path.parent.relative_to(self.examples_dir).as_posix(): path for path in sources
