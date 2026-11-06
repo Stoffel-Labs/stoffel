@@ -12,8 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use stoffelmpc_mpc::honeybadger::{
-    fpmul::f256::Gf256, robust_interpolate::robust_interpolate::RobustShare,
-    triple_gen::ShamirBeaverTriple,
+    robust_interpolate::robust_interpolate::RobustShare, triple_gen::ShamirBeaverTriple,
 };
 
 // ---------------------------------------------------------------------------
@@ -78,8 +77,11 @@ impl From<PreprocStoreError> for String {
 pub enum MaterialKind {
     BeaverTriple = 0,
     RandomShare = 1,
-    PRandBit = 2,
+    // Tag 2 was the retired PRandBit kind (a big-field share plus an unused GF(256) byte per
+    // item). It is not reused, so stores written before the switch to RandBit are never
+    // decoded with the wrong item layout.
     PRandInt = 3,
+    RandBit = 4,
 }
 
 /// Identifies a stored preprocessing blob.
@@ -190,8 +192,8 @@ impl PreprocKeyScope {
         self.key(MaterialKind::RandomShare)
     }
 
-    pub fn prand_bit(self) -> PreprocKey {
-        self.key(MaterialKind::PRandBit)
+    pub fn rand_bit(self) -> PreprocKey {
+        self.key(MaterialKind::RandBit)
     }
 
     pub fn prand_int(self) -> PreprocKey {
@@ -213,8 +215,8 @@ fn material_kind_tag(kind: MaterialKind) -> u8 {
     match kind {
         MaterialKind::BeaverTriple => 0,
         MaterialKind::RandomShare => 1,
-        MaterialKind::PRandBit => 2,
         MaterialKind::PRandInt => 3,
+        MaterialKind::RandBit => 4,
     }
 }
 
@@ -353,7 +355,7 @@ impl PoolAvailability {
         match kind {
             MaterialKind::BeaverTriple => self.beaver,
             MaterialKind::RandomShare => self.random,
-            MaterialKind::PRandBit => self.prand_bit,
+            MaterialKind::RandBit => self.prand_bit,
             MaterialKind::PRandInt => self.prand_int,
         }
     }
@@ -362,7 +364,7 @@ impl PoolAvailability {
         match kind {
             MaterialKind::BeaverTriple => self.beaver = count,
             MaterialKind::RandomShare => self.random = count,
-            MaterialKind::PRandBit => self.prand_bit = count,
+            MaterialKind::RandBit => self.prand_bit = count,
             MaterialKind::PRandInt => self.prand_int = count,
         }
     }
@@ -396,7 +398,7 @@ impl OwnedPreprocBundle {
         match kind {
             MaterialKind::BeaverTriple => self.beaver = Some(material),
             MaterialKind::RandomShare => self.random = Some(material),
-            MaterialKind::PRandBit => self.prand_bit = Some(material),
+            MaterialKind::RandBit => self.prand_bit = Some(material),
             MaterialKind::PRandInt => self.prand_int = Some(material),
         }
     }
@@ -575,7 +577,7 @@ pub async fn standing_preproc_snapshot(
             .await?
             .unwrap_or_default(),
         random: store.meta(&scope.random_share()).await?.unwrap_or_default(),
-        prand_bit: store.meta(&scope.prand_bit()).await?.unwrap_or_default(),
+        prand_bit: store.meta(&scope.rand_bit()).await?.unwrap_or_default(),
         prand_int: store.meta(&scope.prand_int()).await?.unwrap_or_default(),
     })
 }
@@ -684,7 +686,7 @@ type DbJob = Box<dyn FnOnce(&heed::Env, &LmdbDatabase) + Send + 'static>;
 const MATERIAL_KINDS: [MaterialKind; 4] = [
     MaterialKind::BeaverTriple,
     MaterialKind::RandomShare,
-    MaterialKind::PRandBit,
+    MaterialKind::RandBit,
     MaterialKind::PRandInt,
 ];
 struct ReservoirMaterialKeys {
@@ -1297,13 +1299,6 @@ pub fn beaver_triple_size<F: FftField>() -> Result<u32, PreprocStoreError> {
     usize_to_u32(triple_size, "beaver triple item size")
 }
 
-pub fn prandbit_share_size<F: FftField>() -> Result<u32, PreprocStoreError> {
-    let item_size = robust_share_size::<F>()
-        .checked_add(1)
-        .ok_or_else(|| PreprocStoreError::Serialization("prandbit item size overflow".into()))?;
-    usize_to_u32(item_size, "prandbit item size")
-}
-
 fn read_robust_share<F: FftField>(
     data: &[u8],
     item_size: usize,
@@ -1418,40 +1413,6 @@ pub fn deserialize_beaver_triples<F: FftField>(
         pos = end;
     }
     Ok(triples)
-}
-
-pub fn serialize_prandbit_shares<F: FftField>(
-    shares: &[(RobustShare<F>, Gf256)],
-) -> Result<(Vec<u8>, u32), PreprocStoreError> {
-    let item_size = u32_to_usize(prandbit_share_size::<F>()?, "prandbit item size")?;
-    let mut buf = Vec::with_capacity(shares.len() * item_size);
-    for (s, f) in shares {
-        write_robust_share(s, &mut buf)?;
-        buf.push(f.0);
-    }
-    Ok((buf, usize_to_u32(item_size, "prandbit item size")?))
-}
-
-pub fn deserialize_prandbit_shares<F: FftField>(
-    data: &[u8],
-    item_size: u32,
-    offset: u32,
-) -> Result<Vec<(RobustShare<F>, Gf256)>, PreprocStoreError> {
-    let is = u32_to_usize(item_size, "prandbit item size")?;
-    if !has_nonzero_item_size(data, is, "prandbit")? {
-        return Ok(Vec::new());
-    }
-    let share_size = robust_share_size::<F>();
-    let start = byte_offset(offset, item_size, "prandbit offset")?;
-    let mut result = Vec::new();
-    let mut pos = start;
-    while let Some(end) = pos.checked_add(is).filter(|end| *end <= data.len()) {
-        let share = read_robust_share::<F>(&data[pos..], share_size)?;
-        let f2_8 = Gf256(data[pos + share_size]);
-        result.push((share, f2_8));
-        pos = end;
-    }
-    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -1641,21 +1602,6 @@ mod tests {
     }
 
     #[test]
-    fn prandbit_roundtrip() {
-        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(42);
-        let shares: Vec<_> = (0..6)
-            .map(|i| (random_share(&mut rng), Gf256(i as u8)))
-            .collect();
-        let (data, item_size) = serialize_prandbit_shares::<Fr>(&shares).unwrap();
-        let decoded = deserialize_prandbit_shares::<Fr>(&data, item_size, 0).unwrap();
-        assert_eq!(shares.len(), decoded.len());
-        for (a, b) in shares.iter().zip(decoded.iter()) {
-            assert_eq!(a.0.share[0], b.0.share[0]);
-            assert_eq!(a.1, b.1);
-        }
-    }
-
-    #[test]
     fn preproc_key_with_kind() {
         let base = PreprocKey::new(
             [0xAB; 32],
@@ -1679,7 +1625,7 @@ mod tests {
 
         let base = scope.beaver_triple();
         let random = scope.random_share();
-        let prand_bit = scope.prand_bit();
+        let rand_bit = scope.rand_bit();
         let prand_int = scope.prand_int();
 
         assert_eq!(base.program_hash, [0xCD; 32]);
@@ -1688,7 +1634,7 @@ mod tests {
         assert_eq!(base.node_identity, node_identity);
         assert_eq!(base.kind, MaterialKind::BeaverTriple);
         assert_eq!(random, base.with_kind(MaterialKind::RandomShare));
-        assert_eq!(prand_bit, base.with_kind(MaterialKind::PRandBit));
+        assert_eq!(rand_bit, base.with_kind(MaterialKind::RandBit));
         assert_eq!(prand_int, base.with_kind(MaterialKind::PRandInt));
     }
 

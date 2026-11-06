@@ -91,8 +91,8 @@ where
         // multiply (the raw integer multiply would leave the product with 2f
         // fractional bits) plus the same probabilistic-truncation preprocessing
         // the fixed-point division path provisions. Route it through `mul_fixed`
-        // and provision a pool of prandbit/prandint (and the triples/randoms
-        // their generation consumes) so it is self-sufficient without a protocol
+        // and provision a pool of randbit/prandint (and the randoms RandBit
+        // generation consumes) so it is self-sufficient without a protocol
         // change, mirroring `divide_fixed_by_constant_async`.
         if let ShareType::SecretFixedPoint { precision } = ty {
             let left_share = Self::decode_share(left)?;
@@ -106,22 +106,24 @@ where
             let f = precision.fractional_bits();
             if self.is_standing() {
                 let triples = self.reserve_beaver_triples(1).await?;
-                let prandbits = self.reserve_prandbit_shares(f).await?;
-                let prandints = self.reserve_prandint_shares(1, ty).await?;
+                let randbits = self.reserve_randbit_shares(f).await?;
+                let prandints = self.reserve_prandint_shares(1).await?;
                 node.preprocessing_material.lock().await.add(
                     Some(triples),
                     None,
-                    None,
-                    None,
-                    Some(prandbits),
+                    Some(randbits),
                     Some(prandints),
                 );
             } else {
-                const PRANDBIT_POOL_MULS: usize = 16;
-                let pool = f.saturating_mul(PRANDBIT_POOL_MULS);
-                node.params.n_prandbit = node.params.n_prandbit.max(pool);
-                node.params.n_prandint = node.params.n_prandint.max(PRANDBIT_POOL_MULS);
-                node.params.n_triples = node.params.n_triples.saturating_add(pool);
+                // Each multiply consumes one triple, `f` random bits and one
+                // random integer; each random bit consumes one random share
+                // and one degree-2t zero share during generation.
+                const RANDBIT_POOL_MULS: usize = 16;
+                let pool = f.saturating_mul(RANDBIT_POOL_MULS);
+                node.params.n_randbit = node.params.n_randbit.max(pool);
+                node.params.n_zero_shares = node.params.n_zero_shares.max(node.params.n_randbit);
+                node.params.n_prandint = node.params.n_prandint.max(RANDBIT_POOL_MULS);
+                node.params.n_triples = node.params.n_triples.saturating_add(RANDBIT_POOL_MULS);
                 node.params.n_random_shares = node.params.n_random_shares.saturating_add(pool);
             }
 
@@ -149,14 +151,10 @@ where
                 // 2 randoms each, which run_preprocessing adds automatically.
                 if self.is_standing() {
                     let triples = self.reserve_beaver_triples(1).await?;
-                    node.preprocessing_material.lock().await.add(
-                        Some(triples),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    );
+                    node.preprocessing_material
+                        .lock()
+                        .await
+                        .add(Some(triples), None, None, None);
                 } else {
                     const TRIPLE_POOL_MULS: usize = 64;
                     node.params.n_triples = node.params.n_triples.max(TRIPLE_POOL_MULS);
@@ -166,7 +164,7 @@ where
                 if trace {
                     let _m = node.preprocessing_material.lock().await.length();
                     let (triples, randoms, bits, exp_points) =
-                        (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
+                        (_m.beaver_triples, _m.random_shr, _m.randbit, _m.prandint);
                     eprintln!(
                         "[hb multiply start] party={} items=1 ty={:?} material=triples:{} randoms:{} bits:{} exp_points:{}",
                         self.topology.party_id(),
@@ -188,7 +186,7 @@ where
                 if trace {
                     let _m = node.preprocessing_material.lock().await.length();
                     let (triples, randoms, bits, exp_points) =
-                        (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
+                        (_m.beaver_triples, _m.random_shr, _m.randbit, _m.prandint);
                     eprintln!(
                         "[hb multiply done] party={} items=1 elapsed_ms={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                         self.topology.party_id(),
@@ -247,25 +245,25 @@ where
         let mut node = self.clone_node().await;
         let f = precision.fractional_bits();
         if self.is_standing() {
-            let prandbits = self.reserve_prandbit_shares(f).await?;
-            let prandints = self.reserve_prandint_shares(1, ty).await?;
+            let randbits = self.reserve_randbit_shares(f).await?;
+            let prandints = self.reserve_prandint_shares(1).await?;
             node.preprocessing_material.lock().await.add(
                 None,
                 None,
-                None,
-                None,
-                Some(prandbits),
+                Some(randbits),
                 Some(prandints),
             );
         } else {
             // Each division's truncation consumes `f` random bits and one random
-            // integer. One-shot mode preserves the legacy behavior of
-            // provisioning a local pool and letting the protocol regenerate it.
-            const PRANDBIT_POOL_DIVS: usize = 16;
-            let pool = f.saturating_mul(PRANDBIT_POOL_DIVS);
-            node.params.n_prandbit = node.params.n_prandbit.max(pool);
-            node.params.n_prandint = node.params.n_prandint.max(PRANDBIT_POOL_DIVS);
-            node.params.n_triples = node.params.n_triples.saturating_add(pool);
+            // integer; each random bit consumes one random share and one
+            // degree-2t zero share during generation. One-shot mode preserves
+            // the legacy behavior of provisioning a local pool and letting the
+            // protocol regenerate it.
+            const RANDBIT_POOL_DIVS: usize = 16;
+            let pool = f.saturating_mul(RANDBIT_POOL_DIVS);
+            node.params.n_randbit = node.params.n_randbit.max(pool);
+            node.params.n_zero_shares = node.params.n_zero_shares.max(node.params.n_randbit);
+            node.params.n_prandint = node.params.n_prandint.max(RANDBIT_POOL_DIVS);
             node.params.n_random_shares = node.params.n_random_shares.saturating_add(pool);
         }
         let result = node
@@ -327,8 +325,6 @@ where
                             None,
                             None,
                             None,
-                            None,
-                            None,
                         );
                     }
 
@@ -336,7 +332,7 @@ where
                     if trace {
                         let _m = node.preprocessing_material.lock().await.length();
                         let (triples, randoms, bits, exp_points) =
-                            (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
+                            (_m.beaver_triples, _m.random_shr, _m.randbit, _m.prandint);
                         eprintln!(
                             "[hb batch_multiply chunk start] party={} chunk={} items={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                             self.topology.party_id(),
@@ -356,7 +352,7 @@ where
                     if trace {
                         let _m = node.preprocessing_material.lock().await.length();
                         let (triples, randoms, bits, exp_points) =
-                            (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
+                            (_m.beaver_triples, _m.random_shr, _m.randbit, _m.prandint);
                         eprintln!(
                             "[hb batch_multiply chunk done] party={} chunk={} items={} elapsed_ms={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                             self.topology.party_id(),

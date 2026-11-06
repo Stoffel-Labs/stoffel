@@ -13,19 +13,15 @@ const client = new StoffelWasmClient(pkcs8Key, 5, 1);
 const deal = client.open_execution(dealExecutionId);
 const action = client.open_execution(actionExecutionId);
 
-// Both execution streams start at nonce 1 and advance independently. Opening
-// the same ID again resumes the counter shared by its existing handles.
+// Each signed request carries its own random nonce and `created` timestamp,
+// so handles share no state; opening the same ID twice is harmless.
 const dealRequest = deal.sign_request("browser_execution_status", jsonBody({}));
 const actionRequest = action.sign_request("browser_execution_status", jsonBody({}));
 ```
 
 Pass the returned signed request to the browser RPC together with the handle's
-execution ID. Call `client.forget_execution(id)` only after the coordinator has
-permanently retired that execution.
-
-To survive a page reload, store `execution.current_nonce()` after signing and
-restore the handle with `client.resume_execution(id, savedNonce)`. Resuming can
-only advance an existing local counter; it cannot accidentally roll it back.
+execution ID. After a page reload, just call `client.open_execution(id)` again;
+there is no nonce counter to save or restore.
 
 ## Typed inputs and outputs
 
