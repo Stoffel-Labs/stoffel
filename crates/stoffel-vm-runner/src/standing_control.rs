@@ -305,6 +305,8 @@ impl StandingClientCatalog {
     }
 }
 
+// async-trait 0.1.88 emits a redundant must_use on its generated future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait StandingExecutionHandler: Send + Sync + 'static {
     async fn prepare(
@@ -976,7 +978,7 @@ mod tests {
         // 0x04) - must fall through to the X.509 path and fail there, not be silently
         // misinterpreted as a valid point.
         let mut not_a_point = vec![0x02u8];
-        not_a_point.extend(std::iter::repeat(0xAB).take(64));
+        not_a_point.extend(std::iter::repeat_n(0xAB, 64));
         let temporary = tempfile::tempdir().unwrap();
         std::fs::write(temporary.path().join("voter0.crt"), &not_a_point).unwrap();
         assert!(StandingClientCatalog::load(temporary.path()).is_err());

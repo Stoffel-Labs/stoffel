@@ -494,6 +494,8 @@ fn has_nonzero_item_size(
 // ---------------------------------------------------------------------------
 
 /// Async trait for preprocessing material persistence.
+// async-trait 0.1.88 emits a redundant must_use on its generated future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait PreprocStore: Send + Sync + 'static {
     async fn store(&self, key: &PreprocKey, blob: &PreprocBlob) -> Result<(), PreprocStoreError>;

@@ -10,7 +10,7 @@ x-party: &party
     context: .
     dockerfile: Dockerfile.benchmark
     additional_contexts:
-      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}"
     args:
       PROFILE_BUILD: "${STOFFEL_PROFILE_BUILD:-false}"
   volumes:
@@ -61,7 +61,7 @@ services:
       context: .
       dockerfile: docker/coordinator.Dockerfile
       additional_contexts:
-        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}"
     volumes:
       - ./ids:/app/ids:ro
     entrypoint: ["/bin/sh", "-c"]

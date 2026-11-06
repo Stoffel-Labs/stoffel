@@ -45,6 +45,10 @@ RUN mkdir -p /build/.cargo && \
       '[net]' \
       'git-fetch-with-cli = true' \
       '' \
+      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/opt/stoffel-coordinator/crates/off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/opt/stoffel-coordinator/crates/coord-shared" }' \
+      '' \
       '[patch.crates-io]' \
       'stoffel-mpc-coordinator-off-chain = { path = "/opt/stoffel-coordinator/crates/off-chain" }' \
       'stoffel-mpc-coordinator-shared = { path = "/opt/stoffel-coordinator/crates/coord-shared" }' \
