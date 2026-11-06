@@ -5083,3 +5083,32 @@ def main() -> fix64:
         .iter()
         .any(|name| name == "ClientStore.take_share_fixed"));
 }
+
+#[test]
+fn test_secret_type_alias_keeps_secrecy_in_parameter_metadata() {
+    // `Amount` is only secret through its alias target. Codegen must resolve the
+    // alias before emitting metadata; otherwise it surfaces as `Object("Amount")`
+    // and SDK input adapters treat the parameter as clear.
+    let source = r#"
+type Amount = secret int64
+type Balance = Amount
+
+def main(a: Amount, b: secret int64, c: Balance, d: list[Amount]) -> Amount:
+  return a + b
+"#;
+
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("secret type aliases should compile");
+
+    let secret_int64 = FunctionType::Secret(Box::new(FunctionType::int64()));
+    assert_eq!(
+        program.main_chunk.parameter_types,
+        vec![
+            secret_int64.clone(),
+            secret_int64.clone(),
+            secret_int64.clone(),
+            FunctionType::List(Box::new(secret_int64.clone())),
+        ]
+    );
+    assert_eq!(program.main_chunk.return_type, secret_int64);
+}

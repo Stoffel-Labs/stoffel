@@ -28,30 +28,30 @@ csv = "=1.4.0"
 opentelemetry = "=0.32.0"
 opentelemetry-stdout = { version = "=0.32.0", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace"] }
-rustls = { version = "=0.23.41", default-features = false, features = ["ring"] }
-serde = { version = "=1.0.228", features = ["derive"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring"] }
+serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.150"
 stoffelnet = "=0.1.1"
 tempfile = "=3.27.0"
-thiserror = "=2.0.18"
-tokio = { version = "=1.52.3", features = ["rt", "sync", "time"] }
+thiserror = "=2.0.12"
+tokio = { version = "=1.46.1", features = ["rt", "sync", "time"] }
 toml = "=0.8.23"
 tracing = { version = "=0.1.44", features = ["attributes"] }
 tracing-opentelemetry = "=0.33.0"
 tracing-subscriber = { version = "=0.3.23", features = ["fmt"] }
 
 stoffellang = { version = "=0.2.0", path = "../stoffel-lang" }
-stoffel-mpc-coordinator-shared = "=0.2.0"
-stoffel-mpc-coordinator-off-chain = "=0.2.0"
+stoffel-mpc-coordinator-shared = { git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev" }
+stoffel-mpc-coordinator-off-chain = { git = "https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git", branch = "dev" }
 stoffel-vm = { version = "=0.2.0", path = "../stoffel-vm" }
 stoffel-vm-runner = { version = "=0.2.0", path = "../stoffel-vm-runner" }
 stoffel-vm-types = { version = "=0.2.0", path = "../stoffel-vm-types" }
-stoffelmpc-mpc = { package = "stoffelcrypto", version = "=0.1.1" }
+stoffelmpc-mpc = { package = "stoffelcrypto", version = "=0.1.2" }
 
 [dev-dependencies]
 aes = "=0.8.4"
 rand = "=0.8.6"
-sha2 = "=0.10.9"
+sha2 = "=0.10.8"
 stoffel-bindgen = { version = "=0.2.0", path = "../stoffel-bindgen" }
-tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.46.1", features = ["macros", "rt-multi-thread"] }
 trybuild = "=1.0.117"

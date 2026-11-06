@@ -94,6 +94,8 @@ pub struct NodeExecutionContext {
 /// registrations, and preprocessing leases. [`Self::execute`] contains the
 /// online work and may wait for admitted clients. [`Self::cleanup`] is invoked
 /// after execution or cancellation.
+// async-trait 0.1.88 emits a redundant must_use on its generated future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PreparedNodeExecution: Send + 'static {
     /// Run the online phase cooperatively. Network waits naturally return

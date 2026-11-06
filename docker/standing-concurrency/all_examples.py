@@ -27,7 +27,6 @@ from acceptance import (
     COORDINATOR,
     HEX_ID,
     Harness,
-    NODE_CLIENT_TRANSPORT_SERVERS,
     NODE_RPC_SERVERS,
     PARTIES,
     execution_id,
@@ -112,7 +111,7 @@ def backend_and_curve(name: str) -> tuple[str, str]:
         return "avss", "p-256"
     if name == "avss_share_auditor":
         return "avss", "bls12-381"
-    if name == "mpc_oprf":
+    if name in {"mpc_oprf", "threshold_signatures/threshold_bls_bls12381"}:
         return "avss", "bls12-381"
     if name == "threshold_signatures/threshold_ecdsa_p256":
         return "avss", "p-256"
@@ -390,8 +389,8 @@ class AllExamplesHarness(Harness):
         compiler = self.root / "target/debug/stoffellang"
         inspector = self.root / "target/debug/stoffel-run"
         sources = sorted(self.examples_dir.rglob("main.stfl"))
-        if len(sources) != 190:
-            raise AcceptanceFailure(f"expected 190 canonical examples, found {len(sources)}")
+        if len(sources) != 191:
+            raise AcceptanceFailure(f"expected 191 canonical examples, found {len(sources)}")
         if self.selected_examples is not None:
             by_name = {
                 path.parent.relative_to(self.examples_dir).as_posix(): path for path in sources
@@ -571,8 +570,6 @@ class AllExamplesHarness(Harness):
                 str(client["outputs"]),
                 "--servers",
                 NODE_RPC_SERVERS,
-                "--client-transport-servers",
-                NODE_CLIENT_TRANSPORT_SERVERS,
                 "--off-chain-coord",
                 COORDINATOR,
                 "--n-parties",

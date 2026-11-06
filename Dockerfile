@@ -45,6 +45,10 @@ RUN mkdir -p /build/.cargo && \
       '[net]' \
       'git-fetch-with-cli = true' \
       '' \
+      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/opt/stoffel-coordinator/crates/off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/opt/stoffel-coordinator/crates/coord-shared" }' \
+      '' \
       '[patch.crates-io]' \
       'stoffel-mpc-coordinator-off-chain = { path = "/opt/stoffel-coordinator/crates/off-chain" }' \
       'stoffel-mpc-coordinator-shared = { path = "/opt/stoffel-coordinator/crates/coord-shared" }' \
@@ -81,6 +85,18 @@ RUN --mount=type=ssh \
 RUN cargo build --release --package stoffellang && \
     mkdir -p /build/crates/stoffel-lang/examples/mpc_aes128_circuit/target && \
     mkdir -p /build/docker/standing-concurrency/target && \
+    /build/target/release/stoffellang \
+      --binary \
+      --mpc-backend honeybadger \
+      --mpc-curve bls12-381 \
+      --output /build/docker/standing-concurrency/target/client_sub_order.stflb \
+      /build/docker/client_sub_order.stfl && \
+    /build/target/release/stoffellang \
+      --binary \
+      --mpc-backend avss \
+      --mpc-curve bls12-381 \
+      --output /build/docker/standing-concurrency/target/avss_keygen.stflb \
+      /build/docker/avss_keygen.stfl && \
     STOFFEL_INLINE_BUDGET=100000000 \
     STOFFEL_UNROLL_BUDGET=100000000 \
     STOFFEL_UNROLL_MAX_EXPANSION=100000000 \
@@ -166,8 +182,8 @@ COPY --from=builder /build/target/release/stoffel-run /app/stoffel-run
 # Copy the test bytecode files
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/matrix_average_fixed_point.stflb /app/programs/matrix_average_fixed_point.stflb
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/client_mul.stflb /app/programs/client_mul.stflb
-COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/client_sub_order.stflb /app/programs/client_sub_order.stflb
-COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/avss_keygen.stflb /app/programs/avss_keygen.stflb
+COPY --from=builder /build/docker/standing-concurrency/target/client_sub_order.stflb /app/programs/client_sub_order.stflb
+COPY --from=builder /build/docker/standing-concurrency/target/avss_keygen.stflb /app/programs/avss_keygen.stflb
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/avss_certificate_keygen.stflb /app/programs/avss_certificate_keygen.stflb
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/avss_certificate_sign.stflb /app/programs/avss_certificate_sign.stflb
 COPY --from=builder /build/crates/stoffel-vm/src/tests/binaries/threshold_schnorr_ed25519.stflb /app/programs/threshold_schnorr_ed25519.stflb

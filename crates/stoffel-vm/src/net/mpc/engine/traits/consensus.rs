@@ -19,6 +19,8 @@ pub trait MpcEngineConsensus: MpcEngine {
 }
 
 /// Async version of `MpcEngineConsensus`.
+// async-trait 0.1.88 emits a redundant must_use on its generated future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AsyncMpcEngineConsensus: MpcEngineConsensus {
     /// Broadcast a message reliably to all parties asynchronously.

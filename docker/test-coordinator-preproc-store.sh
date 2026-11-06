@@ -10,7 +10,7 @@ WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-240}"
 EXECUTION_ID="${STOFFEL_EXECUTION_ID:-$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')}"
 DEFAULT_COORDINATOR_CONTEXT="${ROOT_DIR}/../stoffel-mpc-coordinator"
 if [[ ! -d "${DEFAULT_COORDINATOR_CONTEXT}/crates/off-chain" ]]; then
-    DEFAULT_COORDINATOR_CONTEXT="https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0"
+    DEFAULT_COORDINATOR_CONTEXT="https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00"
 fi
 COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-${DEFAULT_COORDINATOR_CONTEXT}}}"
 NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}}"

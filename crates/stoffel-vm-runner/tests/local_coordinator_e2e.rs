@@ -21,6 +21,16 @@ fn assert_all_parties_proposed(output: &LocalCoordinatorRunOutput, round: &str) 
     );
 }
 
+fn assert_round_skipped(output: &LocalCoordinatorRunOutput, round: &str) {
+    assert!(
+        !output
+            .combined_output
+            .contains(&format!("proposing {round}")),
+        "expected {round} to be skipped; output:\n{}",
+        output.combined_output
+    );
+}
+
 fn assert_all_parties_acknowledged_completion(output: &LocalCoordinatorRunOutput) {
     let acknowledgements = output
         .combined_output
@@ -61,8 +71,10 @@ async fn local_offchain_coordinator_runs_networked_vm_without_docker_compose() {
     assert_eq!(output.returned_values(), vec!["7", "7", "7", "7", "7"]);
     assert_eq!(output.consistent_returned_values().unwrap(), vec!["7"]);
     assert_all_parties_proposed(&output, "Preprocessing");
+    assert_round_skipped(&output, "InputMaskReservation");
+    assert_round_skipped(&output, "InputCollection");
     assert_all_parties_proposed(&output, "MPCExecution");
-    assert_all_parties_proposed(&output, "OutputDistribution");
+    assert_round_skipped(&output, "OutputDistribution");
     assert_all_parties_proposed(&output, "ProgramFinished");
     assert_all_parties_acknowledged_completion(&output);
 }
@@ -97,8 +109,10 @@ async fn local_offchain_coordinator_runs_avss_networked_vm_without_docker_compos
     assert_eq!(output.returned_values(), vec!["7", "7", "7", "7", "7"]);
     assert_eq!(output.consistent_returned_values().unwrap(), vec!["7"]);
     assert_all_parties_proposed(&output, "Preprocessing");
+    assert_round_skipped(&output, "InputMaskReservation");
+    assert_round_skipped(&output, "InputCollection");
     assert_all_parties_proposed(&output, "MPCExecution");
-    assert_all_parties_proposed(&output, "OutputDistribution");
+    assert_round_skipped(&output, "OutputDistribution");
     assert_all_parties_proposed(&output, "ProgramFinished");
     assert_all_parties_acknowledged_completion(&output);
 }
@@ -172,6 +186,7 @@ def main() -> int64:
 
     assert_eq!(output.returned_values(), vec!["60", "60", "60", "60", "60"]);
     assert_eq!(output.consistent_returned_values().unwrap(), vec!["60"]);
+    assert_round_skipped(&output, "OutputDistribution");
     assert_all_parties_proposed(&output, "InputMaskReservation");
     assert_all_parties_proposed(&output, "InputCollection");
 }
@@ -209,7 +224,7 @@ def main() -> int64:
     assert_all_parties_proposed(&output, "InputMaskReservation");
     assert_all_parties_proposed(&output, "InputCollection");
     assert_all_parties_proposed(&output, "MPCExecution");
-    assert_all_parties_proposed(&output, "OutputDistribution");
+    assert_round_skipped(&output, "OutputDistribution");
     assert_all_parties_proposed(&output, "ProgramFinished");
 }
 
@@ -283,6 +298,43 @@ def main() -> int64:
         .expect("local batch mul coordinator run");
 
     assert_eq!(output.consistent_returned_values().unwrap(), vec!["true"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "starts a real localhost coordinator and AVSS mesh; verifies preprocessing above the 128-item wire limit"]
+async fn local_offchain_coordinator_runs_avss_batch_mul_129_without_docker_compose() {
+    let source = r#"
+def main() -> int64:
+  var lefts: list[Share] = []
+  var rights: list[Share] = []
+  for i in 0..129:
+    lefts.append(Share.from_clear_int(i % 2, 1))
+    rights.append(Share.from_clear_int(1, 1))
+  var products = Share.batch_mul(lefts, rights)
+  return products[128].open()
+"#;
+    let options = stoffellang::CompilerOptions {
+        optimize: true,
+        mpc_backend: stoffel_vm_types::compiled_binary::MpcBackend::Avss,
+        ..Default::default()
+    };
+    let compiled = stoffellang::compile(source, "<local-runner-avss-batch-mul-129-e2e>", &options)
+        .expect("compile AVSS batch mul 129");
+    let binary = stoffellang::convert_to_binary(&compiled);
+
+    let output = LocalCoordinatorRunner::builder(env!("CARGO_BIN_EXE_stoffel-run"), binary)
+        .backend(MpcBackendKind::Avss)
+        .curve(MpcCurveConfig::Bls12_381)
+        .parties(5)
+        .threshold(1)
+        .timeout(Duration::from_secs(900))
+        .build()
+        .expect("local runner config")
+        .run()
+        .await
+        .expect("local batch mul coordinator run");
+
+    assert_eq!(output.consistent_returned_values().unwrap(), vec!["false"]);
 }
 
 #[test]
@@ -445,6 +497,9 @@ async fn local_output_only_runs_finalize_without_client_inputs() {
         assert_eq!(output.consistent_returned_values().unwrap(), vec!["7"]);
         assert_eq!(output.client_outputs.len(), 1);
         assert_eq!(output.client_outputs[0].values, vec![7]);
+        assert_round_skipped(&output, "InputMaskReservation");
+        assert_round_skipped(&output, "InputCollection");
+        assert_all_parties_proposed(&output, "OutputDistribution");
         assert_all_parties_acknowledged_completion(&output);
     }
 }

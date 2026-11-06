@@ -17,7 +17,7 @@ x-party-common: &party-common
     context: ${STOFFEL_VM_DIR:-../../..}
     dockerfile: Dockerfile
     additional_contexts:
-      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}"
       networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
   volumes:
     - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro

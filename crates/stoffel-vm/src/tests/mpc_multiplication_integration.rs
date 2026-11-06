@@ -997,8 +997,12 @@ pub async fn setup_honeybadger_quic_clients<F: FftField + 'static>(
     Ok(clients)
 }
 
+/// Renumbers clients to protocol IDs `n_parties..` in public-key order. The
+/// protocol rejects client IDs below `n_parties` so a party cannot pose as a
+/// client.
 pub async fn assign_topological_client_ids<F: FftField + 'static>(
     clients: &mut [HoneyBadgerQuicClient<F>],
+    n_parties: usize,
 ) -> Result<(), HoneyBadgerError> {
     let mut ordered_clients = Vec::with_capacity(clients.len());
     for (client_index, client) in clients.iter().enumerate() {
@@ -1011,17 +1015,21 @@ pub async fn assign_topological_client_ids<F: FftField + 'static>(
     }
 
     ordered_clients.sort_by(|(left, _), (right, _)| left.cmp(right));
-    for (protocol_id, (_, client_index)) in ordered_clients.into_iter().enumerate() {
+    for (ordinal, (_, client_index)) in ordered_clients.into_iter().enumerate() {
         clients[client_index]
-            .set_protocol_client_id(protocol_id)
+            .set_protocol_client_id(n_parties + ordinal)
             .await?;
     }
 
     Ok(())
 }
 
+/// Routes each client connection under its protocol ID. The transport numbers
+/// clients by sorted public key (`0..`), matching
+/// [`assign_topological_client_ids`] once offset past the `n_parties` party IDs.
 pub fn register_topological_client_connections<F: FftField + PrimeField + 'static>(
     servers: &[HoneyBadgerQuicServer<F>],
+    n_parties: usize,
 ) {
     for server in servers {
         let all_clients = server
@@ -1029,7 +1037,8 @@ pub fn register_topological_client_connections<F: FftField + PrimeField + 'stati
             .as_ref()
             .expect("network should be set")
             .get_all_client_connections();
-        for (client_id, conn) in all_clients {
+        for (sorted_index, conn) in all_clients {
+            let client_id = n_parties + sorted_index;
             if let Some(ref routed) = server.routed_network {
                 routed.register_client(client_id, conn.clone());
             }
@@ -1169,8 +1178,9 @@ mod tests {
             SessionId::pack_slot(0, 0, 0),
             instance_id as u32,
         );
-        // Protocol client IDs are topologically sorted client indexes.
-        let input_client_id: ClientId = 0;
+        // Protocol client IDs are topologically sorted client indexes, offset
+        // past the party IDs.
+        let input_client_id: ClientId = n_parties;
         let output_client_id: ClientId = 200;
         let clientid: Vec<ClientId> = vec![input_client_id]; // Only register input client
         let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
@@ -1266,10 +1276,10 @@ mod tests {
             );
         }
 
-        assign_topological_client_ids(&mut clients)
+        assign_topological_client_ids(&mut clients, n_parties)
             .await
             .expect("Failed to assign topological client IDs");
-        register_topological_client_connections(&servers);
+        register_topological_client_connections(&servers, n_parties);
 
         // Spawn receive-loop tasks with updated nodes and routed networks
         for (i, server) in servers.iter().enumerate() {
@@ -1555,7 +1565,7 @@ mod tests {
         let instance_id = 99997;
         let base_port = 9220; // Unique port range for test_client_input_only
                               // Define client IDs before network setup (client IDs must be registered at setup time)
-        let clientid: Vec<ClientId> = vec![0, 1];
+        let clientid: Vec<ClientId> = vec![n_parties, n_parties + 1];
         let input_values: Vec<Fr> = vec![Fr::from(10), Fr::from(20)];
 
         let mut config = HoneyBadgerQuicConfig::default();
@@ -1648,10 +1658,10 @@ mod tests {
             );
         }
 
-        assign_topological_client_ids(&mut clients)
+        assign_topological_client_ids(&mut clients, n_parties)
             .await
             .expect("Failed to assign topological client IDs");
-        register_topological_client_connections(&servers);
+        register_topological_client_connections(&servers, n_parties);
 
         // Spawn receive-loop tasks with updated nodes and routed networks
         for (i, server) in servers.iter().enumerate() {

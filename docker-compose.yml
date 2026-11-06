@@ -16,7 +16,7 @@ x-party-common: &party-common
     context: .
     dockerfile: Dockerfile
     additional_contexts:
-      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}"
       networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
   networks:
     stoffel-net:
@@ -46,7 +46,7 @@ services:
       context: .
       dockerfile: docker/coordinator.Dockerfile
       additional_contexts:
-        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}"
     container_name: stoffel-coordinator
     hostname: coordinator
     command:
@@ -54,8 +54,9 @@ services:
       - 0.0.0.0
       - --port
       - "31415"
+      # Set STOFFEL_PROGRAM_HASH when selecting different compiled bytecode.
       - --hash
-      - "0000000000000000000000000000000000000000000000000000000000000000"
+      - "${STOFFEL_PROGRAM_HASH:-ed67cd96c6ef7cec0ec9d6d6a82fa9e1b45250212aa3083cd2b5698a94513ad0}"
       - --execution-id
       - "${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001}"
       - --server-cert
@@ -68,8 +69,6 @@ services:
       - "${STOFFEL_THRESHOLD:-1}"
       - --mpc-backend
       - "${STOFFEL_MPC_BACKEND:-honeybadger}"
-      - --mpc-curve
-      - "${STOFFEL_MPC_CURVE:-bls12-381}"
       - --n-inputs
       - "0"
       - --output-clients

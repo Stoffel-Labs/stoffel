@@ -5,13 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLES_DIR="${ROOT_DIR}/examples"
 WORKSPACE_DIR="$(cd "${ROOT_DIR}/../.." && pwd)"
 VM_DIR="${STOFFEL_VM_DIR:-${WORKSPACE_DIR}}"
-COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}}"
+COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}}"
 NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}}"
 OUT_DIR="${STOFFEL_EXAMPLES_OUT:-${EXAMPLES_DIR}/dist}"
 COMPOSE_FILE="${EXAMPLES_DIR}/docker-compose.coordinator.yml"
 AUTH_TOKEN="${STOFFEL_AUTH_TOKEN:-stoffel-examples-coord-token}"
 WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-300}"
-EXPECTED_OUTPUT="${EXPECTED_OUTPUT:-315}"
+EXPECTED_OUTPUT="${EXPECTED_OUTPUT:-320}"
 
 WORKLOAD_CONTAINERS=(
   stoffel-examples-coord-party0
@@ -29,6 +29,7 @@ compose() {
   STOFFEL_COORDINATOR_CONTEXT="$COORDINATOR_CONTEXT" \
   STOFFEL_NETWORK_CONTEXT="$NETWORK_CONTEXT" \
   STOFFEL_EXAMPLES_OUT="$OUT_DIR" \
+  STOFFEL_PROGRAM_HASH="$("${VM_DIR}/target/debug/stoffel-run" --print-program-id "${OUT_DIR}/${STOFFEL_PROGRAM_NAME:-mpc_client_private_score.stflb}")" \
     docker compose -f "$COMPOSE_FILE" "$@"
 }
 
@@ -83,7 +84,7 @@ assert_zero_exit_codes() {
   done
 }
 
-if [ ! -f "${OUT_DIR}/${STOFFEL_PROGRAM_NAME:-mpc_share_arithmetic.stflb}" ]; then
+if [ ! -f "${OUT_DIR}/${STOFFEL_PROGRAM_NAME:-mpc_client_private_score.stflb}" ]; then
   echo "Compiled coordinator program not found in ${OUT_DIR}." >&2
   echo "Run examples/validate_examples.sh first." >&2
   exit 2
