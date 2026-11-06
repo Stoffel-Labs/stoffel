@@ -111,7 +111,7 @@ def backend_and_curve(name: str) -> tuple[str, str]:
         return "avss", "p-256"
     if name == "avss_share_auditor":
         return "avss", "bls12-381"
-    if name == "mpc_oprf":
+    if name in {"mpc_oprf", "threshold_signatures/threshold_bls_bls12381"}:
         return "avss", "bls12-381"
     if name == "threshold_signatures/threshold_ecdsa_p256":
         return "avss", "p-256"

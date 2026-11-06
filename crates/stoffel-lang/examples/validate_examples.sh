@@ -80,6 +80,10 @@ find "$EXAMPLES_DIR" -path "$OUT_DIR" -prune -o -name main.stfl -print | sort | 
       mpc_backend="avss"
       mpc_curve="p-256"
       ;;
+    threshold_signatures/threshold_bls_bls12381)
+      mpc_backend="avss"
+      mpc_curve="bls12-381"
+      ;;
     threshold_signatures/threshold_ecdsa_p256)
       mpc_backend="avss"
       mpc_curve="p-256"
@@ -178,7 +182,7 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
   run_docker_mpc mpc_share_arithmetic.stflb
   run_docker_mpc mpc_share_toolkit.stflb
   run_docker_mpc mpc_protocol_coordination.stflb
-  run_docker_mpc threshold_signatures_threshold_bls_bls12381.stflb honeybadger bls12-381
+  run_docker_mpc threshold_signatures_threshold_bls_bls12381.stflb avss bls12-381
   run_docker_mpc threshold_signatures_threshold_schnorr_ed25519.stflb avss ed25519
   run_docker_mpc threshold_signatures_threshold_eddsa_ed25519.stflb avss ed25519
   run_docker_mpc threshold_signatures_threshold_ecdsa_secp256k1.stflb avss secp256k1
