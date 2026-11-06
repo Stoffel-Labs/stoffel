@@ -1,4 +1,4 @@
-use super::{AvssExecutionNetwork, AvssMpcEngine};
+use super::{AvssExecutionNetwork, AvssMpcEngine, AvssMpcNode, AvssSessionId};
 use crate::net::curve::SupportedMpcField;
 use crate::storage::preproc::{
     self, agree_standing_preproc_plan_for_party, apply_standing_preproc_plan,
@@ -10,6 +10,8 @@ pub use crate::storage::preproc::{
 };
 use ark_ec::CurveGroup;
 use ark_std::rand::SeedableRng;
+use stoffelmpc_mpc::common::rbc::rbc::Avid;
+use stoffelmpc_mpc::common::share::avss::MAX_DEAL_BATCH;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::common::PreprocessingMPCProtocol;
 use tracing::info;
@@ -50,18 +52,40 @@ where
 
         {
             let mut node_clone = self.clone_avss_node().await;
-            let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-            PreprocessingMPCProtocol::<
-                F,
-                FeldmanShamirShare<F, G>,
-                AvssExecutionNetwork,
-            >::run_preprocessing(&mut *node_clone, self.protocol_net.clone(), &mut rng)
-            .await
-            .map_err(|e| format!("AVSS preprocessing failed: {:?}", e))?;
+            self.run_bounded_preprocessing(&mut node_clone).await?;
         }
 
         self.persist_preproc().await?;
         Ok(())
+    }
+
+    /// Keep each dealing within stoffelcrypto's wire limit. Version 0.1.2
+    /// appends a sacrifice candidate for every requested triple, so requesting
+    /// MAX_DEAL_BATCH triples at once would send twice that many commitments.
+    async fn run_bounded_preprocessing(
+        &self,
+        node: &mut AvssMpcNode<F, Avid<AvssSessionId>, G>,
+    ) -> Result<(), String> {
+        let requested_triples = node.params.n_triples;
+        let mut generated_target = node.preprocessing_material.lock().await.len().0;
+        let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
+        loop {
+            generated_target = generated_target
+                .saturating_add(MAX_DEAL_BATCH / 2)
+                .min(requested_triples);
+            node.params.n_triples = generated_target;
+            let result = PreprocessingMPCProtocol::<
+                F,
+                FeldmanShamirShare<F, G>,
+                AvssExecutionNetwork,
+            >::run_preprocessing(node, self.protocol_net.clone(), &mut rng)
+            .await;
+            node.params.n_triples = requested_triples;
+            result.map_err(|error| format!("AVSS preprocessing failed: {error:?}"))?;
+            if generated_target == requested_triples {
+                return Ok(());
+            }
+        }
     }
 
     async fn preproc_scope(
@@ -234,14 +258,7 @@ where
         let mut node_clone = self.clone_avss_node().await;
         node_clone.params.n_triples = needed.beaver as usize;
         node_clone.params.n_v_random_shares = needed.random as usize;
-        let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-        PreprocessingMPCProtocol::<F, FeldmanShamirShare<F, G>, AvssExecutionNetwork>::run_preprocessing(
-            &mut *node_clone,
-            self.protocol_net.clone(),
-            &mut rng,
-        )
-        .await
-        .map_err(|e| format!("AVSS top-up preprocessing failed: {:?}", e))?;
+        self.run_bounded_preprocessing(&mut node_clone).await?;
 
         let mut to_append = Vec::new();
         {
