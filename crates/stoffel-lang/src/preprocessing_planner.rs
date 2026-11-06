@@ -1183,9 +1183,10 @@ impl<'a> Planner<'a> {
                 frac_bits: fixed_frac_bits(&arg_values),
                 ..AbstractValue::secret()
             },
-            "Share.from_clear" | "Share.from_clear_int" | "Share.from_clear_uint" => {
-                AbstractValue::secret()
-            }
+            "Share.from_field"
+            | "Share.from_clear"
+            | "Share.from_clear_int"
+            | "Share.from_clear_uint" => AbstractValue::secret(),
             // `Share.from_clear_fixed(value, total_bits, frac_bits)`.
             "Share.from_clear_fixed" => AbstractValue {
                 frac_bits: Some(
