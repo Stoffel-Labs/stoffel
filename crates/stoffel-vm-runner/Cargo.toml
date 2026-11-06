@@ -49,6 +49,7 @@ uuid = { version = "=1.18.1", features = ["v4"] }
 x509-parser = "=0.18.1"
 
 [features]
+nat = ["stoffel-vm/nat"]
 statistics = ["stoffelmpc-mpc/statistics"]
 
 [dev-dependencies]

@@ -6,6 +6,8 @@
 #      docker-compose -f docker-compose.nat.yml build --build-arg ENABLE_NAT=true
 #
 #   2. The leader node needs to be publicly accessible (port forwarding required)
+#   3. Start four remote parties with distinct PARTY_ID values 1 through 4.
+#      The default five-party, threshold-one topology matches runtime validation.
 #
 # Usage:
 #   Person A (Leader - with public IP or port forwarding):
@@ -37,7 +39,7 @@ services:
       - STOFFEL_EXECUTION_ID=${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001}
       - STOFFEL_PARTY_ID=0
       - STOFFEL_BIND_ADDR=0.0.0.0:9000
-      - STOFFEL_N_PARTIES=${N_PARTIES:-2}
+      - STOFFEL_N_PARTIES=${N_PARTIES:-5}
       - STOFFEL_THRESHOLD=${THRESHOLD:-1}
       - STOFFEL_PROGRAM=/app/programs/matrix_average_fixed_point.stflb
       - STOFFEL_ENTRY=main
@@ -67,7 +69,7 @@ services:
       - STOFFEL_PARTY_ID=${PARTY_ID:-1}
       - STOFFEL_BIND_ADDR=0.0.0.0:9001
       - STOFFEL_BOOTSTRAP_ADDR=${LEADER_PUBLIC_IP:?Set LEADER_PUBLIC_IP environment variable}:9000
-      - STOFFEL_N_PARTIES=${N_PARTIES:-2}
+      - STOFFEL_N_PARTIES=${N_PARTIES:-5}
       - STOFFEL_THRESHOLD=${THRESHOLD:-1}
       - STOFFEL_PROGRAM=/app/programs/matrix_average_fixed_point.stflb
       - STOFFEL_ENTRY=main
