@@ -17,21 +17,21 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 libc = "=0.2.186"
-stoffelmpc-mpc = { package = "stoffelcrypto", version = "=0.1.1", features = ["statistics"] }
+stoffelmpc-mpc = { package = "stoffelcrypto", version = "=0.1.2", features = ["statistics"] }
 stoffelnet = "=0.1.1"
 stoffel-vm-types = { version = "=0.2.0", path = "../stoffel-vm-types" }
 alloy = "=1.8.3"
 alloy-primitives = "=1.6.0"
 x509-parser = "=0.18.1"
 
-async-trait = "=0.1.92"
+async-trait = "=0.1.88"
 redb = "=2.6.3"
-tokio = { version = "=1.52.3", features = ["full"] }
+tokio = { version = "=1.46.1", features = ["full"] }
 quinn = { version = "=0.11.11", features = ["default", "rustls", "ring"] }
 # Keep quinn-proto's alloc-only build away from tinyvec 1.13.0, which
 # fails to import the `vec!` macro in generated-project builds.
 tinyvec = "=1.11.0"
-rustls = "=0.23.41"
+rustls = "=0.23.45"
 rustls-pemfile = "=2.2.0"
 rcgen = "=0.14.8"
 bytes = "=1.12.0"
@@ -39,13 +39,13 @@ rand = "=0.9.4"
 rustc-hash = "=2.1.3"
 smallvec = "=1.15.2"
 parking_lot = "=0.12.5"
-once_cell = "=1.21.4"
-serde = { version = "=1.0.228", features = ["derive", "default"] }
+once_cell = "=1.21.3"
+serde = { version = "=1.0.229", features = ["derive", "default"] }
 ark-ff = "=0.5.0"
 ark-ec = "=0.5.0"
 ark-poly = "=0.5.0"
-uuid = { version = "=1.23.4", features = ["v4", "serde"] }
-futures = "=0.3.32"
+uuid = { version = "=1.18.1", features = ["v4", "serde"] }
+futures = "=0.3.31"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 ark-std = { version = "=0.5.0", features = ["getrandom"] }
@@ -57,15 +57,15 @@ ark-secp256k1 = { version = "=0.5.0" }
 ark-secp256r1 = { version = "=0.5.0" }
 ark-serialize = { version = "=0.5.0", features = ["ark-serialize-derive"] }
 bincode = { version = "=1.3.3", default-features = true }
-thiserror = "=2.0.18"
+thiserror = "=2.0.12"
 blake3 = "=1.8.5"
 heed = "=0.20.5"
 hex = "=0.4.3"
 dirs = "=5.0.1"
 dashmap = "=5.5.3"
-tokio-util = { version = "=0.7.18", features = ["rt"] }
+tokio-util = { version = "=0.7.15", features = ["rt"] }
 bitflags = "=2.13.0"
-sha2 = "=0.10.9"
+sha2 = "=0.10.8"
 ed25519-dalek = { version = "=2.2.0", features = ["std"] }
 curve25519-dalek = { version = "=4.1.3", features = ["alloc"] }
 
@@ -82,7 +82,7 @@ k256 = { version = "=0.13.4", features = ["ecdsa"] }
 p256 = { version = "=0.13.2", features = ["ecdsa"] }
 stoffellang = { version = "=0.2.0", path = "../stoffel-lang" }
 tempfile = "=3.27.0"
-turmoil = "=0.7.2"
+turmoil = "=0.7.1"
 
 [[bench]]
 name = "vm_benchmarks"
