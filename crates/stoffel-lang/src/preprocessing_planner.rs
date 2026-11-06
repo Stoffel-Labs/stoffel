@@ -461,8 +461,9 @@ impl<'a> Planner<'a> {
                     // `secret fix64` pins the fixed-point scale even when the
                     // initialiser (e.g. a user call) does not carry it.
                     if value.frac_bits.is_none() {
-                        value.frac_bits =
-                            type_annotation.as_deref().and_then(annotation_fixed_frac_bits);
+                        value.frac_bits = type_annotation
+                            .as_deref()
+                            .and_then(annotation_fixed_frac_bits);
                     }
                 }
                 env.insert(name.clone(), value);
@@ -1523,9 +1524,7 @@ fn annotation_contains_secret(annotation: &AstNode) -> bool {
 /// scale, matching the runtime's `SecretFixedPoint` precision.
 fn annotation_fixed_frac_bits(annotation: &AstNode) -> Option<usize> {
     match annotation {
-        AstNode::SecretType(inner) | AstNode::ListType(inner) => {
-            annotation_fixed_frac_bits(inner)
-        }
+        AstNode::SecretType(inner) | AstNode::ListType(inner) => annotation_fixed_frac_bits(inner),
         AstNode::Identifier(name, _) => matches!(
             name.as_str(),
             "fixed" | "fixed64" | "fix64" | "fixed32" | "fix32"
