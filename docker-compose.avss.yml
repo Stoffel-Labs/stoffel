@@ -1,6 +1,6 @@
 # StoffelVM 5-Node AVSS DKG Test Environment
 # This docker-compose file sets up a 5-node MPC network using the AVSS backend
-# to perform distributed key generation. Each party runs Share.random() to
+# to perform distributed key generation. Each party runs Share.random_field() to
 # generate a jointly-random secret, then extracts the public key from
 # commitment[0]. All parties should output the same public key.
 #

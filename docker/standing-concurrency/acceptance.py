@@ -59,7 +59,7 @@ class Harness:
         self.project = os.environ.get("PROJECT_NAME", f"stoffel-standing-{campaign}")
         self.wait_seconds = int(os.environ.get("WAIT_TIMEOUT_SECS", "900"))
         default_coordination = "120" if campaign == "concurrency" else "30"
-        default_protocol = "600" if campaign == "concurrency" else "45"
+        default_protocol = "600" if campaign in {"concurrency", "all-examples"} else "45"
         self.coordination_seconds = int(
             os.environ.get("COORDINATION_TIMEOUT_SECS", default_coordination)
         )

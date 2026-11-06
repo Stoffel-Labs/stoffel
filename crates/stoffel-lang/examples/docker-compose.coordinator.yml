@@ -75,7 +75,7 @@ services:
       - "31415"
       # Set STOFFEL_PROGRAM_HASH when selecting different compiled bytecode.
       - --hash
-      - "${STOFFEL_PROGRAM_HASH:-1e736a84d841212b52e68b8f008697363b7973fd1b327d123c3bdf571eb758ae}"
+      - "${STOFFEL_PROGRAM_HASH:-711dae09400f990e7062df9c2d47cbbf83e1a8c8df940ff42d215c50f3c36c69}"
       - --execution-id
       - "${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001}"
       - --server-cert

@@ -4909,7 +4909,7 @@ where
         .await?;
     }
     let mut standing_preprocessing_action = None;
-    if engine.is_standing() && n > 1 && preallocated_bundle.is_none() {
+    if (engine.is_standing() || has_preproc_store) && n > 1 && preallocated_bundle.is_none() {
         let local_snapshot = engine.standing_preproc_snapshot().await?;
         let local_targets = engine.standing_preproc_targets().await?;
         let local_proposal = StandingPreprocessingProposal {
@@ -5270,6 +5270,7 @@ where
     )
     .await
     .map_err(|e| format!("Failed to create AVSS engine: {}", e))?;
+    let has_preproc_store = preproc_store.is_some();
     configure_preproc_store(engine.as_ref(), program_hash, preproc_store)?;
     if use_program_preproc_reservoir {
         engine.use_program_preproc_reservoir();
@@ -5394,7 +5395,7 @@ where
         .await?;
     }
     let mut standing_preprocessing_action = None;
-    if engine.is_standing() && n > 1 && preallocated_bundle.is_none() {
+    if (engine.is_standing() || has_preproc_store) && n > 1 && preallocated_bundle.is_none() {
         let local_snapshot = engine.standing_preproc_snapshot().await?;
         let local_targets = engine.standing_preproc_targets().await?;
         let local_proposal = StandingPreprocessingProposal {

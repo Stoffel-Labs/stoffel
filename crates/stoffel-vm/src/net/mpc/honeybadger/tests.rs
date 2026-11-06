@@ -319,19 +319,41 @@ async fn preprocess_reserves_persistent_random_shares_when_loaded() {
         .await
         .unwrap();
 
-    let engine = test_engine(
-        Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
+    let session = MpcSessionConfig::try_new(
         next_instance_id(),
         party_id,
         n,
         t,
-    );
+        Arc::new(QuicNetworkManager::new()),
+    )
+    .unwrap();
+    let engine =
+        HoneyBadgerMpcEngine::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>::from_config(
+            HoneyBadgerEngineConfig::new(session, HoneyBadgerPreprocessingConfig::new(0, 3)),
+        )
+        .unwrap();
     engine
         .preproc_persistence_ops()
         .unwrap()
         .set_preproc_store(store.clone(), program_hash)
         .unwrap();
 
+    // Multi-party loads must not proceed without a common inventory decision.
+    assert!(engine
+        .preprocess()
+        .await
+        .unwrap_err()
+        .contains("party-agreed inventory plan"));
+    assert_eq!(store.available(&key).await.unwrap(), 3);
+    preproc::store_standing_preproc_generation(store.as_ref(), scope, [0x42; 32])
+        .await
+        .unwrap();
+    let snapshot = engine.standing_preproc_snapshot().await.unwrap();
+    let plan = engine
+        .install_standing_preproc_plan(vec![snapshot; n], [0x43; 32])
+        .await
+        .unwrap();
+    assert_eq!(plan.action, preproc::StandingPreprocAction::Reuse);
     engine.preprocess().await.unwrap();
 
     assert_eq!(
@@ -339,6 +361,15 @@ async fn preprocess_reserves_persistent_random_shares_when_loaded() {
         0,
         "persistent random shares loaded into the runtime pool must be consumed"
     );
+    let consumed = engine.standing_preproc_snapshot().await.unwrap();
+    let refill = preproc::agree_standing_preproc_plan(
+        engine.standing_preproc_targets().await.unwrap(),
+        &[consumed; 2],
+        [0x44; 32],
+    )
+    .unwrap();
+    assert_eq!(refill.action, preproc::StandingPreprocAction::TopUp);
+    assert_eq!(refill.needed.random, 3);
     assert!(
         store.load(&key).await.unwrap().is_none(),
         "consumed persistent random shares should be evicted after preload"

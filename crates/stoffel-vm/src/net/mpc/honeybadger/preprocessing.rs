@@ -2,8 +2,7 @@ use super::HoneyBadgerMpcEngine;
 use crate::net::curve::SupportedMpcField;
 use crate::storage::preproc::{
     self, agree_standing_preproc_plan_for_party, apply_standing_preproc_plan,
-    standing_preproc_snapshot, OwnedPreprocBundle, PoolAvailability, PreprocBlob, PreprocKeyScope,
-    TakenPreproc,
+    standing_preproc_snapshot, OwnedPreprocBundle, PoolAvailability, PreprocKeyScope, TakenPreproc,
 };
 pub use crate::storage::preproc::{
     agree_standing_preproc_plan, StandingPreprocAction, StandingPreprocPlan,
@@ -181,9 +180,8 @@ where
             return self.preprocess_standing().await;
         }
 
-        if self.try_load_preproc().await? {
-            self.ready.store(true, Ordering::SeqCst);
-            return Ok(());
+        if self.preproc_store.read().await.is_some() {
+            return self.preprocess_persistent_execution().await;
         }
 
         {
@@ -218,8 +216,6 @@ where
             }
             result.map_err(|e| format!("Preprocessing failed: {:?}", e))?;
         }
-
-        self.persist_preproc().await?;
 
         self.ready.store(true, Ordering::SeqCst);
         Ok(())
@@ -523,148 +519,15 @@ where
         Ok(())
     }
 
-    /// Try to load preprocessing material from the persistent store.
-    /// Returns `true` if material was loaded, `false` if nothing available.
-    async fn try_load_preproc(&self) -> Result<bool, String> {
-        let store = self.preproc_store.read().await.clone();
-        let hash = *self.program_hash.read().await;
-        let (store, hash) = match (store, hash) {
-            (Some(store), Some(hash)) => (store, hash),
-            _ => return Ok(false),
-        };
-        let identity = self.persistent_identity();
-        let scope = PreprocKeyScope::new(
-            hash,
-            F::field_kind(),
-            self.topology.n_parties(),
-            self.topology.threshold(),
-            identity,
-        );
-        let requested = store.scope_availability(&scope).await?;
-        if requested == PoolAvailability::default() {
-            return Ok(false);
-        }
-
-        // One transaction removes the complete bundle before it reaches RAM.
-        // Concurrent engines therefore cannot observe or consume the same
-        // correlated material.
-        let bundle = store.take_bundle_from_reservoir(&scope, requested).await?;
-        let loaded = bundle.availability();
-        self.activate_preproc_bundle(bundle).await?;
-        let msg = format!(
-            "Loaded preprocessing material from store for program {} (identity={}, n={}, t={}, triples={}, randoms={}, prandbits={}, prandints={})",
-            hex::encode(hash),
-            identity,
-            self.topology.n_parties(),
-            self.topology.threshold(),
-            loaded.beaver,
-            loaded.random,
-            loaded.prand_bit,
-            loaded.prand_int,
-        );
-        eprintln!("{msg}");
-        tracing::info!("{msg}");
-        Ok(true)
-    }
-
-    /// Persist current preprocessing material to the store.
-    ///
-    /// Drains and serializes material inside the lock, then releases the lock
-    /// before the async store writes to minimise lock hold time.
-    async fn persist_preproc(&self) -> Result<(), String> {
-        let store = self.preproc_store.read().await.clone();
-        let hash = *self.program_hash.read().await;
-        let (store, hash) = match (store, hash) {
-            (Some(s), Some(h)) => (s, h),
-            _ => return Ok(()),
-        };
-        let persistent_identity = self.persistent_identity();
-
-        let scope = PreprocKeyScope::new(
-            hash,
-            F::field_kind(),
-            self.topology.n_parties(),
-            self.topology.threshold(),
-            persistent_identity,
-        );
-        let base = scope.beaver_triple();
-
-        let mut to_store = Vec::new();
-        let mut restore_bt = None;
-        let mut restore_rs = None;
-        let mut restore_pb = None;
-        let mut restore_pi = None;
-
-        {
-            let node = self.clone_node().await;
-            let mut prep = node.preprocessing_material.lock().await;
-            let _m = prep.length();
-            let (n_bt, n_rs, n_pb, n_pi) =
-                (_m.beaver_triples, _m.random_shr, _m.randbit, _m.prandint);
-
-            if n_bt > 0 {
-                let items = prep
-                    .take_beaver_triples(n_bt)
-                    .map_err(|e| format!("{e:?}"))?;
-                let (data, item_size) = preproc::serialize_beaver_triples::<F>(&items)?;
-                to_store.push((
-                    base.clone(),
-                    PreprocBlob::try_new(data, item_size, items.len())?,
-                ));
-                restore_bt = Some(items);
-            }
-            if n_rs > 0 {
-                let items = prep
-                    .take_random_shares(n_rs)
-                    .map_err(|e| format!("{e:?}"))?;
-                let (data, item_size) = preproc::serialize_robust_shares::<F>(&items)?;
-                to_store.push((
-                    scope.random_share(),
-                    PreprocBlob::try_new(data, item_size, items.len())?,
-                ));
-                restore_rs = Some(items);
-            }
-            if n_pb > 0 {
-                let items = prep
-                    .take_randbit_shares(n_pb)
-                    .map_err(|e| format!("{e:?}"))?;
-                let (data, item_size) = preproc::serialize_robust_shares::<F>(&items)?;
-                to_store.push((
-                    scope.rand_bit(),
-                    PreprocBlob::try_new(data, item_size, items.len())?,
-                ));
-                restore_pb = Some(items);
-            }
-            if n_pi > 0 {
-                let items = prep
-                    .take_prandint_shares(n_pi)
-                    .map_err(|e| format!("{e:?}"))?;
-                let (data, item_size) = preproc::serialize_robust_shares::<F>(&items)?;
-                to_store.push((
-                    scope.prand_int(),
-                    PreprocBlob::try_new(data, item_size, items.len())?,
-                ));
-                restore_pi = Some(items);
-            }
-
-            prep.add(restore_bt, restore_rs, restore_pb, restore_pi);
-        }
-
-        for (key, blob) in &to_store {
-            store.store(key, blob).await?;
-        }
-
-        let msg = format!(
-            "Persisted preprocessing material to store for program {} (identity={}, n={}, t={}, blobs={})",
-            hex::encode(hash),
-            persistent_identity,
-            self.topology.n_parties(),
-            self.topology.threshold(),
-            to_store.len()
-        );
-        eprintln!("{msg}");
-        tracing::info!("{msg}");
-        Ok(())
+    /// Agree and refill the persistent inventory, then remove this execution's
+    /// entire allocation before making any correlated material available in RAM.
+    /// A subsequent process must refill consumed material rather than reuse it.
+    async fn preprocess_persistent_execution(&self) -> Result<(), String> {
+        self.preprocess_standing().await?;
+        let targets = self.standing_preproc_targets().await?;
+        let (store, _, scope) = self.preproc_scope().await?;
+        let bundle = store.take_bundle_from_reservoir(&scope, targets).await?;
+        self.activate_preproc_bundle(bundle).await
     }
 
     async fn fill_random_share_cache(
