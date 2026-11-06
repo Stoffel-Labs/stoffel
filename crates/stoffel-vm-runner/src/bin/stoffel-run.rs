@@ -1766,13 +1766,13 @@ fn store_reserved_client_inputs<F, I>(
     client_input_count: usize,
     client_input_slots: &std::collections::HashMap<I, usize>,
     client_input_types: &std::collections::BTreeMap<usize, Vec<ShareType>>,
-) where
+) -> Result<(), String>
+where
     F: ark_ff::FftField,
     I: Eq + std::hash::Hash + std::fmt::Debug,
 {
     if client_input_count == 0 {
-        eprintln!("--client-input-count must be greater than 0");
-        exit(13);
+        return Err("--client-input-count must be greater than 0".to_owned());
     }
 
     let mut seen_reserved_indices = std::collections::HashSet::new();
@@ -1785,30 +1785,27 @@ fn store_reserved_client_inputs<F, I>(
 
     for (client_id, shares) in client_inputs {
         if shares.is_empty() {
-            eprintln!(
+            return Err(format!(
                 "Coordinator returned zero input shares for client {:?}",
                 client_id
-            );
-            exit(13);
+            ));
         }
         let reserved_indices = match client_to_indices.get(&client_id) {
             Some(indices) => indices,
             None => {
-                eprintln!(
+                return Err(format!(
                     "Coordinator returned input for client {:?} without a reserved index",
                     client_id
-                );
-                exit(13);
+                ));
             }
         };
         if reserved_indices.len() != shares.len() {
-            eprintln!(
+            return Err(format!(
                 "Coordinator returned {} input shares for client {:?}, but {} reserved indices were recorded",
                 shares.len(),
                 client_id,
                 reserved_indices.len()
-            );
-            exit(13);
+            ));
         }
 
         let mut indexed_shares: Vec<(u64, RobustShare<F>)> =
@@ -1818,28 +1815,25 @@ fn store_reserved_client_inputs<F, I>(
         let client_slot = match client_input_slots.get(&client_id) {
             Some(slot) => *slot,
             None => {
-                eprintln!(
+                return Err(format!(
                     "Coordinator returned input for client {:?} without an admitted manifest slot",
                     client_id
-                );
-                exit(13);
+                ));
             }
         };
         let mut ordered_shares = Vec::with_capacity(indexed_shares.len());
         for (reserved_index, share) in indexed_shares {
             if reserved_index > usize::MAX as u64 {
-                eprintln!(
+                return Err(format!(
                     "Coordinator reserved index {} exceeds local usize range",
                     reserved_index
-                );
-                exit(13);
+                ));
             }
             if !seen_reserved_indices.insert(reserved_index as usize) {
-                eprintln!(
+                return Err(format!(
                     "Coordinator assigned duplicate reserved index {} while collecting inputs",
                     reserved_index
-                );
-                exit(13);
+                ));
             }
             ordered_shares.push(share);
         }
@@ -1853,12 +1847,12 @@ fn store_reserved_client_inputs<F, I>(
         (client_slot, shares, share_types)
     });
     if let Err(error) = vm.try_replace_client_inputs_with_types(inputs) {
-        eprintln!(
+        return Err(format!(
             "Failed to atomically hydrate client input shares: {}",
             error
-        );
-        exit(13);
+        ));
     }
+    Ok(())
 }
 fn store_reserved_client_inputs_feldman<F, G, I>(
     vm: &mut VirtualMachine,
@@ -1867,14 +1861,14 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
     client_input_count: usize,
     client_input_slots: &std::collections::HashMap<I, usize>,
     client_input_types: &std::collections::BTreeMap<usize, Vec<ShareType>>,
-) where
+) -> Result<(), String>
+where
     F: SupportedMpcField,
     G: CurveGroup<ScalarField = F>,
     I: Eq + std::hash::Hash + std::fmt::Debug,
 {
     if client_input_count == 0 {
-        eprintln!("--client-input-count must be greater than 0");
-        exit(13);
+        return Err("--client-input-count must be greater than 0".to_owned());
     }
 
     let mut seen_reserved_indices = std::collections::HashSet::new();
@@ -1884,30 +1878,27 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
 
     for (client_id, shares) in client_inputs {
         if shares.is_empty() {
-            eprintln!(
+            return Err(format!(
                 "Coordinator returned zero AVSS input shares for client {:?}",
                 client_id
-            );
-            exit(13);
+            ));
         }
         let reserved_indices = match client_to_indices.get(&client_id) {
             Some(indices) => indices,
             None => {
-                eprintln!(
+                return Err(format!(
                     "Coordinator returned input for client {:?} without a reserved index",
                     client_id
-                );
-                exit(13);
+                ));
             }
         };
         if reserved_indices.len() != shares.len() {
-            eprintln!(
+            return Err(format!(
                 "Coordinator returned {} AVSS input shares for client {:?}, but {} reserved indices were recorded",
                 shares.len(),
                 client_id,
                 reserved_indices.len()
-            );
-            exit(13);
+            ));
         }
 
         let mut indexed_shares: Vec<(u64, FeldmanShamirShare<F, G>)> =
@@ -1917,28 +1908,25 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
         let client_slot = match client_input_slots.get(&client_id) {
             Some(slot) => *slot,
             None => {
-                eprintln!(
+                return Err(format!(
                     "Coordinator returned AVSS input for client {:?} without an admitted manifest slot",
                     client_id
-                );
-                exit(13);
+                ));
             }
         };
         let mut ordered_shares = Vec::with_capacity(indexed_shares.len());
         for (reserved_index, share) in indexed_shares {
             if reserved_index > usize::MAX as u64 {
-                eprintln!(
+                return Err(format!(
                     "Coordinator reserved index {} exceeds local usize range",
                     reserved_index
-                );
-                exit(13);
+                ));
             }
             if !seen_reserved_indices.insert(reserved_index as usize) {
-                eprintln!(
+                return Err(format!(
                     "Coordinator assigned duplicate reserved index {} while collecting inputs",
                     reserved_index
-                );
-                exit(13);
+                ));
             }
             ordered_shares.push(share);
         }
@@ -1954,13 +1942,13 @@ fn store_reserved_client_inputs_feldman<F, G, I>(
             vm.try_store_client_input_feldman(client_slot, shares)
         };
         if let Err(error) = result {
-            eprintln!(
+            return Err(format!(
                 "Failed to store AVSS input shares for client slot {}: {}",
                 client_slot, error
-            );
-            exit(13);
+            ));
         }
     }
+    Ok(())
 }
 fn configure_preproc_store(
     engine: &dyn MpcEngine,
@@ -2304,7 +2292,7 @@ where
         client_input_count,
         client_input_slots_by_id,
         client_input_types,
-    );
+    )?;
     mark_input_path_phase(InputPathPhase::Complete, profile_clients, total_input_count);
 
     Ok(())
@@ -5953,7 +5941,7 @@ where
             client_input_count,
             &client_input_slots_by_id,
             client_input_types,
-        );
+        )?;
     }
 
     eprintln!("[party {my_id}] proposing MPCExecution");
@@ -7148,7 +7136,7 @@ impl StandingRunnerExecutionHandler {
                 client_input_count,
                 &client_input_slots_by_id,
                 client_input_types,
-            );
+            )?;
         }
 
         eprintln!("[party {}] proposing MPCExecution", self.party_id);
@@ -10101,11 +10089,13 @@ mod tests {
         preprocessing_transcript_ack_if_complete, preprocessing_transcript_digest,
         record_preprocessing_exchange_value, render_fixed_point_i64,
         resolve_client_protocol_bindings, standing_preproc_pool_program_id,
-        standing_reservoir_plan, standing_reservoir_refill_execution_id, validate_cli_mode_flags,
-        validate_cli_option_values, validate_client_server_count, validate_preprocessing_proposals,
-        validate_required_cli_parameters, validate_reservoir_allocation_admission,
-        CoordinatorOutputFormat, ExecutionTaskGroup, PreprocessingExchangeFrame,
-        PreprocessingExchangeMessage, PreprocessingExchangePhase, ReservoirAllocationSnapshot,
+        standing_reservoir_plan, standing_reservoir_refill_execution_id,
+        store_reserved_client_inputs, store_reserved_client_inputs_feldman,
+        validate_cli_mode_flags, validate_cli_option_values, validate_client_server_count,
+        validate_preprocessing_proposals, validate_required_cli_parameters,
+        validate_reservoir_allocation_admission, CoordinatorOutputFormat, ExecutionTaskGroup,
+        FeldmanShamirShare, PreprocessingExchangeFrame, PreprocessingExchangeMessage,
+        PreprocessingExchangePhase, ReservoirAllocationSnapshot, RobustShare,
         StandingPreprocessingProposal,
     };
     use std::collections::{BTreeMap, HashSet};
@@ -10126,6 +10116,92 @@ mod tests {
     use stoffel_vm_types::core_types::{
         ClearShareInput, ClearShareValue, ShareData, ShareType, Value,
     };
+    use stoffelmpc_mpc::common::SecretSharingScheme;
+
+    /// Reservations for clients 1 and 2. The maps are keyed the way the helpers see them: by
+    /// client identity, with client 1 reserving one index.
+    fn single_reservation_fixture() -> (
+        std::collections::HashMap<u8, Vec<u64>>,
+        std::collections::HashMap<u8, usize>,
+        BTreeMap<usize, Vec<ShareType>>,
+    ) {
+        (
+            std::collections::HashMap::from([(1, vec![0])]),
+            std::collections::HashMap::from([(1, 0)]),
+            BTreeMap::new(),
+        )
+    }
+
+    // A standing node hosts unrelated runs in one process, so input data that does not match the
+    // reservations has to fail with an error. Before this returned an error it called `exit`,
+    // which would also have ended this test binary.
+    #[test]
+    fn hb_inputs_that_do_not_match_reservations_fail_with_an_error() {
+        let shares = RobustShare::<ark_bls12_381::Fr>::compute_shares(
+            ark_bls12_381::Fr::from(5u64),
+            5,
+            1,
+            None,
+            &mut ark_std::test_rng(),
+        )
+        .unwrap();
+        let (indices, slots, types) = single_reservation_fixture();
+        let store = |inputs: Vec<(u8, Vec<_>)>, input_count| {
+            store_reserved_client_inputs(
+                &mut VirtualMachine::new(),
+                &indices,
+                inputs.into_iter().collect(),
+                input_count,
+                &slots,
+                &types,
+            )
+        };
+
+        let extra = store(vec![(1, shares[..2].to_vec())], 1).unwrap_err();
+        assert!(extra.contains("2 input shares"), "{extra}");
+        let empty = store(vec![(1, Vec::new())], 1).unwrap_err();
+        assert!(empty.contains("zero input shares"), "{empty}");
+        let unknown = store(vec![(9, shares[..1].to_vec())], 1).unwrap_err();
+        assert!(unknown.contains("without a reserved index"), "{unknown}");
+        let no_inputs = store(vec![(1, shares[..1].to_vec())], 0).unwrap_err();
+        assert!(no_inputs.contains("--client-input-count"), "{no_inputs}");
+        store(vec![(1, shares[..1].to_vec())], 1).expect("inputs match the reservations");
+    }
+
+    #[test]
+    fn avss_inputs_that_do_not_match_reservations_fail_with_an_error() {
+        let ids = [1, 2, 3, 4, 5];
+        let shares =
+            FeldmanShamirShare::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>::compute_shares(
+                ark_bls12_381::Fr::from(5u64),
+                5,
+                1,
+                Some(&ids),
+                &mut ark_std::test_rng(),
+            )
+            .unwrap();
+        let (indices, slots, types) = single_reservation_fixture();
+        let store = |inputs: Vec<(u8, Vec<_>)>, input_count| {
+            store_reserved_client_inputs_feldman(
+                &mut VirtualMachine::new(),
+                &indices,
+                inputs.into_iter().collect(),
+                input_count,
+                &slots,
+                &types,
+            )
+        };
+
+        let extra = store(vec![(1, shares[..2].to_vec())], 1).unwrap_err();
+        assert!(extra.contains("2 AVSS input shares"), "{extra}");
+        let empty = store(vec![(1, Vec::new())], 1).unwrap_err();
+        assert!(empty.contains("zero AVSS input shares"), "{empty}");
+        let unknown = store(vec![(9, shares[..1].to_vec())], 1).unwrap_err();
+        assert!(unknown.contains("without a reserved index"), "{unknown}");
+        let no_inputs = store(vec![(1, shares[..1].to_vec())], 0).unwrap_err();
+        assert!(no_inputs.contains("--client-input-count"), "{no_inputs}");
+        store(vec![(1, shares[..1].to_vec())], 1).expect("inputs match the reservations");
+    }
 
     #[test]
     fn resolves_positional_client_program_independent_of_option_order() {

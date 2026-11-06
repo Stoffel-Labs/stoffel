@@ -1005,6 +1005,7 @@ pub enum CoordinatorRPCBaseError {
     ExecutionAlreadyRegistered = 17,
     ShutdownNotAccepted = 18,
     EmptyBatch = 19,
+    DuplicateIndex = 20,
 }
 
 /// Every round except `Idle`, in protocol order.
@@ -1016,6 +1017,25 @@ const ORDERED_ROUNDS: [Round; 6] = [
     Round::OutputDistribution,
     Round::ProgramFinished,
 ];
+
+/// Rejects a batch that names the same index twice.
+///
+/// Batch validation checks each index against the state from before the batch, so without this
+/// guard every occurrence of an index would pass, and the event would hold more entries than the
+/// batch fills slots. Parties count those entries, so it has to run before any state changes.
+fn reject_duplicate_indices(indices: &[u64]) -> RpcResult<()> {
+    let mut seen = HashSet::with_capacity(indices.len());
+    for &index in indices {
+        if !seen.insert(index) {
+            return Err(ErrorObjectOwned::owned(
+                ErrorCode::ServerError(DuplicateIndex as i32).code(),
+                format!("The index {index} occurs more than once in this batch."),
+                None::<()>,
+            ));
+        }
+    }
+    Ok(())
+}
 
 fn execution_not_found(execution_id: ExecutionId) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
@@ -2020,6 +2040,8 @@ impl CoordinatorRPCBaseServer for CoordinatorRPCServerConnectionBase {
             ));
         }
 
+        reject_duplicate_indices(&reserved_indices)?;
+
         // Validate every index before applying any of them, so the batch is atomic: either all
         // of `reserved_indices` end up with a masked input recorded, or (on error) none do.
         for &raw_reserved_index in &reserved_indices {
@@ -2225,6 +2247,8 @@ impl CoordinatorRPCBaseServer for CoordinatorRPCServerConnectionBase {
                 None::<()>,
             ));
         }
+
+        reject_duplicate_indices(&indices)?;
 
         // Clients must reserve all of their indices in a single (batched) call: once a client
         // owns any entry in `reserved_indices`, it gets no second call to add more piecemeal.
@@ -2865,16 +2889,20 @@ impl<F: FftField, S: ShareBound<F>> Coordinator<F, S> for OffChainCoordinatorCli
         // Each event now carries every (index, masked input) pair submitted by one
         // `submit_masked_input`/`submit_masked_inputs` call, so a single event can satisfy
         // several of the `n_inputs` we're waiting for -- keep receiving events (not just
-        // `n_inputs` of them) until enough inputs have actually been seen.
-        let mut received = 0u64;
-        while received < n_inputs {
+        // `n_inputs` of them) until enough inputs have actually been seen. Only distinct indices
+        // count: a repeated one fills no new slot, so this fails instead of returning a set of
+        // inputs that does not match the reservations.
+        let mut seen = HashSet::new();
+        while (seen.len() as u64) < n_inputs {
             if let Some(Ok(Event::MaskedInputEvent {
                 client,
                 masked_inputs,
             })) = sub.next().await
             {
-                received += masked_inputs.len() as u64;
                 for (reserved_index, masked_input) in masked_inputs {
+                    if !seen.insert(reserved_index) {
+                        return Err(CoordinatorError::DuplicateIndex(reserved_index));
+                    }
                     let i = reserved_index as usize;
                     let mask_share = &mask_shares[i];
                     let masked_input =
