@@ -202,7 +202,10 @@ class Harness:
             "== Building the exact VM, coordinator, and networking worktrees ==",
             flush=True,
         )
-        self.compose("--profile", "tools", "build")
+        if os.environ.get("STOFFEL_SKIP_BUILD") == "1":
+            print("Using existing images (STOFFEL_SKIP_BUILD=1).", flush=True)
+        else:
+            self.compose("--profile", "tools", "build")
         self.command(["docker", "image", "inspect", self.image], capture=True)
         self.record_provenance(coordinator, networking)
         self.assert_credentials()
