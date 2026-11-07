@@ -1159,3 +1159,39 @@ fn honeybadger_exponent_open_fails_closed_without_verifiable_shares() {
     assert!(error.contains("disabled for Byzantine-threshold sessions"));
     assert!(error.contains("AVSS backend"));
 }
+
+#[tokio::test]
+async fn one_bit_randomness_consumes_bits_not_wide_integers() {
+    use stoffel_vm_types::core_types::ShareType;
+    type Engine = HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>;
+    let engine = test_engine(
+        Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
+        next_instance_id(),
+        0,
+        5,
+        1,
+    );
+    let node = engine.clone_node().await;
+    let bits = [0u64, 1]
+        .into_iter()
+        .map(|v| RobustShare::new(ark_bls12_381::Fr::from(v), 0, 1))
+        .collect();
+    node.preprocessing_material.lock().await.add(
+        None,
+        None,
+        Some(bits),
+        Some(vec![RobustShare::new(ark_bls12_381::Fr::from(7u64), 0, 1)]),
+    );
+    for expected in [0u64, 1] {
+        let value = engine
+            .random_integer_share_async_impl(ShareType::boolean())
+            .await
+            .unwrap();
+        let share = Engine::decode_share(value.as_bytes()).unwrap();
+        assert_eq!(share.share[0], ark_bls12_381::Fr::from(expected));
+    }
+    assert_eq!(
+        node.preprocessing_material.lock().await.length().prandint,
+        1
+    );
+}

@@ -727,8 +727,29 @@ where
     /// Pull one pre-generated PRandInt share from the preprocessing pool.
     pub(super) async fn random_integer_share_async_impl(
         &self,
-        _ty: ShareType,
+        ty: ShareType,
     ) -> Result<ShareData, String> {
+        if matches!(
+            ty,
+            ShareType::SecretInt { bit_length: 1 } | ShareType::SecretUInt { bit_length: 1 }
+        ) {
+            let shares = match self.reserve_randbit_shares(1).await {
+                Ok(shares) => shares,
+                Err(error) if self.is_standing() => return Err(error),
+                Err(_) => {
+                    let mut node = self.clone_node().await;
+                    node.params.n_randbit = node.params.n_randbit.max(1);
+                    node.params.n_zero_shares = node.params.n_zero_shares.max(1);
+                    node.params.n_random_shares = node.params.n_random_shares.max(1);
+                    let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
+                    node.run_preprocessing(self.protocol_net.clone(), &mut rng)
+                        .await
+                        .map_err(|e| format!("Failed to generate a random bit: {e:?}"))?;
+                    self.reserve_randbit_shares(1).await?
+                }
+            };
+            return Self::encode_share(&shares[0]).map(|v| ShareData::Opaque(v.into()));
+        }
         let shares = self.reserve_prandint_shares(1).await?;
         Self::encode_share(&shares[0]).map(|v| ShareData::Opaque(v.into()))
     }

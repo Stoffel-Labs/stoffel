@@ -35,15 +35,15 @@ from acceptance import (
 
 PARAMETERIZED_ENTRY_WRAPPERS = {
     "mpc_bitwise_share": """
-def __standing_example_main() -> None:
+def main() -> None:
   __example_parameterized_main([Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)], [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)])
 """,
     "mpc_polynomial_unbounded_or": """
-def __standing_example_main() -> bool:
+def main() -> bool:
   return __example_parameterized_main([Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)])
 """,
     "mpc_aes128_transcipher": """
-def __standing_example_main() -> int64:
+def main() -> int64:
   var ciphertext: list[int64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
   while ciphertext.len() < 128:
     ciphertext.append(0)
@@ -163,7 +163,7 @@ def augment_source(name: str, source: str, _inputs: dict[int, list[str]]) -> tup
             flags=re.MULTILINE,
         )
         additions.append(wrapper)
-        entry = "__standing_example_main"
+        entry = "main"
 
     return source.rstrip() + "\n" + "\n".join(additions) + "\n", entry
 

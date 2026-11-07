@@ -1170,7 +1170,14 @@ impl<'a> Planner<'a> {
             }
             "Share.random" | "Share.random_int" => {
                 match self.mpc_backend {
-                    MpcBackend::HoneyBadger => demand.add(0, 0, 0, 1),
+                    MpcBackend::HoneyBadger => {
+                        match (name.as_str(), arg_values.first().and_then(|v| v.int)) {
+                            (_, Some(1)) => demand.add(0, 0, 1, 0),
+                            ("Share.random", _) | (_, Some(_)) => demand.add(0, 0, 0, 1),
+                            // A runtime bit width may select either pool.
+                            (_, None) => demand.add(0, 0, 1, 1),
+                        }
+                    }
                     MpcBackend::Avss => demand.add(0, 1, 0, 0),
                 }
                 AbstractValue::secret()
@@ -1631,6 +1638,13 @@ mod tests {
     /// report ZERO demand with `dynamic: false` (the stale pre-loop list
     /// length made the post-loop `batch_mul` count len 0), starving the
     /// runtime preprocessing pool.
+    #[test]
+    fn one_bit_randomness_uses_randbit_material() {
+        let demand = demand_for("def main() -> Share:\n  return Share.random_int(1)\n");
+        assert_eq!(demand.prandbits, 1);
+        assert_eq!(demand.prandints, 0);
+    }
+
     #[test]
     fn counted_while_batch_mul_provisions_like_for() {
         let src = r#"
