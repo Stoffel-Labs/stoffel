@@ -4767,7 +4767,9 @@ def main() -> int64:
     assert_eq!(demand.randoms, 1);
     assert_eq!(demand.prandints, 2);
     assert_eq!(demand.triples, 0);
-    assert_eq!(demand.prandbits, 0);
+    // Generic random() is lowered using its contextual type after planning.
+    // Reserve both pools so a one-bit lowering cannot exhaust its allocation.
+    assert_eq!(demand.prandbits, 1);
     assert!(!demand.dynamic);
 }
 
@@ -4822,7 +4824,9 @@ def main() -> int64:
     assert_eq!(demand.randoms, 4);
     assert_eq!(demand.prandints, 8);
     assert_eq!(demand.triples, 0);
-    assert_eq!(demand.prandbits, 0);
+    // Generic random() is lowered using its contextual type after planning.
+    // Reserve both pools so a one-bit lowering cannot exhaust its allocation.
+    assert_eq!(demand.prandbits, 4);
     assert!(!demand.dynamic);
 }
 
