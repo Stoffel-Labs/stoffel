@@ -80,7 +80,7 @@ find "$EXAMPLES_DIR" -path "$OUT_DIR" -prune -o -name main.stfl -print | sort | 
       mpc_backend="avss"
       mpc_curve="p-256"
       ;;
-    threshold_signatures/threshold_bls_bls12381)
+    mpc_dh_psi|mpc_oprf|threshold_signatures/threshold_bls_bls12381)
       mpc_backend="avss"
       mpc_curve="bls12-381"
       ;;
