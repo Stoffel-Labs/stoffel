@@ -53,3 +53,6 @@ dont\ look\ pls/
 docker/standing-concurrency/all_examples.py
 **/__pycache__/
 crates/stoffel-lang/examples/dist/
+
+# Host-only catalog scheduler tests
+docker/standing-concurrency/test_*.py

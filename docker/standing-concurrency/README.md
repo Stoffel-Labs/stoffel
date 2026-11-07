@@ -135,3 +135,9 @@ The program manifest is the sole source of the MPC backend, curve, and client
 input shape. The matrix keeps backend and curve as fixture metadata only so the
 driver can select an artifact and launch a compatible test client; they are not
 fields in the standing admission.
+
+The full example catalog distributes programs across sixteen-wide waves using
+manifest preprocessing demand as a workload estimate. Every example still runs
+once on the same standing nodes. Set `STOFFEL_ALL_EXAMPLES_SOURCE_ORDER=1` to use
+alphabetical waves as a concentrated-load stress test; grouping all AES circuits
+can exceed the MPC dependency's bounded session admission on lagging parties.

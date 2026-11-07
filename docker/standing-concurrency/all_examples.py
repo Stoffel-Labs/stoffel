@@ -56,12 +56,10 @@ def main() -> int64:
 """,
 }
 
-# A full 189-way online fan-out is useful as a stress/profile mode, but the MPC
-# dependency can intermittently strand first-round batch multiplications at
-# that load even when the VM dispatcher and transport remain healthy. Sixteen
-# preserves substantial overlap while the complete catalog has demonstrated
-# end-to-end progress on one persistent mesh. The environment override retains
-# explicit stress testing at any desired fan-out.
+# Retain sixteen concurrent examples, while distributing large preprocessing
+# demands across waves. Alphabetical order clusters the AES circuits and can
+# exhaust the MPC dependency's bounded session admission on lagging parties.
+# STOFFEL_ALL_EXAMPLES_SOURCE_ORDER=1 preserves that concentrated stress mode.
 DEFAULT_ALL_EXAMPLES_WAVE_SIZE = 16
 
 
@@ -490,6 +488,10 @@ class AllExamplesHarness(Harness):
                     "entry": entry,
                     "backend": backend,
                     "curve": curve,
+                    "preprocessing_work": sum(
+                        int(report["manifest"]["preprocessing_demand"][kind])
+                        for kind in ("triples", "randoms", "prandbits", "prandints")
+                    ),
                     "dynamic": bool(
                         report["manifest"]["preprocessing_demand"]["dynamic"]
                     ),
@@ -679,6 +681,23 @@ def run_wave(
     return sequence, number
 
 
+def schedule_waves(examples: list[dict[str, Any]], wave_size: int) -> list[list[dict[str, Any]]]:
+    """Keep concurrency while avoiding an alphabetical cluster of AES circuits."""
+    if wave_size <= 0:
+        raise ValueError("wave_size must be positive")
+    if not examples:
+        return []
+    if os.environ.get("STOFFEL_ALL_EXAMPLES_SOURCE_ORDER") == "1":
+        return [examples[i:i + wave_size] for i in range(0, len(examples), wave_size)]
+    waves: list[list[dict[str, Any]]] = [[] for _ in range((len(examples) + wave_size - 1) // wave_size)]
+    loads = [0] * len(waves)
+    for item in sorted(examples, key=lambda item: (-item["preprocessing_work"], item["name"])):
+        index = min((i for i, wave in enumerate(waves) if len(wave) < wave_size), key=lambda i: (loads[i], len(waves[i]), i))
+        waves[index].append(item)
+        loads[index] += item["preprocessing_work"]
+    return waves
+
+
 def run_all_examples(harness: AllExamplesHarness) -> None:
     harness.initialize_catalog()
     unique_programs = len({item["program_id"] for item in harness.catalog})
@@ -707,17 +726,17 @@ def run_all_examples(harness: AllExamplesHarness) -> None:
             "STOFFEL_ALL_EXAMPLES_WAVE_SIZE must be a positive integer"
         )
     wave_size = min(wave_size, len(concurrent))
-    wave_count = (len(concurrent) + wave_size - 1) // wave_size
+    waves = schedule_waves(concurrent, wave_size)
+    wave_count = len(waves)
     print(
         f"== Running {len(concurrent)} examples in {wave_count} concurrent "
         f"wave(s) of up to {wave_size} ==",
         flush=True,
     )
     sequence, number = 1, 10_000
-    for start in range(0, len(concurrent), wave_size):
-        wave = concurrent[start : start + wave_size]
+    for index, wave in enumerate(waves, 1):
         print(
-            f"== Concurrent wave {start // wave_size + 1}/{wave_count}: "
+            f"== Concurrent wave {index}/{wave_count}: "
             f"{len(wave)} examples ==",
             flush=True,
         )
