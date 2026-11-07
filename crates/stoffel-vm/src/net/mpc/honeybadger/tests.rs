@@ -1195,3 +1195,76 @@ async fn one_bit_randomness_consumes_bits_not_wide_integers() {
         1
     );
 }
+
+#[tokio::test]
+async fn completed_session_history_covers_planned_work_without_raising_active_limits() {
+    use stoffelmpc_mpc::common::ProtocolSessionId;
+    use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
+    let session = MpcSessionConfig::try_new(
+        next_instance_id(),
+        0,
+        5,
+        1,
+        Arc::new(QuicNetworkManager::new()),
+    )
+    .unwrap();
+    let engine =
+        HoneyBadgerMpcEngine::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>::from_config(
+            HoneyBadgerEngineConfig::new(session, HoneyBadgerPreprocessingConfig::new(2048, 0)),
+        )
+        .unwrap();
+    let node = engine.clone_node().await;
+    let id = |counter, child, round| {
+        SessionId::new(
+            ProtocolType::Mul,
+            SessionId::pack_slot(counter, child, round),
+            node.params.instance_id,
+        )
+    };
+    for counter in 0..2048 {
+        node.operations
+            .mul
+            .mult_storage
+            .lock()
+            .await
+            .retire(id(counter, 0, 0));
+        for child in 0..2 {
+            node.operations
+                .mul
+                .batch_recon
+                .store
+                .lock()
+                .await
+                .retire(id(counter, child, 1));
+        }
+    }
+    assert!(node
+        .operations
+        .mul
+        .get_or_create_mult_storage(id(0, 0, 0), 0)
+        .await
+        .is_none());
+    let mut batch = node.operations.mul.batch_recon.store.lock().await;
+    for child in 0..2 {
+        assert!(batch
+            .get_or_create_with(id(0, child, 1), || panic!("completed child recreated"))
+            .is_none());
+    }
+    assert_eq!(batch.len(), 0);
+    drop(batch);
+    assert_eq!(node.operations.mul.store_len().await, 0);
+    for counter in 3000..3204 {
+        assert!(node
+            .operations
+            .mul
+            .get_or_create_mult_storage(id(counter, 0, 0), 0)
+            .await
+            .is_some());
+    }
+    assert!(node
+        .operations
+        .mul
+        .get_or_create_mult_storage(id(3204, 0, 0), 0)
+        .await
+        .is_none());
+}

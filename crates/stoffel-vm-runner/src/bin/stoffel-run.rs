@@ -4737,12 +4737,13 @@ where
     // `client_bindings` for INST and output routing, but exclude them from the
     // input protocol instead of requiring a synthetic completion message.
     let mpc_input_ids = mpc_input_protocol_ids(input_setup_plan);
-    let mpc_node = <HoneyBadgerMPCNode<F, Avid<HbSessionId>> as MPCProtocol<
+    let mut mpc_node = <HoneyBadgerMPCNode<F, Avid<HbSessionId>> as MPCProtocol<
         F,
         RobustShare<F>,
         QuicNetworkManager,
     >>::setup(my_id, mpc_opts, mpc_input_ids)
     .map_err(|e| format!("Failed to create MPC node: {:?}", e))?;
+    stoffel_vm::net::mpc::honeybadger::configure_session_history(&mut mpc_node);
     eprintln!("[party {}] MPC node setup complete", my_id);
 
     // Wire a send hook into the shared QuicNetworkManager so that ALL outbound
@@ -4815,8 +4816,19 @@ where
     let (processor_ready_tx, processor_ready_rx) = oneshot::channel();
     spawn_execution_task(execution_tasks, async move {
         let _ = processor_ready_tx.send(());
+        let mut inbound = stoffel_vm::net::mpc::honeybadger::HoneyBadgerInboundQueue::default();
+        let mut retry = tokio::time::interval(Duration::from_millis(2));
+        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            if server_rx.is_closed()
+                && server_rx.is_empty()
+                && client_rx.is_closed()
+                && client_rx.is_empty()
+            {
+                break;
+            }
             tokio::select! {
+                _ = retry.tick(), if !inbound.is_empty() => {}
                 Some(message) = server_rx.recv() => {
                     let sender_id = match message.source {
                         ExecutionTransportSource::Party(sender_id) => sender_id,
@@ -4842,16 +4854,8 @@ where
                         }
                         Ok(false) => {}
                     }
-                    let node_handle = processing_engine.node_handle().clone();
-                    let process_result = {
-                        let mut node = node_handle.lock().await;
-                        node.process(sender_id, raw_msg, processing_net.clone()).await
-                    };
-                    if let Err(e) = process_result {
-                        eprintln!(
-                            "[party {}] Failed to process message from {}: {:?}",
-                            process_party_id, sender_id, e
-                        );
+                    if let Err(error) = inbound.push(sender_id, raw_msg) {
+                        eprintln!("[party {}] Dropping over-budget message from {}: {}", process_party_id, sender_id, error);
                     }
                 }
                 Some(message) = client_rx.recv() => {
@@ -4888,6 +4892,24 @@ where
                     }
                 }
                 else => break,
+            }
+            // Drain ready traffic in short batches. Future multiplication traffic
+            // stays bounded without occupying every upstream protocol session.
+            for _ in 0..32 {
+                let node_handle = processing_engine.node_handle().clone();
+                let mut node = node_handle.lock().await;
+                let Some((sender_id, raw_msg)) = inbound.pop_ready(&node).await else {
+                    break;
+                };
+                if let Err(error) = node
+                    .process(sender_id, raw_msg, processing_net.clone())
+                    .await
+                {
+                    eprintln!(
+                        "[party {}] Failed to process message from {}: {:?}",
+                        process_party_id, sender_id, error
+                    );
+                }
             }
         }
     });

@@ -139,5 +139,9 @@ fields in the standing admission.
 The full example catalog distributes programs across sixteen-wide waves using
 manifest preprocessing demand as a workload estimate. Every example still runs
 once on the same standing nodes. Set `STOFFEL_ALL_EXAMPLES_SOURCE_ORDER=1` to use
-alphabetical waves as a concentrated-load stress test; grouping all AES circuits
-can exceed the MPC dependency's bounded session admission on lagging parties.
+alphabetical waves as a concentrated-load stress test, including the AES circuits
+in one wave. HoneyBadger keeps future multiplication messages in a bounded
+per-sender backlog until session capacity is available. Current parent and
+reconstruction sessions continue to drain, and completed-session history covers
+the planned material so delayed packets cannot recreate finished work. The
+underlying protocol's active-session admission limits remain unchanged.
