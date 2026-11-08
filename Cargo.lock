@@ -5738,6 +5738,7 @@ name = "stoffel-bindgen"
 version = "0.2.0"
 dependencies = [
  "stoffellang",
+ "syn 2.0.118",
  "thiserror 2.0.12",
 ]
 
