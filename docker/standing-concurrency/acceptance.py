@@ -1294,8 +1294,12 @@ def run_concurrency(harness: Harness) -> None:
         short = cpu_completed["cpu-short"][party]["_mtime_ns"]
         long = cpu_completed["cpu-long"][party]["_mtime_ns"]
         if int(short) >= int(long):
+            long_ready = int(cpu_completed["cpu-long"][party]["_ready_mtime_ns"])
+            short_ready = int(cpu_completed["cpu-short"][party]["_ready_mtime_ns"])
             raise AcceptanceFailure(
-                f"CPU-short did not finish before CPU-long on {party}"
+                f"CPU-short did not finish before CPU-long on {party}; "
+                f"long duration={(int(long) - long_ready) / 1e6:.1f} ms, "
+                f"short admission delay={(short_ready - long_ready) / 1e6:.1f} ms"
             )
     harness.assert_snapshot(snapshot)
 

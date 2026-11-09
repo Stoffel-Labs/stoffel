@@ -2,14 +2,17 @@
 #
 # Both entries remain runnable without an MPC/network effect. The long entry is
 # deliberately much larger than the scheduler's local-instruction budget; the
-# short entry is still large enough to cross that budget at least once. A
-# short-before-long completion therefore demonstrates instruction-budget
+# short entry is still large enough to cross that budget at least once.
+# The long workload must also outlast coordinator admission of the short job:
+# five million iterations can finish in roughly 300 ms on a release build,
+# leaving too little margin for the second execution to start.
+# A short-before-long completion therefore demonstrates instruction-budget
 # yielding between runnable VM tasks instead of progress only while one task is
 # blocked on the network.
 
 def cpu_long() -> int64:
   var accumulator: int64 = 0
-  for round in 0..5000000:
+  for round in 0..50000000:
     accumulator = accumulator + round
   return accumulator
 
