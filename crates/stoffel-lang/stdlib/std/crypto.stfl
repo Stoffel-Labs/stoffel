@@ -1,13 +1,252 @@
+"""Byte strings, hashing and elliptic-curve helpers for public values.
+
+Every item here is a builtin that is always in scope. `import std.crypto`
+is accepted but optional: imports of `std.*` modules are no-ops.
+
+All functions here work on clear (public) data and run locally on each
+party: none of them communicates, consumes preprocessing or touches secret
+shares. They exist to glue MPC protocols such as threshold signatures
+together, for example to hash a message, turn the hash into a field
+element, or format an opened curve point.
+
+Encodings. Field elements and curve points travel as `bytes` in arkworks'
+compressed canonical serialization, which is what `Share.open_field`,
+`Share.open_exp` and `Share.get_commitment` produce. For scalar fields
+that is the little-endian encoding of the element.
+
+Curve names. Functions that take a `curve_name` accept these names, in any
+letter case: `"bls12-381"` (also `"bls12_381"`, `"bls12381"`), `"bn254"`,
+`"curve25519"`, `"ed25519"`, `"secp256k1"` and `"p-256"` (also `"p256"`,
+`"nist-p256"`, `"secp256r1"`). `Mpc.curve` returns the curve the MPC network
+runs on. Unless noted otherwise a function works on the curve's scalar
+field.
+
+Example:
+  var message = Bytes.from_string("hello")
+  var digest = Crypto.sha256(message)
+  var challenge = Crypto.hash_to_field(digest, Mpc.curve())
+"""
+
 builtin object Bytes:
+  """Constructors for `bytes` values.
+
+  `bytes` is `list[uint8]`, so every list function also applies.
+  """
   def concat(left: bytes, right: bytes) -> bytes {.builtin.}:
+    """Join two byte strings into a new one.
+
+    Args:
+      left: The leading bytes.
+      right: The trailing bytes.
+
+    Returns:
+      A new byte string: `left` followed by `right`.
+
+    Raises:
+      An error if either argument is not a list of `uint8` values.
+
+    MPC:
+      Local; no communication.
+
+    Example:
+      var signature = Bytes.concat(r_bytes, s_bytes)
+    """
   def from_string(value: string) -> bytes {.builtin.}:
+    """Encode a string as its UTF-8 bytes.
+
+    Args:
+      value: The text to encode.
+
+    Returns:
+      The UTF-8 encoding of `value`.
+
+    MPC:
+      Local; no communication.
+
+    Example:
+      var message = Bytes.from_string("stoffel")
+    """
 
 builtin object Crypto:
+  """Hash functions and elliptic-curve conversions on public values.
+
+  See the module documentation for the byte encodings and the accepted
+  curve names.
+  """
   def sha256(message: bytes) -> bytes {.builtin.}:
+    """Compute the SHA-256 digest of a byte string.
+
+    Args:
+      message: The bytes to hash.
+
+    Returns:
+      The 32-byte digest.
+
+    Raises:
+      An error if `message` is not a list of `uint8` values.
+
+    MPC:
+      Local; no communication.
+
+    Example:
+      var digest = Crypto.sha256(Bytes.from_string("hello"))
+    """
   def sha512(message: bytes) -> bytes {.builtin.}:
+    """Compute the SHA-512 digest of a byte string.
+
+    Args:
+      message: The bytes to hash.
+
+    Returns:
+      The 64-byte digest.
+
+    Raises:
+      An error if `message` is not a list of `uint8` values.
+
+    MPC:
+      Local; no communication.
+    """
   def hash_to_field(message: bytes, curve_name: string) -> bytes {.builtin.}:
+    """Reduce bytes to an element of a curve's scalar field.
+
+    Despite the name this does not hash: it interprets `message` as an
+    integer and reduces it modulo the scalar field order. Hash the message
+    first (for example with `Crypto.sha256`) and pass the digest. The bytes
+    are read big-endian, except on curve25519 and ed25519, where they are
+    read little-endian as in Ed25519 signatures.
+
+    Args:
+      message: The bytes to reduce, usually a digest.
+      curve_name: The curve whose scalar field to use.
+
+    Returns:
+      The field element, in compressed canonical encoding.
+
+    Raises:
+      An error if `curve_name` is not a supported curve.
+
+    MPC:
+      Local; no communication.
+
+    Example:
+      var digest = Crypto.sha256(message)
+      var e = Crypto.hash_to_field(digest, "secp256k1")
+    """
   def field_inv(field_bytes: bytes, curve_name: string) -> bytes {.builtin.}:
+    """Compute the multiplicative inverse of a scalar field element.
+
+    Args:
+      field_bytes: The field element, in compressed canonical encoding.
+      curve_name: The curve whose scalar field the element belongs to.
+
+    Returns:
+      The inverse, in the same encoding.
+
+    Raises:
+      An error if `curve_name` is not supported, `field_bytes` is not a
+      valid field element, or the element is zero.
+
+    MPC:
+      Local; no communication.
+
+    Example:
+      var delta_inverse = Crypto.field_inv(delta, "p-256")
+    """
   def point_x_to_field(point_bytes: bytes, curve_name: string) -> bytes {.builtin.}:
+    """Take a curve point's x-coordinate modulo the scalar field order.
+
+    This is the `r` value of an ECDSA signature computed from the nonce
+    point. Only secp256k1 and p-256 are supported.
+
+    Args:
+      point_bytes: The point, in compressed canonical encoding (for
+        example the result of `Share.open_exp` or `Share.get_commitment`).
+      curve_name: `"secp256k1"` or `"p-256"`.
+
+    Returns:
+      The x-coordinate reduced modulo the scalar field order, as a field
+      element in compressed canonical encoding.
+
+    Raises:
+      An error if the curve is not secp256k1 or p-256, the bytes are not a
+      valid point, or the point is the point at infinity.
+
+    MPC:
+      Local; no communication.
+
+    Example:
+      var r = Crypto.point_x_to_field(nonce_point, "secp256k1")
+    """
   def field_to_scalar_bytes(field_bytes: bytes, curve_name: string) -> bytes {.builtin.}:
+    """Convert a scalar field element to 32-byte big-endian form.
+
+    This is the standard encoding of ECDSA `r` and `s` values. Only
+    secp256k1 and p-256 are supported.
+
+    Args:
+      field_bytes: The field element, in compressed canonical encoding.
+      curve_name: `"secp256k1"` or `"p-256"`.
+
+    Returns:
+      Exactly 32 bytes, big-endian and zero-padded.
+
+    Raises:
+      An error if the curve is not secp256k1 or p-256, or `field_bytes` is
+      not a valid field element.
+
+    MPC:
+      Local; no communication.
+
+    Example:
+      var r_bytes = Crypto.field_to_scalar_bytes(r, "secp256k1")
+    """
   def point_to_sec1(point_bytes: bytes, curve_name: string) -> bytes {.builtin.}:
+    """Convert a curve point to SEC1 compressed form.
+
+    This is the usual encoding of an ECDSA public key. Only secp256k1 and
+    p-256 are supported.
+
+    Args:
+      point_bytes: The point, in compressed canonical encoding.
+      curve_name: `"secp256k1"` or `"p-256"`.
+
+    Returns:
+      33 bytes: `0x02` or `0x03` (the parity of y) followed by the 32-byte
+      big-endian x-coordinate.
+
+    Raises:
+      An error if the curve is not secp256k1 or p-256, the bytes are not a
+      valid point, or the point is the point at infinity.
+
+    MPC:
+      Local; no communication.
+
+    Example:
+      var public_key_bytes = Crypto.point_to_sec1(public_key, "secp256k1")
+    """
   def hash_to_g1(message: bytes) -> bytes {.builtin.}:
+    """Hash bytes to a point in the BLS12-381 G1 group.
+
+    Uses try-and-increment: for counter = 0, 1, 2, ... it hashes `message`
+    followed by the counter (4 bytes, little-endian) with SHA-256, maps the
+    digest to a base field element used as x, and returns the first valid
+    curve point after clearing the cofactor. This is not the IETF
+    hash-to-curve construction and does not run in constant time; use it
+    only on public data.
+
+    Args:
+      message: The bytes to hash.
+
+    Returns:
+      The G1 point, in compressed canonical encoding (48 bytes).
+
+    Raises:
+      An error if no point is found within 256 attempts, which is
+      vanishingly unlikely.
+
+    MPC:
+      Local; no communication.
+
+    Example:
+      var hashed_message = Crypto.hash_to_g1(Bytes.from_string("message"))
+    """

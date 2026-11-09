@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
@@ -22,8 +23,8 @@ const LOCAL_MPC_TEST_TIMEOUT_SECS: &str = "120";
 
 /// Overwrites the scaffolded `src/main.stfl` with a deterministic two-argument
 /// addition program so named-input run flows have a stable, cleartext-safe
-/// `main(a, b)` to exercise. The default `init` template is a no-argument random
-/// boolean circuit, which neither accepts named inputs nor runs without an MPC
+/// `main(a, b)` to exercise. The default `init` template uses ClientStore IO,
+/// which neither accepts named inputs nor runs without an MPC
 /// engine, so tests that assert on `--input a=.. --input b=..` results write this
 /// program after `init` (and before any `build`).
 fn write_addition_program(project_dir: &std::path::Path) {
@@ -79,36 +80,238 @@ fn init_creates_default_project() {
         .stdout(predicate::str::contains("Created Stoffel project"));
 
     assert!(temp.path().join("hello/Stoffel.toml").exists());
+    let config = fs::read_to_string(temp.path().join("hello/Stoffel.toml")).unwrap();
+    assert!(config.contains("docs.stoffelmpc.com/getting-started/basic-usage"));
     assert!(temp.path().join("hello/src/main.stfl").exists());
     assert!(temp.path().join("hello/Cargo.toml").exists());
     assert!(temp.path().join("hello/build.rs").exists());
     assert!(temp.path().join("hello/src/main.rs").exists());
     assert!(!temp.path().join("hello/src/stoffel_bindings.rs").exists());
     let program = fs::read_to_string(temp.path().join("hello/src/main.stfl")).unwrap();
-    assert!(program.contains("def gate_and(a: secret bool, b: secret bool) -> secret bool"));
-    assert!(program.contains("var x: secret bool = Share.random()"));
-    assert!(program.contains("return result.reveal()"));
+    assert!(program.contains("ClientStore.take_share(0, 0)"));
+    assert!(program.contains("MpcOutput.send_to_client(0, [doubled])"));
+    assert!(!program.contains(".open()"));
+    assert!(!program.contains(".reveal()"));
     let cargo_toml = fs::read_to_string(temp.path().join("hello/Cargo.toml")).unwrap();
     assert!(cargo_toml.contains("stoffel-rust-sdk"));
     assert!(cargo_toml.contains("stoffel = { package = \"stoffel-rust-sdk\""));
     assert!(cargo_toml.contains("[build-dependencies]"));
     assert!(cargo_toml.contains("stoffel-bindgen"));
+    assert!(cargo_toml.contains("autobins = false"));
+    assert!(cargo_toml.contains("default-run = \"stoffel-client\""));
+    for binary in [
+        "name = \"stoffel-client\"",
+        "name = \"stoffel-server\"",
+        "name = \"stoffel-coordinator\"",
+    ] {
+        assert!(
+            cargo_toml.contains(binary),
+            "missing generated binary {binary}"
+        );
+    }
     let build_rs = fs::read_to_string(temp.path().join("hello/build.rs")).unwrap();
-    assert!(build_rs.contains("generate_bindings_from_source"));
-    assert!(build_rs.contains("src/main.stfl"));
-    let main_rs = fs::read_to_string(temp.path().join("hello/src/main.rs")).unwrap();
-    assert!(main_rs.contains("mod stoffel_bindings"));
-    assert!(main_rs.contains("include!(concat!(env!(\"OUT_DIR\")"));
-    assert!(main_rs.contains("stoffel_bindings::ProgramManifest"));
-    assert!(!main_rs.contains("with_inputs"));
+    assert!(build_rs.contains("stoffel_bindgen::generate_bindings("));
+    assert!(build_rs.contains("artifacts/program.stflb"));
+    let src = temp.path().join("hello/src");
+    for file in [
+        "client.rs",
+        "server.rs",
+        "coordinator.rs",
+        "main.rs",
+        "main.stfl",
+    ] {
+        assert!(src.join(file).exists(), "missing src/{file}");
+    }
+    assert!(!src.join("main.stoffel").exists());
+    assert!(!src.join("deployment.rs").exists());
+    let client_rs = fs::read_to_string(src.join("client.rs")).unwrap();
+    assert!(client_rs.contains("async fn main()"));
+    assert!(client_rs.contains("app::client()"));
+    assert!(client_rs.contains(".run_typed("));
+    assert!(client_rs.contains("INTEGRATION STEP 4"));
+    assert!(client_rs.contains("run_private_feature"));
+    for implementation_detail in [
+        "Deserialize",
+        "NetworkDeployment",
+        "Stoffel::load_file",
+        "offchain_client_config",
+        "identity_files",
+        "serde_json",
+    ] {
+        assert!(
+            !client_rs.contains(implementation_detail),
+            "client.rs exposes configuration detail {implementation_detail}"
+        );
+    }
+    assert!(client_rs.lines().count() < 45);
+    let main_rs = fs::read_to_string(src.join("main.rs")).unwrap();
+    assert!(main_rs.contains("stoffel_bindings.rs"));
+    assert!(
+        main_rs.contains("stoffel_bindings::ProgramManifest")
+            || main_rs.contains("bindings::ProgramManifest")
+    );
+    assert!(main_rs.contains("Stoffel::load_file"));
+    assert!(main_rs.contains("client_for_deployment"));
+    assert!(main_rs.contains("offchain_client_config(0)"));
+    assert!(main_rs.contains("INTEGRATION STEP 3"));
+    assert!(main_rs.contains("participant-owned application process"));
+    let server_rs = fs::read_to_string(src.join("server.rs")).unwrap();
+    assert!(server_rs.contains("config.parties"));
+    assert!(server_rs.contains(".server(party_id)"));
+    // Bind and bootstrap addresses share one resolver so a Compose service
+    // name becomes the numeric, routable address the runner needs.
+    assert!(server_rs.contains("fn resolve_socket_address("));
+    assert!(server_rs.contains("resolve_socket_address(\n        \"bind\","));
+    assert!(server_rs.contains("resolve_socket_address(\n            \"bootstrap\","));
+    assert!(!server_rs.contains("numeric_bind_address"));
+    assert!(!server_rs.contains("resolve_bootstrap_address"));
+    // The template pins a published SDK without `.advertise()`.
+    assert!(!server_rs.contains(".advertise("));
+    assert!(server_rs.contains(".to_socket_addrs()"));
+    let coordinator_rs = fs::read_to_string(src.join("coordinator.rs")).unwrap();
+    assert!(coordinator_rs.contains("Some(\"wait-ready\")"));
+    assert!(coordinator_rs.contains("wait_for_round(Round::InputMaskReservation)"));
+    assert!(coordinator_rs.contains("STOFFEL_READY_TIMEOUT_SECS"));
+    assert!(coordinator_rs.contains("validate_deployment()?;"));
+    assert!(!coordinator_rs.contains("let validated = validate_deployment()?;"));
+    let generated_rust = format!("{main_rs}\n{client_rs}\n{server_rs}\n{coordinator_rs}");
+    for prohibited in [
+        "execute_local",
+        "exec_local",
+        "exec_local_mpc",
+        "LocalCoordinatorRunner",
+        "compile_file",
+    ] {
+        assert!(
+            !generated_rust.contains(prohibited),
+            "generated Rust uses {prohibited}"
+        );
+    }
+    assert!(temp.path().join("hello/tests/test_double.stfl").exists());
+    assert!(!temp.path().join("hello/tests/test_double.stoffel").exists());
+    assert!(temp.path().join("hello/tests/topology.rs").exists());
+    assert!(temp.path().join("hello/scripts/run-local.sh").exists());
+    let run_local = fs::read_to_string(temp.path().join("hello/scripts/run-local.sh")).unwrap();
+    assert!(run_local.contains("command -v stoffel-run"));
+    assert!(run_local.contains("cargo install stoffel-vm-runner --version 0.2.0 --locked"));
+    assert!(run_local.contains("export STOFFEL_RUN_BIN"));
+    assert!(run_local.contains("STOFFEL_AUTO_ADDRESSES=1"));
+    let prepare = run_local.find("stoffel-coordinator\" prepare").unwrap();
+    let stop_selecting = run_local.find("unset STOFFEL_AUTO_ADDRESSES").unwrap();
+    let serve = run_local.find("stoffel-coordinator\" serve").unwrap();
+    assert!(prepare < stop_selecting && stop_selecting < serve);
+    #[cfg(unix)]
+    assert_ne!(
+        fs::metadata(temp.path().join("hello/scripts/run-local.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111,
+        0,
+        "run-local.sh should be executable"
+    );
+    let wait_ready = run_local.find("stoffel-coordinator\" wait-ready").unwrap();
+    let ready_message = run_local.find("ready for participant input").unwrap();
+    assert!(wait_ready < ready_message);
+    assert!(temp.path().join("hello/scripts/run-client.sh").exists());
+    let run_client = fs::read_to_string(temp.path().join("hello/scripts/run-client.sh")).unwrap();
+    assert!(run_client.contains("participant-owned client"));
+    assert!(run_client.contains("stoffel-coordinator -- wait-ready"));
+    assert!(run_client.contains("stoffel-client"));
+    #[cfg(unix)]
+    assert_ne!(
+        fs::metadata(temp.path().join("hello/scripts/run-client.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111,
+        0,
+        "run-client.sh should be executable"
+    );
+    assert!(temp
+        .path()
+        .join("hello/scripts/docker-compose.yml")
+        .exists());
+    let compose = fs::read_to_string(temp.path().join("hello/scripts/docker-compose.yml")).unwrap();
+    for party in 0..5 {
+        assert!(
+            compose.contains(&format!("[\"stoffel-server\", \"{party}\"]")),
+            "Compose is missing node {party}"
+        );
+        // Each node binds its MPC listener to its own service address: the
+        // bootnode hands that address to the other parties, so 0.0.0.0 would
+        // make every peer dial itself.
+        assert!(compose.contains(&format!(
+            "STOFFEL_BIND_ADDRESS: node-{party}:{}",
+            19_200 + party * 2
+        )));
+        assert!(compose.contains(&format!(
+            "STOFFEL_RPC_BIND_ADDRESS: 0.0.0.0:{}",
+            19_400 + party
+        )));
+    }
+    assert!(!compose.contains("STOFFEL_BIND_ADDRESS: 0.0.0.0"));
+    assert_eq!(
+        compose
+            .matches("STOFFEL_BOOTSTRAP_ADDRESS: node-0:19200")
+            .count(),
+        4
+    );
+    // Peers gate on node-0 starting, not on its health: node-0 only becomes
+    // healthy after every party has joined.
+    assert_eq!(compose.matches("condition: service_started").count(), 4);
+    assert!(compose.contains("[\"stoffel-coordinator\", \"wait-ready\"]"));
+    assert!(compose.contains("condition: service_healthy"));
+    assert!(!compose.contains("--client-input-total"));
+    let dockerfile = fs::read_to_string(temp.path().join("hello/scripts/Dockerfile")).unwrap();
+    assert!(dockerfile.contains("/app/artifacts/program.stflb"));
+    assert!(dockerfile.contains("stoffel-coordinator"));
+    assert!(dockerfile.contains("stoffel-server"));
+    assert!(!dockerfile.contains("stoffel-client"));
+    assert!(!temp.path().join("hello/deploy/local").exists());
+    let ignore = fs::read_to_string(temp.path().join("hello/.gitignore")).unwrap();
+    assert!(ignore.contains("/deploy/local/"));
     let readme = fs::read_to_string(temp.path().join("hello/README.md")).unwrap();
+    assert!(readme.starts_with("# hello\n"));
     assert!(readme.contains("stoffel check"));
-    assert!(readme.contains("stoffel run"));
-    assert!(readme.contains("stoffel dev --once"));
+    assert!(readme.contains("### 2. Compile the Stoffel program"));
+    assert!(readme.contains("stoffel build --output artifacts/program.stflb"));
+    for source in ["client.rs", "server.rs", "coordinator.rs", "main.rs"] {
+        assert!(readme.contains(source), "README does not explain {source}");
+    }
+    assert!(!readme.contains("deployment.rs"));
+    assert!(readme.contains("scripts/docker-compose.yml"));
+    assert!(readme.contains("input-ready"));
+    assert!(readme.contains("open port"));
+    assert!(readme.contains("STOFFEL_BIND_ADDRESS"));
+    assert!(readme.contains("https://docs.stoffelmpc.com"));
+    assert!(readme.contains("runnable base project"));
+    assert!(readme.contains("## Integrate Stoffel into your own app"));
+    assert!(readme.contains("single-host development deployment"));
+    assert!(readme.contains("It is not a separate in-process or simulated execution model"));
+    assert!(readme.contains("operator-managed production deployment"));
+    assert!(!readme.contains("For a real deployment"));
+    assert!(readme.contains("Move the client boundary into participant-owned code"));
+    assert!(readme.contains("rust-sdk/app-integration"));
+    assert!(readme.contains("stoffel-typed-client-io-bindings"));
+    assert!(readme.contains("stoffel-app-network-and-offchain-integration"));
+    assert!(readme.contains("stoffel-deployment-runbook"));
     assert!(!readme.contains("--input a=40 --input b=2"));
     assert!(readme.contains("stoffel build"));
     assert!(readme.contains("cargo build"));
     assert!(readme.contains("cargo run"));
+    assert!(!readme.contains("stoffel-vm-runner"));
+    assert!(!readme.contains("STOFFEL_RUN_BIN"));
+
+    let missing_runner = StdCommand::new("sh")
+        .arg(temp.path().join("hello/scripts/run-local.sh"))
+        .current_dir(temp.path().join("hello"))
+        .env("STOFFEL_RUN_BIN", "/definitely/missing/stoffel-run")
+        .output()
+        .unwrap();
+    assert!(!missing_runner.status.success());
+    assert!(String::from_utf8_lossy(&missing_runner.stderr)
+        .contains("STOFFEL_RUN_BIN is not executable"));
 }
 
 #[cfg(unix)]
@@ -147,6 +350,9 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("hello");
+    let cargo_target = std::env::var_os("STOFFEL_GENERATED_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project.join("target"));
     Command::cargo_bin("stoffel")
         .unwrap()
         .arg("init")
@@ -207,15 +413,307 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
     fs::write(&cargo_toml_path, toml::to_string(&manifest).unwrap()).unwrap();
     fs::copy(workspace.join("Cargo.lock"), project.join("Cargo.lock")).unwrap();
 
-    StdCommand::new("cargo")
+    let missing_bytecode = StdCommand::new("cargo")
         .arg("build")
+        .args(["--bins"])
         .arg("--offline")
         .current_dir(&project)
+        .env("CARGO_TARGET_DIR", &cargo_target)
+        .output()
+        .expect("cargo build without bytecode should run");
+    assert!(!missing_bytecode.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_bytecode.stderr)
+            .contains("build bytecode first: stoffel build --output artifacts/program.stflb"),
+        "missing-bytecode failure was not actionable:\n{}",
+        String::from_utf8_lossy(&missing_bytecode.stderr)
+    );
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(&project)
+        .arg("test")
+        .assert()
+        .success();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(&project)
+        .args(["build", "--output", "artifacts/program.stflb"])
+        .assert()
+        .success();
+
+    StdCommand::new("cargo")
+        .arg("build")
+        .args(["--bins"])
+        .arg("--offline")
+        .current_dir(&project)
+        .env("CARGO_TARGET_DIR", &cargo_target)
         .status()
         .expect("cargo build should run")
         .success()
         .then_some(())
         .expect("initialized default project should build with cargo");
+
+    assert!(StdCommand::new("cargo")
+        .arg("test")
+        .arg("--offline")
+        .current_dir(&project)
+        .env("CARGO_TARGET_DIR", &cargo_target)
+        .status()
+        .expect("generated Rust tests should run")
+        .success());
+
+    let coordinator = cargo_target.join("debug").join(format!(
+        "stoffel-coordinator{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    let occupied_coordinator = std::net::TcpListener::bind("127.0.0.1:19300")
+        .expect("reserve the default coordinator endpoint");
+    let occupied_node =
+        std::net::UdpSocket::bind("127.0.0.1:19200").expect("reserve the default node endpoint");
+    let prepared = StdCommand::new(&coordinator)
+        .arg("prepare")
+        .current_dir(temp.path())
+        .env("STOFFEL_AUTO_ADDRESSES", "1")
+        .output()
+        .expect("coordinator prepare should run outside the project directory");
+    assert!(
+        prepared.status.success(),
+        "coordinator preparation failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&prepared.stdout),
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+
+    let deployment_dir = project.join("deploy/local");
+    let deployment_path = deployment_dir.join("deployment.json");
+    let deployment: serde_json::Value =
+        serde_json::from_slice(&fs::read(&deployment_path).unwrap()).unwrap();
+    assert_eq!(deployment["program"], "../../artifacts/program.stflb");
+    assert_eq!(deployment["coordinator_host"], "127.0.0.1");
+    assert_eq!(deployment["parties"], 5);
+    assert_eq!(deployment["threshold"], 1);
+    assert_eq!(deployment["client_cert"], "client-0.cert.der");
+    assert_eq!(deployment["client_key"], "client-0.key.der");
+    assert_ne!(deployment["coordinator_port"], 19_300);
+    assert_ne!(deployment["node_bind_addresses"][0], "127.0.0.1:19200");
+    for field in ["node_bind_addresses", "servers", "node_rpc_addresses"] {
+        let addresses = deployment[field]
+            .as_array()
+            .unwrap_or_else(|| panic!("{field} should be an array"));
+        assert_eq!(addresses.len(), 5, "{field} should match mpc.parties");
+        assert!(addresses.iter().all(|address| address
+            .as_str()
+            .is_some_and(|address| address.starts_with("127.0.0.1:"))));
+    }
+    assert!(deployment["coordinator_port"].as_u64().is_some());
+    assert!(deployment["timestamp"].as_u64().is_some());
+    let node_binds = deployment["node_bind_addresses"].as_array().unwrap();
+    let servers = deployment["servers"].as_array().unwrap();
+    let node_rpcs = deployment["node_rpc_addresses"].as_array().unwrap();
+    assert_ne!(servers[0], node_binds[0]);
+    for party in 1..5 {
+        assert_eq!(servers[party], node_binds[party]);
+    }
+    for addresses in [node_binds, node_rpcs] {
+        assert_eq!(
+            addresses
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            5,
+            "development endpoints should be unique within each transport"
+        );
+    }
+    drop(occupied_coordinator);
+    drop(occupied_node);
+
+    for identity in ["coordinator", "client-0"] {
+        for suffix in ["cert", "key"] {
+            assert!(deployment_dir
+                .join(format!("{identity}.{suffix}.der"))
+                .is_file());
+        }
+    }
+    for party in 0..5 {
+        for suffix in ["cert", "key"] {
+            assert!(deployment_dir
+                .join(format!("node-{party}.{suffix}.der"))
+                .is_file());
+        }
+    }
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(&deployment_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+
+    let client_key = fs::read(deployment_dir.join("client-0.key.der")).unwrap();
+    let deployment_before_repeat = fs::read(&deployment_path).unwrap();
+    let selected_node_address = deployment["node_bind_addresses"][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let occupied_selected_node = std::net::UdpSocket::bind(&selected_node_address)
+        .expect("reserve the selected node endpoint before repeated preparation");
+    assert!(StdCommand::new(&coordinator)
+        .arg("prepare")
+        .current_dir(temp.path())
+        .env("STOFFEL_AUTO_ADDRESSES", "1")
+        .status()
+        .expect("repeated coordinator prepare should run")
+        .success());
+    assert_eq!(
+        fs::read(deployment_dir.join("client-0.key.der")).unwrap(),
+        client_key,
+        "repeated preparation should preserve participant identity material"
+    );
+    assert_eq!(
+        fs::read(&deployment_path).unwrap(),
+        deployment_before_repeat,
+        "repeated preparation must preserve the selected endpoint set"
+    );
+    drop(occupied_selected_node);
+
+    let mut incomplete_deployment = deployment;
+    incomplete_deployment
+        .as_object_mut()
+        .unwrap()
+        .remove("node_bind_addresses");
+    fs::write(
+        &deployment_path,
+        serde_json::to_vec_pretty(&incomplete_deployment).unwrap(),
+    )
+    .unwrap();
+    let obsolete_schema = StdCommand::new(coordinator)
+        .arg("prepare")
+        .current_dir(temp.path())
+        .output()
+        .expect("coordinator should reject an incomplete deployment schema");
+    assert!(!obsolete_schema.status.success());
+    assert!(String::from_utf8_lossy(&obsolete_schema.stderr)
+        .contains("missing field `node_bind_addresses`"));
+}
+
+#[test]
+fn init_force_preserves_ignore_rules_and_local_identities() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join(".gitignore"), "custom-cache/").unwrap();
+    fs::create_dir_all(temp.path().join("deploy/local")).unwrap();
+    let identity = temp.path().join("deploy/local/client-0.key.der");
+    fs::write(&identity, "identity fixture, not a real private key").unwrap();
+    for _ in 0..2 {
+        Command::cargo_bin("stoffel")
+            .unwrap()
+            .arg("init")
+            .arg(temp.path())
+            .arg("--force")
+            .assert()
+            .success();
+    }
+    assert_eq!(
+        fs::read_to_string(temp.path().join(".gitignore")).unwrap(),
+        "custom-cache/\n/target/\n/artifacts/\n/deploy/local/\n"
+    );
+    assert_eq!(
+        fs::read_to_string(identity).unwrap(),
+        "identity fixture, not a real private key"
+    );
+}
+
+/// Public-dependency consumer test: no path patches or local-MPC SDK calls.
+/// Requires the matching stoffel-run binary. Local ports are selected dynamically.
+#[test]
+#[ignore = "builds a public-dependency app and starts coordinator + nodes; set STOFFEL_RUN_BIN"]
+fn init_default_project_runs_with_separate_services() {
+    let _guard = local_mpc_guard();
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("app");
+    let cargo_target = std::env::var_os("STOFFEL_GENERATED_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project.join("target"));
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(&project)
+        .assert()
+        .success();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(&project)
+        .args(["build", "--output", "artifacts/program.stflb"])
+        .assert()
+        .success();
+    assert!(StdCommand::new("cargo")
+        .args(["build", "--bins"])
+        .arg("--offline")
+        .current_dir(&project)
+        .env("CARGO_TARGET_DIR", &cargo_target)
+        .status()
+        .unwrap()
+        .success());
+    let runner = PathBuf::from(std::env::var_os("STOFFEL_RUN_BIN").expect("set STOFFEL_RUN_BIN"));
+    let runner_dir = runner.parent().expect("stoffel-run has a parent directory");
+    let mut path_entries = vec![runner_dir.to_path_buf()];
+    path_entries.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let runner_path = std::env::join_paths(path_entries).unwrap();
+    let stoffel = assert_cmd::cargo::cargo_bin("stoffel");
+    let occupied_default = std::net::TcpListener::bind("127.0.0.1:19300")
+        .expect("reserve the default coordinator address");
+    let occupied_default_node =
+        std::net::UdpSocket::bind("127.0.0.1:19200").expect("reserve the default node address");
+    let mut services = StdCommand::new("sh")
+        .arg(project.join("scripts/run-local.sh"))
+        .current_dir(&project)
+        .env("CARGO_TARGET_DIR", &cargo_target)
+        .env("STOFFEL_BIN", stoffel)
+        .env_remove("STOFFEL_RUN_BIN")
+        .env("PATH", runner_path)
+        .env("STOFFEL_AUTH_TOKEN", "stoffel-local-example")
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(services.stdout.take().unwrap());
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert_ne!(
+            stdout.read_line(&mut line).unwrap(),
+            0,
+            "services exited early"
+        );
+        if line.contains("Development Stoffel deployment is ready") {
+            break;
+        }
+    }
+    let deployment = fs::read_to_string(project.join("deploy/local/deployment.json")).unwrap();
+    assert!(!deployment.contains("\"coordinator_port\": 19300"));
+    assert!(deployment.contains("\"node_bind_addresses\""));
+    drop(occupied_default);
+    drop(occupied_default_node);
+    let output = StdCommand::new("sh")
+        .arg(project.join("scripts/run-client.sh"))
+        .current_dir(&project)
+        .arg("42")
+        .env("CARGO_TARGET_DIR", &cargo_target)
+        .env("STOFFEL_READY_TIMEOUT_SECS", LOCAL_MPC_TEST_TIMEOUT_SECS)
+        .output()
+        .unwrap();
+    let _ = StdCommand::new("kill")
+        .arg(services.id().to_string())
+        .status();
+    let _ = services.wait();
+    assert!(
+        output.status.success(),
+        "client failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Doubled result: 84"));
+    assert!(project.join("Cargo.lock").exists());
 }
 
 #[test]
@@ -278,8 +776,7 @@ fn init_help_names_supported_templates_and_aliases() {
 }
 
 #[test]
-#[ignore = "heavy integration test; run with the serial heavy-test command"]
-fn run_executes_default_secret_bool_circuit_project() {
+fn run_executes_default_client_io_project() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     Command::cargo_bin("stoffel")
@@ -293,20 +790,24 @@ fn run_executes_default_secret_bool_circuit_project() {
     let output = Command::cargo_bin("stoffel")
         .unwrap()
         .current_dir(temp.path())
-        .args(["run", "--timeout-secs", LOCAL_MPC_TEST_TIMEOUT_SECS])
+        .args([
+            "run",
+            "--client-input",
+            "0=42",
+            "--timeout-secs",
+            LOCAL_MPC_TEST_TIMEOUT_SECS,
+        ])
         .output()
         .expect("stoffel run should execute");
     assert!(
         output.status.success(),
-        "default secret bool circuit failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
+        "default client IO failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("true") || stdout.contains("false"),
-        "expected boolean output, got stdout:\n{stdout}"
+        stdout.trim() == "true",
+        "expected successful output delivery, got stdout:\n{stdout}"
     );
 }
 
@@ -634,7 +1135,9 @@ fn run_recompiles_when_project_config_is_newer_than_bytecode() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("invalid Byzantine threshold"));
+        .stderr(predicate::str::contains(
+            "honeybadger requires parties (N) >= 4 * threshold (T) + 1",
+        ));
 }
 
 #[test]
@@ -707,7 +1210,7 @@ fn run_rejects_non_project_directories_inside_a_project() {
 
 #[test]
 #[ignore = "heavy integration test; run with the serial heavy-test command"]
-fn dev_once_executes_default_secret_bool_circuit_project() {
+fn dev_once_executes_default_client_io_project() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("app");
@@ -722,10 +1225,16 @@ fn dev_once_executes_default_secret_bool_circuit_project() {
         .unwrap()
         .arg("dev")
         .arg(&project)
-        .args(["--once", "--timeout-secs", LOCAL_MPC_TEST_TIMEOUT_SECS])
+        .args([
+            "--once",
+            "--client-input",
+            "0=42",
+            "--timeout-secs",
+            LOCAL_MPC_TEST_TIMEOUT_SECS,
+        ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("true").or(predicate::str::contains("false")));
+        .stdout(predicate::str::contains("true"));
 }
 
 #[test]
@@ -1545,9 +2054,7 @@ fn run_validates_entry_and_inputs_before_timeout() {
         .stderr(predicate::str::contains(
             "entry function 'missing' is not declared",
         ))
-        .stderr(predicate::str::contains(
-            "Available source functions: circuit, gate_and, gate_not, gate_or, gate_xor, main",
-        ));
+        .stderr(predicate::str::contains("Available source functions: main"));
 
     fs::write(
         temp.path().join("src/main.stfl"),
@@ -2897,7 +3404,10 @@ fn build_rejects_configured_source_with_wrong_extension() {
     let config = fs::read_to_string(temp.path().join("Stoffel.toml")).unwrap();
     fs::write(
         temp.path().join("Stoffel.toml"),
-        config.replace("source = \"src/main.stfl\"", "source = \"src/main.txt\""),
+        config.replace(
+            "source = \"src/main.stfl\"",
+            "source = \"src/main.stoffel\"",
+        ),
     )
     .unwrap();
 
@@ -2908,7 +3418,7 @@ fn build_rejects_configured_source_with_wrong_extension() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "invalid build.source src/main.txt",
+            "invalid build.source src/main.stoffel",
         ))
         .stderr(predicate::str::contains(
             "expected a .stfl source file or source directory",
@@ -3155,8 +3665,8 @@ fn build_invalid_mpc_flags_report_configuration_context() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("failed to compile or configure"))
-        .stderr(predicate::str::contains("parties must be at least 5"))
-        .stderr(predicate::str::contains("4 * threshold + 1"));
+        .stderr(predicate::str::contains("honeybadger requires parties"))
+        .stderr(predicate::str::contains("4 * threshold (T) + 1"));
 }
 
 #[test]
@@ -3210,7 +3720,9 @@ fn project_config_rejects_invalid_mpc_values_before_running() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("invalid [mpc] config"))
-        .stderr(predicate::str::contains("parties must be at least 5"));
+        .stderr(predicate::str::contains(
+            "honeybadger requires parties (N) >= 4 * threshold (T) + 1",
+        ));
 }
 
 #[test]
@@ -3682,7 +4194,11 @@ fn init_supports_declared_templates_and_library_mode() {
         (
             "python",
             "requirements.txt",
-            &["stoffel run", "python3 -m pip install -r requirements.txt"][..],
+            &[
+                "stoffel build --output artifacts/program.stflb",
+                "./scripts/run-local.sh",
+                "python3 -m pip install -r requirements.txt",
+            ][..],
         ),
         (
             "rust",
@@ -3696,12 +4212,21 @@ fn init_supports_declared_templates_and_library_mode() {
         (
             "solidity-foundry",
             "foundry.toml",
-            &["stoffel run", "forge build"][..],
+            &[
+                "stoffel build --output artifacts/program.stflb",
+                "./scripts/run-local.sh",
+                "forge build",
+            ][..],
         ),
         (
             "solidity-hardhat",
             "hardhat.config.js",
-            &["stoffel run", "npm install", "npx hardhat compile"][..],
+            &[
+                "stoffel build --output artifacts/program.stflb",
+                "./scripts/run-local.sh",
+                "npm install",
+                "npx hardhat compile",
+            ][..],
         ),
     ] {
         let path = temp.path().join(name);
@@ -3718,6 +4243,8 @@ fn init_supports_declared_templates_and_library_mode() {
                 "{name} README should contain `{marker}`"
             );
         }
+        assert!(!readme.contains("stoffel-vm-runner"));
+        assert!(!readme.contains("STOFFEL_RUN_BIN"));
         if name == "rust" {
             let cargo_toml = fs::read_to_string(path.join("Cargo.toml")).unwrap();
             assert!(cargo_toml.contains("tokio"));
@@ -3730,7 +4257,7 @@ fn init_supports_declared_templates_and_library_mode() {
         }
         if name != "rust" {
             let program = fs::read_to_string(path.join("src/main.stfl")).unwrap();
-            assert!(program.contains("secret bool"));
+            assert!(program.contains("ClientStore.take_share(0, 0)"));
         }
     }
 
@@ -5263,4 +5790,553 @@ fn utility_help_lists_status_clean_update_options() {
         .stdout(predicate::str::contains(
             "Project directory or .stfl source file to watch",
         ));
+}
+
+const DOCUMENTED_PROGRAM: &str = r#""""Arithmetic helpers for the demo project."""
+
+def add(a: int64, b: int64) -> int64:
+  """Add two numbers.
+
+  Args:
+    a: Left operand.
+    b: Right operand.
+  """
+  return a + b
+
+def main() -> int64:
+  """Entry point of the demo."""
+  return add(1, 2)
+"#;
+
+fn init_documented_project() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(temp.path())
+        .arg("--force")
+        .assert()
+        .success();
+    fs::write(temp.path().join("src/main.stfl"), DOCUMENTED_PROGRAM).unwrap();
+    temp
+}
+
+fn stoffel_doc(dir: &std::path::Path) -> Command {
+    let mut command = Command::cargo_bin("stoffel").unwrap();
+    command
+        .current_dir(dir)
+        .env("STOFFEL_NO_OPEN", "1")
+        .arg("doc");
+    command
+}
+
+#[test]
+fn help_lists_the_doc_command() {
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Generate HTML API documentation from .stfl docstrings",
+        ))
+        .stdout(predicate::str::contains("deploy").not())
+        .stdout(predicate::str::contains("publish").not());
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .args(["doc", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--std"))
+        .stdout(predicate::str::contains("--deny-missing"))
+        .stdout(predicate::str::contains("--include-private"))
+        .stdout(predicate::str::contains("publish").not());
+}
+
+#[test]
+fn typoed_doc_command_suggests_doc() {
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("doq")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Did you mean `stoffel doc`?"))
+        .stderr(predicate::str::contains("publish").not())
+        .stderr(predicate::str::contains("deploy").not());
+}
+
+#[test]
+fn doc_generates_project_docs_under_target() {
+    let project = init_documented_project();
+    stoffel_doc(project.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Documented 2/2 items (0 undocumented) from 1 file",
+        ))
+        .stdout(predicate::str::contains("index.html"));
+
+    let doc_dir = project.path().join("target/doc");
+    let index = fs::read_to_string(doc_dir.join("index.html")).unwrap();
+    assert!(index.contains("Arithmetic helpers for the demo project."));
+    assert!(index.contains("main.html"));
+    let page = fs::read_to_string(doc_dir.join("main.html")).unwrap();
+    assert!(page.contains("Add two numbers."), "{page}");
+    assert!(page.contains("id=\"fn.add\""));
+    assert!(page.contains("Left operand."));
+    assert!(page.contains("&gt;"), "signature arrows are escaped");
+    assert!(page.contains(">add</span>(<span class=\"pa\">a</span>"));
+    let search = fs::read_to_string(doc_dir.join("search-index.js")).unwrap();
+    assert!(search.contains("\"u\":\"main.html#fn.add\""));
+}
+
+#[test]
+fn doc_documents_loose_files_without_a_project() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("lib.stfl"),
+        "\"\"\"Loose helpers.\"\"\"\n\ndef twice(x: int64) -> int64:\n  \"\"\"Double `x`.\"\"\"\n  return x * 2\n",
+    )
+    .unwrap();
+    stoffel_doc(temp.path())
+        .args(["lib.stfl", "-o", "site"])
+        .assert()
+        .success();
+    let page = fs::read_to_string(temp.path().join("site/lib.html")).unwrap();
+    assert!(page.contains("Double <code>x</code>."), "{page}");
+    assert!(temp.path().join("site/index.html").exists());
+    assert!(!temp.path().join("target").exists());
+}
+
+#[test]
+fn doc_without_project_or_paths_explains_inputs() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "pass a .stfl file or directory, or use --std",
+        ));
+}
+
+#[test]
+fn doc_std_writes_every_stdlib_module() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "-o", "stddocs"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from 5 files"));
+    let out = temp.path().join("stddocs");
+    assert!(out.join("index.html").exists());
+    for module in [
+        "std.core",
+        "std.mpc",
+        "std.protocols",
+        "std.crypto",
+        "std.avss",
+    ] {
+        assert!(
+            out.join(format!("{module}.html")).exists(),
+            "missing {module}.html"
+        );
+    }
+    let mpc = fs::read_to_string(out.join("std.mpc.html")).unwrap();
+    assert!(mpc.contains("id=\"obj.Share.mul\""));
+    assert!(mpc.contains("Always in scope."));
+    let search = fs::read_to_string(out.join("search-index.js")).unwrap();
+    assert!(search.contains("\"p\":\"Share.mul\""));
+}
+
+#[test]
+fn doc_std_is_fully_documented() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "--check", "--deny-missing"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(0 undocumented) from 5 files"));
+    assert!(!temp.path().join("target").exists());
+}
+
+#[test]
+fn doc_rejects_output_in_project_root_or_sources() {
+    let project = init_documented_project();
+    stoffel_doc(project.path())
+        .args(["-o", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing to write documentation"));
+    stoffel_doc(project.path())
+        .args(["-o", "src/docs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("under src/"));
+    stoffel_doc(project.path())
+        .args(["-o", "target/../docs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("parent-directory"));
+    assert!(!project.path().join("src/docs").exists());
+    assert!(!project.path().join("index.html").exists());
+    assert!(!project.path().join("docs").exists());
+}
+
+#[test]
+fn doc_supports_a_root_level_build_source() {
+    let project = init_documented_project();
+    let root = project.path();
+    fs::rename(root.join("src/main.stfl"), root.join("main.stfl")).unwrap();
+    fs::remove_dir_all(root.join("src")).unwrap();
+    let config_path = root.join("Stoffel.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    assert!(config.contains("source = \"src/main.stfl\""), "{config}");
+    fs::write(
+        &config_path,
+        config.replace("source = \"src/main.stfl\"", "source = \"main.stfl\""),
+    )
+    .unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(root)
+        .arg("check")
+        .assert()
+        .success();
+
+    stoffel_doc(root).assert().success();
+    assert!(root.join("target/doc/main.html").exists());
+    stoffel_doc(root)
+        .args(["-o", "target/site"])
+        .assert()
+        .success();
+    assert!(root.join("target/site/index.html").exists());
+    stoffel_doc(root)
+        .args(["--std", "-o", "target/std"])
+        .assert()
+        .success();
+    stoffel_doc(root)
+        .arg("main.stfl")
+        .args(["-o", "site"])
+        .assert()
+        .success();
+    assert!(root.join("site/main.html").exists());
+    stoffel_doc(root)
+        .args(["-o", "."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing to write documentation"));
+    assert!(!root.join("index.html").exists());
+}
+
+#[test]
+fn doc_parse_errors_fail_without_writing() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("broken.stfl"), "def main(:\n  pass\n").unwrap();
+    stoffel_doc(temp.path())
+        .args(["broken.stfl", "-o", "site"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("broken.stfl"))
+        .stderr(predicate::str::contains("failed to extract docs"));
+    assert!(!temp.path().join("site").exists());
+}
+
+#[test]
+fn doc_check_reports_without_writing() {
+    let project = init_documented_project();
+    stoffel_doc(project.path())
+        .arg("--check")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Documented 2/2 items"))
+        .stdout(predicate::str::contains("no files written"));
+    assert!(!project.path().join("target/doc").exists());
+}
+
+#[test]
+fn doc_deny_missing_fails_on_undocumented_items() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("lib.stfl"),
+        "def bare(x: int64) -> int64:\n  return x\n",
+    )
+    .unwrap();
+    stoffel_doc(temp.path())
+        .args(["lib.stfl", "--deny-missing", "-o", "site"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("(1 undocumented)"))
+        .stderr(predicate::str::contains("`bare` has no docstring"))
+        .stderr(predicate::str::contains("--deny-missing"));
+    assert!(!temp.path().join("site").exists());
+
+    // Without --deny-missing the same input documents fine.
+    stoffel_doc(temp.path())
+        .args(["lib.stfl", "-o", "site"])
+        .assert()
+        .success();
+
+    let project = init_documented_project();
+    stoffel_doc(project.path())
+        .args(["--check", "--deny-missing"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn doc_include_private_toggles_private_items() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("lib.stfl"),
+        "\"\"\"Lib.\"\"\"\n\ndef public_fn():\n  \"\"\"Public.\"\"\"\n  pass\n\ndef _helper():\n  \"\"\"Hidden helper.\"\"\"\n  pass\n",
+    )
+    .unwrap();
+    stoffel_doc(temp.path())
+        .args(["lib.stfl", "-o", "public"])
+        .assert()
+        .success();
+    let public = fs::read_to_string(temp.path().join("public/lib.html")).unwrap();
+    assert!(public.contains("public_fn"));
+    assert!(!public.contains("_helper"));
+    assert!(
+        !fs::read_to_string(temp.path().join("public/search-index.js"))
+            .unwrap()
+            .contains("_helper")
+    );
+
+    stoffel_doc(temp.path())
+        .args(["lib.stfl", "--include-private", "-o", "private"])
+        .assert()
+        .success();
+    let private = fs::read_to_string(temp.path().join("private/lib.html")).unwrap();
+    assert!(private.contains("id=\"fn._helper\""));
+    assert!(private.contains("Hidden helper."));
+}
+
+#[test]
+fn clean_removes_generated_docs() {
+    let project = init_documented_project();
+    stoffel_doc(project.path()).assert().success();
+    assert!(project.path().join("target/doc/index.html").exists());
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("clean")
+        .arg(project.path())
+        .assert()
+        .success();
+    assert!(!project.path().join("target/doc").exists());
+}
+
+#[test]
+fn doc_escapes_html_in_docstrings_and_signatures() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("xss.stfl"),
+        concat!(
+            "\"\"\"Module <script>alert('module')</script>.\"\"\"\n\n",
+            "def greet(name: string = \"\\\"><b>bold</b>\") -> string:\n",
+            "  \"\"\"Say hi <img src=x onerror=alert(1)>.\n\n",
+            "  See [link](javascript:alert(1)) and `<script>alert(2)</script>`.\n",
+            "  \"\"\"\n",
+            "  return name\n",
+        ),
+    )
+    .unwrap();
+    stoffel_doc(temp.path())
+        .args(["xss.stfl", "-o", "site"])
+        .assert()
+        .success();
+    for page in ["site/xss.html", "site/index.html"] {
+        let html = fs::read_to_string(temp.path().join(page)).unwrap();
+        assert!(!html.contains("<script>alert"), "{page}: {html}");
+        assert!(!html.contains("<img"), "{page}");
+        assert!(!html.contains("<b>bold"), "{page}");
+        assert!(!html.contains("href=\"javascript:"), "{page}");
+    }
+    let html = fs::read_to_string(temp.path().join("site/xss.html")).unwrap();
+    assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
+    assert!(html.contains("<code>&lt;script&gt;alert(2)&lt;/script&gt;</code>"));
+    assert!(html.contains("&quot;&gt;&lt;b&gt;bold&lt;/b&gt;"));
+    let search = fs::read_to_string(temp.path().join("site/search-index.js")).unwrap();
+    assert!(!search.contains("</script>"));
+    assert!(!search.contains("<img"));
+}
+
+#[test]
+fn doc_markdown_writes_mintlify_pages_for_the_stdlib() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("docs.json"), "{}").unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "--format", "markdown", "-o", "reference/stdlib"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Generated 6 Mintlify pages"))
+        .stdout(predicate::str::contains(
+            "Links use the base path /reference/stdlib",
+        ));
+    let out = temp.path().join("reference/stdlib");
+    assert!(!out.join("index.html").exists());
+    for page in [
+        "overview",
+        "std/core",
+        "std/mpc",
+        "std/protocols",
+        "std/crypto",
+        "std/avss",
+    ] {
+        let text = fs::read_to_string(out.join(format!("{page}.mdx")))
+            .unwrap_or_else(|error| panic!("missing {page}.mdx: {error}"));
+        assert!(text.starts_with("---\ntitle: "), "{page}: {text}");
+    }
+    let mpc = fs::read_to_string(out.join("std/mpc.mdx")).unwrap();
+    assert!(mpc.contains("#### `mul` {#obj-share-mul}"), "{mpc}");
+    assert!(mpc.contains("<ResponseField name=\"share1\" type=\"Share\">"));
+    assert!(mpc.contains("<Info>\n**MPC cost**"));
+    assert!(mpc.contains("](/reference/stdlib/std/mpc#obj-share-batch_mul)"));
+    let overview = fs::read_to_string(out.join("overview.mdx")).unwrap();
+    assert!(overview.contains("href=\"/reference/stdlib/std/core\""));
+    let navigation = fs::read_to_string(out.join("navigation.json")).unwrap();
+    assert!(
+        navigation.contains("\"reference/stdlib/overview\""),
+        "{navigation}"
+    );
+    assert!(
+        navigation.contains("\"reference/stdlib/std/mpc\""),
+        "{navigation}"
+    );
+}
+
+#[test]
+fn doc_markdown_base_path_can_be_set_explicitly() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args([
+            "--std",
+            "--format",
+            "md",
+            "-o",
+            "mdx",
+            "--base-path",
+            "/api/std/",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Links use the base path /api/std"));
+    let navigation = fs::read_to_string(temp.path().join("mdx/navigation.json")).unwrap();
+    assert!(navigation.contains("\"api/std/std/core\""), "{navigation}");
+    stoffel_doc(temp.path())
+        .args([
+            "--std",
+            "--format",
+            "md",
+            "-o",
+            "mdx",
+            "--base-path",
+            "../up",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid --base-path"));
+}
+
+#[test]
+fn doc_markdown_without_docs_json_links_from_the_root() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "--format", "markdown", "-o", "mdx"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No docs.json found above"));
+    let overview = fs::read_to_string(temp.path().join("mdx/overview.mdx")).unwrap();
+    assert!(overview.contains("href=\"/std/core\""), "{overview}");
+}
+
+#[test]
+fn doc_format_flags_are_checked() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "-o", "site", "--base-path", "docs"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--base-path only applies to --format markdown",
+        ));
+    stoffel_doc(temp.path())
+        .args(["--std", "--format", "markdown", "-o", "mdx", "--open"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--open only applies to --format html",
+        ));
+    stoffel_doc(temp.path())
+        .args(["--std", "--format", "pdf"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value 'pdf'"));
+    assert!(!temp.path().join("site").exists());
+    assert!(!temp.path().join("mdx").exists());
+}
+
+#[test]
+fn doc_markdown_escapes_mdx_in_docstrings() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("xss.stfl"),
+        concat!(
+            "\"\"\"Module <script>alert('module')</script> {props}.\"\"\"\n\n",
+            "def greet(name: string = \"\\\"><b>bold</b>\") -> string:\n",
+            "  \"\"\"Say hi <img src=x onerror=alert(1)> {window.x}.\n\n",
+            "  See [link](javascript:alert(1)) and `<script>alert(2)</script>`.\n\n",
+            "  Args:\n",
+            "    name: Who to <greet>.\n",
+            "  \"\"\"\n",
+            "  return name\n",
+        ),
+    )
+    .unwrap();
+    stoffel_doc(temp.path())
+        .args(["xss.stfl", "--format", "markdown", "-o", "mdx"])
+        .assert()
+        .success();
+    let page = fs::read_to_string(temp.path().join("mdx/xss.mdx")).unwrap();
+    assert!(
+        page.contains("Say hi \\<img src=x onerror=alert(1)\\> \\{window.x\\}."),
+        "{page}"
+    );
+    assert!(page.contains("\\[link\\](javascript:alert(1))"), "{page}");
+    assert!(!page.contains("[link](javascript:"), "{page}");
+    assert!(page.contains("`<script>alert(2)</script>`"), "{page}");
+    assert!(
+        page.contains("default=\"&quot;\\&quot;><b>bold</b>&quot;\""),
+        "{page}"
+    );
+    let overview = fs::read_to_string(temp.path().join("mdx/overview.mdx")).unwrap();
+    assert!(
+        overview.contains("Module \\<script\\>alert('module')\\</script\\> \\{props\\}."),
+        "{overview}"
+    );
+}
+
+#[test]
+fn doc_open_is_skipped_when_no_open_is_set() {
+    let project = init_documented_project();
+    stoffel_doc(project.path())
+        .arg("--open")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Skipping --open because STOFFEL_NO_OPEN is set",
+        ));
+}
+
+#[test]
+fn doc_std_conflicts_with_paths() {
+    let temp = TempDir::new().unwrap();
+    stoffel_doc(temp.path())
+        .args(["--std", "lib.stfl"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
 }

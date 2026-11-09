@@ -18,8 +18,10 @@ serde = { version = "=1.0.229", features = ["derive"] }
 stoffel-rust-sdk = { version = "=0.2.0", path = "../stoffel-rust-sdk" }
 tokio = { version = "=1.46.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 toml = "=0.8.23"
+serde_json = "=1.0.150"
 
 [dev-dependencies]
 assert_cmd = "=2.2.2"
 predicates = "=3.1.4"
+serde_json = "=1.0.150"
 tempfile = "=3.27.0"

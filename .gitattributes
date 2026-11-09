@@ -1,0 +1,2 @@
+# StoffelLang sources must use LF line endings: the lexer rejects CR.
+*.stfl text eol=lf

@@ -608,31 +608,28 @@ responsible for any lower-level cryptographic or networking internals.
 
 ## Release Readiness
 
-The SDK is currently a monorepo-local crate and intentionally keeps
-`publish = false` until the dependency graph is registry-ready. A crates.io
-release requires these dependencies to be published or replaced with registry
-dependencies first:
+The SDK is published to crates.io from the `stoffel-rust-sdk-vX.Y.Z` tag
+workflow. Its internal Stoffel dependencies carry both an exact version and a
+workspace path: local builds use the path, while Cargo packages the exact
+registry requirement.
 
-- `stoffellang`
-- `stoffel-vm`
-- `stoffel-vm-runner`
-- `stoffel-vm-types`
-- `stoffelnet`
-- `stoffelmpc-mpc`
+Publish a coordinated release in dependency order so the SDK dry run can
+resolve every exact requirement from crates.io:
 
-`cargo package -p stoffel-rust-sdk --allow-dirty --no-verify` currently fails
-because local path dependencies are not registry-ready. Once those crates are
-published and the SDK manifest no longer uses local path dependencies, remove
-`publish = false` and run:
+1. `stoffel-vm-types`
+2. `stoffellang`
+3. `stoffel-vm`
+4. `stoffel-vm-runner`
+5. `stoffel-bindgen`
+6. `stoffel-rust-sdk`
+
+After the upstream versions are available, validate the SDK package with the
+same locked dry run used by the release workflow:
 
 ```sh
-cargo package -p stoffel-rust-sdk
-cargo publish -p stoffel-rust-sdk --dry-run
+cargo publish -p stoffel-rust-sdk --locked --dry-run
+cargo package -p stoffel-rust-sdk --locked
 ```
-
-For the current monorepo-local state, `cargo sdk-package-probe` runs the
-package-preparation command and is expected to fail with the unpublished
-dependency blocker above.
 
 ## Examples
 

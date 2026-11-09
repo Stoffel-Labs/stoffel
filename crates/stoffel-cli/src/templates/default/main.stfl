@@ -1,0 +1,8 @@
+# INTEGRATION STEP 2: replace this example with the smallest computation that
+# must operate on private participant values. ClientStore slot 0 maps to
+# Client0Inputs in the generated Rust bindings.
+def main():
+  var input = ClientStore.take_share(0, 0)
+  var doubled = Share.mul_scalar(input, 2)
+  # Only this authorized output is returned to participant client 0.
+  MpcOutput.send_to_client(0, [doubled])

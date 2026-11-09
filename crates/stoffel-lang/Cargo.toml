@@ -48,5 +48,17 @@ path = "tests/rust/user_defined_object_tests.rs"
 name = "fixture_and_example_tests"
 path = "tests/rust/fixture_and_example_tests.rs"
 
+[[test]]
+name = "docstring_tests"
+path = "tests/rust/docstring_tests.rs"
+
+[[test]]
+name = "docstring_equivalence_tests"
+path = "tests/rust/docstring_equivalence_tests.rs"
+
+[[test]]
+name = "docs_tests"
+path = "tests/rust/docs_tests.rs"
+
 [dev-dependencies]
 tempfile = "=3.27.0"

@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::backend::Backend;
 use crate::error::{Error, Result};
 use crate::types::GeneratedProgramManifest;
 
@@ -146,6 +147,64 @@ impl MpcBackend {
             }
         }
     }
+
+    /// Multiplier `k` in the backend's deployment floor `parties >= k * threshold + 1`.
+    fn minimum_parties_multiplier(self) -> usize {
+        match self {
+            // SDK-only deployment floor: HoneyBadger is deployed at N >= 4t + 1.
+            // NOTE: upstream stoffelcrypto 0.1.1 enforces the SAME protocol bound
+            // t < ceil(n/3) (i.e. N >= 3t + 1) for BOTH backends
+            // (honeybadger/mod.rs:476, avss_mpc/mod.rs:220). The 4t + 1 used here is a
+            // conservative SDK deployment floor, NOT HoneyBadger's Byzantine threshold.
+            MpcBackend::HoneyBadger => 4,
+            MpcBackend::Avss { .. } => 3,
+        }
+    }
+
+    /// Minimum party count for a given `threshold`: AVSS needs `3 * t + 1`,
+    /// HoneyBadger needs `4 * t + 1` (SDK deployment floor).
+    pub fn minimum_parties(self, threshold: usize) -> Result<usize> {
+        match self {
+            MpcBackend::HoneyBadger => {
+                checked_threshold_expression(threshold, 4, 1, "honeybadger minimum parties")
+            }
+            MpcBackend::Avss { .. } => {
+                checked_threshold_expression(threshold, 3, 1, "avss minimum parties")
+            }
+        }
+    }
+
+    /// Maximum tolerated `threshold` for a given party count: AVSS allows
+    /// `floor((n - 1) / 3)`, HoneyBadger allows `floor((n - 1) / 4)`.
+    pub fn maximum_threshold(self, parties: usize) -> Result<usize> {
+        let multiplier = self.minimum_parties_multiplier();
+        let minimum = multiplier + 1;
+        if parties < minimum {
+            return Err(Error::Configuration(format!(
+                "{} requires parties (N) >= {} to support a threshold (T) of at least 1 (got N = {})",
+                self.name(),
+                minimum,
+                parties
+            )));
+        }
+        Ok((parties - 1) / multiplier)
+    }
+
+    /// Fail unless `parties` satisfies the backend's minimum for `threshold`.
+    /// The error names the selected backend and its formula.
+    pub fn ensure_minimum_parties(self, parties: usize, threshold: usize) -> Result<()> {
+        let minimum = self.minimum_parties(threshold)?;
+        if parties < minimum {
+            return Err(Error::Configuration(format!(
+                "{} requires parties (N) >= {} * threshold (T) + 1 (got N = {}, T = {})",
+                self.name(),
+                self.minimum_parties_multiplier(),
+                parties,
+                threshold
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Display for MpcBackend {
@@ -221,41 +280,25 @@ impl MpcConfig {
         MpcConfigBuilder::default()
     }
 
-    pub fn minimum_parties_for_threshold(threshold: usize) -> Result<usize> {
-        byzantine_minimum_parties(threshold)
+    pub fn minimum_parties_for_threshold(backend: MpcBackend, threshold: usize) -> Result<usize> {
+        backend.minimum_parties(threshold)
     }
 
-    pub fn maximum_threshold_for_parties(parties: usize) -> Result<usize> {
-        if parties < 5 {
-            return Err(Error::Configuration(
-                "parties must be at least 5 for 4 * threshold + 1 Byzantine MPC".to_owned(),
-            ));
-        }
-        Ok((parties - 1) / 4)
+    pub fn maximum_threshold_for_parties(backend: MpcBackend, parties: usize) -> Result<usize> {
+        backend.maximum_threshold(parties)
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.parties < 5 {
-            return Err(Error::Configuration(
-                "parties must be at least 5 for 4 * threshold + 1 Byzantine MPC".to_owned(),
-            ));
-        }
-        let minimum_parties = byzantine_minimum_parties(self.threshold)?;
-        if self.parties < minimum_parties {
-            return Err(Error::Configuration(format!(
-                "invalid Byzantine threshold: parties ({}) must be >= 4 * threshold ({}) + 1",
-                self.parties, self.threshold
-            )));
-        }
-        Ok(())
+        self.backend
+            .ensure_minimum_parties(self.parties, self.threshold)
     }
 
     pub fn minimum_parties(&self) -> Result<usize> {
-        Self::minimum_parties_for_threshold(self.threshold)
+        self.backend.minimum_parties(self.threshold)
     }
 
     pub fn maximum_threshold(&self) -> Result<usize> {
-        Self::maximum_threshold_for_parties(self.parties)
+        self.backend.maximum_threshold(self.parties)
     }
 
     pub fn minimum_reconstruction_shares(&self) -> Result<usize> {
@@ -415,19 +458,8 @@ impl NetworkConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.network.expected_parties < 5 {
-            return Err(Error::Configuration(
-                "expected_parties must be at least 5 for 4 * threshold + 1 Byzantine MPC"
-                    .to_owned(),
-            ));
-        }
-        let minimum_parties = byzantine_minimum_parties(self.mpc.threshold)?;
-        if self.network.expected_parties < minimum_parties {
-            return Err(Error::Configuration(format!(
-                "invalid Byzantine threshold: expected_parties ({}) must be >= 4 * threshold ({}) + 1",
-                self.network.expected_parties, self.mpc.threshold
-            )));
-        }
+        let backend = self.mpc_backend()?;
+        backend.ensure_minimum_parties(self.network.expected_parties, self.mpc.threshold)?;
         if self.network.party_id >= self.network.expected_parties {
             return Err(Error::Configuration(format!(
                 "party_id {} must be less than expected_parties {}",
@@ -1054,10 +1086,6 @@ fn normalize_identifier(value: &str) -> String {
         .collect()
 }
 
-fn byzantine_minimum_parties(threshold: usize) -> Result<usize> {
-    checked_threshold_expression(threshold, 4, 1, "Byzantine party threshold")
-}
-
 pub(crate) fn validate_socket_address(label: &str, address: &str) -> Result<()> {
     let trimmed = address.trim();
     if trimmed.is_empty() {
@@ -1092,4 +1120,91 @@ fn checked_threshold_expression(
 
 fn duration_to_millis(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod backend_topology_tests {
+    use super::*;
+
+    fn avss() -> MpcBackend {
+        MpcBackend::Avss {
+            curve: Curve::Bls12_381,
+        }
+    }
+
+    fn config(parties: usize, threshold: usize, backend: MpcBackend) -> MpcConfig {
+        MpcConfig {
+            parties,
+            threshold,
+            instance_id: 1,
+            backend,
+        }
+    }
+
+    #[test]
+    fn avss_validate_accepts_three_t_plus_one_topologies() {
+        // STO-1019: AVSS is deployable at n = 3t + 1.
+        config(4, 1, avss())
+            .validate()
+            .expect("AVSS (n=4, t=1) must validate");
+        config(7, 2, avss())
+            .validate()
+            .expect("AVSS (n=7, t=2) must validate");
+    }
+
+    #[test]
+    fn avss_validate_rejects_below_three_t_plus_one() {
+        for (parties, threshold) in [(3, 1), (6, 2)] {
+            let err = config(parties, threshold, avss()).validate().unwrap_err();
+            let Error::Configuration(message) = err else {
+                panic!("expected configuration error for AVSS ({parties}, {threshold})");
+            };
+            assert!(
+                message.contains("avss requires parties (N) >= 3 * threshold (T) + 1"),
+                "AVSS rejection must name the backend and its formula: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn honeybadger_validate_uses_four_t_plus_one_floor() {
+        config(5, 1, MpcBackend::HoneyBadger)
+            .validate()
+            .expect("HoneyBadger (n=5, t=1) must validate");
+
+        let err = config(4, 1, MpcBackend::HoneyBadger)
+            .validate()
+            .unwrap_err();
+        let Error::Configuration(message) = err else {
+            panic!("expected configuration error for HoneyBadger (4, 1)");
+        };
+        assert!(
+            message.contains("honeybadger requires parties (N) >= 4 * threshold (T) + 1"),
+            "HoneyBadger rejection must name the backend and its formula: {message}"
+        );
+    }
+
+    #[test]
+    fn summaries_are_backend_specific_and_round_trip() -> Result<()> {
+        // STO-1020: summaries report backend-specific minimum_parties/maximum_threshold.
+        let avss_summary = config(7, 2, avss()).summary()?;
+        assert_eq!(avss_summary.minimum_parties, 7);
+        assert_eq!(avss_summary.maximum_threshold, 2);
+
+        let hb_summary = config(9, 2, MpcBackend::HoneyBadger).summary()?;
+        assert_eq!(hb_summary.minimum_parties, 9);
+        assert_eq!(hb_summary.maximum_threshold, 2);
+
+        // Just-below-bound party counts are rejected for both backends.
+        assert!(config(6, 2, avss()).summary().is_err());
+        assert!(config(8, 2, MpcBackend::HoneyBadger).summary().is_err());
+
+        // Serialization round-trip preserves the backend-specific summary values.
+        let serialized = toml::to_string(&avss_summary).expect("summary serializes");
+        let reparsed: MpcConfigSummary = toml::from_str(&serialized).expect("summary deserializes");
+        assert_eq!(reparsed, avss_summary);
+        assert_eq!(reparsed.minimum_parties, 7);
+        assert_eq!(reparsed.maximum_threshold, 2);
+        Ok(())
+    }
 }
