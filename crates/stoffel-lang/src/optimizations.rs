@@ -5854,6 +5854,22 @@ fn gather_inline_infos(root: &AstNode, allow_multi_return: bool) -> HashMap<Stri
         if is_recursive(name) {
             continue;
         }
+        // These builtins resolve captured variables by their names in this
+        // function's frame. Inlining can rename or remove those locals, so
+        // preserve the frame even when the body otherwise fits the budget.
+        if callees.get(name).is_some_and(|called| {
+            called.iter().any(|name| {
+                matches!(
+                    name.as_str(),
+                    "create_closure"
+                        | "create_closure_with_upvalue"
+                        | "get_upvalue"
+                        | "set_upvalue"
+                )
+            })
+        }) {
+            continue;
+        }
         // Never inline functions with variadic / defaulted parameters (the binding
         // prelude assumes one ordered argument per parameter).
         if params
