@@ -24,12 +24,14 @@ mod client_io;
 mod config;
 mod consensus;
 mod engine;
+mod inbound;
 mod operations;
 mod preprocessing;
 mod reservation;
 #[cfg(test)]
 mod tests;
 pub use config::{HoneyBadgerEngineConfig, HoneyBadgerPreprocessingConfig};
+pub use inbound::HoneyBadgerInboundQueue;
 pub use preprocessing::{
     agree_standing_preproc_plan, StandingPreprocAction, StandingPreprocPlan,
     StandingPreprocSnapshot,
@@ -40,6 +42,26 @@ use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::honeybadger::SessionId as HbSessionId;
 type RBCImpl = Avid<HbSessionId>;
 const DEFAULT_RESET_DRAIN_TIMEOUT_MS: u64 = 30_000;
+
+/// Initialize completed-session history on a fresh node, before protocol I/O.
+/// Late packets must not recreate completed sessions after the upstream short
+/// tombstone ring wraps. Bound history by the planned material, and keep the
+/// upstream active-session admission limits unchanged.
+pub fn configure_session_history<F: SupportedMpcField>(node: &mut HoneyBadgerMPCNode<F, RBCImpl>) {
+    use stoffelmpc_mpc::common::session_store::{SessionStore, DEFAULT_RETIRED_CAP};
+    let sessions = node
+        .params
+        .n_triples
+        .saturating_add(node.params.n_randbit)
+        .saturating_add(node.params.n_prandint)
+        .max(DEFAULT_RETIRED_CAP);
+    for multiplication in [&mut node.operations.mul, &mut node.type_ops.fpmul.mult_node] {
+        multiplication.mult_storage = Arc::new(Mutex::new(SessionStore::new(sessions)));
+        multiplication.batch_recon.store = Arc::new(futures::lock::Mutex::new(SessionStore::new(
+            sessions.saturating_mul(2),
+        )));
+    }
+}
 
 use crate::net::engine_config::{DeploymentMode, MpcSessionConfig};
 
@@ -247,30 +269,34 @@ where
         &self,
         new_instance_id: u64,
     ) -> Result<HoneyBadgerMPCNode<F, RBCImpl>, String> {
-        let (n_triples, n_random_shares, n_prandbit, n_prandint) = {
+        let (n_triples, n_random_shares, n_randbit, n_prandint, n_zero_shares) = {
             let node = self.node.lock().await;
             (
                 node.params.n_triples,
                 node.params.n_random_shares,
-                node.params.n_prandbit,
+                node.params.n_randbit,
                 node.params.n_prandint,
+                node.params.n_zero_shares,
             )
         };
-        let mpc_opts = honeybadger_node_opts_with_truncation(
+        let mut mpc_opts = honeybadger_node_opts_with_truncation(
             self.topology.n_parties(),
             self.topology.threshold(),
             n_triples,
             n_random_shares,
-            n_prandbit,
+            n_randbit,
             n_prandint,
             new_instance_id,
         )?;
-        <HoneyBadgerMPCNode<F, RBCImpl> as MPCProtocol<
+        mpc_opts.set_n_zero_shares(n_zero_shares);
+        let mut node = <HoneyBadgerMPCNode<F, RBCImpl> as MPCProtocol<
             F,
             RobustShare<F>,
             QuicNetworkManager,
         >>::setup(self.topology.party_id(), mpc_opts, self.input_ids.clone())
-        .map_err(|e| format!("Failed to recreate HoneyBadger MPC node: {:?}", e))
+        .map_err(|e| format!("Failed to recreate HoneyBadger MPC node: {:?}", e))?;
+        configure_session_history(&mut node);
+        Ok(node)
     }
 
     pub(crate) async fn reset_state_for_next_run(
@@ -381,12 +407,13 @@ where
         )?;
 
         // Create the MPC node
-        let node = <HoneyBadgerMPCNode<F, RBCImpl> as MPCProtocol<
+        let mut node = <HoneyBadgerMPCNode<F, RBCImpl> as MPCProtocol<
             F,
             RobustShare<F>,
             QuicNetworkManager,
         >>::setup(party_id, mpc_opts, input_ids.clone())
         .map_err(|e| format!("Failed to create MPC node: {:?}", e))?;
+        configure_session_history(&mut node);
 
         Ok(Arc::new(Self {
             topology,

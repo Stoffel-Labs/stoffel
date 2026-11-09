@@ -63,9 +63,21 @@ struct Args {
     #[arg(long, default_value_t = 31415)]
     port: u16,
 
-    /// Optional ordinary WebSocket bind address for signed browser-client RPC.
-    #[arg(long)]
-    browser_bind_addr: Option<String>,
+    /// Optional TLS WebSocket address for signed browser-client RPC.
+    #[arg(long, requires_all = ["browser_cert", "browser_key", "webauthn_rp_id"])]
+    browser_bind_addr: Option<std::net::SocketAddr>,
+
+    /// PEM certificate chain for the browser TLS listener.
+    #[arg(long, requires = "browser_bind_addr")]
+    browser_cert: Option<String>,
+
+    /// PEM private key for the browser TLS listener.
+    #[arg(long, requires = "browser_bind_addr")]
+    browser_key: Option<String>,
+
+    /// WebAuthn relying-party hostname served by the browser application.
+    #[arg(long, requires = "browser_bind_addr")]
+    webauthn_rp_id: Option<String>,
 }
 
 fn parse_nonzero_execution_id(value: &str) -> Result<ExecutionId, String> {
@@ -187,14 +199,25 @@ async fn main() {
 
     let cert = fs::read(&args.server_cert).expect("could not read server cert");
     let key = fs::read(&args.server_key).expect("could not read server key");
-    let coord = if let Some(browser_bind_addr) = args.browser_bind_addr.as_deref() {
-        OffChainCoordinatorServer::<CoordinatorConnection>::start_coord_with_browser(
+    let coord = if let Some(browser_bind_addr) = args.browser_bind_addr {
+        let browser_cert = fs::read(args.browser_cert.as_ref().expect("--browser-cert required"))
+            .expect("could not read browser TLS certificate chain");
+        let browser_key = fs::read(args.browser_key.as_ref().expect("--browser-key required"))
+            .expect("could not read browser TLS key");
+        OffChainCoordinatorServer::<CoordinatorConnection>::start_coord_with_browser_tls(
             state,
             &args.bind_addr,
             args.port,
             cert,
             key,
-            browser_bind_addr,
+            &browser_bind_addr.ip().to_string(),
+            browser_bind_addr.port(),
+            browser_cert,
+            browser_key,
+            args.webauthn_rp_id
+                .as_deref()
+                .expect("--webauthn-rp-id required"),
+            None,
         )
         .await
     } else {
@@ -277,4 +300,52 @@ fn parse_input_assignment(cert_files: &[String]) -> InputAssignment {
         }
     }
     InputAssignment { clients, ranges }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    fn required_args() -> Vec<&'static str> {
+        vec![
+            "coordinator",
+            "--server-cert",
+            "cert.der",
+            "--server-key",
+            "key.der",
+            "--n",
+            "5",
+            "--t",
+            "1",
+        ]
+    }
+
+    #[test]
+    fn native_listener_does_not_require_browser_credentials() {
+        assert!(Args::try_parse_from(required_args()).is_ok());
+    }
+
+    #[test]
+    fn browser_listener_requires_tls_and_relying_party() {
+        let mut args = required_args();
+        args.extend(["--browser-bind-addr", "127.0.0.1:31416"]);
+        assert!(Args::try_parse_from(args).is_err());
+    }
+
+    #[test]
+    fn browser_listener_accepts_complete_tls_configuration() {
+        let mut args = required_args();
+        args.extend([
+            "--browser-bind-addr",
+            "127.0.0.1:31416",
+            "--browser-cert",
+            "cert.pem",
+            "--browser-key",
+            "key.pem",
+            "--webauthn-rp-id",
+            "localhost",
+        ]);
+        assert!(Args::try_parse_from(args).is_ok());
+    }
 }

@@ -62,6 +62,26 @@ fn open_exp_test_payload(
 }
 
 #[test]
+fn open_in_exponent_capability_matches_the_session_threshold() {
+    use crate::net::mpc_engine::MpcCapabilities;
+
+    for (parties, threshold, supported) in [(5, 0, true), (5, 1, false)] {
+        let engine = test_engine(
+            Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
+            next_instance_id(),
+            0,
+            parties,
+            threshold,
+        );
+        assert_eq!(
+            engine.capabilities().contains(MpcCapabilities::OPEN_IN_EXP),
+            supported
+        );
+        assert_eq!(engine.as_open_in_exp().is_some(), supported);
+    }
+}
+
+#[test]
 fn robust_open_requires_full_bft_quorum() {
     type Engine = HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>;
 
@@ -156,7 +176,7 @@ async fn individual_random_reservations_transfer_the_upstream_vec_once_in_order(
         .preprocessing_material
         .lock()
         .await
-        .add(None, None, Some(shares.clone()), None, None, None);
+        .add(None, Some(shares.clone()), None, None);
 
     for (index, expected) in shares.iter().enumerate() {
         let taken = engine.reserve_random_share().await.unwrap();
@@ -231,9 +251,7 @@ def main() -> int64:
         .await
         .add(
             None,
-            None,
             Some(vec![expected.clone(); RANDOM_SHARE_COUNT]),
-            None,
             None,
             None,
         );
@@ -301,19 +319,41 @@ async fn preprocess_reserves_persistent_random_shares_when_loaded() {
         .await
         .unwrap();
 
-    let engine = test_engine(
-        Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
+    let session = MpcSessionConfig::try_new(
         next_instance_id(),
         party_id,
         n,
         t,
-    );
+        Arc::new(QuicNetworkManager::new()),
+    )
+    .unwrap();
+    let engine =
+        HoneyBadgerMpcEngine::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>::from_config(
+            HoneyBadgerEngineConfig::new(session, HoneyBadgerPreprocessingConfig::new(0, 3)),
+        )
+        .unwrap();
     engine
         .preproc_persistence_ops()
         .unwrap()
         .set_preproc_store(store.clone(), program_hash)
         .unwrap();
 
+    // Multi-party loads must not proceed without a common inventory decision.
+    assert!(engine
+        .preprocess()
+        .await
+        .unwrap_err()
+        .contains("party-agreed inventory plan"));
+    assert_eq!(store.available(&key).await.unwrap(), 3);
+    preproc::store_standing_preproc_generation(store.as_ref(), scope, [0x42; 32])
+        .await
+        .unwrap();
+    let snapshot = engine.standing_preproc_snapshot().await.unwrap();
+    let plan = engine
+        .install_standing_preproc_plan(vec![snapshot; n], [0x43; 32])
+        .await
+        .unwrap();
+    assert_eq!(plan.action, preproc::StandingPreprocAction::Reuse);
     engine.preprocess().await.unwrap();
 
     assert_eq!(
@@ -321,6 +361,15 @@ async fn preprocess_reserves_persistent_random_shares_when_loaded() {
         0,
         "persistent random shares loaded into the runtime pool must be consumed"
     );
+    let consumed = engine.standing_preproc_snapshot().await.unwrap();
+    let refill = preproc::agree_standing_preproc_plan(
+        engine.standing_preproc_targets().await.unwrap(),
+        &[consumed; 2],
+        [0x44; 32],
+    )
+    .unwrap();
+    assert_eq!(refill.action, preproc::StandingPreprocAction::TopUp);
+    assert_eq!(refill.needed.random, 3);
     assert!(
         store.load(&key).await.unwrap().is_none(),
         "consumed persistent random shares should be evicted after preload"
@@ -1109,4 +1158,113 @@ fn honeybadger_exponent_open_fails_closed_without_verifiable_shares() {
         .expect_err("unverifiable HoneyBadger exponent opening must fail closed");
     assert!(error.contains("disabled for Byzantine-threshold sessions"));
     assert!(error.contains("AVSS backend"));
+}
+
+#[tokio::test]
+async fn one_bit_randomness_consumes_bits_not_wide_integers() {
+    use stoffel_vm_types::core_types::ShareType;
+    type Engine = HoneyBadgerMpcEngine<ark_bls12_381::Fr, ark_bls12_381::G1Projective>;
+    let engine = test_engine(
+        Arc::new(crate::net::open_registry::OpenMessageRouter::new()),
+        next_instance_id(),
+        0,
+        5,
+        1,
+    );
+    let node = engine.clone_node().await;
+    let bits = [0u64, 1]
+        .into_iter()
+        .map(|v| RobustShare::new(ark_bls12_381::Fr::from(v), 0, 1))
+        .collect();
+    node.preprocessing_material.lock().await.add(
+        None,
+        None,
+        Some(bits),
+        Some(vec![RobustShare::new(ark_bls12_381::Fr::from(7u64), 0, 1)]),
+    );
+    for expected in [0u64, 1] {
+        let value = engine
+            .random_integer_share_async_impl(ShareType::boolean())
+            .await
+            .unwrap();
+        let share = Engine::decode_share(value.as_bytes()).unwrap();
+        assert_eq!(share.share[0], ark_bls12_381::Fr::from(expected));
+    }
+    assert_eq!(
+        node.preprocessing_material.lock().await.length().prandint,
+        1
+    );
+}
+
+#[tokio::test]
+async fn completed_session_history_covers_planned_work_without_raising_active_limits() {
+    use stoffelmpc_mpc::common::ProtocolSessionId;
+    use stoffelmpc_mpc::honeybadger::{ProtocolType, SessionId};
+    let session = MpcSessionConfig::try_new(
+        next_instance_id(),
+        0,
+        5,
+        1,
+        Arc::new(QuicNetworkManager::new()),
+    )
+    .unwrap();
+    let engine =
+        HoneyBadgerMpcEngine::<ark_bls12_381::Fr, ark_bls12_381::G1Projective>::from_config(
+            HoneyBadgerEngineConfig::new(session, HoneyBadgerPreprocessingConfig::new(2048, 0)),
+        )
+        .unwrap();
+    let node = engine.clone_node().await;
+    let id = |counter, child, round| {
+        SessionId::new(
+            ProtocolType::Mul,
+            SessionId::pack_slot(counter, child, round),
+            node.params.instance_id,
+        )
+    };
+    for counter in 0..2048 {
+        node.operations
+            .mul
+            .mult_storage
+            .lock()
+            .await
+            .retire(id(counter, 0, 0));
+        for child in 0..2 {
+            node.operations
+                .mul
+                .batch_recon
+                .store
+                .lock()
+                .await
+                .retire(id(counter, child, 1));
+        }
+    }
+    assert!(node
+        .operations
+        .mul
+        .get_or_create_mult_storage(id(0, 0, 0), 0)
+        .await
+        .is_none());
+    let mut batch = node.operations.mul.batch_recon.store.lock().await;
+    for child in 0..2 {
+        assert!(batch
+            .get_or_create_with(id(0, child, 1), || panic!("completed child recreated"))
+            .is_none());
+    }
+    assert_eq!(batch.len(), 0);
+    drop(batch);
+    assert_eq!(node.operations.mul.store_len().await, 0);
+    for counter in 3000..3204 {
+        assert!(node
+            .operations
+            .mul
+            .get_or_create_mult_storage(id(counter, 0, 0), 0)
+            .await
+            .is_some());
+    }
+    assert!(node
+        .operations
+        .mul
+        .get_or_create_mult_storage(id(3204, 0, 0), 0)
+        .await
+        .is_none());
 }

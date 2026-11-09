@@ -13,7 +13,7 @@ categories = ["compilers", "cryptography", "data-structures"]
 rustc-hash = "=2.1.3"
 smallvec = "=1.15.2"
 parking_lot = "=0.12.5"
-serde = { version = "=1.0.228", features = ["derive"] }
-num-bigint = "=0.4.6"
+serde = { version = "=1.0.229", features = ["derive"] }
+num-bigint = "=0.4.8"
 num-integer = "=0.1.46"
 num-traits = "=0.2.19"

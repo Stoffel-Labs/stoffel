@@ -255,6 +255,11 @@ struct CodeGenerator {
     symbol_types: ScopeMap<SymbolType>,
     // User object fields available for default construction in this scope.
     object_field_types: ScopeMap<Vec<(String, SymbolType)>>,
+    // `type Name = ...` aliases declared in this module, keyed by alias name.
+    // Annotations are resolved through these so an alias such as
+    // `type Amount = secret int64` keeps its `secret` qualifier in register
+    // secrecy and in emitted parameter metadata.
+    type_aliases: HashMap<String, SymbolType>,
     // Compiled functions.
     compiled_functions: HashMap<String, BytecodeChunk>,
     // If present, this chunk represents `def main(...)` promoted to the program entry.
@@ -404,6 +409,49 @@ fn pin_key(value: &crate::core_types::Value) -> Option<PinKey> {
 }
 
 impl CodeGenerator {
+    /// Replaces references to `type` aliases declared in this module with their
+    /// targets, mirroring semantic analysis, so secrecy carried by an alias is
+    /// not lost when deciding register banks or emitting type metadata.
+    fn resolve_type_aliases(&self, sym_type: &SymbolType) -> SymbolType {
+        self.resolve_type_aliases_inner(sym_type, 0)
+    }
+
+    fn resolve_type_aliases_inner(&self, sym_type: &SymbolType, depth: usize) -> SymbolType {
+        if depth > 32 {
+            return sym_type.clone();
+        }
+        match sym_type {
+            SymbolType::TypeName(name) => match self.type_aliases.get(name) {
+                Some(target) => self.resolve_type_aliases_inner(target, depth + 1),
+                None => sym_type.clone(),
+            },
+            SymbolType::Secret(inner) => {
+                let resolved = self.resolve_type_aliases_inner(inner, depth + 1);
+                // `secret Amount` where `Amount` is already secret must not nest.
+                if resolved.is_secret() {
+                    resolved
+                } else {
+                    SymbolType::Secret(Box::new(resolved))
+                }
+            }
+            SymbolType::List(inner) => {
+                SymbolType::List(Box::new(self.resolve_type_aliases_inner(inner, depth + 1)))
+            }
+            SymbolType::Dict(key, value) => SymbolType::Dict(
+                Box::new(self.resolve_type_aliases_inner(key, depth + 1)),
+                Box::new(self.resolve_type_aliases_inner(value, depth + 1)),
+            ),
+            SymbolType::Generic(name, params) => SymbolType::Generic(
+                name.clone(),
+                params
+                    .iter()
+                    .map(|param| self.resolve_type_aliases_inner(param, depth + 1))
+                    .collect(),
+            ),
+            _ => sym_type.clone(),
+        }
+    }
+
     fn new() -> Self {
         CodeGenerator {
             current_instructions: Vec::new(),
@@ -414,6 +462,7 @@ impl CodeGenerator {
             symbol_table: ScopeMap::default(),
             symbol_types: ScopeMap::default(),
             object_field_types: ScopeMap::default(),
+            type_aliases: HashMap::new(),
             compiled_functions: HashMap::new(),
             main_proc_chunk: None,
             entry_main_chunk: None,
@@ -2024,7 +2073,9 @@ impl CodeGenerator {
                 // Determine if the initial value needs a secret register
                 // Secrecy comes from a `secret` type annotation.
                 // Semantic analysis should have ensured consistency if both are present.
-                let annotation_type = type_annotation.as_ref().map(|n| SymbolType::from_ast(n));
+                let annotation_type = type_annotation
+                    .as_ref()
+                    .map(|n| self.resolve_type_aliases(&SymbolType::from_ast(n)));
                 let value_type_hint = value
                     .as_deref()
                     .and_then(|expr| self.type_hint_for_node(expr));
@@ -3033,6 +3084,7 @@ impl CodeGenerator {
                 let mut function_generator = CodeGenerator::new();
                 function_generator.opt_level = self.opt_level;
                 function_generator.object_field_types = self.object_field_types.clone();
+                function_generator.type_aliases = self.type_aliases.clone();
                 // A variable that is reassigned anywhere in the body (e.g. a
                 // `while`-loop counter) is not a constant, so it must not be
                 // resolved to its initial value when statically determining
@@ -3046,7 +3098,12 @@ impl CodeGenerator {
                     let param_type = param
                         .type_annotation
                         .as_ref()
-                        .map(|n| SymbolType::from_ast_with_type_params(n, type_params))
+                        .map(|n| {
+                            self.resolve_type_aliases(&SymbolType::from_ast_with_type_params(
+                                n,
+                                type_params,
+                            ))
+                        })
                         .unwrap_or(SymbolType::Unknown);
                     let param_is_secret = param_type.uses_secret_register();
                     // Function arguments enter in the clear ABI parameter slots
@@ -3139,14 +3196,24 @@ impl CodeGenerator {
                         param
                             .type_annotation
                             .as_ref()
-                            .map(|n| SymbolType::from_ast_with_type_params(n, type_params))
+                            .map(|n| {
+                                self.resolve_type_aliases(&SymbolType::from_ast_with_type_params(
+                                    n,
+                                    type_params,
+                                ))
+                            })
                             .unwrap_or(SymbolType::Unknown)
                     })
                     .map(symbol_type_to_function_type)
                     .collect();
                 function_chunk.return_type = return_type
                     .as_ref()
-                    .map(|n| SymbolType::from_ast_with_type_params(n, type_params))
+                    .map(|n| {
+                        self.resolve_type_aliases(&SymbolType::from_ast_with_type_params(
+                            n,
+                            type_params,
+                        ))
+                    })
                     .map(symbol_type_to_function_type)
                     .unwrap_or(stoffel_vm_types::compiled_binary::FunctionType::Void);
                 function_chunk.upvalues = collect_upvalue_names(body);
@@ -3214,7 +3281,8 @@ impl CodeGenerator {
                 let field_types = fields
                     .iter()
                     .map(|field| {
-                        let mut field_type = SymbolType::from_ast(&field.type_annotation);
+                        let mut field_type = self
+                            .resolve_type_aliases(&SymbolType::from_ast(&field.type_annotation));
                         if field.is_secret && !field_type.is_secret() {
                             field_type = field_type.with_secret_modifier();
                         }
@@ -3558,6 +3626,33 @@ fn collect_upvalue_names(node: &AstNode) -> Vec<String> {
 /// `Assignment`) within `node`, not descending into nested function definitions
 /// (which have their own scope and are seeded separately). Used to exclude
 /// loop counters and other mutated variables from constant-slot resolution.
+/// Records every `type Name = ...` alias declared at the top level of `node`
+/// (aliases are declarations, so they only appear in module-level blocks).
+/// The stored target keeps the alias's `secret` qualifier; nested alias
+/// references are resolved lazily by [`CodeGenerator::resolve_type_aliases`].
+fn collect_type_aliases(node: &AstNode, out: &mut HashMap<String, SymbolType>) {
+    match node {
+        AstNode::Block(statements) => {
+            for statement in statements {
+                collect_type_aliases(statement, out);
+            }
+        }
+        AstNode::TypeAlias {
+            name,
+            target_type,
+            is_secret,
+            ..
+        } => {
+            let mut alias_type = SymbolType::from_ast(target_type);
+            if *is_secret && !alias_type.is_secret() {
+                alias_type = alias_type.with_secret_modifier();
+            }
+            out.insert(name.clone(), alias_type);
+        }
+        _ => {}
+    }
+}
+
 fn collect_reassigned_vars(node: &AstNode, out: &mut HashSet<String>) {
     match node {
         AstNode::Assignment { target, value, .. } => {
@@ -3670,6 +3765,7 @@ pub fn generate_bytecode_with_opt_level_and_backend(
 ) -> CompilerResult<CompiledProgram> {
     let mut generator = CodeGenerator::new();
     generator.opt_level = opt_level;
+    collect_type_aliases(node, &mut generator.type_aliases);
     collect_reassigned_vars(node, &mut generator.reassigned_vars);
     let (_result_vr, _result_is_secret) = generator.compile_node(node)?;
     let mut program = generator.finalize_program()?;

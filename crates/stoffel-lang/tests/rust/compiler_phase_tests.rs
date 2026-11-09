@@ -4767,7 +4767,9 @@ def main() -> int64:
     assert_eq!(demand.randoms, 1);
     assert_eq!(demand.prandints, 2);
     assert_eq!(demand.triples, 0);
-    assert_eq!(demand.prandbits, 0);
+    // Generic random() is lowered using its contextual type after planning.
+    // Reserve both pools so a one-bit lowering cannot exhaust its allocation.
+    assert_eq!(demand.prandbits, 1);
     assert!(!demand.dynamic);
 }
 
@@ -4822,7 +4824,9 @@ def main() -> int64:
     assert_eq!(demand.randoms, 4);
     assert_eq!(demand.prandints, 8);
     assert_eq!(demand.triples, 0);
-    assert_eq!(demand.prandbits, 0);
+    // Generic random() is lowered using its contextual type after planning.
+    // Reserve both pools so a one-bit lowering cannot exhaust its allocation.
+    assert_eq!(demand.prandbits, 4);
     assert!(!demand.dynamic);
 }
 
@@ -5082,4 +5086,33 @@ def main() -> fix64:
     assert!(calls
         .iter()
         .any(|name| name == "ClientStore.take_share_fixed"));
+}
+
+#[test]
+fn test_secret_type_alias_keeps_secrecy_in_parameter_metadata() {
+    // `Amount` is only secret through its alias target. Codegen must resolve the
+    // alias before emitting metadata; otherwise it surfaces as `Object("Amount")`
+    // and SDK input adapters treat the parameter as clear.
+    let source = r#"
+type Amount = secret int64
+type Balance = Amount
+
+def main(a: Amount, b: secret int64, c: Balance, d: list[Amount]) -> Amount:
+  return a + b
+"#;
+
+    let program = compile(source, "test.stfl", &default_options())
+        .expect("secret type aliases should compile");
+
+    let secret_int64 = FunctionType::Secret(Box::new(FunctionType::int64()));
+    assert_eq!(
+        program.main_chunk.parameter_types,
+        vec![
+            secret_int64.clone(),
+            secret_int64.clone(),
+            secret_int64.clone(),
+            FunctionType::List(Box::new(secret_int64.clone())),
+        ]
+    );
+    assert_eq!(program.main_chunk.return_type, secret_int64);
 }

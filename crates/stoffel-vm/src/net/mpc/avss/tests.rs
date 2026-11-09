@@ -439,11 +439,9 @@ async fn preprocess_reserves_persistent_avss_random_shares_when_loaded() {
     let net = Arc::new(QuicNetworkManager::new());
     let public_keys = Arc::new(vec![G1::generator(); n]);
     let session = MpcSessionConfig::try_new(9_000_000, party_id, n, t, net).unwrap();
-    let engine = AvssMpcEngine::<Fr, G1>::from_config(AvssEngineConfig::new(
-        session,
-        Fr::from(5u64),
-        public_keys,
-    ))
+    let engine = AvssMpcEngine::<Fr, G1>::from_config(
+        AvssEngineConfig::new(session, Fr::from(5u64), public_keys).with_preprocessing_counts(3, 0),
+    )
     .await
     .unwrap();
     engine
@@ -452,6 +450,22 @@ async fn preprocess_reserves_persistent_avss_random_shares_when_loaded() {
         .set_preproc_store(store.clone(), program_hash)
         .unwrap();
 
+    // Multi-party loads must not proceed without a common inventory decision.
+    assert!(engine
+        .preprocess()
+        .await
+        .unwrap_err()
+        .contains("party-agreed inventory plan"));
+    assert_eq!(store.available(&key).await.unwrap(), 3);
+    preproc::store_standing_preproc_generation(store.as_ref(), scope, [0x42; 32])
+        .await
+        .unwrap();
+    let snapshot = engine.standing_preproc_snapshot().await.unwrap();
+    let plan = engine
+        .install_standing_preproc_plan(vec![snapshot; n], [0x43; 32])
+        .await
+        .unwrap();
+    assert_eq!(plan.action, preproc::StandingPreprocAction::Reuse);
     engine.preprocess().await.unwrap();
 
     assert_eq!(
@@ -459,6 +473,15 @@ async fn preprocess_reserves_persistent_avss_random_shares_when_loaded() {
         0,
         "persistent AVSS random shares loaded into the runtime pool must be consumed"
     );
+    let consumed = engine.standing_preproc_snapshot().await.unwrap();
+    let refill = preproc::agree_standing_preproc_plan(
+        engine.standing_preproc_targets().await.unwrap(),
+        &[consumed; 2],
+        [0x44; 32],
+    )
+    .unwrap();
+    assert_eq!(refill.action, preproc::StandingPreprocAction::TopUp);
+    assert_eq!(refill.needed.random, 3);
     assert!(
         store.load(&key).await.unwrap().is_none(),
         "consumed persistent AVSS random shares should be evicted after preload"

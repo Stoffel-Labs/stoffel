@@ -1,0 +1,8 @@
+# Subtract inputs in reserved-index order and return the result to both clients.
+def main() -> int64:
+  var left: secret int64 = ClientStore.take_share(0, 0)
+  var right: secret int64 = ClientStore.take_share(1, 0)
+  var difference = left.sub(right)
+  difference.send_to_client(0)
+  difference.send_to_client(1)
+  return difference.open()

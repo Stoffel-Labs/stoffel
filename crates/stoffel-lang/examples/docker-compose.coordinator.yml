@@ -10,7 +10,7 @@ x-stoffel-build: &stoffel-build
   context: ${STOFFEL_VM_DIR:-../../..}
   dockerfile: Dockerfile
   additional_contexts:
-    coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+    coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}"
     networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
 
 x-party-common: &party-common
@@ -21,7 +21,7 @@ x-party-common: &party-common
     STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
     STOFFEL_N_PARTIES: "5"
     STOFFEL_THRESHOLD: "1"
-    STOFFEL_PROGRAM: /app/examples/${STOFFEL_PROGRAM_NAME:-mpc_share_arithmetic.stflb}
+    STOFFEL_PROGRAM: /app/examples/${STOFFEL_PROGRAM_NAME:-mpc_client_private_score.stflb}
     STOFFEL_ENTRY: ${STOFFEL_ENTRY:-main}
     STOFFEL_MPC_BACKEND: honeybadger
     STOFFEL_MPC_CURVE: bls12-381
@@ -41,7 +41,7 @@ x-client-common: &client-common
     - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
   environment: &client-env
     STOFFEL_ROLE: client
-    STOFFEL_PROGRAM: /app/examples/${STOFFEL_PROGRAM_NAME:-mpc_share_arithmetic.stflb}
+    STOFFEL_PROGRAM: /app/examples/${STOFFEL_PROGRAM_NAME:-mpc_client_private_score.stflb}
     STOFFEL_SERVERS: ${STOFFEL_COORD_NET_PREFIX:-172.32.0}.10:16180,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.11:16181,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.12:16182,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.13:16183,${STOFFEL_COORD_NET_PREFIX:-172.32.0}.14:16184
     STOFFEL_N_PARTIES: "5"
     STOFFEL_THRESHOLD: "1"
@@ -64,7 +64,7 @@ services:
       context: ${STOFFEL_VM_DIR:-../../..}
       dockerfile: docker/coordinator.Dockerfile
       additional_contexts:
-        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}"
         networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
     container_name: stoffel-examples-coordinator
     hostname: coordinator
@@ -73,8 +73,9 @@ services:
       - 0.0.0.0
       - --port
       - "31415"
+      # Set STOFFEL_PROGRAM_HASH when selecting different compiled bytecode.
       - --hash
-      - "0000000000000000000000000000000000000000000000000000000000000000"
+      - "${STOFFEL_PROGRAM_HASH:-711dae09400f990e7062df9c2d47cbbf83e1a8c8df940ff42d215c50f3c36c69}"
       - --execution-id
       - "${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001}"
       - --server-cert
@@ -224,7 +225,7 @@ services:
     hostname: client0
     environment:
       <<: *client-env
-      STOFFEL_INPUTS: ${STOFFEL_CLIENT0_INPUT:-15}
+      STOFFEL_INPUTS: ${STOFFEL_CLIENT0_INPUT:-100}
       STOFFEL_CLIENT_INDEX: ${STOFFEL_CLIENT0_INDEX:-0}
       STOFFEL_CERT: /app/ids/clients/cert0.crt
       STOFFEL_KEY: /app/ids/clients/key0.der
@@ -251,9 +252,9 @@ services:
     hostname: client1
     environment:
       <<: *client-env
-      STOFFEL_INPUTS: ${STOFFEL_CLIENT1_INPUT:-25}
+      STOFFEL_INPUTS: ${STOFFEL_CLIENT1_INPUT:-20}
       STOFFEL_CLIENT_INDEX: ${STOFFEL_CLIENT1_INDEX:-1}
-      STOFFEL_OUTPUTS: ${STOFFEL_CLIENT1_OUTPUTS:-0}
+      STOFFEL_OUTPUTS: ${STOFFEL_CLIENT1_OUTPUTS:-1}
       STOFFEL_CERT: /app/ids/clients/cert1.crt
       STOFFEL_KEY: /app/ids/clients/key1.der
     networks:

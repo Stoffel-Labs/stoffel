@@ -239,15 +239,20 @@ where
     }
 
     fn capabilities(&self) -> MpcCapabilities {
-        MpcCapabilities::MULTIPLICATION
-            | MpcCapabilities::OPEN_IN_EXP
+        let mut capabilities = MpcCapabilities::MULTIPLICATION
             | MpcCapabilities::CLIENT_INPUT
             | MpcCapabilities::CLIENT_OUTPUT
             | MpcCapabilities::CONSENSUS
             | MpcCapabilities::RESERVATION
             | MpcCapabilities::RANDOMNESS
             | MpcCapabilities::FIELD_OPEN
-            | MpcCapabilities::PREPROC_PERSISTENCE
+            | MpcCapabilities::PREPROC_PERSISTENCE;
+        // RobustShare has no authenticated polynomial commitments. The
+        // operation is supported only by the threshold-zero compatibility path.
+        if self.topology.threshold() == 0 {
+            capabilities |= MpcCapabilities::OPEN_IN_EXP;
+        }
+        capabilities
     }
 
     fn as_consensus(&self) -> Option<&dyn MpcEngineConsensus> {
@@ -267,7 +272,7 @@ where
     }
 
     fn as_open_in_exp(&self) -> Option<&dyn MpcEngineOpenInExponent> {
-        Some(self)
+        (self.topology.threshold() == 0).then_some(self)
     }
 
     fn as_randomness(&self) -> Option<&dyn MpcEngineRandomness> {

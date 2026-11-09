@@ -1,8 +1,8 @@
-use super::{AvssExecutionNetwork, AvssMpcEngine};
+use super::{AvssExecutionNetwork, AvssMpcEngine, AvssMpcNode, AvssSessionId};
 use crate::net::curve::SupportedMpcField;
 use crate::storage::preproc::{
     self, agree_standing_preproc_plan_for_party, apply_standing_preproc_plan,
-    standing_preproc_snapshot, OwnedPreprocBundle, PoolAvailability, PreprocBlob, PreprocKeyScope,
+    standing_preproc_snapshot, OwnedPreprocBundle, PoolAvailability, PreprocKeyScope,
 };
 pub use crate::storage::preproc::{
     agree_standing_preproc_plan, StandingPreprocAction, StandingPreprocPlan,
@@ -10,9 +10,10 @@ pub use crate::storage::preproc::{
 };
 use ark_ec::CurveGroup;
 use ark_std::rand::SeedableRng;
+use stoffelmpc_mpc::common::rbc::rbc::Avid;
+use stoffelmpc_mpc::common::share::avss::MAX_DEAL_BATCH;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::common::PreprocessingMPCProtocol;
-use tracing::info;
 
 fn ensure_decoded_count(label: &str, actual: usize, expected: u32) -> Result<(), String> {
     let expected = usize::try_from(expected)
@@ -32,8 +33,8 @@ where
 {
     /// Run cooperative preprocessing to generate random shares and Beaver triples.
     ///
-    /// If a persistent store is configured, attempts to load from it first.
-    /// After generation, persists the result for future runs.
+    /// A persistent store uses a party-agreed inventory and destructively
+    /// allocates fresh material before execution.
     ///
     /// This clones the inner node so that preprocessing can run concurrently
     /// with the message processing loop (which also needs the node lock for
@@ -44,24 +45,45 @@ where
             return self.preprocess_standing().await;
         }
 
-        if self.try_load_preproc().await? {
-            return Ok(());
+        if self.preproc_store.read().await.is_some() {
+            return self.preprocess_persistent_execution().await;
         }
 
         {
             let mut node_clone = self.clone_avss_node().await;
-            let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-            PreprocessingMPCProtocol::<
+            self.run_bounded_preprocessing(&mut node_clone).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Keep each dealing within stoffelcrypto's wire limit. Version 0.1.2
+    /// appends a sacrifice candidate for every requested triple, so requesting
+    /// MAX_DEAL_BATCH triples at once would send twice that many commitments.
+    async fn run_bounded_preprocessing(
+        &self,
+        node: &mut AvssMpcNode<F, Avid<AvssSessionId>, G>,
+    ) -> Result<(), String> {
+        let requested_triples = node.params.n_triples;
+        let mut generated_target = node.preprocessing_material.lock().await.len().0;
+        let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
+        loop {
+            generated_target = generated_target
+                .saturating_add(MAX_DEAL_BATCH / 2)
+                .min(requested_triples);
+            node.params.n_triples = generated_target;
+            let result = PreprocessingMPCProtocol::<
                 F,
                 FeldmanShamirShare<F, G>,
                 AvssExecutionNetwork,
-            >::run_preprocessing(&mut *node_clone, self.protocol_net.clone(), &mut rng)
-            .await
-            .map_err(|e| format!("AVSS preprocessing failed: {:?}", e))?;
+            >::run_preprocessing(node, self.protocol_net.clone(), &mut rng)
+            .await;
+            node.params.n_triples = requested_triples;
+            result.map_err(|error| format!("AVSS preprocessing failed: {error:?}"))?;
+            if generated_target == requested_triples {
+                return Ok(());
+            }
         }
-
-        self.persist_preproc().await?;
-        Ok(())
     }
 
     async fn preproc_scope(
@@ -234,14 +256,7 @@ where
         let mut node_clone = self.clone_avss_node().await;
         node_clone.params.n_triples = needed.beaver as usize;
         node_clone.params.n_v_random_shares = needed.random as usize;
-        let mut rng = ark_std::rand::rngs::StdRng::from_entropy();
-        PreprocessingMPCProtocol::<F, FeldmanShamirShare<F, G>, AvssExecutionNetwork>::run_preprocessing(
-            &mut *node_clone,
-            self.protocol_net.clone(),
-            &mut rng,
-        )
-        .await
-        .map_err(|e| format!("AVSS top-up preprocessing failed: {:?}", e))?;
+        self.run_bounded_preprocessing(&mut node_clone).await?;
 
         let mut to_append = Vec::new();
         {
@@ -270,92 +285,15 @@ where
         Ok(())
     }
 
-    /// Try to load AVSS preprocessing material from the persistent store.
-    async fn try_load_preproc(&self) -> Result<bool, String> {
-        let store = self.preproc_store.read().await.clone();
-        let config = *self.preproc_config.read().await;
-        let (store, (hash, field_kind)) = match (store, config) {
-            (Some(store), Some(config)) => (store, config),
-            _ => return Ok(false),
-        };
-        let scope = PreprocKeyScope::new(
-            hash,
-            field_kind,
-            self.topology.n_parties(),
-            self.topology.threshold(),
-            self.local_identity,
-        );
-        let requested = store.scope_availability(&scope).await?;
-        if requested == PoolAvailability::default() {
-            return Ok(false);
-        }
-
-        let bundle = store.take_bundle_from_reservoir(&scope, requested).await?;
-        self.activate_preproc_bundle(bundle).await?;
-        info!(
-            "Loaded AVSS preprocessing material from store for program {}",
-            hex::encode(hash)
-        );
-        Ok(true)
-    }
-
-    /// Persist current AVSS preprocessing material to the store.
-    ///
-    /// Drains and serializes inside the lock, then stores after releasing.
-    async fn persist_preproc(&self) -> Result<(), String> {
-        let store = self.preproc_store.read().await.clone();
-        let config = *self.preproc_config.read().await;
-        let (store, (hash, field_kind)) = match (store, config) {
-            (Some(s), Some(c)) => (s, c),
-            _ => return Ok(()),
-        };
-
-        let scope = PreprocKeyScope::new(
-            hash,
-            field_kind,
-            self.topology.n_parties(),
-            self.topology.threshold(),
-            self.local_identity,
-        );
-        let base = scope.beaver_triple();
-        let mut to_store = Vec::new();
-
-        {
-            let node = self.clone_avss_node().await;
-            let mut prep = node.preprocessing_material.lock().await;
-            let (n_bt, n_rs) = prep.len();
-
-            if n_bt > 0 {
-                let items = prep.take_triples(n_bt).map_err(|e| format!("{e:?}"))?;
-                let (data, item_size) = preproc::serialize_avss_triples::<F, G>(&items)?;
-                to_store.push((
-                    base.clone(),
-                    PreprocBlob::try_new(data, item_size, items.len())?,
-                ));
-                prep.add(Some(items), None);
-            }
-            if n_rs > 0 {
-                let items = prep
-                    .take_v_random_shares(n_rs)
-                    .map_err(|e| format!("{e:?}"))?;
-                let (data, item_size) = preproc::serialize_feldman_shares::<F, G>(&items)?;
-                to_store.push((
-                    scope.random_share(),
-                    PreprocBlob::try_new(data, item_size, items.len())?,
-                ));
-                prep.add(None, Some(items));
-            }
-        }
-
-        for (key, blob) in &to_store {
-            store.store(key, blob).await?;
-        }
-
-        info!(
-            "Persisted AVSS preprocessing material to store for program {}",
-            hex::encode(hash)
-        );
-        Ok(())
+    /// Agree and refill the persistent inventory, then remove this execution's
+    /// entire allocation before making any correlated material available in RAM.
+    /// A subsequent process must refill consumed material rather than reuse it.
+    async fn preprocess_persistent_execution(&self) -> Result<(), String> {
+        self.preprocess_standing().await?;
+        let targets = self.standing_preproc_targets().await?;
+        let (store, _, scope) = self.preproc_scope().await?;
+        let bundle = store.take_bundle_from_reservoir(&scope, targets).await?;
+        self.activate_preproc_bundle(bundle).await
     }
 
     pub(super) async fn reserve_random_shares(

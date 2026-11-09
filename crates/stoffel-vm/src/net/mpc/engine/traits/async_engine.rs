@@ -12,6 +12,8 @@ use stoffelnet::network_utils::ClientId;
 /// Hydrating VM client inputs can wait on network input servers, so async VM
 /// orchestration routes through this trait instead of the synchronous
 /// `MpcEngineClientOps` bridge.
+// async-trait 0.1.88 emits a redundant must_use on its generated future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AsyncMpcEngineClientOps: MpcEngine {
     /// Get all client IDs that have submitted inputs without blocking the async runtime.
@@ -36,6 +38,8 @@ pub trait AsyncMpcEngineClientOps: MpcEngine {
 /// This trait provides async versions of the MPC operations that require
 /// network communication. The VM can use these methods to avoid blocking the
 /// async runtime during MPC operations.
+// async-trait 0.1.88 emits a redundant must_use on its generated future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AsyncMpcEngine: MpcEngine {
     /// Build an error for core async operations that must be explicitly

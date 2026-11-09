@@ -2,6 +2,24 @@
 
 All notable changes to the Stoffel crates are tracked here.
 
+## [Unreleased]
+
+#### Added
+
+- Added `stoffel start-mesh`, `stoffel stop-mesh` and `stoffel run --mesh`: start a named standing mesh of local MPC parties once and run any number of executions on it, including in parallel.
+- Added `StandingMesh`, `StandingAdmitter` and `run_on_standing_mesh` to `stoffel-vm-runner`, and `vm::execute_on_standing_mesh` to the SDK.
+- Standing nodes record each execution's VM return when `STOFFEL_STANDING_RESULT_DIR` is set, and report bootnode and node readiness through marker files.
+
+#### Changed
+
+- Updated `stoffelcrypto` to `0.1.2` and the coordinator to its git `dev` branch, aligning the workspace's exact dependency pins (including `tokio` 1.46.1) with `stoffelcrypto`'s.
+- The standing leader waits for its bootnode to listen instead of sleeping before joining.
+
+#### Fixed
+
+- Serializing a program now writes function labels in a stable order, so the same program always gets the same content address.
+- Standing control commands published by several processes at once can no longer replace one another.
+
 ## [0.2.0] - 2026-09-03
 
 #### Added
@@ -10,6 +28,7 @@ All notable changes to the Stoffel crates are tracked here.
 
 #### Changed
 
+- Updated `stoffelcrypto` and `stoffelnet` to `0.1.1`, with matching AVSS share verification and timestamped share-store support.
 - Reworked resolved bytecode handling with operand validation, compact resolved operands, resolved function headers, and improved constant/label/function metadata resolution.
 - Improved `-O3` MPC optimization substantially: batched independent `Share.batch_mul` calls, cross-block CTR scheduling, constant branch folding, public-gate folding, bounded multi-return inlining, loop vectorization, and faster dependency tracking.
 - Reduced AES-family MPC round counts in the tracked examples while preserving NIST/equivalence checks, including AES `-O3` from 3306 to 296 rounds, CTR `-O3` from 4774 to 418 rounds, and CBC `-O3` from 22876 to 1061 rounds across the optimizer and example updates.

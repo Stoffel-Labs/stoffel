@@ -313,7 +313,7 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     );
 
     for idx in 0..client_count {
-        let client_id = idx as ClientId;
+        let client_id = (n_parties + idx) as ClientId;
         client_ids.push(client_id);
 
         let mut matrix_values: Vec<Fr> = Vec::new();
@@ -470,10 +470,10 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assign_topological_client_ids(&mut clients)
+    assign_topological_client_ids(&mut clients, n_parties)
         .await
         .expect("Failed to assign topological client IDs");
-    register_topological_client_connections(&servers);
+    register_topological_client_connections(&servers, n_parties);
 
     // Step 5: Run preprocessing
     info!("Step 5: Running preprocessing...");

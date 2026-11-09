@@ -81,7 +81,7 @@ async fn test_vm_mesh_full_integration() {
 
     // Step 1: Create mesh network of MPC servers
     // Define client IDs upfront so they can be passed to server setup
-    let client_ids: Vec<ClientId> = vec![0, 1];
+    let client_ids: Vec<ClientId> = vec![n_parties, n_parties + 1];
 
     info!(
         "Step 1: Creating {} MPC servers in mesh topology...",
@@ -219,10 +219,10 @@ async fn test_vm_mesh_full_integration() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assign_topological_client_ids(&mut clients)
+    assign_topological_client_ids(&mut clients, n_parties)
         .await
         .expect("Failed to assign topological client IDs");
-    register_topological_client_connections(&servers);
+    register_topological_client_connections(&servers, n_parties);
 
     // Step 5: Run preprocessing
     info!("Step 5: Running preprocessing on all servers...");
@@ -465,7 +465,7 @@ async fn test_vm_mesh_average_salary_integration() {
     let mut client_inputs = Vec::new();
     let mut expected_sum = 0i64;
     for idx in 0..client_count {
-        let client_id = idx as ClientId;
+        let client_id = (n_parties + idx) as ClientId;
         client_ids.push(client_id);
         let salary = rng.gen_range(40_000i64..=200_000i64);
         expected_sum += salary;
@@ -585,10 +585,10 @@ async fn test_vm_mesh_average_salary_integration() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assign_topological_client_ids(&mut clients)
+    assign_topological_client_ids(&mut clients, n_parties)
         .await
         .expect("Failed to assign topological client IDs");
-    register_topological_client_connections(&servers);
+    register_topological_client_connections(&servers, n_parties);
 
     info!("Running preprocessing for average test...");
     let preprocessing_handles: Vec<_> = servers
@@ -934,7 +934,7 @@ async fn test_vm_mesh_large_preprocessing() {
     };
 
     // Define client IDs before network setup (client IDs must be registered at setup time)
-    let client_ids: Vec<ClientId> = vec![0, 1];
+    let client_ids: Vec<ClientId> = vec![n_parties, n_parties + 1];
     let client_inputs: Vec<Vec<Fr>> = vec![
         vec![Fr::from(10u64)], // Client 30 input
         vec![Fr::from(20u64)], // Client 31 input
@@ -1061,10 +1061,10 @@ async fn test_vm_mesh_large_preprocessing() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assign_topological_client_ids(&mut clients)
+    assign_topological_client_ids(&mut clients, n_parties)
         .await
         .expect("Failed to assign topological client IDs");
-    register_topological_client_connections(&servers);
+    register_topological_client_connections(&servers, n_parties);
 
     // Step 5: Run preprocessing (matching the exact pattern from test_vm_mesh_full_integration)
     info!("Step 5: Running preprocessing on all servers...");
@@ -1099,12 +1099,12 @@ async fn test_vm_mesh_large_preprocessing() {
         let material_len = material.length();
         let triples_count = material_len.beaver_triples;
         let random_shares_count = material_len.random_shr;
-        let prandbit_count = material_len.prandbit;
+        let randbit_count = material_len.randbit;
         let prandint_count = material_len.prandint;
 
         info!(
-            "  Server {}: {} triples, {} random shares, {} prandbits, {} prandints",
-            i, triples_count, random_shares_count, prandbit_count, prandint_count
+            "  Server {}: {} triples, {} random shares, {} randbits, {} prandints",
+            i, triples_count, random_shares_count, randbit_count, prandint_count
         );
 
         assert!(
@@ -1231,7 +1231,7 @@ async fn test_vm_mesh_output_client_integration() {
     let mut client_inputs = Vec::new();
     let mut expected_sum = 0i64;
     for idx in 0..client_count {
-        let client_id = idx as ClientId;
+        let client_id = (n_parties + idx) as ClientId;
         client_ids.push(client_id);
         let salary = rng.gen_range(50_000i64..=150_000i64);
         expected_sum += salary;
@@ -1356,10 +1356,10 @@ async fn test_vm_mesh_output_client_integration() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assign_topological_client_ids(&mut clients)
+    assign_topological_client_ids(&mut clients, n_parties)
         .await
         .expect("Failed to assign topological client IDs");
-    register_topological_client_connections(&servers);
+    register_topological_client_connections(&servers, n_parties);
 
     // Step 5: Run preprocessing
     info!("Step 5: Running preprocessing...");
@@ -1518,7 +1518,7 @@ async fn test_vm_mesh_output_client_integration() {
 
     // Create the output client
     let output_client = Arc::new(Mutex::new(
-        OutputClient::<Fr>::new(output_client_id as usize, n_parties, threshold, 1)
+        OutputClient::<Fr>::new(output_client_id as usize, n_parties, threshold, 1, 1)
             .expect("Failed to create OutputClient"),
     ));
 
@@ -1535,12 +1535,12 @@ async fn test_vm_mesh_output_client_integration() {
 
         // Create the OutputMessage that would be sent over network
         let output_msg =
-            stoffelmpc_mpc::honeybadger::output::OutputMessage::new(sender_id, payload);
+            stoffelmpc_mpc::honeybadger::output::OutputMessage::new(sender_id, 1, payload);
 
         // Process the message at the output client
         let mut client = output_client.lock().await;
         client
-            .process(output_msg)
+            .process(sender_id, output_msg)
             .await
             .expect("OutputClient failed to process message");
 
@@ -1700,7 +1700,7 @@ async fn test_vm_mesh_matrix_average_integration() {
     );
 
     for idx in 0..client_count {
-        let client_id = idx as ClientId;
+        let client_id = (n_parties + idx) as ClientId;
         client_ids.push(client_id);
 
         // Generate a random matrix (values between 1-100)
@@ -1843,10 +1843,10 @@ async fn test_vm_mesh_matrix_average_integration() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assign_topological_client_ids(&mut clients)
+    assign_topological_client_ids(&mut clients, n_parties)
         .await
         .expect("Failed to assign topological client IDs");
-    register_topological_client_connections(&servers);
+    register_topological_client_connections(&servers, n_parties);
 
     // Step 5: Run preprocessing
     info!("Step 5: Running preprocessing...");
@@ -2270,7 +2270,7 @@ async fn test_vm_mesh_matrix_average_fixed_point_integration() {
     );
 
     for idx in 0..client_count {
-        let client_id = idx as ClientId;
+        let client_id = (n_parties + idx) as ClientId;
         client_ids.push(client_id);
 
         // Generate random matrix with decimal values (e.g., 1.5, 42.75)
@@ -2585,7 +2585,7 @@ async fn test_vm_mesh_matrix_average_fixed_point_integration() {
         .map(|(server, shares)| async move {
             let mut material = server.node.preprocessing_material.lock().await;
             let count = shares.len();
-            material.add(None, None, Some(shares), None, None, None);
+            material.add(None, Some(shares), None, None);
             count
         })
         .collect();
@@ -2633,10 +2633,10 @@ async fn test_vm_mesh_matrix_average_fixed_point_integration() {
     // Brief pause to ensure connections are stable
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    assign_topological_client_ids(&mut clients)
+    assign_topological_client_ids(&mut clients, n_parties)
         .await
         .expect("Failed to assign topological client IDs");
-    register_topological_client_connections(&servers);
+    register_topological_client_connections(&servers, n_parties);
 
     // OPTIMIZATION: Initialize input protocol for all servers in parallel
     // Each server initializes input protocol for all clients
@@ -3405,7 +3405,7 @@ async fn test_vm_mesh_bytecode_fixed_point_integration() {
     );
 
     for idx in 0..client_count {
-        let client_id = idx as ClientId;
+        let client_id = (n_parties + idx) as ClientId;
         client_ids.push(client_id);
 
         // Generate random matrix with decimal values
@@ -3585,10 +3585,10 @@ async fn test_vm_mesh_bytecode_fixed_point_integration() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assign_topological_client_ids(&mut clients)
+    assign_topological_client_ids(&mut clients, n_parties)
         .await
         .expect("Failed to assign topological client IDs");
-    register_topological_client_connections(&servers);
+    register_topological_client_connections(&servers, n_parties);
 
     // Step 6: Run preprocessing
     info!("Step 6: Running preprocessing...");

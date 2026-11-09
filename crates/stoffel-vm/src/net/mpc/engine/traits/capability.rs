@@ -256,6 +256,8 @@ pub trait MpcEngineClientOutput: MpcEngine {
 /// 3. `get_mask_share` — clients collect per-node mask shares
 /// 4. `submit_masked_input` — clients submit `input + mask`
 /// 5. `consume_masked_inputs` — nodes compute `masked_input − mask_share`
+// async-trait 0.1.88 emits a redundant must_use on its generated future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait MpcEngineReservation: MpcEngine {
     /// Initialize or restore reservation state for a program.

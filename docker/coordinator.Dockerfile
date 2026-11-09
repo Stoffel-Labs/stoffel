@@ -26,6 +26,10 @@ RUN mkdir -p /build/.cargo && \
       '[patch."https://github.com/Stoffel-Labs/StoffelVM.git"]' \
       'stoffel-vm-types = { path = "/StoffelVM/crates/stoffel-vm-types" }' \
       '' \
+      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/build/coordinator/crates/off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/build/coordinator/crates/coord-shared" }' \
+      '' \
       '[patch.crates-io]' \
       'stoffel-mpc-coordinator-off-chain = { path = "/build/coordinator/crates/off-chain" }' \
       'stoffel-mpc-coordinator-shared = { path = "/build/coordinator/crates/coord-shared" }' \
@@ -60,6 +64,10 @@ RUN mkdir -p /build/.cargo && \
       '' \
       '[patch."https://github.com/Stoffel-Labs/StoffelVM.git"]' \
       'stoffel-vm-types = { path = "/StoffelVM/crates/stoffel-vm-types" }' \
+      '' \
+      '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/build/coordinator/crates/off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/build/coordinator/crates/coord-shared" }' \
       '' \
       '[patch.crates-io]' \
       'stoffel-mpc-coordinator-off-chain = { path = "/build/coordinator/crates/off-chain" }' \

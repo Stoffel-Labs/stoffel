@@ -1,15 +1,7 @@
 # run-args: --client-input 0=1 --client-input 0=2 --client-input 0=3 --client-input 1=2 --client-input 1=4 --client-input 1=6 --expected-output-clients 2
 def random_bit() -> Share:
-  while True:
-    var r = Share.random_field()
-    var r_squared = Share.open_field(Share.mul(r, r))
-    if Field.is_zero(r_squared):
-      continue
-    var r_prime_inv = Field.inverse(Field.sqrt(r_squared))
-    var two_inv = Field.inverse(Field.from_int(2))
-    var c = Share.mul_field(r, r_prime_inv)
-    var a = Share.mul_field(Share.add_field(c, Field.one()), two_inv)
-    return Share.retag(a, 1)
+  # Use a typed preprocessed bit; field shares cannot be retagged as integers.
+  return Share.random_int(1)
 
 def pow2(i: int64) -> int64:
   var p = 1

@@ -28,10 +28,6 @@ PARTIES = [f"party{party}" for party in range(5)]
 NODE_RPC_SERVERS = ",".join(
     f"172.33.0.{party + 10}:16180" for party in range(5)
 )
-NODE_CLIENT_TRANSPORT_SERVERS = ",".join(
-    ["172.33.0.10:10000"]
-    + [f"172.33.0.{party + 10}:{9000 + party}" for party in range(1, 5)]
-)
 COORDINATOR = "coordinator:31415"
 HEX_ID = re.compile(r"^[0-9a-f]{64}$")
 
@@ -63,7 +59,7 @@ class Harness:
         self.project = os.environ.get("PROJECT_NAME", f"stoffel-standing-{campaign}")
         self.wait_seconds = int(os.environ.get("WAIT_TIMEOUT_SECS", "900"))
         default_coordination = "120" if campaign == "concurrency" else "30"
-        default_protocol = "600" if campaign == "concurrency" else "45"
+        default_protocol = "600" if campaign in {"concurrency", "all-examples"} else "45"
         self.coordination_seconds = int(
             os.environ.get("COORDINATION_TIMEOUT_SECS", default_coordination)
         )
@@ -206,7 +202,10 @@ class Harness:
             "== Building the exact VM, coordinator, and networking worktrees ==",
             flush=True,
         )
-        self.compose("--profile", "tools", "build")
+        if os.environ.get("STOFFEL_SKIP_BUILD") == "1":
+            print("Using existing images (STOFFEL_SKIP_BUILD=1).", flush=True)
+        else:
+            self.compose("--profile", "tools", "build")
         self.command(["docker", "image", "inspect", self.image], capture=True)
         self.record_provenance(coordinator, networking)
         self.assert_credentials()
@@ -726,8 +725,6 @@ test -z "$(find /app /run/secrets -type f \( -name '*.der' -o -name '*.key' \) !
                 str(client["outputs"]),
                 "--servers",
                 NODE_RPC_SERVERS,
-                "--client-transport-servers",
-                NODE_CLIENT_TRANSPORT_SERVERS,
                 "--off-chain-coord",
                 COORDINATOR,
                 "--n-parties",

@@ -10,7 +10,7 @@ x-party: &party
     context: .
     dockerfile: Dockerfile.benchmark
     additional_contexts:
-      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+      coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}"
     args:
       PROFILE_BUILD: "${STOFFEL_PROFILE_BUILD:-false}"
   volumes:
@@ -61,7 +61,7 @@ services:
       context: .
       dockerfile: docker/coordinator.Dockerfile
       additional_contexts:
-        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#v0.2.0}"
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}"
     volumes:
       - ./ids:/app/ids:ro
     entrypoint: ["/bin/sh", "-c"]
@@ -77,14 +77,13 @@ services:
         /app/stoffel-coordinator \
           --bind-addr 0.0.0.0 \
           --port 31415 \
-          --hash 0000000000000000000000000000000000000000000000000000000000000000 \
+          --hash ${STOFFEL_PROGRAM_HASH:-d9f3f6fcccedc0b4941e244e31d7d587a545c2d36f5d8c0ff5a82873827440d2} \
           --execution-id ${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001} \
           --server-cert /app/ids/server_cert.crt \
           --server-key /app/ids/server_key.der \
           --n 5 \
           --t 1 \
           --mpc-backend ${STOFFEL_MPC_BACKEND:-honeybadger} \
-          --mpc-curve ${STOFFEL_MPC_CURVE:-bls12-381} \
           --n-inputs 0 \
           --output-clients /app/ids/clients/cert0.crt \
           --initial-mpc-nodes /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt &
