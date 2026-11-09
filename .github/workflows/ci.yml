@@ -95,7 +95,7 @@ jobs:
         with:
           context: .
           build-contexts: |
-            coordinator=https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00
+            coordinator=https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#a8346fc85ae9d19e49c46720cd90133a75af8670
             networking=https://github.com/Stoffel-Labs/stoffel-networking.git#49a237aa5df3211224aedf97ab0bf084ad1c8d31
           push: false
           tags: stoffelvm:test
@@ -116,7 +116,7 @@ jobs:
         with:
           context: .
           build-contexts: |
-            coordinator=https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00
+            coordinator=https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#a8346fc85ae9d19e49c46720cd90133a75af8670
             networking=https://github.com/Stoffel-Labs/stoffel-networking.git#49a237aa5df3211224aedf97ab0bf084ad1c8d31
           push: true
           tags: |

@@ -24,7 +24,7 @@ x-stoffel-build: &stoffel-build
   context: .
   dockerfile: Dockerfile
   additional_contexts:
-    coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}"
+    coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#a8346fc85ae9d19e49c46720cd90133a75af8670}"
     networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
 
 x-party-common: &party-common
@@ -71,7 +71,7 @@ services:
       context: .
       dockerfile: docker/coordinator.Dockerfile
       additional_contexts:
-        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}"
+        coordinator: "${STOFFEL_COORDINATOR_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#a8346fc85ae9d19e49c46720cd90133a75af8670}"
         networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
     container_name: stoffel-coordinator-reserve-index
     hostname: coordinator
