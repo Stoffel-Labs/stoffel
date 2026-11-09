@@ -65,6 +65,9 @@ jobs:
             --skip optimized_aes_at_o3_matches_nist_vector
 
       - name: Run heavyweight CLI integration tests serially
+        env:
+          STOFFEL_RUN_BIN: ${{ github.workspace }}/target/release/stoffel-run
+          STOFFEL_GENERATED_TARGET_DIR: ${{ github.workspace }}/target/generated-app
         run: cargo test -p stoffel-cli --test cli -- --ignored --test-threads=1
 
       - name: Run local coordinator lifecycle regressions serially
