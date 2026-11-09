@@ -2221,7 +2221,7 @@ fn network_config_validation_is_backend_aware() -> stoffel::Result<()> {
 fn offchain_client_config_validation_is_backend_aware() -> stoffel::Result<()> {
     fn avss_config(parties: usize, threshold: usize) -> stoffel::Result<OffChainClientConfig> {
         // `build()` runs `OffChainClientConfig::validate` internally.
-        OffChainClientConfig::builder()
+        offchain_config_builder()
             .coordinator("127.0.0.1", 19000)
             .timestamp(1)
             .parties(parties)
@@ -2247,7 +2247,7 @@ fn offchain_client_config_validation_is_backend_aware() -> stoffel::Result<()> {
     }
 
     // HoneyBadger accepts n = 4t + 1 and rejects below it.
-    OffChainClientConfig::builder()
+    offchain_config_builder()
         .coordinator("127.0.0.1", 19000)
         .timestamp(1)
         .parties(5)
@@ -2256,7 +2256,7 @@ fn offchain_client_config_validation_is_backend_aware() -> stoffel::Result<()> {
         .node_rpc_address("127.0.0.1:19100")
         .identity_der(vec![1], vec![2])
         .build()?;
-    let hb_err = OffChainClientConfig::builder()
+    let hb_err = offchain_config_builder()
         .coordinator("127.0.0.1", 19000)
         .timestamp(1)
         .parties(4)

@@ -21,6 +21,62 @@ fn local_mpc_guard() -> MutexGuard<'static, ()> {
 
 const LOCAL_MPC_TEST_TIMEOUT_SECS: &str = "120";
 
+// Exercise the release candidate before its crates have been published.
+fn use_workspace_crates(project: &std::path::Path) {
+    let cli_manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk_path = cli_manifest_dir
+        .parent()
+        .expect("CLI crate lives under crates/")
+        .join("stoffel-rust-sdk");
+    let crates_dir = sdk_path.parent().expect("SDK crate lives under crates/");
+    let bindgen_path = crates_dir.join("stoffel-bindgen");
+    let cargo_toml_path = project.join("Cargo.toml");
+    let cargo_toml = fs::read_to_string(&cargo_toml_path)
+        .unwrap()
+        .replace(
+            "stoffel = { package = \"stoffel-rust-sdk\", version = \"=0.2.0\" }",
+            &format!(
+                "stoffel = {{ package = \"stoffel-rust-sdk\", path = \"{}\" }}",
+                sdk_path.display()
+            ),
+        )
+        .replace(
+            "stoffel-bindgen = \"=0.2.0\"",
+            &format!(
+                "stoffel-bindgen = {{ path = \"{}\" }}",
+                bindgen_path.display()
+            ),
+        );
+    // This fixture builds the in-tree SDK. Cargo does not inherit workspace
+    // patches or its lockfile when that SDK is used from a separate project.
+    // Carry both over so --offline also works on a fresh CI dependency cache,
+    // rather than depending on unrelated registry versions cached locally.
+    let workspace = crates_dir
+        .parent()
+        .expect("crates live under the workspace");
+    let workspace_manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(workspace.join("Cargo.toml")).unwrap()).unwrap();
+    let mut manifest: toml::Value = toml::from_str(&cargo_toml).unwrap();
+    if let Some(patches) = workspace_manifest.get("patch") {
+        let mut patches = patches.clone();
+        for (_, overrides) in patches.as_table_mut().unwrap().iter_mut() {
+            for (_, dependency) in overrides.as_table_mut().unwrap().iter_mut() {
+                if let Some(path) = dependency.get_mut("path") {
+                    *path = toml::Value::String(
+                        workspace.join(path.as_str().unwrap()).display().to_string(),
+                    );
+                }
+            }
+        }
+        manifest
+            .as_table_mut()
+            .unwrap()
+            .insert("patch".to_owned(), patches);
+    }
+    fs::write(&cargo_toml_path, toml::to_string(&manifest).unwrap()).unwrap();
+    fs::copy(workspace.join("Cargo.lock"), project.join("Cargo.lock")).unwrap();
+}
+
 /// Overwrites the scaffolded `src/main.stfl` with a deterministic two-argument
 /// addition program so named-input run flows have a stable, cleartext-safe
 /// `main(a, b)` to exercise. The default `init` template uses ClientStore IO,
@@ -360,58 +416,7 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
         .assert()
         .success();
 
-    let cli_manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sdk_path = cli_manifest_dir
-        .parent()
-        .expect("CLI crate lives under crates/")
-        .join("stoffel-rust-sdk");
-    let crates_dir = sdk_path.parent().expect("SDK crate lives under crates/");
-    let bindgen_path = crates_dir.join("stoffel-bindgen");
-    let cargo_toml_path = project.join("Cargo.toml");
-    let cargo_toml = fs::read_to_string(&cargo_toml_path)
-        .unwrap()
-        .replace(
-            "stoffel = { package = \"stoffel-rust-sdk\", version = \"=0.2.0\" }",
-            &format!(
-                "stoffel = {{ package = \"stoffel-rust-sdk\", path = \"{}\" }}",
-                sdk_path.display()
-            ),
-        )
-        .replace(
-            "stoffel-bindgen = \"=0.2.0\"",
-            &format!(
-                "stoffel-bindgen = {{ path = \"{}\" }}",
-                bindgen_path.display()
-            ),
-        );
-    // This fixture builds the in-tree SDK. Cargo does not inherit workspace
-    // patches or its lockfile when that SDK is used from a separate project.
-    // Carry both over so --offline also works on a fresh CI dependency cache,
-    // rather than depending on unrelated registry versions cached locally.
-    let workspace = crates_dir
-        .parent()
-        .expect("crates live under the workspace");
-    let workspace_manifest: toml::Value =
-        toml::from_str(&fs::read_to_string(workspace.join("Cargo.toml")).unwrap()).unwrap();
-    let mut manifest: toml::Value = toml::from_str(&cargo_toml).unwrap();
-    if let Some(patches) = workspace_manifest.get("patch") {
-        let mut patches = patches.clone();
-        for (_, overrides) in patches.as_table_mut().unwrap().iter_mut() {
-            for (_, dependency) in overrides.as_table_mut().unwrap().iter_mut() {
-                if let Some(path) = dependency.get_mut("path") {
-                    *path = toml::Value::String(
-                        workspace.join(path.as_str().unwrap()).display().to_string(),
-                    );
-                }
-            }
-        }
-        manifest
-            .as_table_mut()
-            .unwrap()
-            .insert("patch".to_owned(), patches);
-    }
-    fs::write(&cargo_toml_path, toml::to_string(&manifest).unwrap()).unwrap();
-    fs::copy(workspace.join("Cargo.lock"), project.join("Cargo.lock")).unwrap();
+    use_workspace_crates(&project);
 
     let missing_bytecode = StdCommand::new("cargo")
         .arg("build")
@@ -622,7 +627,7 @@ fn init_force_preserves_ignore_rules_and_local_identities() {
     );
 }
 
-/// Public-dependency consumer test: no path patches or local-MPC SDK calls.
+/// Deploy the generated application against this release candidate as separate processes.
 /// Requires the matching stoffel-run binary. Local ports are selected dynamically.
 #[test]
 #[ignore = "builds a public-dependency app and starts coordinator + nodes; set STOFFEL_RUN_BIN"]
@@ -645,6 +650,7 @@ fn init_default_project_runs_with_separate_services() {
         .args(["build", "--output", "artifacts/program.stflb"])
         .assert()
         .success();
+    use_workspace_crates(&project);
     assert!(StdCommand::new("cargo")
         .args(["build", "--bins"])
         .arg("--offline")
