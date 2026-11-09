@@ -7,7 +7,6 @@ use crate::errors::SourceLocation;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Optimizer expansion budgets, threaded explicitly through `optimize_all` from
 /// `CompilerOptions`.
@@ -55,23 +54,29 @@ thread_local! {
     static DEAD_FNS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
-/// Counter for generating unique temporary variable names
-static BATCH_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Scoped to each full optimization call; standalone passes share only
+    /// their current thread's counter, never another compilation's names.
+    static BATCH_TEMP_COUNTER: Cell<usize> = const { Cell::new(0) };
+}
 
 fn generate_temp_name() -> String {
-    let count = BATCH_TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-    format!("__batch_reveal_{}", count)
+    generate_named_temp_name("batch_reveal")
 }
 
 fn generate_named_temp_name(prefix: &str) -> String {
-    let count = BATCH_TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let count = BATCH_TEMP_COUNTER.with(|counter| {
+        let count = counter.get();
+        counter.set(count + 1);
+        count
+    });
     format!("__{}_{}", prefix, count)
 }
 
 /// Resets the temporary variable counter (useful for testing)
 #[allow(dead_code)]
 pub fn reset_temp_counter() {
-    BATCH_TEMP_COUNTER.store(0, Ordering::SeqCst);
+    BATCH_TEMP_COUNTER.with(|counter| counter.set(0));
 }
 
 /// Represents a detected Share.open() call that can potentially be batched
@@ -1469,8 +1474,11 @@ fn batched_boolean_value_expr(
     }
 }
 
-fn optimize_block_multiplies(statements: Vec<AstNode>) -> Vec<AstNode> {
-    let statements: Vec<AstNode> = statements.into_iter().map(optimize_multiplies).collect();
+fn optimize_block_multiplies(statements: Vec<AstNode>, changed: &mut bool) -> Vec<AstNode> {
+    let statements: Vec<AstNode> = statements
+        .into_iter()
+        .map(|node| optimize_multiplies_tracked(node, changed))
+        .collect();
     let candidates = extract_multiply_candidates(&statements);
 
     if candidates.is_empty() {
@@ -1490,7 +1498,16 @@ fn optimize_block_multiplies(statements: Vec<AstNode>) -> Vec<AstNode> {
         for candidate in group {
             batched_indices.insert(candidate.statement_index);
         }
-        batch_replacements.push((first_idx, create_batch_multiply_statements(group)));
+        let replacement = create_batch_multiply_statements(group);
+        // Singleton flat batch calls are often emitted unchanged. Counting
+        // those as rewrites would force every fixed-point run to hit its cap.
+        *changed = *changed
+            || replacement.len() != group.len()
+            || group
+                .iter()
+                .zip(&replacement)
+                .any(|(candidate, new)| statements[candidate.statement_index] != *new);
+        batch_replacements.push((first_idx, replacement));
     }
 
     let mut result = Vec::new();
@@ -1514,8 +1531,16 @@ fn optimize_block_multiplies(statements: Vec<AstNode>) -> Vec<AstNode> {
 
 /// Batches consecutive independent secret multiplications into Share.batch_mul().
 pub fn optimize_multiplies(node: AstNode) -> AstNode {
+    // Single-pass callers discard the convergence flag. Starting it true lets
+    // the short-circuit in each block skip replacement comparisons.
+    optimize_multiplies_tracked(node, &mut true)
+}
+
+fn optimize_multiplies_tracked(node: AstNode, changed: &mut bool) -> AstNode {
     match node {
-        AstNode::Block(statements) => AstNode::Block(optimize_block_multiplies(statements)),
+        AstNode::Block(statements) => {
+            AstNode::Block(optimize_block_multiplies(statements, changed))
+        }
         AstNode::FunctionDefinition {
             name,
             type_params,
@@ -1531,7 +1556,7 @@ pub fn optimize_multiplies(node: AstNode) -> AstNode {
             type_params,
             parameters,
             return_type,
-            body: Box::new(optimize_multiplies(*body)),
+            body: Box::new(optimize_multiplies_tracked(*body, changed)),
             is_secret,
             pragmas,
             location,
@@ -1542,17 +1567,17 @@ pub fn optimize_multiplies(node: AstNode) -> AstNode {
             then_branch,
             else_branch,
         } => AstNode::IfExpression {
-            condition: Box::new(optimize_multiplies(*condition)),
-            then_branch: Box::new(optimize_multiplies(*then_branch)),
-            else_branch: else_branch.map(|e| Box::new(optimize_multiplies(*e))),
+            condition: Box::new(optimize_multiplies_tracked(*condition, changed)),
+            then_branch: Box::new(optimize_multiplies_tracked(*then_branch, changed)),
+            else_branch: else_branch.map(|e| Box::new(optimize_multiplies_tracked(*e, changed))),
         },
         AstNode::WhileLoop {
             condition,
             body,
             location,
         } => AstNode::WhileLoop {
-            condition: Box::new(optimize_multiplies(*condition)),
-            body: Box::new(optimize_multiplies(*body)),
+            condition: Box::new(optimize_multiplies_tracked(*condition, changed)),
+            body: Box::new(optimize_multiplies_tracked(*body, changed)),
             location,
         },
         AstNode::ForLoop {
@@ -1562,8 +1587,8 @@ pub fn optimize_multiplies(node: AstNode) -> AstNode {
             location,
         } => AstNode::ForLoop {
             variables,
-            iterable: Box::new(optimize_multiplies(*iterable)),
-            body: Box::new(optimize_multiplies(*body)),
+            iterable: Box::new(optimize_multiplies_tracked(*iterable, changed)),
+            body: Box::new(optimize_multiplies_tracked(*body, changed)),
             location,
         },
         AstNode::TryCatch {
@@ -1572,15 +1597,16 @@ pub fn optimize_multiplies(node: AstNode) -> AstNode {
             finally_block,
             location,
         } => AstNode::TryCatch {
-            try_block: Box::new(optimize_multiplies(*try_block)),
+            try_block: Box::new(optimize_multiplies_tracked(*try_block, changed)),
             catch_clauses: catch_clauses
                 .into_iter()
                 .map(|c| crate::ast::CatchClause {
-                    body: Box::new(optimize_multiplies(*c.body)),
+                    body: Box::new(optimize_multiplies_tracked(*c.body, changed)),
                     ..c
                 })
                 .collect(),
-            finally_block: finally_block.map(|b| Box::new(optimize_multiplies(*b))),
+            finally_block: finally_block
+                .map(|b| Box::new(optimize_multiplies_tracked(*b, changed))),
             location,
         },
         _ => node,
@@ -1593,11 +1619,14 @@ pub fn optimize_multiplies(node: AstNode) -> AstNode {
 /// only on the next iteration.
 fn optimize_multiply_batches_to_fixpoint(mut node: AstNode) -> AstNode {
     for _ in 0..8 {
-        let next = optimize_multiplies(schedule_for_batching(node.clone()));
-        if next == node {
+        // Track actual rewrites instead of retaining a second, deep-cloned AST
+        // just to detect convergence. Scheduling alone can change the program.
+        let mut changed = false;
+        node = schedule_for_batching_tracked(node, &mut changed);
+        node = optimize_multiplies_tracked(node, &mut changed);
+        if !changed {
             break;
         }
-        node = next;
     }
     node
 }
@@ -2497,10 +2526,20 @@ pub fn optimize_all_with_budgets(
     optimization_level: u8,
     budgets: OptBudgets,
 ) -> AstNode {
-    let previous = ACTIVE_BUDGETS.with(|c| c.replace(budgets));
-    let result = optimize_all_inner(node, optimization_level);
-    ACTIVE_BUDGETS.with(|c| c.set(previous));
-    result
+    struct RestoreState(OptBudgets, usize, usize);
+    impl Drop for RestoreState {
+        fn drop(&mut self) {
+            ACTIVE_BUDGETS.with(|c| c.set(self.0));
+            BATCH_TEMP_COUNTER.with(|c| c.set(self.1));
+            INLINE_SUFFIX.with(|c| c.set(self.2));
+        }
+    }
+    let _restore = RestoreState(
+        ACTIVE_BUDGETS.with(|c| c.replace(budgets)),
+        BATCH_TEMP_COUNTER.with(|c| c.replace(0)),
+        INLINE_SUFFIX.with(|c| c.replace(0)),
+    );
+    optimize_all_inner(node, optimization_level)
 }
 
 // ===========================================================================
@@ -3549,22 +3588,20 @@ pub(crate) fn lower_semantic_client_reductions(node: AstNode) -> AstNode {
                 .map(lower_semantic_client_reductions)
                 .collect::<Vec<_>>();
             let mut result = Vec::with_capacity(statements.len());
-            let mut index = 0;
-            while index < statements.len() {
-                if index + 2 < statements.len() {
-                    if let Some(fused) = fused_declaration(
-                        &statements[index],
-                        &statements[index + 1],
-                        &statements[index + 2],
-                        &statements[index + 3..],
-                    ) {
+            let mut statements = statements.into_iter();
+            while let Some(first) = statements.next() {
+                let remaining = statements.as_slice();
+                if remaining.len() >= 2 {
+                    if let Some(fused) =
+                        fused_declaration(&first, &remaining[0], &remaining[1], &remaining[2..])
+                    {
                         result.push(fused);
-                        index += 3;
+                        statements.next();
+                        statements.next();
                         continue;
                     }
                 }
-                result.push(statements[index].clone());
-                index += 1;
+                result.push(first);
             }
             AstNode::Block(result)
         }
@@ -3730,6 +3767,24 @@ fn root_var(node: &AstNode) -> Option<String> {
     }
 }
 
+fn root_var_ref(node: &AstNode) -> Option<&str> {
+    match node {
+        AstNode::Identifier(name, _) => Some(name),
+        AstNode::IndexAccess { base, .. } => root_var_ref(base),
+        AstNode::FieldAccess { object, .. } => root_var_ref(object),
+        _ => None,
+    }
+}
+
+fn collect_referenced_names<'a>(node: &'a AstNode, names: &mut HashSet<&'a str>) {
+    match node {
+        AstNode::Identifier(name, _) => {
+            names.insert(name);
+        }
+        _ => for_each_child(node, &mut |child| collect_referenced_names(child, names)),
+    }
+}
+
 /// The semantic secret/clear ground truth for a node, when semantic analysis
 /// attached it (the resolved return type of a call). Uses `contains_secret` so a
 /// call returning a *list/collection of* secret (e.g. `Share.batch_mul` →
@@ -3782,17 +3837,73 @@ fn value_is_multiply(value: &AstNode) -> bool {
     }
 }
 
+/// Dense scratch membership with one bit per interned key. Retained statement
+/// facts stay sparse vectors: a bitset per statement would be quadratic.
+#[derive(Default)]
+struct KeyMarks(Vec<u64>);
+
+impl KeyMarks {
+    fn insert(&mut self, key: u32) -> bool {
+        let word = key as usize / 64;
+        if self.0.len() <= word {
+            self.0.resize(word + 1, 0);
+        }
+        let bit = 1u64 << (key % 64);
+        let fresh = self.0[word] & bit == 0;
+        self.0[word] |= bit;
+        fresh
+    }
+
+    fn remove(&mut self, key: u32) {
+        self.0[key as usize / 64] &= !(1u64 << (key % 64));
+    }
+
+    fn dedup(&mut self, keys: &mut Vec<u32>) {
+        if keys.len() <= 2 {
+            keys.dedup();
+            return;
+        }
+        keys.retain(|&key| self.insert(key));
+        for &key in keys.iter() {
+            self.remove(key);
+        }
+    }
+}
+
+#[derive(Default)]
+struct KeyUnion {
+    marks: KeyMarks,
+    keys: Vec<u32>,
+}
+
+impl KeyUnion {
+    fn insert(&mut self, key: u32) -> bool {
+        if self.marks.insert(key) {
+            self.keys.push(key);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn extend(&mut self, keys: impl IntoIterator<Item = u32>) {
+        for key in keys {
+            self.insert(key);
+        }
+    }
+}
+
 /// Per-statement scheduling facts.
 struct SchedInfo {
-    direct_reads: HashSet<u32>,
+    direct_reads: Rc<[u32]>,
     /// Materialized logical-read keys (loop aggregates; see `loop_sched_info`).
-    logical_reads: HashSet<u32>,
+    logical_reads: Vec<u32>,
     /// Lazy logical-read cones (one per mutator-call argument), flattened only
     /// where consumed: the DAG build in `schedule_run` applies them as edges
     /// directly, loop aggregation materializes them into `logical_reads`.
     logical_nodes: Vec<Rc<DepNode>>,
-    writes: HashSet<u32>,
-    effects: HashSet<u32>,
+    writes: Vec<u32>,
+    effects: Vec<u32>,
     is_multiply: bool,
 }
 
@@ -3819,28 +3930,71 @@ fn global_key() -> String {
 /// — is unchanged). The catch-all key is the scalar key of `GLOBAL_KEY`, which
 /// contains `:`/`*` and so can never collide with an identifier.
 #[derive(Default)]
-struct KeyInterner {
-    ids: HashMap<String, u32>,
-    names: Vec<String>,
+struct KeyInterner<'a> {
+    ids: HashMap<&'a str, u32>,
+    cache: [Option<(&'a str, u32)>; 32],
+    names: Vec<&'a str>,
+    scratch: KeyMarks,
+    next_dep_id: u32,
+    free_marks: Vec<KeyMarks>,
 }
 
-impl KeyInterner {
-    fn var_id(&mut self, name: &str) -> u32 {
-        if let Some(&id) = self.ids.get(name) {
-            id
-        } else {
-            let id = self.names.len() as u32;
-            self.ids.insert(name.to_string(), id);
-            self.names.push(name.to_string());
-            id
+impl<'a> KeyInterner<'a> {
+    fn key_union(&mut self) -> KeyUnion {
+        KeyUnion {
+            marks: self.free_marks.pop().unwrap_or_default(),
+            keys: Vec::new(),
         }
     }
 
-    fn scalar(&mut self, name: &str) -> u32 {
+    fn finish_union(&mut self, union: KeyUnion) -> Vec<u32> {
+        let KeyUnion { mut marks, keys } = union;
+        for &key in &keys {
+            marks.remove(key);
+        }
+        // Reusing words avoids zeroing an entire key universe for every small
+        // loop at the end of a large run. Only touched bits need resetting.
+        self.free_marks.push(marks);
+        keys
+    }
+
+    fn dep_node(&mut self, own: impl Into<Rc<[u32]>>, parents: Vec<Rc<DepNode>>) -> Rc<DepNode> {
+        let id = self.next_dep_id;
+        self.next_dep_id = id
+            .checked_add(1)
+            .expect("too many scheduling dependency nodes");
+        Rc::new(DepNode {
+            id,
+            own: own.into(),
+            parents,
+        })
+    }
+
+    fn var_id(&mut self, name: &'a str) -> u32 {
+        let slot = ((name.as_ptr() as usize) >> 4) & 31;
+        if let Some((key, id)) = self.cache[slot] {
+            if std::ptr::eq(key, name) {
+                return id;
+            }
+        }
+        let id = match self.ids.entry(name) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let id = self.names.len() as u32;
+                self.names.push(name);
+                entry.insert(id);
+                id
+            }
+        };
+        self.cache[slot] = Some((name, id));
+        id
+    }
+
+    fn scalar(&mut self, name: &'a str) -> u32 {
         self.var_id(name) * 2
     }
 
-    fn heap(&mut self, name: &str) -> u32 {
+    fn heap(&mut self, name: &'a str) -> u32 {
         self.var_id(name) * 2 + 1
     }
 
@@ -3849,8 +4003,8 @@ impl KeyInterner {
     }
 
     /// The variable name behind a scalar/heap key (`None` for the global key).
-    fn key_root(&self, key: u32) -> Option<&str> {
-        let name = self.names[(key / 2) as usize].as_str();
+    fn key_root(&self, key: u32) -> Option<&'a str> {
+        let name = self.names[(key / 2) as usize];
         (name != GLOBAL_KEY).then_some(name)
     }
 
@@ -3860,12 +4014,19 @@ impl KeyInterner {
     }
 }
 
-fn collect_direct_read_keys(node: &AstNode, out: &mut HashSet<u32>, interner: &mut KeyInterner) {
-    let mut vars = HashSet::new();
-    collect_referenced_vars(node, &mut vars);
-    for var in vars {
-        out.insert(interner.scalar(&var));
-        out.insert(interner.heap(&var));
+fn collect_direct_read_keys<'a>(
+    node: &'a AstNode,
+    out: &mut Vec<u32>,
+    interner: &mut KeyInterner<'a>,
+) {
+    match node {
+        AstNode::Identifier(name, _) => {
+            let scalar = interner.scalar(name);
+            out.extend([scalar, scalar + 1]);
+        }
+        _ => for_each_child(node, &mut |child| {
+            collect_direct_read_keys(child, out, interner)
+        }),
     }
 }
 
@@ -3886,16 +4047,59 @@ fn collect_direct_read_keys(node: &AstNode, out: &mut HashSet<u32>, interner: &m
 /// concrete set. The consumed key set is membership-identical to the old
 /// materialized one, so the dependency DAG — and therefore the emitted schedule
 /// and round counts — is byte-for-byte unchanged.
-type SchedEnv = HashMap<String, Rc<DepNode>>;
+// Use the existing variable IDs: dependency lookup never rehashes a name.
+#[derive(Default)]
+struct SchedEnv<'a> {
+    values: HashMap<u32, Option<Rc<DepNode>>>,
+    parent: Option<&'a SchedEnv<'a>>,
+}
+
+impl SchedEnv<'_> {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn child(&self) -> SchedEnv<'_> {
+        SchedEnv {
+            values: HashMap::new(),
+            parent: Some(self),
+        }
+    }
+
+    fn get(&self, id: &u32) -> Option<&Rc<DepNode>> {
+        match self.values.get(id) {
+            Some(value) => value.as_ref(),
+            None => self.parent?.get(id),
+        }
+    }
+
+    fn insert(&mut self, id: u32, value: Rc<DepNode>) {
+        self.values.insert(id, Some(value));
+    }
+
+    fn remove(&mut self, id: &u32) {
+        if self.parent.is_some_and(|parent| parent.get(id).is_some()) {
+            self.values.insert(*id, None); // Hide an inherited binding too.
+        } else {
+            self.values.remove(id);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.values.clear();
+        self.parent = None;
+    }
+}
 
 /// A lazily-evaluated set of logical-dependency keys (see [`SchedEnv`]).
-#[derive(Default)]
 struct DepNode {
+    // Run-local identity survives environment replacement without pointer reuse.
+    id: u32,
     /// Keys contributed directly by this binding: the interned scalar/heap keys
     /// of the variables its initializer references (plus, for loop commits, the
     /// concrete aggregate keys computed by `loop_sched_info`). Duplicate-free by
     /// construction (built from a set of variables / a key set).
-    own: Vec<u32>,
+    own: Rc<[u32]>,
     /// Predecessor closures included transitively — the `env` entries of the
     /// referenced variables, captured by value (`Rc` snapshot) at build time so
     /// a later reassignment of one of those variables cannot retroactively change
@@ -3905,34 +4109,41 @@ struct DepNode {
 
 /// Build the lazy dependency node for `node`'s logical reads against `env`,
 /// without flattening the transitive closure (O(referenced vars), not O(N)).
-fn logical_reads_node(node: &AstNode, env: &SchedEnv, interner: &mut KeyInterner) -> Rc<DepNode> {
-    let mut vars = HashSet::new();
-    collect_referenced_vars(node, &mut vars);
-    let mut own = Vec::with_capacity(vars.len() * 2);
-    let mut parents = Vec::new();
-    for var in vars {
-        own.push(interner.scalar(&var));
-        own.push(interner.heap(&var));
-        if let Some(dep) = env.get(&var) {
-            parents.push(Rc::clone(dep));
-        }
-    }
-    Rc::new(DepNode { own, parents })
+fn logical_reads_node<'a>(
+    node: &'a AstNode,
+    env: &SchedEnv,
+    interner: &mut KeyInterner<'a>,
+) -> Rc<DepNode> {
+    let mut own = Vec::new();
+    collect_direct_read_keys(node, &mut own, interner);
+    interner.scratch.dedup(&mut own);
+    logical_reads_from_keys(own.into(), env, interner)
 }
 
-/// Flatten a `DepNode` closure into a concrete key set. The `Rc`-identity
+/// Reuse already collected, deduplicated direct reads instead of walking and
+/// interning an initializer a second time.
+fn logical_reads_from_keys(
+    own: Rc<[u32]>,
+    env: &SchedEnv,
+    interner: &mut KeyInterner<'_>,
+) -> Rc<DepNode> {
+    let parents = own
+        .iter()
+        .filter(|&&key| key % 2 == 0)
+        .filter_map(|&key| env.get(&(key / 2)).cloned())
+        .collect();
+    interner.dep_node(own, parents)
+}
+
+/// Flatten a `DepNode` closure into a concrete key set. The run-local node-id
 /// `visited` set both dedups shared sub-closures and guarantees termination;
 /// the result is exactly the transitive union of `own` over the node and all its
 /// (transitive) parents — i.e. the set the old materialized `env` stored.
 /// Iterative so a long straight-line dependency chain cannot overflow the stack.
-fn flatten_dep_node(
-    node: &Rc<DepNode>,
-    out: &mut HashSet<u32>,
-    visited: &mut HashSet<*const DepNode>,
-) {
+fn flatten_dep_node(node: &Rc<DepNode>, out: &mut KeyUnion, visited: &mut KeyUnion) {
     let mut stack: Vec<&Rc<DepNode>> = vec![node];
     while let Some(n) = stack.pop() {
-        if !visited.insert(Rc::as_ptr(n)) {
+        if !visited.insert(n.id) {
             continue;
         }
         out.extend(n.own.iter().copied());
@@ -3964,41 +4175,49 @@ fn loop_body_is_schedulable(body: &AstNode, pure_fns: &HashSet<String>) -> bool 
 /// induction variables. The over-approximation only ever ADDS dependency edges,
 /// so the resulting schedule preserves every observed value; `is_multiply` is
 /// false because a loop is not a single fusable multiply.
-fn loop_sched_info(
-    variables: &[String],
-    iterable: &AstNode,
-    body: &AstNode,
+fn loop_sched_info<'a>(
+    variables: &'a [String],
+    iterable: &'a AstNode,
+    body: &'a AstNode,
     env: &SchedEnv,
-    interner: &mut KeyInterner,
+    interner: &mut KeyInterner<'a>,
 ) -> SchedInfo {
-    let mut direct_reads = HashSet::new();
-    let mut logical_reads = HashSet::new();
-    let mut writes = HashSet::new();
-    let mut effects = HashSet::new();
+    let mut direct_reads = interner.key_union();
+    let mut logical_reads = interner.key_union();
+    let mut writes = interner.key_union();
+    let mut effects = interner.key_union();
 
-    collect_direct_read_keys(iterable, &mut direct_reads, interner);
+    let mut iterable_reads = Vec::new();
+    collect_direct_read_keys(iterable, &mut iterable_reads, interner);
+    direct_reads.extend(iterable_reads);
 
-    // Walk the body with a private env seeded from the outer one so each
-    // statement's logical reads resolve against bindings created earlier in the
-    // loop body (mirroring `schedule_run`'s per-statement env threading).
-    let mut body_env = env.clone();
+    // Read inherited bindings on demand; record only this loop's updates.
+    // Removal/clear hide inherited values without changing the outer scope.
+    let mut body_env = env.child();
+    // Nodes are immutable and ids never reused: each transitive dependency
+    // needs visiting only once across the entire loop aggregate.
+    let mut visited = interner.key_union();
     for stmt in loop_body_statements(body) {
         let info = sched_info(stmt, &body_env, interner);
         update_sched_env(stmt, &mut body_env, &info, interner);
-        direct_reads.extend(info.direct_reads);
+        direct_reads.extend(info.direct_reads.iter().copied());
         logical_reads.extend(info.logical_reads);
         // Materialize the statement's lazy cones into the loop aggregate: the
         // aggregate must be a concrete set (induction-variable filtering below,
-        // loop-commit leaf in `update_sched_env`). One shared visited set per
-        // statement; sharing the `logical_reads` out-set keeps the resulting
-        // union identical to flattening each cone separately.
-        let mut visited = HashSet::new();
+        // loop-commit leaf in `update_sched_env`). Previously shared cones were
+        // re-traversed once per statement even after their keys were included.
         for node in &info.logical_nodes {
             flatten_dep_node(node, &mut logical_reads, &mut visited);
         }
         writes.extend(info.writes);
         effects.extend(info.effects);
     }
+
+    interner.finish_union(visited);
+    let mut direct_reads = interner.finish_union(direct_reads);
+    let mut logical_reads = interner.finish_union(logical_reads);
+    let mut writes = interner.finish_union(writes);
+    let mut effects = interner.finish_union(effects);
 
     // The induction variables are loop-local: drop their keys so they neither
     // create false hazards with outer bindings nor leak as loop writes.
@@ -4011,13 +4230,12 @@ fn loop_sched_info(
             &mut writes,
             &mut effects,
         ] {
-            set.remove(&sk);
-            set.remove(&hk);
+            set.retain(|&key| key != sk && key != hk);
         }
     }
 
     SchedInfo {
-        direct_reads,
+        direct_reads: direct_reads.into(),
         logical_reads,
         logical_nodes: Vec::new(),
         writes,
@@ -4034,7 +4252,7 @@ fn stmt_is_schedulable(stmt: &AstNode, pure_fns: &HashSet<String>) -> bool {
             .as_deref()
             .is_none_or(|v| expr_is_reorderable(v, pure_fns)),
         AstNode::Assignment { target, value, .. } => {
-            (matches!(target.as_ref(), AstNode::Identifier(_, _)) || root_var(target).is_some())
+            (matches!(target.as_ref(), AstNode::Identifier(_, _)) || root_var_ref(target).is_some())
                 && expr_is_pure(target, pure_fns)
                 && expr_is_reorderable(value, pure_fns)
         }
@@ -4071,17 +4289,17 @@ fn stmt_is_schedulable(stmt: &AstNode, pure_fns: &HashSet<String>) -> bool {
 /// is deliberately coarser than the multiply batcher's field-level keying
 /// (`statement_reads_and_writes` / `keys_conflict`) and must not be merged with
 /// it — see the note on `statement_reads_and_writes`.
-fn sched_info(stmt: &AstNode, env: &SchedEnv, interner: &mut KeyInterner) -> SchedInfo {
-    let mut direct_reads = HashSet::new();
-    let logical_reads = HashSet::new();
+fn sched_info<'a>(stmt: &'a AstNode, env: &SchedEnv, interner: &mut KeyInterner<'a>) -> SchedInfo {
+    let mut direct_reads = Vec::new();
+    let logical_reads = Vec::new();
     let mut logical_nodes = Vec::new();
-    let mut writes = HashSet::new();
-    let mut effects = HashSet::new();
+    let mut writes = Vec::new();
+    let mut effects = Vec::new();
     let mut is_multiply = false;
 
     match stmt {
         AstNode::VariableDeclaration { name, value, .. } => {
-            writes.insert(interner.scalar(name));
+            writes.push(interner.scalar(name));
             if let Some(v) = value.as_deref() {
                 collect_direct_read_keys(v, &mut direct_reads, interner);
                 is_multiply = value_is_multiply(v);
@@ -4092,18 +4310,18 @@ fn sched_info(stmt: &AstNode, env: &SchedEnv, interner: &mut KeyInterner) -> Sch
             is_multiply = value_is_multiply(value);
             match target.as_ref() {
                 AstNode::Identifier(name, _) => {
-                    writes.insert(interner.scalar(name));
+                    writes.push(interner.scalar(name));
                 }
                 // Index/field assignment mutates (and reads) the base object.
                 other => {
-                    if let Some(root) = root_var(other) {
-                        let key = interner.heap(&root);
-                        writes.insert(key);
-                        direct_reads.insert(key);
-                        effects.insert(key);
+                    if let Some(root) = root_var_ref(other) {
+                        let key = interner.heap(root);
+                        writes.push(key);
+                        direct_reads.push(key);
+                        effects.push(key);
                     } else {
-                        writes.insert(interner.global());
-                        effects.insert(interner.global());
+                        writes.push(interner.global());
+                        effects.push(interner.global());
                     }
                     collect_direct_read_keys(other, &mut direct_reads, interner);
                 }
@@ -4124,20 +4342,21 @@ fn sched_info(stmt: &AstNode, env: &SchedEnv, interner: &mut KeyInterner) -> Sch
             // A recognized mutator: first argument is the receiver (read+written),
             // the rest are read.
             if let Some(receiver) = arguments.first() {
-                if let Some(root) = root_var(receiver) {
-                    let key = interner.heap(&root);
-                    writes.insert(key);
-                    direct_reads.insert(key);
-                    effects.insert(key);
+                if let Some(root) = root_var_ref(receiver) {
+                    let key = interner.heap(root);
+                    writes.push(key);
+                    direct_reads.push(key);
+                    effects.push(key);
                 } else {
-                    writes.insert(interner.global());
-                    effects.insert(interner.global());
+                    writes.push(interner.global());
+                    effects.push(interner.global());
                 }
                 collect_direct_read_keys(receiver, &mut direct_reads, interner);
             }
             for arg in arguments.iter().skip(1) {
-                collect_direct_read_keys(arg, &mut direct_reads, interner);
-                logical_nodes.push(logical_reads_node(arg, env, interner));
+                let deps = logical_reads_node(arg, env, interner);
+                direct_reads.extend_from_slice(&deps.own);
+                logical_nodes.push(deps);
             }
         }
         _ => {
@@ -4145,8 +4364,11 @@ fn sched_info(stmt: &AstNode, env: &SchedEnv, interner: &mut KeyInterner) -> Sch
         }
     }
 
+    for keys in [&mut direct_reads, &mut writes, &mut effects] {
+        interner.scratch.dedup(keys);
+    }
     SchedInfo {
-        direct_reads,
+        direct_reads: direct_reads.into(),
         logical_reads,
         logical_nodes,
         writes,
@@ -4159,26 +4381,23 @@ fn sched_info(stmt: &AstNode, env: &SchedEnv, interner: &mut KeyInterner) -> Sch
 /// `sched_info(stmt, env)` computed against this same env (both call sites have
 /// it in hand); the `ForLoop` arm reuses it instead of recomputing
 /// `loop_sched_info` — a pure memoization of a deterministic function.
-fn update_sched_env(
-    stmt: &AstNode,
+fn update_sched_env<'a>(
+    stmt: &'a AstNode,
     env: &mut SchedEnv,
     info: &SchedInfo,
-    interner: &mut KeyInterner,
+    interner: &mut KeyInterner<'a>,
 ) {
     match stmt {
-        AstNode::VariableDeclaration { name, value, .. } => {
-            let deps = value
-                .as_deref()
-                .map(|v| logical_reads_node(v, env, interner))
-                .unwrap_or_default();
-            env.insert(name.clone(), deps);
+        AstNode::VariableDeclaration { name, .. } => {
+            let deps = logical_reads_from_keys(info.direct_reads.clone(), env, interner);
+            env.insert(interner.var_id(name), deps);
         }
-        AstNode::Assignment { target, value, .. } => {
+        AstNode::Assignment { target, .. } => {
             if let AstNode::Identifier(name, _) = target.as_ref() {
-                let deps = logical_reads_node(value, env, interner);
-                env.insert(name.clone(), deps);
-            } else if let Some(root) = root_var(target) {
-                env.remove(&root);
+                let deps = logical_reads_from_keys(info.direct_reads.clone(), env, interner);
+                env.insert(interner.var_id(name), deps);
+            } else if let Some(root) = root_var_ref(target) {
+                env.remove(&interner.var_id(root));
             } else {
                 env.clear();
             }
@@ -4193,35 +4412,35 @@ fn update_sched_env(
             // to one of those inputs. `info` is the loop's aggregate (already
             // materialized by `loop_sched_info`, so `logical_nodes` is empty —
             // flattened anyway for robustness).
-            let mut deps: HashSet<u32> = info
-                .direct_reads
-                .iter()
-                .chain(info.logical_reads.iter())
-                .copied()
-                .collect();
-            let mut visited = HashSet::new();
+            let mut deps = interner.key_union();
+            deps.extend(
+                info.direct_reads
+                    .iter()
+                    .chain(info.logical_reads.iter())
+                    .copied(),
+            );
+            let mut visited = interner.key_union();
             for node in &info.logical_nodes {
                 flatten_dep_node(node, &mut deps, &mut visited);
             }
             // One shared leaf node holding the concrete aggregate set; every
             // root the loop wrote points at it (flattens to `deps`, exactly as
             // the old per-root `deps.clone()` did).
-            let dep_node = Rc::new(DepNode {
-                own: deps.into_iter().collect(),
-                parents: Vec::new(),
-            });
+            interner.finish_union(visited);
+            let keys = interner.finish_union(deps);
+            let dep_node = interner.dep_node(keys, Vec::new());
             for w in &info.writes {
                 if let Some(root) = interner.key_root(*w) {
-                    env.insert(root.to_string(), Rc::clone(&dep_node));
+                    env.insert(interner.var_id(root), Rc::clone(&dep_node));
                 }
             }
             for var in variables {
-                env.remove(var);
+                env.remove(&interner.var_id(var));
             }
         }
         AstNode::FunctionCall { arguments, .. } => {
-            if let Some(receiver) = arguments.first().and_then(root_var) {
-                env.remove(&receiver);
+            if let Some(receiver) = arguments.first().and_then(root_var_ref) {
+                env.remove(&interner.var_id(receiver));
             } else {
                 env.clear();
             }
@@ -4232,11 +4451,15 @@ fn update_sched_env(
 
 /// Recurse into nested scopes, then reorder each block's statement list.
 pub fn schedule_for_batching(node: AstNode) -> AstNode {
-    let pure_fns = compute_pure_functions(&node);
-    schedule_in_node(node, &pure_fns)
+    schedule_for_batching_tracked(node, &mut false)
 }
 
-fn schedule_in_node(node: AstNode, pure_fns: &HashSet<String>) -> AstNode {
+fn schedule_for_batching_tracked(node: AstNode, changed: &mut bool) -> AstNode {
+    let pure_fns = compute_pure_functions(&node);
+    schedule_in_node(node, &pure_fns, changed)
+}
+
+fn schedule_in_node(node: AstNode, pure_fns: &HashSet<String>, changed: &mut bool) -> AstNode {
     match node {
         AstNode::Block(stmts) => {
             // Flatten statement-position nested blocks (which inlining introduces
@@ -4244,12 +4467,12 @@ fn schedule_in_node(node: AstNode, pure_fns: &HashSet<String>) -> AstNode {
             // across what were separate blocks — e.g. the 16 inlined S-box
             // instances of one SubBytes layer. Inlining alpha-renames every
             // binding uniquely, so merging their scopes cannot capture or shadow.
-            let stmts = flatten_statement_blocks(stmts);
+            let stmts = flatten_statement_blocks(stmts, changed);
             let stmts: Vec<AstNode> = stmts
                 .into_iter()
-                .map(|s| schedule_in_node(s, pure_fns))
+                .map(|s| schedule_in_node(s, pure_fns, changed))
                 .collect();
-            AstNode::Block(schedule_statement_list(stmts, pure_fns))
+            AstNode::Block(schedule_statement_list(stmts, pure_fns, changed))
         }
         AstNode::FunctionDefinition {
             name,
@@ -4266,7 +4489,7 @@ fn schedule_in_node(node: AstNode, pure_fns: &HashSet<String>) -> AstNode {
             type_params,
             parameters,
             return_type,
-            body: Box::new(schedule_in_node(*body, pure_fns)),
+            body: Box::new(schedule_in_node(*body, pure_fns, changed)),
             is_secret,
             pragmas,
             location,
@@ -4278,7 +4501,7 @@ fn schedule_in_node(node: AstNode, pure_fns: &HashSet<String>) -> AstNode {
             location,
         } => AstNode::WhileLoop {
             condition,
-            body: Box::new(schedule_in_node(*body, pure_fns)),
+            body: Box::new(schedule_in_node(*body, pure_fns, changed)),
             location,
         },
         AstNode::ForLoop {
@@ -4289,7 +4512,7 @@ fn schedule_in_node(node: AstNode, pure_fns: &HashSet<String>) -> AstNode {
         } => AstNode::ForLoop {
             variables,
             iterable,
-            body: Box::new(schedule_in_node(*body, pure_fns)),
+            body: Box::new(schedule_in_node(*body, pure_fns, changed)),
             location,
         },
         AstNode::IfExpression {
@@ -4298,8 +4521,8 @@ fn schedule_in_node(node: AstNode, pure_fns: &HashSet<String>) -> AstNode {
             else_branch,
         } => AstNode::IfExpression {
             condition,
-            then_branch: Box::new(schedule_in_node(*then_branch, pure_fns)),
-            else_branch: else_branch.map(|e| Box::new(schedule_in_node(*e, pure_fns))),
+            then_branch: Box::new(schedule_in_node(*then_branch, pure_fns, changed)),
+            else_branch: else_branch.map(|e| Box::new(schedule_in_node(*e, pure_fns, changed))),
         },
         AstNode::TryCatch {
             try_block,
@@ -4307,15 +4530,15 @@ fn schedule_in_node(node: AstNode, pure_fns: &HashSet<String>) -> AstNode {
             finally_block,
             location,
         } => AstNode::TryCatch {
-            try_block: Box::new(schedule_in_node(*try_block, pure_fns)),
+            try_block: Box::new(schedule_in_node(*try_block, pure_fns, changed)),
             catch_clauses: catch_clauses
                 .into_iter()
                 .map(|c| crate::ast::CatchClause {
-                    body: Box::new(schedule_in_node(*c.body, pure_fns)),
+                    body: Box::new(schedule_in_node(*c.body, pure_fns, changed)),
                     ..c
                 })
                 .collect(),
-            finally_block: finally_block.map(|b| Box::new(schedule_in_node(*b, pure_fns))),
+            finally_block: finally_block.map(|b| Box::new(schedule_in_node(*b, pure_fns, changed))),
             location,
         },
         other => other,
@@ -4326,11 +4549,14 @@ fn schedule_in_node(node: AstNode, pure_fns: &HashSet<String>) -> AstNode {
 /// statement list (one scope), so multiplies in formerly-separate blocks can be
 /// co-scheduled. Only flattens bare statement-position blocks; if/loop/function
 /// bodies are left to their owning constructs.
-fn flatten_statement_blocks(stmts: Vec<AstNode>) -> Vec<AstNode> {
+fn flatten_statement_blocks(stmts: Vec<AstNode>, changed: &mut bool) -> Vec<AstNode> {
     let mut out = Vec::with_capacity(stmts.len());
     for stmt in stmts {
         match stmt {
-            AstNode::Block(inner) => out.extend(flatten_statement_blocks(inner)),
+            AstNode::Block(inner) => {
+                *changed = true;
+                out.extend(flatten_statement_blocks(inner, changed));
+            }
             other => out.push(other),
         }
     }
@@ -4339,7 +4565,11 @@ fn flatten_statement_blocks(stmts: Vec<AstNode>) -> Vec<AstNode> {
 
 /// Split a statement list into maximal schedulable runs separated by barriers,
 /// reorder each run, and emit barriers in place.
-fn schedule_statement_list(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> Vec<AstNode> {
+fn schedule_statement_list(
+    stmts: Vec<AstNode>,
+    pure_fns: &HashSet<String>,
+    changed: &mut bool,
+) -> Vec<AstNode> {
     let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
     let mut run: Vec<AstNode> = Vec::new();
     for stmt in stmts {
@@ -4347,13 +4577,13 @@ fn schedule_statement_list(stmts: Vec<AstNode>, pure_fns: &HashSet<String>) -> V
             run.push(stmt);
         } else {
             if !run.is_empty() {
-                out.extend(schedule_run(std::mem::take(&mut run)));
+                out.extend(schedule_run(std::mem::take(&mut run), changed));
             }
             out.push(stmt);
         }
     }
     if !run.is_empty() {
-        out.extend(schedule_run(run));
+        out.extend(schedule_run(run, changed));
     }
     out
 }
@@ -4374,14 +4604,14 @@ fn sched_cone_ab_check() -> bool {
 /// Reorder one analyzable straight-line run via dependency-graph list scheduling,
 /// clustering same-depth multiplies. Falls back to the original order if a
 /// dependency cycle is somehow present (never expected).
-fn schedule_run(stmts: Vec<AstNode>) -> Vec<AstNode> {
+fn schedule_run(stmts: Vec<AstNode>, changed: &mut bool) -> Vec<AstNode> {
     let n = stmts.len();
     if n < 2 {
         return stmts;
     }
 
     let mut interner = KeyInterner::default();
-    let mut env: SchedEnv = HashMap::new();
+    let mut env = SchedEnv::new();
     let infos: Vec<SchedInfo> = stmts
         .iter()
         .map(|stmt| {
@@ -4395,6 +4625,9 @@ fn schedule_run(stmts: Vec<AstNode>) -> Vec<AstNode> {
     // (no-op for the DAG: nothing reads or writes a key merely by interning).
     let global_key = interner.global();
     let key_bound = interner.key_bound();
+    // The graph needs only interned IDs and captured dependencies now.
+    drop(env);
+    drop(interner);
     let order = if sched_cone_ab_check() {
         let full = build_schedule_order(&infos, key_bound, global_key, false);
         let pruned = build_schedule_order(&infos, key_bound, global_key, true);
@@ -4413,6 +4646,14 @@ fn schedule_run(stmts: Vec<AstNode>) -> Vec<AstNode> {
         return stmts;
     };
 
+    if order
+        .iter()
+        .enumerate()
+        .all(|(index, &source)| index == source || stmts[index] == stmts[source])
+    {
+        return stmts;
+    }
+    *changed = true;
     // Materialize the reordered run.
     let mut slots: Vec<Option<AstNode>> = stmts.into_iter().map(Some).collect();
     order
@@ -4422,53 +4663,62 @@ fn schedule_run(stmts: Vec<AstNode>) -> Vec<AstNode> {
 }
 
 /// Compute the memoized *pruned* cone of a `DepNode`: the transitive `own` keys
-/// restricted to `relevant` ones. Pointer-keyed memoization is sound because
-/// each memo entry holds an `Rc` to its node, so no cached address can be freed
-/// and reused while the memo is alive. Iterative post-order (parents before the
-/// node) so long straight-line chains cannot overflow the stack and every node
+/// restricted to `relevant` ones. Dense run-local node ids index the memo;
+/// they cannot be reused after a binding dies. Iterative post-order (parents
+/// before the node) avoids overflowing the stack, and every node
 /// is computed exactly once per run.
 fn pruned_cone(
     node: &Rc<DepNode>,
     relevant: &[bool],
-    memo: &mut HashMap<*const DepNode, (Rc<DepNode>, Rc<Vec<u32>>)>,
+    memo: &mut Vec<Option<Rc<Vec<u32>>>>,
+    scratch: &mut KeyMarks,
+    empty: &Rc<Vec<u32>>,
 ) -> Rc<Vec<u32>> {
-    if let Some((_, keys)) = memo.get(&Rc::as_ptr(node)) {
+    if memo.len() <= node.id as usize {
+        memo.resize_with(node.id as usize + 1, || None);
+    }
+    if let Some(keys) = &memo[node.id as usize] {
         return Rc::clone(keys);
     }
     // (node, parents_done): first visit pushes the node back with
     // parents_done=true plus its unmemoized parents; second visit unions.
     let mut stack: Vec<(Rc<DepNode>, bool)> = vec![(Rc::clone(node), false)];
     while let Some((n, parents_done)) = stack.pop() {
-        let ptr = Rc::as_ptr(&n);
-        if memo.contains_key(&ptr) {
+        let id = n.id as usize;
+        if memo[id].is_some() {
             continue;
         }
         if !parents_done {
             stack.push((Rc::clone(&n), true));
             for p in &n.parents {
-                if !memo.contains_key(&Rc::as_ptr(p)) {
+                if memo[p.id as usize].is_none() {
                     stack.push((Rc::clone(p), false));
                 }
             }
             continue;
         }
-        let mut keys: HashSet<u32> = n
+        let mut keys: Vec<u32> = n
             .own
             .iter()
             .copied()
             .filter(|&k| relevant[k as usize])
             .collect();
         for p in &n.parents {
-            let (_, pk) = &memo[&Rc::as_ptr(p)];
+            let pk = memo[p.id as usize].as_ref().unwrap();
             keys.extend(pk.iter().copied());
         }
-        let mut keys: Vec<u32> = keys.into_iter().collect();
+        scratch.dedup(&mut keys);
         // Sorted for determinism; edge application below is per-key independent,
         // so the order cannot affect the DAG either way.
         keys.sort_unstable();
-        memo.insert(ptr, (n, Rc::new(keys)));
+        keys.shrink_to_fit();
+        memo[id] = Some(if keys.is_empty() {
+            Rc::clone(empty)
+        } else {
+            Rc::new(keys)
+        });
     }
-    Rc::clone(&memo[&Rc::as_ptr(node)].1)
+    Rc::clone(memo[node.id as usize].as_ref().unwrap())
 }
 
 /// Build the dependency DAG over `infos` and list-schedule it. Returns the
@@ -4510,13 +4760,29 @@ fn build_schedule_order(
     prune: bool,
 ) -> Option<Vec<usize>> {
     let n = infos.len();
-    // Build the dependency DAG (deduplicated successor sets).
-    let mut succ: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    // Edges are added while visiting destinations in increasing index order.
+    // Duplicate destinations in any successor list are therefore consecutive:
+    // a last-element check replaces a hash table per statement, without a
+    // separate sorting/deduplication pass.
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut indeg: Vec<usize> = vec![0usize; n];
+
+    fn add_edge(from: usize, to: usize, succ: &mut [Vec<usize>], indeg: &mut [usize]) {
+        if from != to && succ[from].last() != Some(&to) {
+            succ[from].push(to);
+            indeg[to] += 1;
+        }
+    }
 
     // All keys are interned by now, so the per-key maps are dense arrays.
     let mut last_write: Vec<Option<usize>> = vec![None; key_bound];
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); key_bound];
+    let mut final_write = vec![0usize; key_bound];
+    for (i, info) in infos.iter().enumerate() {
+        for &w in &info.writes {
+            final_write[w as usize] = i;
+        }
+    }
     let mut effect_prev: Vec<Option<usize>> = vec![None; key_bound];
 
     // Hazard relevance for the pruned cone walk (see the doc comment): count
@@ -4544,7 +4810,9 @@ fn build_schedule_order(
             })
             .collect();
     }
-    let mut cone_memo: HashMap<*const DepNode, (Rc<DepNode>, Rc<Vec<u32>>)> = HashMap::new();
+    let mut cone_memo = Vec::new();
+    let mut cone_scratch = KeyMarks::default();
+    let empty_cone = Rc::new(Vec::new());
 
     // Register statement `i` reading key `r`: a RAW edge from the key's last
     // writer, plus a `readers` entry feeding later WAR edges. Applied per key
@@ -4555,34 +4823,53 @@ fn build_schedule_order(
         r: u32,
         i: usize,
         last_write: &[Option<usize>],
+        final_write: &[usize],
         readers: &mut [Vec<usize>],
-        succ: &mut [HashSet<usize>],
+        succ: &mut [Vec<usize>],
         indeg: &mut [usize],
     ) {
         if let Some(w) = last_write[r as usize] {
-            if w != i && succ[w].insert(i) {
-                indeg[i] += 1;
-            }
+            add_edge(w, i, succ, indeg);
         }
         let rl = &mut readers[r as usize];
-        if rl.last() != Some(&i) {
+        if i < final_write[r as usize] && rl.last() != Some(&i) {
             rl.push(i);
         }
     }
 
-    for i in 0..n {
-        for &r in infos[i]
-            .direct_reads
-            .iter()
-            .chain(infos[i].logical_reads.iter())
-        {
-            apply_read(r, i, &last_write, &mut readers, &mut succ, &mut indeg);
+    for (i, info) in infos.iter().enumerate() {
+        for &r in info.direct_reads.iter().chain(info.logical_reads.iter()) {
+            apply_read(
+                r,
+                i,
+                &last_write,
+                &final_write,
+                &mut readers,
+                &mut succ,
+                &mut indeg,
+            );
         }
         if prune {
             // Apply each cone's memoized hazard-relevant keys.
-            for node in &infos[i].logical_nodes {
-                for &r in pruned_cone(node, &relevant, &mut cone_memo).iter() {
-                    apply_read(r, i, &last_write, &mut readers, &mut succ, &mut indeg);
+            for node in &info.logical_nodes {
+                for &r in pruned_cone(
+                    node,
+                    &relevant,
+                    &mut cone_memo,
+                    &mut cone_scratch,
+                    &empty_cone,
+                )
+                .iter()
+                {
+                    apply_read(
+                        r,
+                        i,
+                        &last_write,
+                        &final_write,
+                        &mut readers,
+                        &mut succ,
+                        &mut indeg,
+                    );
                 }
             }
         } else {
@@ -4590,35 +4877,37 @@ fn build_schedule_order(
             // visited set), applying reads directly instead of materializing
             // the flat set.
             let mut visited: HashSet<*const DepNode> = HashSet::new();
-            let mut stack: Vec<&Rc<DepNode>> = infos[i].logical_nodes.iter().collect();
+            let mut stack: Vec<&Rc<DepNode>> = info.logical_nodes.iter().collect();
             while let Some(node) = stack.pop() {
                 if !visited.insert(Rc::as_ptr(node)) {
                     continue;
                 }
-                for &r in &node.own {
-                    apply_read(r, i, &last_write, &mut readers, &mut succ, &mut indeg);
+                for &r in node.own.iter() {
+                    apply_read(
+                        r,
+                        i,
+                        &last_write,
+                        &final_write,
+                        &mut readers,
+                        &mut succ,
+                        &mut indeg,
+                    );
                 }
                 stack.extend(node.parents.iter());
             }
         }
-        for &w in &infos[i].writes {
+        for &w in &info.writes {
             if let Some(pw) = last_write[w as usize] {
-                if pw != i && succ[pw].insert(i) {
-                    indeg[i] += 1; // WAW
-                }
+                add_edge(pw, i, &mut succ, &mut indeg); // WAW
             }
-            for rd in std::mem::take(&mut readers[w as usize]) {
-                if rd != i && succ[rd].insert(i) {
-                    indeg[i] += 1; // WAR
-                }
+            for rd in readers[w as usize].drain(..) {
+                add_edge(rd, i, &mut succ, &mut indeg); // WAR
             }
             last_write[w as usize] = Some(i);
         }
-        for &effect in &infos[i].effects {
+        for &effect in &info.effects {
             if let Some(pe) = effect_prev[effect as usize] {
-                if pe != i && succ[pe].insert(i) {
-                    indeg[i] += 1;
-                }
+                add_edge(pe, i, &mut succ, &mut indeg);
             }
             effect_prev[effect as usize] = Some(i);
         }
@@ -4642,18 +4931,19 @@ fn build_schedule_order(
     }
 
     let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut step = Vec::new();
     while order.len() < n {
         // Collect the indices to release this step.
-        let step: Vec<usize> = if !ready_free.is_empty() {
+        if !ready_free.is_empty() {
             // Emit one ready free statement.
-            vec![ready_free.pop().map(|Reverse(i)| i).unwrap()]
+            step.push(ready_free.pop().map(|Reverse(i)| i).unwrap());
         } else if !ready_mult.is_empty() {
             // Fire one multiply round: all currently-ready multiplies at once.
-            std::iter::from_fn(|| ready_mult.pop().map(|Reverse(i)| i)).collect()
+            step.extend(std::iter::from_fn(|| ready_mult.pop().map(|Reverse(i)| i)));
         } else {
             break; // cycle (unexpected) — fall back below.
-        };
-        for i in step {
+        }
+        for i in step.drain(..) {
             order.push(i);
             for &s in &succ[i] {
                 indeg[s] -= 1;
@@ -4938,7 +5228,17 @@ fn drop_dead_bindings(
 // it cannot explode code size, and recursive functions are never inlined.
 // ===========================================================================
 
-static INLINE_SUFFIX: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static INLINE_SUFFIX: Cell<usize> = const { Cell::new(0) };
+}
+
+fn next_inline_suffix() -> usize {
+    INLINE_SUFFIX.with(|counter| {
+        let suffix = counter.get();
+        counter.set(suffix + 1);
+        suffix
+    })
+}
 
 /// Total number of AST nodes inlining may add before it stops (blowup guard).
 const INLINE_BUDGET: usize = 200_000;
@@ -4960,6 +5260,7 @@ struct InlineParam {
 struct InlineInfo {
     params: Vec<InlineParam>,
     body: AstNode,
+    declared: Vec<String>,
     size: usize,
 }
 
@@ -5107,15 +5408,17 @@ fn inline_call(
     args: Vec<AstNode>,
     loc: &SourceLocation,
 ) -> (Vec<AstNode>, AstNode) {
-    let suffix = INLINE_SUFFIX.fetch_add(1, Ordering::Relaxed);
-    let mut declared: HashSet<String> = info.params.iter().map(|p| p.name.clone()).collect();
-    collect_declared_names(&info.body, &mut declared);
-    let map: HashMap<String, String> = declared
+    let suffix = next_inline_suffix();
+    let map: HashMap<String, String> = info
+        .declared
         .iter()
         .map(|n| (n.clone(), format!("{}__inl{}", n, suffix)))
         .collect();
 
-    let mut prelude: Vec<AstNode> = Vec::new();
+    let AstNode::Block(stmts) = &info.body else {
+        unreachable!("inlinable functions have a block body")
+    };
+    let mut prelude = Vec::with_capacity(info.params.len() + stmts.len());
     // Bind arguments to renamed parameters (single, ordered evaluation).
     // Preserve the parameter's secrecy and type annotation so a secret argument
     // binding stays secret: dropping these would let codegen lower a secret
@@ -5131,9 +5434,6 @@ fn inline_call(
         });
     }
 
-    let AstNode::Block(stmts) = &info.body else {
-        unreachable!("inlinable functions have a block body")
-    };
     let mut return_expr = AstNode::Literal {
         value: crate::ast::Value::Nil,
         location: loc.clone(),
@@ -5175,9 +5475,8 @@ fn try_inline_value(
                         .iter()
                         .any(|a| matches!(a, AstNode::NamedArgument { .. }))
                 {
-                    let info = info.clone();
                     *budget = budget.saturating_sub(info.size);
-                    return Ok(inline_call(&info, arguments, loc));
+                    return Ok(inline_call(info, arguments, loc));
                 }
             }
         }
@@ -5498,15 +5797,15 @@ fn collect_called_names(node: &AstNode, out: &mut HashSet<String>) {
 fn gather_inline_infos(root: &AstNode, allow_multi_return: bool) -> HashMap<String, InlineInfo> {
     // Collect every named function definition (with its return type + location, so
     // a multi-return body can be normalized to a single tail return below).
-    type Def = (
-        String,
-        Vec<crate::ast::Parameter>,
-        AstNode,
-        Option<Box<AstNode>>,
-        SourceLocation,
+    type Def<'a> = (
+        &'a str,
+        &'a [crate::ast::Parameter],
+        &'a AstNode,
+        &'a Option<Box<AstNode>>,
+        &'a SourceLocation,
     );
-    let mut defs: Vec<Def> = Vec::new();
-    fn gather(node: &AstNode, out: &mut Vec<Def>) {
+    let mut defs: Vec<Def<'_>> = Vec::new();
+    fn gather<'a>(node: &'a AstNode, out: &mut Vec<Def<'a>>) {
         if let AstNode::FunctionDefinition {
             name: Some(n),
             parameters,
@@ -5516,35 +5815,34 @@ fn gather_inline_infos(root: &AstNode, allow_multi_return: bool) -> HashMap<Stri
             ..
         } = node
         {
-            out.push((
-                n.clone(),
-                parameters.clone(),
-                (**body).clone(),
-                return_type.clone(),
-                location.clone(),
-            ));
+            out.push((n, parameters, body, return_type, location));
         }
         for_each_child_def(node, &mut |c| gather(c, out));
     }
     gather(root, &mut defs);
 
     // Direct-call graph for recursion detection.
-    let mut callees: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut callees: HashMap<&str, HashSet<String>> = HashMap::new();
     for (name, _, body, _, _) in &defs {
         let mut c = HashSet::new();
         collect_called_names(body, &mut c);
-        callees.insert(name.clone(), c);
+        callees.insert(*name, c);
     }
     let is_recursive = |start: &str| -> bool {
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut stack: Vec<String> = callees.get(start).into_iter().flatten().cloned().collect();
+        let mut seen = HashSet::new();
+        let mut stack: Vec<&str> = callees
+            .get(start)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
         while let Some(n) = stack.pop() {
             if n == start {
                 return true;
             }
-            if seen.insert(n.clone()) {
-                if let Some(next) = callees.get(&n) {
-                    stack.extend(next.iter().cloned());
+            if seen.insert(n) {
+                if let Some(next) = callees.get(n) {
+                    stack.extend(next.iter().map(String::as_str));
                 }
             }
         }
@@ -5553,7 +5851,23 @@ fn gather_inline_infos(root: &AstNode, allow_multi_return: bool) -> HashMap<Stri
 
     let mut infos = HashMap::new();
     for (name, params, body, return_type, location) in defs {
-        if is_recursive(&name) {
+        if is_recursive(name) {
+            continue;
+        }
+        // These builtins resolve captured variables by their names in this
+        // function's frame. Inlining can rename or remove those locals, so
+        // preserve the frame even when the body otherwise fits the budget.
+        if callees.get(name).is_some_and(|called| {
+            called.iter().any(|name| {
+                matches!(
+                    name.as_str(),
+                    "create_closure"
+                        | "create_closure_with_upvalue"
+                        | "get_upvalue"
+                        | "set_upvalue"
+                )
+            })
+        }) {
             continue;
         }
         // Never inline functions with variadic / defaulted parameters (the binding
@@ -5572,29 +5886,34 @@ fn gather_inline_infos(root: &AstNode, allow_multi_return: bool) -> HashMap<Stri
         // (e.g. `aes_sbox_vec`) inlines and its same-depth multiplies fuse, while a
         // large early-returning helper stays an opaque call rather than being
         // spliced at every site and exploding the post-inline unroll.
-        let prepared = if function_is_inlinable(&params, &body) {
-            body
+        let prepared = if function_is_inlinable(params, body) {
+            body.clone()
         } else if !allow_multi_return {
             continue;
         } else {
-            match normalize_function_returns(&body, &return_type, &location) {
+            match normalize_function_returns(body, return_type, location) {
                 Some(normalized) if node_size(&normalized) <= MULTI_RETURN_INLINE_MAX => normalized,
                 _ => continue,
             }
         };
         let size = node_size(&prepared);
+        let mut declared: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+        collect_declared_names(&prepared, &mut declared);
+        let mut declared: Vec<_> = declared.into_iter().collect();
+        declared.sort_unstable();
         infos.insert(
-            name,
+            name.to_owned(),
             InlineInfo {
                 params: params
-                    .into_iter()
+                    .iter()
                     .map(|p| InlineParam {
-                        name: p.name,
+                        name: p.name.clone(),
                         is_secret: p.is_secret,
-                        type_annotation: p.type_annotation,
+                        type_annotation: p.type_annotation.clone(),
                     })
                     .collect(),
                 body: prepared,
+                declared,
                 size,
             },
         );
@@ -5797,7 +6116,7 @@ fn normalize_function_returns(
 
 /// Like `for_each_child` but also descends into nested function-definition bodies
 /// and top-level blocks (used only for *gathering* definitions, not transforming).
-fn for_each_child_def(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
+fn for_each_child_def<'a>(node: &'a AstNode, f: &mut dyn FnMut(&'a AstNode)) {
     match node {
         AstNode::Block(stmts) => {
             for s in stmts {
@@ -5937,7 +6256,7 @@ fn unroll_max_expansion() -> usize {
 /// Statically known list shape: a length and its recursive element shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Shape {
-    List { len: usize, elem: Box<Shape> },
+    List { len: usize, elem: Rc<Shape> },
     Unknown,
 }
 
@@ -5945,7 +6264,7 @@ impl Shape {
     fn flat(len: usize) -> Shape {
         Shape::List {
             len,
-            elem: Box::new(Shape::Unknown),
+            elem: Rc::new(Shape::Unknown),
         }
     }
     fn count(&self) -> Option<usize> {
@@ -5970,7 +6289,7 @@ fn merge_shape(a: Shape, b: &Shape) -> Shape {
         (Shape::List { len: la, elem: ea }, Shape::List { len: lb, elem: eb }) if la == *lb => {
             Shape::List {
                 len: la,
-                elem: Box::new(merge_shape(*ea, eb)),
+                elem: Rc::new(merge_shape(Rc::unwrap_or_clone(ea), eb)),
             }
         }
         _ => Shape::Unknown,
@@ -5989,21 +6308,30 @@ struct LenEnv {
 }
 
 impl LenEnv {
-    /// The current alias group of `name` (the names sharing its underlying list),
-    /// excluding `name` itself.
-    fn alias_group(&self, name: &str) -> Vec<String> {
-        self.aliases
-            .get(name)
-            .map(|s| s.as_ref().iter().cloned().collect())
-            .unwrap_or_default()
+    fn set_int(&mut self, name: &str, value: u128) {
+        if let Some(slot) = self.ints.get_mut(name) {
+            *slot = value;
+        } else {
+            self.ints.insert(name.to_owned(), value);
+        }
+    }
+
+    fn set_shape(&mut self, name: &str, value: Shape) {
+        if let Some(slot) = self.shapes.get_mut(name) {
+            *slot = value;
+        } else {
+            self.shapes.insert(name.to_owned(), value);
+        }
     }
 
     /// Drop `name`'s shape/int and those of everything it may alias (used when a
     /// call might mutate or store an alias of it).
     fn invalidate(&mut self, name: &str) {
-        for other in self.alias_group(name) {
-            self.shapes.remove(&other);
-            self.ints.remove(&other);
+        if let Some(group) = self.aliases.get(name) {
+            for other in group.iter() {
+                self.shapes.remove(other);
+                self.ints.remove(other);
+            }
         }
         self.shapes.remove(name);
         self.ints.remove(name);
@@ -6045,10 +6373,16 @@ impl LenEnv {
     /// Set `name`'s shape, propagating to its alias group (a mutation grows the
     /// one underlying list, so every alias observes the same new length).
     fn set_shape_aliased(&mut self, name: &str, shape: Shape) {
-        for other in self.alias_group(name) {
-            self.shapes.insert(other, shape.clone());
+        if let Some(group) = self.aliases.get(name) {
+            for other in group.iter() {
+                if let Some(slot) = self.shapes.get_mut(other) {
+                    *slot = shape.clone();
+                } else {
+                    self.shapes.insert(other.clone(), shape.clone());
+                }
+            }
         }
-        self.shapes.insert(name.to_string(), shape);
+        self.set_shape(name, shape);
     }
 }
 
@@ -6089,21 +6423,36 @@ struct BuiltinEffect {
 /// every call site (impure / mutates-unknown / not-len-safe), matching the old
 /// `matches!`-returns-false behavior exactly.
 fn builtin_effect(name: &str) -> BuiltinEffect {
-    // Memoized per call name: the registry canonicalization + base-name match is
-    // deterministic (static registry), and this is queried at every FunctionCall
-    // visit of every walker — one hash lookup thereafter instead of 2-3 registry
-    // probes per query. Thread-local, so no cross-thread sync is involved.
+    #[derive(Default)]
+    struct EffectCache {
+        effects: HashMap<Rc<str>, BuiltinEffect>,
+        recent: [Option<(Rc<str>, BuiltinEffect)>; 32],
+    }
     thread_local! {
-        static EFFECT_CACHE: RefCell<HashMap<String, BuiltinEffect>> =
-            RefCell::new(HashMap::new());
+        static EFFECT_CACHE: RefCell<EffectCache> = RefCell::new(EffectCache::default());
     }
     EFFECT_CACHE.with(|cache| {
-        if let Some(e) = cache.borrow().get(name) {
-            return *e;
+        let mut cache = cache.borrow_mut();
+        let bytes = name.as_bytes();
+        let slot = (bytes.first().copied().unwrap_or(0) as usize
+            ^ ((bytes.last().copied().unwrap_or(0) as usize) << 2)
+            ^ bytes.len())
+            & 31;
+        if let Some((key, effect)) = &cache.recent[slot] {
+            if key.as_ref() == name {
+                return *effect;
+            }
         }
-        let e = builtin_effect_uncached(name);
-        cache.borrow_mut().insert(name.to_string(), e);
-        e
+        let (key, effect) = if let Some((key, effect)) = cache.effects.get_key_value(name) {
+            (key.clone(), *effect)
+        } else {
+            let effect = builtin_effect_uncached(name);
+            let key: Rc<str> = name.into();
+            cache.effects.insert(key.clone(), effect);
+            (key, effect)
+        };
+        cache.recent[slot] = Some((key, effect));
+        effect
     })
 }
 
@@ -6181,7 +6530,7 @@ fn eval_shape(node: &AstNode, env: &LenEnv) -> Shape {
             }
             Shape::List {
                 len: elements.len(),
-                elem: Box::new(elem.unwrap_or(Shape::Unknown)),
+                elem: Rc::new(elem.unwrap_or(Shape::Unknown)),
             }
         }
         AstNode::Identifier(name, _) => env.shapes.get(name).cloned().unwrap_or(Shape::Unknown),
@@ -6306,11 +6655,11 @@ fn invalidate_unsafe_call_args(node: &AstNode, env: &mut LenEnv) {
         if unsafe_call {
             let mut used = HashSet::new();
             for a in arguments {
-                collect_identifiers(a, &mut used);
+                collect_referenced_names(a, &mut used);
             }
             for u in used {
-                if env.shapes.contains_key(&u) || env.ints.contains_key(&u) {
-                    env.invalidate(&u);
+                if env.shapes.contains_key(u) || env.ints.contains_key(u) {
+                    env.invalidate(u);
                 }
             }
         }
@@ -6328,10 +6677,10 @@ fn apply_statement_to_env(stmt: &AstNode, env: &mut LenEnv) {
                     // Potential aliasing: `var b = a`.
                     env.alias_union(name, rhs);
                     let shape = env.shapes.get(rhs).cloned().unwrap_or(Shape::Unknown);
-                    env.shapes.insert(name.clone(), shape);
+                    env.set_shape(name, shape);
                     match env.ints.get(rhs).copied() {
                         Some(v) => {
-                            env.ints.insert(name.clone(), v);
+                            env.set_int(name, v);
                         }
                         None => {
                             env.ints.remove(name);
@@ -6340,10 +6689,10 @@ fn apply_statement_to_env(stmt: &AstNode, env: &mut LenEnv) {
                 }
                 Some(v) => {
                     let shape = eval_shape(v, env);
-                    env.shapes.insert(name.clone(), shape);
+                    env.set_shape(name, shape);
                     match eval_int(v, env) {
                         Some(i) => {
-                            env.ints.insert(name.clone(), i);
+                            env.set_int(name, i);
                         }
                         None => {
                             env.ints.remove(name);
@@ -6365,10 +6714,10 @@ fn apply_statement_to_env(stmt: &AstNode, env: &mut LenEnv) {
                 if let AstNode::Identifier(rhs, _) = value.as_ref() {
                     env.alias_union(name, rhs);
                     let shape = env.shapes.get(rhs).cloned().unwrap_or(Shape::Unknown);
-                    env.shapes.insert(name.clone(), shape);
+                    env.set_shape(name, shape);
                     match env.ints.get(rhs).copied() {
                         Some(v) => {
-                            env.ints.insert(name.clone(), v);
+                            env.set_int(name, v);
                         }
                         None => {
                             env.ints.remove(name);
@@ -6376,10 +6725,10 @@ fn apply_statement_to_env(stmt: &AstNode, env: &mut LenEnv) {
                     }
                 } else {
                     let shape = eval_shape(value, env);
-                    env.shapes.insert(name.clone(), shape);
+                    env.set_shape(name, shape);
                     match eval_int(value, env) {
                         Some(i) => {
-                            env.ints.insert(name.clone(), i);
+                            env.set_int(name, i);
                         }
                         None => {
                             env.ints.remove(name);
@@ -6398,41 +6747,32 @@ fn apply_statement_to_env(stmt: &AstNode, env: &mut LenEnv) {
 /// both incoming paths prove exactly the same value.  Alias facts obey the same
 /// rule: dropping an alias on just one path would let a later mutation leave a
 /// stale shape on the other name.
-fn meet_len_env(left: LenEnv, right: &LenEnv) -> LenEnv {
-    let shapes = left
-        .shapes
-        .into_iter()
-        .filter(|(name, shape)| right.shapes.get(name) == Some(shape))
-        .collect();
-    let ints = left
-        .ints
-        .into_iter()
-        .filter(|(name, value)| right.ints.get(name) == Some(value))
-        .collect();
-    let aliases = left
-        .aliases
-        .into_iter()
-        .filter(|(name, group)| {
-            right
-                .aliases
-                .get(name)
-                .is_some_and(|other| other.as_ref() == group.as_ref())
-        })
-        .collect();
-    LenEnv {
-        shapes,
-        ints,
-        aliases,
-    }
+fn meet_len_env(mut left: LenEnv, right: &LenEnv) -> LenEnv {
+    left.shapes
+        .retain(|name, shape| right.shapes.get(name) == Some(shape));
+    left.ints
+        .retain(|name, value| right.ints.get(name) == Some(value));
+    left.aliases
+        .retain(|name, group| right.aliases.get(name) == Some(group));
+    left
 }
 
 /// Conservatively forget every fact a control-flow construct may mutate.
-fn invalidate_node_mutations(node: &AstNode, env: &mut LenEnv) {
-    let mut mutated = HashSet::new();
-    collect_mutated_vars(node, &mut mutated);
-    for name in mutated {
-        env.invalidate(&name);
-        env.alias_unbind(&name);
+fn invalidate_node_mutations(
+    node: &AstNode,
+    env: &mut LenEnv,
+    mutations: &mut HashMap<*const AstNode, HashSet<String>>,
+) {
+    // The proof borrows an immutable AST; repeat iterations reuse static writes,
+    // while invalidation still runs against the current alias environment.
+    let mutated = mutations.entry(node as *const AstNode).or_insert_with(|| {
+        let mut names = HashSet::new();
+        collect_mutated_vars(node, &mut names);
+        names
+    });
+    for name in mutated.iter() {
+        env.invalidate(name);
+        env.alias_unbind(name);
     }
 }
 
@@ -6458,6 +6798,16 @@ fn has_abrupt_loop_control(node: &AstNode) -> bool {
 /// facts.  `fuel` bounds compile time on large inlined programs.  Returning
 /// false means the caller must discard the attempted proof.
 fn transfer_len_env(node: &AstNode, env: &mut LenEnv, fuel: &mut usize) -> bool {
+    transfer_len_env_inner(node, env, fuel, &mut [None; 4], &mut HashMap::new())
+}
+
+fn transfer_len_env_inner(
+    node: &AstNode,
+    env: &mut LenEnv,
+    fuel: &mut usize,
+    abrupt: &mut [Option<(*const AstNode, bool)>; 4],
+    mutations: &mut HashMap<*const AstNode, HashSet<String>>,
+) -> bool {
     if *fuel == 0 {
         return false;
     }
@@ -6465,7 +6815,7 @@ fn transfer_len_env(node: &AstNode, env: &mut LenEnv, fuel: &mut usize) -> bool 
     match node {
         AstNode::Block(statements) => {
             for statement in statements {
-                if !transfer_len_env(statement, env, fuel) {
+                if !transfer_len_env_inner(statement, env, fuel, abrupt, mutations) {
                     return false;
                 }
             }
@@ -6475,25 +6825,23 @@ fn transfer_len_env(node: &AstNode, env: &mut LenEnv, fuel: &mut usize) -> bool 
             then_branch,
             else_branch,
         } => match const_eval_bool_env(condition, env) {
-            Some(true) => return transfer_len_env(then_branch, env, fuel),
+            Some(true) => return transfer_len_env_inner(then_branch, env, fuel, abrupt, mutations),
             Some(false) => {
                 if let Some(branch) = else_branch {
-                    return transfer_len_env(branch, env, fuel);
+                    return transfer_len_env_inner(branch, env, fuel, abrupt, mutations);
                 }
             }
             None => {
-                let before = env.clone();
-                let mut then_env = before.clone();
-                if !transfer_len_env(then_branch, &mut then_env, fuel) {
+                let mut then_env = env.clone();
+                if !transfer_len_env_inner(then_branch, &mut then_env, fuel, abrupt, mutations) {
                     return false;
                 }
-                let mut else_env = before;
                 if let Some(branch) = else_branch {
-                    if !transfer_len_env(branch, &mut else_env, fuel) {
+                    if !transfer_len_env_inner(branch, env, fuel, abrupt, mutations) {
                         return false;
                     }
                 }
-                *env = meet_len_env(then_env, &else_env);
+                *env = meet_len_env(then_env, env);
             }
         },
         AstNode::ForLoop {
@@ -6503,25 +6851,40 @@ fn transfer_len_env(node: &AstNode, env: &mut LenEnv, fuel: &mut usize) -> bool 
             ..
         } => {
             let Some((lo, hi)) = range_bounds(iterable, env) else {
-                invalidate_node_mutations(body, env);
+                invalidate_node_mutations(body, env, mutations);
                 return true;
             };
             let [variable] = variables.as_slice() else {
-                invalidate_node_mutations(body, env);
+                invalidate_node_mutations(body, env, mutations);
                 return true;
             };
             if hi < lo
                 || hi.saturating_sub(lo) > UNROLL_MAX_ITERATIONS
-                || has_abrupt_loop_control(body)
+                // The AST stays borrowed for this proof; only the environment changes.
+                // Nested loops revisit the same body, so scan control flow once.
+                || {
+                    let key = body.as_ref() as *const AstNode;
+                    // ponytail: four cached bodies; collisions only repeat the
+                    // original scan. Keep proof-local caching allocation-free.
+                    let slot = &mut abrupt[((key as usize) >> 4) & 3];
+                    match *slot {
+                        Some((cached, value)) if cached == key => value,
+                        _ => {
+                            let value = has_abrupt_loop_control(body);
+                            *slot = Some((key, value));
+                            value
+                        }
+                    }
+                }
             {
-                invalidate_node_mutations(body, env);
+                invalidate_node_mutations(body, env, mutations);
                 return true;
             }
             for value in lo..hi {
                 env.alias_unbind(variable);
                 env.shapes.remove(variable);
-                env.ints.insert(variable.clone(), value);
-                if !transfer_len_env(body, env, fuel) {
+                env.set_int(variable, value);
+                if !transfer_len_env_inner(body, env, fuel, abrupt, mutations) {
                     return false;
                 }
             }
@@ -6530,7 +6893,7 @@ fn transfer_len_env(node: &AstNode, env: &mut LenEnv, fuel: &mut usize) -> bool 
             env.ints.remove(variable);
         }
         node @ AstNode::WhileLoop { .. } | node @ AstNode::TryCatch { .. } => {
-            invalidate_node_mutations(node, env);
+            invalidate_node_mutations(node, env, mutations);
         }
         AstNode::FunctionDefinition { .. } => {}
         AstNode::Return { .. } | AstNode::Yield(_) | AstNode::Break | AstNode::Continue => {
@@ -6636,12 +6999,12 @@ fn apply_call_to_env(expr: &AstNode, env: &mut LenEnv) {
                         .unwrap_or(Shape::Unknown);
                     if let Some(AstNode::Identifier(recv, _)) = arguments.first() {
                         if let Some(Shape::List { len, elem }) = env.shapes.get(recv).cloned() {
-                            let new_elem = merge_shape(*elem, &elem_shape);
+                            let new_elem = merge_shape(Rc::unwrap_or_clone(elem), &elem_shape);
                             env.set_shape_aliased(
                                 recv,
                                 Shape::List {
                                     len: len + 1,
-                                    elem: Box::new(new_elem),
+                                    elem: Rc::new(new_elem),
                                 },
                             );
                         }
@@ -6652,12 +7015,12 @@ fn apply_call_to_env(expr: &AstNode, env: &mut LenEnv) {
                         if let Some(Shape::List { len, elem }) = env.shapes.get(recv).cloned() {
                             match arguments.get(1).map(|o| eval_shape(o, env)) {
                                 Some(Shape::List { len: m, elem: oe }) => {
-                                    let new_elem = merge_shape(*elem, &oe);
+                                    let new_elem = merge_shape(Rc::unwrap_or_clone(elem), &oe);
                                     env.set_shape_aliased(
                                         recv,
                                         Shape::List {
                                             len: len + m,
-                                            elem: Box::new(new_elem),
+                                            elem: Rc::new(new_elem),
                                         },
                                     );
                                 }
@@ -7032,7 +7395,7 @@ fn fold_branches_in_stmts(stmts: Vec<AstNode>) -> Vec<AstNode> {
 
 /// A flow-sensitive provenance fact for a value. `Top` is the conservative
 /// unknown (possibly secret) default.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ConstVal {
     Top,
     /// A value proven by semantic typing to be secret, but whose clear value is
@@ -7050,10 +7413,73 @@ enum ConstVal {
         from_list: bool,
     },
     /// A list whose elements are themselves tracked (public) facts.
-    List(Vec<ConstVal>),
+    List(Rc<Vec<ConstVal>>),
 }
 
-type GateEnv = std::collections::HashMap<String, ConstVal>;
+/// Owned AST rewriting cannot borrow names for the duration of the pass.
+/// Intern each name once; branch-local facts use a nested undo journal instead
+/// of cloning all bindings. Each slot is saved at most once per checkpoint.
+#[derive(Default)]
+struct GateEnv {
+    ids: HashMap<String, usize>,
+    values: Vec<Option<ConstVal>>,
+    saved_depth: Vec<usize>,
+    undo: Vec<(usize, Option<ConstVal>, usize)>,
+    depth: usize,
+}
+
+impl GateEnv {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, name: &str) -> Option<&ConstVal> {
+        self.values[*self.ids.get(name)?].as_ref()
+    }
+
+    fn save(&mut self, id: usize) {
+        if self.depth != 0 && self.saved_depth[id] != self.depth {
+            self.undo
+                .push((id, self.values[id].clone(), self.saved_depth[id]));
+            self.saved_depth[id] = self.depth;
+        }
+    }
+
+    fn get_mut(&mut self, name: &str) -> Option<&mut ConstVal> {
+        let id = *self.ids.get(name)?;
+        self.values[id].as_ref()?;
+        self.save(id);
+        self.values[id].as_mut()
+    }
+
+    fn insert(&mut self, name: &str, value: ConstVal) {
+        let id = if let Some(&id) = self.ids.get(name) {
+            id
+        } else {
+            let id = self.values.len();
+            self.ids.insert(name.to_owned(), id);
+            self.values.push(None);
+            self.saved_depth.push(0);
+            id
+        };
+        self.save(id);
+        self.values[id] = Some(value);
+    }
+
+    fn checkpoint(&mut self) -> usize {
+        self.depth += 1;
+        self.undo.len()
+    }
+
+    fn rollback(&mut self, checkpoint: usize) {
+        while self.undo.len() > checkpoint {
+            let (id, value, saved_depth) = self.undo.pop().unwrap();
+            self.values[id] = value;
+            self.saved_depth[id] = saved_depth;
+        }
+        self.depth -= 1;
+    }
+}
 
 fn annotation_contains_secret_type(annotation: Option<&AstNode>) -> bool {
     fn contains(node: &AstNode) -> bool {
@@ -7097,7 +7523,7 @@ pub fn fold_public_gates(node: AstNode) -> AstNode {
                 if parameter.is_secret
                     || annotation_contains_secret_type(parameter.type_annotation.as_deref())
                 {
-                    env.insert(parameter.name.clone(), ConstVal::Secret);
+                    env.insert(&parameter.name, ConstVal::Secret);
                 }
             }
             let body = Box::new(gate_process_node(*body, &mut env));
@@ -7173,7 +7599,7 @@ fn gate_process_stmt(stmt: AstNode, env: &mut GateEnv) -> AstNode {
             // lanes, so a later mixed batch can itself be reduced.
             for statement in &prefix {
                 if let AstNode::VariableDeclaration { name, .. } = statement {
-                    env.insert(name.clone(), ConstVal::Secret);
+                    env.insert(name, ConstVal::Secret);
                 }
             }
             let mut cv = match &value {
@@ -7185,7 +7611,7 @@ fn gate_process_stmt(stmt: AstNode, env: &mut GateEnv) -> AstNode {
             {
                 cv = ConstVal::Secret;
             }
-            env.insert(name.clone(), cv);
+            env.insert(&name, cv);
             let declaration = AstNode::VariableDeclaration {
                 name,
                 type_annotation,
@@ -7218,13 +7644,13 @@ fn gate_process_stmt(stmt: AstNode, env: &mut GateEnv) -> AstNode {
                     {
                         cv = ConstVal::Secret;
                     }
-                    env.insert(name.clone(), cv);
+                    env.insert(name, cv);
                 }
                 other => {
                     // Element/field store: we can't precisely model it, so drop
                     // any tracked fact for the root variable.
                     if let Some(root) = base_var_of(other) {
-                        env.insert(root, ConstVal::Top);
+                        env.insert(&root, ConstVal::Top);
                     }
                 }
             }
@@ -7264,13 +7690,16 @@ fn gate_process_stmt(stmt: AstNode, env: &mut GateEnv) -> AstNode {
             else_branch,
         } => {
             let condition = Box::new(gate_rewrite_expr(*condition, env));
-            // Fold inside each branch using current knowledge (a clone, since the
+            // Fold inside each branch using current knowledge (restored afterward since the
             // taken side is unknown), then forget anything either branch wrote.
-            let mut then_env = env.clone();
-            let then_branch = Box::new(gate_process_node(*then_branch, &mut then_env));
+            let checkpoint = env.checkpoint();
+            let then_branch = Box::new(gate_process_node(*then_branch, env));
+            env.rollback(checkpoint);
             let else_branch = else_branch.map(|e| {
-                let mut else_env = env.clone();
-                Box::new(gate_process_node(*e, &mut else_env))
+                let checkpoint = env.checkpoint();
+                let branch = Box::new(gate_process_node(*e, env));
+                env.rollback(checkpoint);
+                branch
             });
             let mut written = HashSet::new();
             collect_written_vars(&then_branch, &mut written);
@@ -7278,7 +7707,7 @@ fn gate_process_stmt(stmt: AstNode, env: &mut GateEnv) -> AstNode {
                 collect_written_vars(e, &mut written);
             }
             for v in written {
-                env.insert(v, ConstVal::Top);
+                env.insert(&v, ConstVal::Top);
             }
             AstNode::IfExpression {
                 condition,
@@ -7331,12 +7760,13 @@ fn gate_process_loop_body(
     let mut written = HashSet::new();
     collect_written_vars(&body, &mut written);
     for v in &written {
-        env.insert(v.clone(), ConstVal::Top);
-    }
-    let mut body_env = env.clone();
-    let body = Box::new(gate_process_node(body, &mut body_env));
-    for v in written {
         env.insert(v, ConstVal::Top);
+    }
+    let checkpoint = env.checkpoint();
+    let body = Box::new(gate_process_node(body, env));
+    env.rollback(checkpoint);
+    for v in written {
+        env.insert(&v, ConstVal::Top);
     }
     rebuild(body)
 }
@@ -7351,7 +7781,7 @@ fn gate_apply_call_effect(
     env: &mut GateEnv,
 ) {
     let list_var = match args.first() {
-        Some(AstNode::Identifier(name, _)) => Some(name.clone()),
+        Some(AstNode::Identifier(name, _)) => Some(name.as_str()),
         _ => None,
     };
     match base {
@@ -7359,7 +7789,7 @@ fn gate_apply_call_effect(
             if let (Some(var), Some(elem_node)) = (&list_var, args.get(1)) {
                 let elem = gate_eval(elem_node, env);
                 if let Some(ConstVal::List(v)) = env.get_mut(var) {
-                    v.push(elem);
+                    Rc::make_mut(v).push(elem);
                 }
             }
         }
@@ -7372,7 +7802,7 @@ fn gate_apply_call_effect(
                 match (idx, env.get_mut(var)) {
                     (ConstVal::Int(i), Some(ConstVal::List(v))) if i >= 0 => {
                         let i = (i as usize).min(v.len());
-                        v.insert(i, elem);
+                        Rc::make_mut(v).insert(i, elem);
                     }
                     (_, slot @ Some(_)) => {
                         *slot.unwrap() = ConstVal::Top;
@@ -7385,7 +7815,9 @@ fn gate_apply_call_effect(
             if let (Some(var), Some(other_node)) = (&list_var, args.get(1)) {
                 let other = gate_eval(other_node, env);
                 match (other, env.get_mut(var)) {
-                    (ConstVal::List(o), Some(ConstVal::List(v))) => v.extend(o),
+                    (ConstVal::List(o), Some(ConstVal::List(v))) => {
+                        Rc::make_mut(v).extend(o.iter().cloned())
+                    }
                     (_, Some(slot)) => *slot = ConstVal::Top,
                     _ => {}
                 }
@@ -7411,7 +7843,7 @@ fn gate_apply_call_effect(
             if !is_known_builtin {
                 for a in args {
                     if let Some(root) = base_var_of(a) {
-                        env.insert(root, ConstVal::Top);
+                        env.insert(&root, ConstVal::Top);
                     }
                 }
             }
@@ -7580,7 +8012,7 @@ fn all_public_bits(cv: &ConstVal) -> Option<Vec<u8>> {
             return None;
         }
         let mut vals = Vec::with_capacity(elems.len());
-        for e in elems {
+        for e in elems.iter() {
             match e {
                 ConstVal::Bit { val, .. } => vals.push(*val),
                 _ => return None,
@@ -7656,11 +8088,11 @@ fn try_localize_public_batch_mul(
     // General mixed-list path. Every lane must be proven either public or
     // secret; one public lane is enough to make the split profitable. Unknown
     // lanes fail closed and keep the original batch untouched.
-    let mut left_values = match gate_eval(&arguments[0], env) {
+    let left_values = match gate_eval(&arguments[0], env) {
         ConstVal::List(values) => values,
         _ => return None,
     };
-    let mut right_values = match gate_eval(&arguments[1], env) {
+    let right_values = match gate_eval(&arguments[1], env) {
         ConstVal::List(values) => values,
         _ => return None,
     };
@@ -7690,11 +8122,7 @@ fn try_localize_public_batch_mul(
     let mut interactive_rights = Vec::new();
     let mut output_lanes: Vec<Option<AstNode>> = Vec::with_capacity(left_values.len());
     let mut localized = 0usize;
-    for (i, (left_value, right_value)) in left_values
-        .drain(..)
-        .zip(right_values.drain(..))
-        .enumerate()
-    {
+    for (i, (left_value, right_value)) in left_values.iter().zip(right_values.iter()).enumerate() {
         let left_expr = element_expr(&arguments[0], i)?;
         let right_expr = element_expr(&arguments[1], i)?;
         let lane = match (left_value, right_value) {
@@ -7704,13 +8132,17 @@ fn try_localize_public_batch_mul(
             }
             (ConstVal::Secret, ConstVal::Bit { val, .. }) => {
                 localized += 1;
-                Some(make_share_mul_scalar_expr(left_expr, val as u128, location))
+                Some(make_share_mul_scalar_expr(
+                    left_expr,
+                    *val as u128,
+                    location,
+                ))
             }
             (ConstVal::Bit { val, .. }, ConstVal::Secret) => {
                 localized += 1;
                 Some(make_share_mul_scalar_expr(
                     right_expr,
-                    val as u128,
+                    *val as u128,
                     location,
                 ))
             }
@@ -7836,9 +8268,9 @@ fn gate_eval(node: &AstNode, env: &GateEnv) -> ConstVal {
                 _ => ConstVal::Top,
             }
         }
-        AstNode::ListLiteral { elements, .. } => {
-            ConstVal::List(elements.iter().map(|e| gate_eval(e, env)).collect())
-        }
+        AstNode::ListLiteral { elements, .. } => ConstVal::List(Rc::new(
+            elements.iter().map(|e| gate_eval(e, env)).collect(),
+        )),
         AstNode::FunctionCall {
             function,
             arguments,
@@ -7923,7 +8355,9 @@ fn gate_eval(node: &AstNode, env: &GateEnv) -> ConstVal {
                     gate_eval(&arguments[2], env),
                 ) {
                     if start >= 0 && end >= start && (end as usize) <= values.len() {
-                        return ConstVal::List(values[start as usize..end as usize].to_vec());
+                        return ConstVal::List(Rc::new(
+                            values[start as usize..end as usize].to_vec(),
+                        ));
                     }
                 }
             }
@@ -8058,18 +8492,18 @@ fn dead_function_names(root: &AstNode) -> HashSet<String> {
 fn scoped_len_env(env: &LenEnv, nodes: &[&AstNode]) -> LenEnv {
     let mut referenced = HashSet::new();
     for n in nodes {
-        collect_identifiers(n, &mut referenced);
+        collect_referenced_names(n, &mut referenced);
     }
     let mut out = LenEnv::default();
     for name in referenced {
-        if let Some(s) = env.shapes.get(&name) {
-            out.shapes.insert(name.clone(), s.clone());
+        if let Some(s) = env.shapes.get(name) {
+            out.shapes.insert(name.to_owned(), s.clone());
         }
-        if let Some(&v) = env.ints.get(&name) {
-            out.ints.insert(name.clone(), v);
+        if let Some(&v) = env.ints.get(name) {
+            out.ints.insert(name.to_owned(), v);
         }
-        if let Some(g) = env.aliases.get(&name) {
-            out.aliases.insert(name, Rc::clone(g));
+        if let Some(g) = env.aliases.get(name) {
+            out.aliases.insert(name.to_owned(), Rc::clone(g));
         }
     }
     out
@@ -8279,17 +8713,20 @@ fn unroll_stmt_list(stmts: Vec<AstNode>, env: &mut LenEnv, budget: &mut usize) -
         // by multi-return normalization (e.g. an inlined `if n == 0`, n = a.len()),
         // restoring the barrier-free straight-line region the multiply scheduler
         // needs. Sound because `const_eval_bool_env` only reports a provable value.
-        if let AstNode::IfExpression {
-            condition,
-            then_branch,
-            else_branch,
-        } = &stmt
-        {
+        if let AstNode::IfExpression { condition, .. } = &stmt {
             if let Some(taken) = const_eval_bool_env(condition, env) {
+                let AstNode::IfExpression {
+                    then_branch,
+                    else_branch,
+                    ..
+                } = stmt
+                else {
+                    unreachable!()
+                };
                 let branch = if taken {
-                    Some((**then_branch).clone())
+                    Some(*then_branch)
                 } else {
-                    else_branch.as_deref().cloned()
+                    else_branch.map(|b| *b)
                 };
                 if let Some(b) = branch {
                     // Front-splice in order via reversed push_front (O(k), same
@@ -8627,7 +9064,7 @@ fn try_unroll_for(stmt: AstNode, env: &LenEnv, budget: &mut usize) -> UnrollOutc
             for statement in body_stmts {
                 collect_declared_names(statement, &mut body_declared);
             }
-            let suffix = INLINE_SUFFIX.fetch_add(1, Ordering::Relaxed);
+            let suffix = next_inline_suffix();
             let rename: HashMap<String, String> = body_declared
                 .iter()
                 .map(|name| (name.clone(), format!("{name}__peel{suffix}")))
@@ -8692,7 +9129,7 @@ fn try_unroll_for(stmt: AstNode, env: &LenEnv, budget: &mut usize) -> UnrollOutc
     let mut flattened: Vec<AstNode> =
         Vec::with_capacity((iterations as usize).saturating_mul(body_stmts.len()));
     for k in lo..hi {
-        let suffix = INLINE_SUFFIX.fetch_add(1, Ordering::Relaxed);
+        let suffix = next_inline_suffix();
         let rename: HashMap<String, String> = body_declared
             .iter()
             .map(|name| (name.clone(), format!("{name}__unroll{suffix}")))
@@ -8943,18 +9380,32 @@ fn base_var_of(node: &AstNode) -> Option<String> {
 /// Collect every variable written in a subtree: declarations, assignments
 /// (including element/field stores), and in-place mutator targets.
 fn collect_written_vars(node: &AstNode, out: &mut HashSet<String>) {
+    for_each_written(node, &mut |name| {
+        out.insert(name.to_owned());
+    });
+}
+
+fn written_names(node: &AstNode) -> HashSet<&str> {
+    let mut names = HashSet::new();
+    for_each_written(node, &mut |name| {
+        names.insert(name);
+    });
+    names
+}
+
+fn for_each_written<'a>(node: &'a AstNode, out: &mut dyn FnMut(&'a str)) {
     match node {
         AstNode::VariableDeclaration { name, value, .. } => {
-            out.insert(name.clone());
+            out(name);
             if let Some(v) = value {
-                collect_written_vars(v, out);
+                for_each_written(v, out);
             }
         }
         AstNode::Assignment { target, value, .. } => {
-            if let Some(b) = base_var_of(target) {
-                out.insert(b);
+            if let Some(b) = root_var_ref(target) {
+                out(b);
             }
-            collect_written_vars(value, out);
+            for_each_written(value, out);
         }
         AstNode::FunctionCall {
             function,
@@ -8963,36 +9414,36 @@ fn collect_written_vars(node: &AstNode, out: &mut HashSet<String>) {
         } => {
             if let Some(name) = call_name(node) {
                 if is_mutator_call_name(name) {
-                    if let Some(b) = arguments.first().and_then(base_var_of) {
-                        out.insert(b);
+                    if let Some(b) = arguments.first().and_then(root_var_ref) {
+                        out(b);
                     }
                 }
             }
-            collect_written_vars(function, out);
+            for_each_written(function, out);
             for a in arguments {
-                collect_written_vars(a, out);
+                for_each_written(a, out);
             }
         }
         AstNode::Block(stmts) => {
             for s in stmts {
-                collect_written_vars(s, out);
+                for_each_written(s, out);
             }
         }
         AstNode::BinaryOperation { left, right, .. } => {
-            collect_written_vars(left, out);
-            collect_written_vars(right, out);
+            for_each_written(left, out);
+            for_each_written(right, out);
         }
-        AstNode::UnaryOperation { operand, .. } => collect_written_vars(operand, out),
+        AstNode::UnaryOperation { operand, .. } => for_each_written(operand, out),
         AstNode::IndexAccess { base, index, .. } => {
-            collect_written_vars(base, out);
-            collect_written_vars(index, out);
+            for_each_written(base, out);
+            for_each_written(index, out);
         }
-        AstNode::FieldAccess { object, .. } => collect_written_vars(object, out),
+        AstNode::FieldAccess { object, .. } => for_each_written(object, out),
         AstNode::ListLiteral { elements, .. }
         | AstNode::TupleLiteral(elements)
         | AstNode::SetLiteral(elements) => {
             for e in elements {
-                collect_written_vars(e, out);
+                for_each_written(e, out);
             }
         }
         AstNode::IfExpression {
@@ -9000,17 +9451,17 @@ fn collect_written_vars(node: &AstNode, out: &mut HashSet<String>) {
             then_branch,
             else_branch,
         } => {
-            collect_written_vars(condition, out);
-            collect_written_vars(then_branch, out);
+            for_each_written(condition, out);
+            for_each_written(then_branch, out);
             if let Some(e) = else_branch {
-                collect_written_vars(e, out);
+                for_each_written(e, out);
             }
         }
         AstNode::WhileLoop {
             condition, body, ..
         } => {
-            collect_written_vars(condition, out);
-            collect_written_vars(body, out);
+            for_each_written(condition, out);
+            for_each_written(body, out);
         }
         AstNode::ForLoop {
             variables,
@@ -9019,15 +9470,15 @@ fn collect_written_vars(node: &AstNode, out: &mut HashSet<String>) {
             ..
         } => {
             for v in variables {
-                out.insert(v.clone());
+                out(v);
             }
-            collect_written_vars(iterable, out);
-            collect_written_vars(body, out);
+            for_each_written(iterable, out);
+            for_each_written(body, out);
         }
         AstNode::Return { value: Some(v), .. } | AstNode::Yield(Some(v)) => {
-            collect_written_vars(v, out)
+            for_each_written(v, out)
         }
-        AstNode::DiscardStatement { expression, .. } => collect_written_vars(expression, out),
+        AstNode::DiscardStatement { expression, .. } => for_each_written(expression, out),
         _ => {}
     }
 }
@@ -9368,7 +9819,7 @@ fn stmt_has_effect(node: &AstNode, pure_fns: &HashSet<String>) -> bool {
 /// callers that build on this walker. It deliberately does NOT descend into
 /// `FunctionDefinition` bodies: that is a scope boundary, and the scope-crossing
 /// walker `for_each_child_def` handles it separately.
-pub(crate) fn for_each_child(node: &AstNode, f: &mut dyn FnMut(&AstNode)) {
+pub(crate) fn for_each_child<'a>(node: &'a AstNode, f: &mut dyn FnMut(&'a AstNode)) {
     match node {
         AstNode::Assignment { target, value, .. } => {
             f(target);
@@ -9904,7 +10355,7 @@ fn loop_with_body(loop_node: AstNode, new_body: Vec<AstNode>) -> AstNode {
 /// `var x = E` declarations out of each loop in the block to just before it.
 fn block_licm(stmts: Vec<AstNode>, pure_fns: &HashSet<String>, changed: &mut bool) -> Vec<AstNode> {
     let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
-    for stmt in stmts {
+    for mut stmt in stmts {
         let is_loop = matches!(stmt, AstNode::ForLoop { .. } | AstNode::WhileLoop { .. });
         if !is_loop {
             out.push(stmt);
@@ -9933,34 +10384,42 @@ fn block_licm(stmts: Vec<AstNode>, pure_fns: &HashSet<String>, changed: &mut boo
         let mut body_mutated: HashSet<String> = HashSet::new();
         collect_licm_mutated_vars(body, &mut body_mutated);
 
-        let mut hoisted: Vec<AstNode> = Vec::new();
-        let mut remaining: Vec<AstNode> = Vec::with_capacity(body_stmts.len());
+        let capacity = body_stmts.len();
+        let body_stmts = match &mut stmt {
+            AstNode::ForLoop { body, .. } | AstNode::WhileLoop { body, .. } => {
+                let AstNode::Block(stmts) = body.as_mut() else {
+                    unreachable!()
+                };
+                std::mem::take(stmts)
+            }
+            _ => unreachable!(),
+        };
+        let mut hoisted = Vec::new();
+        let mut remaining = Vec::with_capacity(capacity);
         for s in body_stmts {
             if let AstNode::VariableDeclaration {
                 name,
                 value: Some(value),
                 ..
-            } = s
+            } = &s
             {
                 let mut refs = HashSet::new();
                 collect_referenced_vars(value, &mut refs);
                 let invariant = refs.iter().all(|r| !variant.contains(r));
                 let single_assignment = !body_mutated.contains(name);
                 if invariant && single_assignment && expr_is_pure(value, pure_fns) {
-                    hoisted.push(s.clone());
+                    hoisted.push(s);
                     continue;
                 }
             }
-            remaining.push(s.clone());
+            remaining.push(s);
         }
 
-        if hoisted.is_empty() {
-            out.push(stmt);
-        } else {
+        if !hoisted.is_empty() {
             *changed = true;
             out.extend(hoisted);
-            out.push(loop_with_body(stmt, remaining));
         }
+        out.push(loop_with_body(stmt, remaining));
     }
     out
 }
@@ -10016,10 +10475,9 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>, changed: &mut bool
     // Hash-keyed availability (O(1) lookup by structural expr key, no linear
     // equality scan), using the same value-numbering core as GVN (`AvailEnv`):
     //   key_to_src : structural expr key → the variable already holding that value
-    //   src_key    : that source variable → its key (to evict it on invalidation)
+    //   sources    : source variable → key and optional GVN join references
     //   ref_index  : referenced variable → source variables whose value depends on it
-    // block_cse never joins envs, so it leaves the env's GVN-only `src_refs` map
-    // empty; `invalidate`/`clear`'s upkeep of that map is then a no-op here.
+    // Local CSE never joins environments, so its source references stay absent.
     let mut env = AvailEnv::new();
     let mut out: Vec<AstNode> = Vec::with_capacity(stmts.len());
 
@@ -10031,7 +10489,7 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>, changed: &mut bool
         // owned value is moved into `out` afterwards (rebuilt only on the rewrite
         // path — no wholesale clone of the >99% unchanged statements).
         let mut alias: Option<String> = None;
-        let mut staged: Option<(String, String, HashSet<String>)> = None; // (key, name, refs)
+        let mut staged: Option<(String, &str, HashSet<&str>)> = None; // (key, name, refs)
         if let AstNode::VariableDeclaration {
             name,
             value: Some(value),
@@ -10041,13 +10499,13 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>, changed: &mut bool
             if expr_is_pure(value, pure_fns) && !mutated.contains(name) {
                 let mut key = String::new();
                 if expr_key(value, &mut key) {
-                    if let Some(src) = env.key_to_src.get(&key) {
+                    if let Some(src) = env.key_to_src.get(key.as_str()) {
                         // Replace the redundant computation with an alias to the earlier result.
-                        alias = Some(src.clone());
+                        alias = Some(env.source_name(*src));
                     } else {
                         let mut refs = HashSet::new();
-                        collect_referenced_vars(value, &mut refs);
-                        staged = Some((key, name.clone(), refs));
+                        collect_referenced_names(value, &mut refs);
+                        staged = Some((key, name, refs));
                     }
                 }
             }
@@ -10055,9 +10513,7 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>, changed: &mut bool
 
         // Invalidate entries clobbered by this statement's writes (a reassignment /
         // mutation of a tracked var, or of a value an available entry depends on).
-        let mut writes = HashSet::new();
-        collect_written_vars(&stmt, &mut writes);
-        env.invalidate(&writes);
+        env.invalidate(&written_names(&stmt));
 
         if stmt_has_effect(&stmt, pure_fns) {
             // An effect may change get_field reads etc.; drop everything conservatively.
@@ -10066,15 +10522,8 @@ fn block_cse(stmts: Vec<AstNode>, pure_fns: &HashSet<String>, changed: &mut bool
             // Commit the freshly-computed expression as available for later reuse.
             // This is block_cse's own (non-GVN) commit: it intentionally omits the
             // defensive eviction `AvailEnv::commit` does, preserving the exact set
-            // of expressions eliminated; it also skips `src_refs` (GVN-join-only).
-            for r in &refs {
-                env.ref_index
-                    .entry(r.clone())
-                    .or_default()
-                    .push(name.clone());
-            }
-            env.src_key.insert(name.clone(), key.clone());
-            env.key_to_src.insert(key, name);
+            // of expressions eliminated; it also skips join references (GVN-only).
+            env.commit_cse(key.into(), name, &refs);
         }
 
         match (alias, stmt) {
@@ -10237,143 +10686,236 @@ pub fn optimize_licm_cse(node: AstNode) -> AstNode {
 /// the binding currently holding it, plus a reverse index for precise
 /// write-invalidation. The `new`/`invalidate`/`clear` plumbing is identical
 /// across both passes and lives here once; each pass keeps its own commit step
-/// (GVN's adds defensive eviction + `src_refs` upkeep needed by its joins, which
-/// `block_cse` deliberately omits — see the note on `src_refs`).
-#[derive(Clone)]
+/// GVN records references for joins and evicts replaced values defensively;
+/// local CSE retains its original commit behavior and stores no join references.
+#[derive(Default)]
+struct AvailNames {
+    ids: HashMap<Rc<str>, usize>,
+    names: Vec<Rc<str>>,
+}
+
+impl AvailNames {
+    fn intern(&mut self, name: &str) -> usize {
+        if let Some(&id) = self.ids.get(name) {
+            return id;
+        }
+        let id = self.names.len();
+        let name: Rc<str> = name.into();
+        self.names.push(name.clone());
+        self.ids.insert(name, id);
+        id
+    }
+}
+
+struct AvailDominators {
+    // A nonempty dominance snapshot pins the ID generation, just like a branch.
+    _names: Option<Rc<RefCell<AvailNames>>>,
+    members: Vec<bool>,
+}
+
+#[derive(Clone, Default)]
+struct AvailSlot {
+    #[allow(clippy::type_complexity)] // Source name and optional dependency IDs.
+    source: Option<(Rc<str>, Option<Rc<[usize]>>)>,
+    readers: Vec<usize>,
+}
+
+#[derive(Clone, Default)]
 struct AvailEnv {
-    /// Canonical expr key (value number) -> source binding currently holding it.
-    key_to_src: HashMap<String, String>,
-    /// Source binding -> its value number (inverse, for eviction by name).
-    src_key: HashMap<String, String>,
-    /// Source binding -> vars its value reads. Only GVN's join logic needs this
-    /// (to rebuild the ref index after an intersect/restrict); `block_cse` never
-    /// joins envs, so it leaves this map empty (the `invalidate`/`clear` upkeep
-    /// of it is then a harmless no-op).
-    src_refs: HashMap<String, HashSet<String>>,
-    /// Referenced var -> source bindings whose value reads it (fast invalidation).
-    ref_index: HashMap<String, Vec<String>>,
+    names: Rc<RefCell<AvailNames>>,
+    key_to_src: HashMap<Rc<str>, usize>,
+    #[allow(clippy::vec_box)] // Page pointers avoid spare capacity in large binding records.
+    slots: Vec<Box<[AvailSlot; 64]>>,
+    touched_sources: Vec<usize>,
+    touched_refs: Vec<usize>,
 }
 
 impl AvailEnv {
     fn new() -> Self {
-        AvailEnv {
-            key_to_src: HashMap::new(),
-            src_key: HashMap::new(),
-            src_refs: HashMap::new(),
-            ref_index: HashMap::new(),
+        Self::default()
+    }
+
+    fn empty_branch(&self) -> Self {
+        Self {
+            names: self.names.clone(),
+            ..Self::default()
         }
     }
 
-    /// Record `key -> name` as available, with the vars `name`'s value reads.
-    /// Mirrors the commit `block_cse` does after invalidation.
-    fn commit(&mut self, key: String, name: String, refs: HashSet<String>) {
-        // Defensive eviction of any stale entry for this key/name (normally absent).
-        if let Some(old) = self.key_to_src.get(&key).cloned() {
-            if old != name {
-                self.src_key.remove(&old);
-                self.src_refs.remove(&old);
-            }
-        }
-        if let Some(old_key) = self.src_key.get(&name).cloned() {
-            if self.key_to_src.get(&old_key).map(String::as_str) == Some(name.as_str()) {
-                self.key_to_src.remove(&old_key);
-            }
-        }
-        for r in &refs {
-            self.ref_index
-                .entry(r.clone())
-                .or_default()
-                .push(name.clone());
-        }
-        self.src_key.insert(name.clone(), key.clone());
-        self.src_refs.insert(name.clone(), refs);
-        self.key_to_src.insert(key, name);
+    fn source_name(&self, id: usize) -> String {
+        self.names.borrow().names[id].to_string()
     }
 
-    /// Drop entries invalidated by `writes` (mirrors `block_cse`'s invalidation).
-    fn invalidate(&mut self, writes: &HashSet<String>) {
+    fn intern(&mut self, name: &str) -> usize {
+        let id = self.names.borrow_mut().intern(name);
+        self.ensure_slots(id + 1);
+        id
+    }
+
+    fn ensure_slots(&mut self, len: usize) {
+        // Exact-size chunks avoid geometric spare capacity in the much larger
+        // per-binding records. Only the small page-pointer array can overgrow.
+        while self.slots.len() < len.div_ceil(64) {
+            self.slots
+                .push(Box::new(std::array::from_fn(|_| AvailSlot::default())));
+        }
+    }
+
+    fn commit<S: std::borrow::Borrow<str>>(&mut self, key: Rc<str>, name: &str, refs: &HashSet<S>) {
+        let id = self.intern(name);
+        let refs: Rc<[usize]> = refs.iter().map(|r| self.intern(r.borrow())).collect();
+        self.commit_ids(key, id, Some(refs), true);
+    }
+
+    fn commit_cse(&mut self, key: Rc<str>, name: &str, refs: &HashSet<&str>) {
+        let id = self.intern(name);
+        for r in refs {
+            let r = self.intern(r);
+            if self.slots[r / 64][r % 64].readers.is_empty() {
+                self.touched_refs.push(r);
+            }
+            self.slots[r / 64][r % 64].readers.push(id);
+        }
+        if self.slots[id / 64][id % 64].source.is_none() {
+            self.touched_sources.push(id);
+        }
+        self.slots[id / 64][id % 64].source = Some((key.clone(), None));
+        self.key_to_src.insert(key, id);
+    }
+
+    fn commit_ids(&mut self, key: Rc<str>, id: usize, refs: Option<Rc<[usize]>>, evict: bool) {
+        // Branches share IDs, never availability. A sibling may have interned
+        // additional names since this branch was created.
+        let len = self.names.borrow().names.len();
+        self.ensure_slots(len);
+        if evict {
+            if let Some((old, _)) = self.slots[id / 64][id % 64].source.take() {
+                if self.key_to_src.get(&old) == Some(&id) {
+                    self.key_to_src.remove(&old);
+                }
+            }
+        }
+        if let Some(old) = self.key_to_src.insert(key.clone(), id) {
+            if old != id {
+                self.slots[old / 64][old % 64].source = None;
+            }
+        }
+        if let Some(refs) = &refs {
+            for &r in refs.iter() {
+                if self.slots[r / 64][r % 64].readers.is_empty() {
+                    self.touched_refs.push(r);
+                }
+                self.slots[r / 64][r % 64].readers.push(id);
+            }
+        }
+        if self.slots[id / 64][id % 64].source.is_none() {
+            self.touched_sources.push(id);
+        }
+        self.slots[id / 64][id % 64].source = Some((key, refs));
+    }
+
+    fn evict(&mut self, id: usize) {
+        if let Some(page) = self.slots.get_mut(id / 64) {
+            let slot = &mut page[id % 64].source;
+            if let Some((key, _)) = slot.take() {
+                if self.key_to_src.get(&key) == Some(&id) {
+                    self.key_to_src.remove(&key);
+                }
+            }
+        }
+    }
+
+    fn invalidate<S: std::borrow::Borrow<str>>(&mut self, writes: &HashSet<S>) {
         for w in writes {
-            // Entries whose value reads `w` are now stale.
-            if let Some(srcs) = self.ref_index.remove(w) {
-                for s in srcs {
-                    if let Some(k) = self.src_key.remove(&s) {
-                        if self.key_to_src.get(&k).map(String::as_str) == Some(s.as_str()) {
-                            self.key_to_src.remove(&k);
-                        }
-                        self.src_refs.remove(&s);
-                    }
+            let id = self.names.borrow().ids.get(w.borrow()).copied();
+            let Some(id) = id else { continue };
+            if id / 64 < self.slots.len() {
+                let readers = std::mem::take(&mut self.slots[id / 64][id % 64].readers);
+                for source in readers {
+                    self.evict(source);
                 }
             }
-            // `w` itself, if it is a source binding, is overwritten.
-            if let Some(k) = self.src_key.remove(w) {
-                if self.key_to_src.get(&k).map(String::as_str) == Some(w.as_str()) {
-                    self.key_to_src.remove(&k);
-                }
-                self.src_refs.remove(w);
-            }
+            self.evict(id);
         }
     }
 
     fn clear(&mut self) {
         self.key_to_src.clear();
-        self.src_key.clear();
-        self.src_refs.clear();
-        self.ref_index.clear();
+        if Rc::strong_count(&self.names) == 1 {
+            // No branch or nonempty dominance snapshot can observe these IDs.
+            // Recycle them so a sequence of effectful regions cannot retain
+            // a function's entire historical name universe.
+            *self.names.borrow_mut() = AvailNames::default();
+            self.slots.clear();
+            self.touched_sources.clear();
+            self.touched_refs.clear();
+        } else {
+            for id in self.touched_sources.drain(..) {
+                self.slots[id / 64][id % 64].source = None;
+            }
+            for id in self.touched_refs.drain(..) {
+                self.slots[id / 64][id % 64].readers.clear();
+            }
+        }
     }
 
-    /// Names of bindings currently held available (dominate this point).
-    fn dominating_names(&self) -> HashSet<String> {
-        self.key_to_src.values().cloned().collect()
+    fn dominating_names(&self) -> AvailDominators {
+        if self.key_to_src.is_empty() {
+            return AvailDominators {
+                _names: None,
+                members: Vec::new(),
+            };
+        }
+        let mut members = vec![false; self.slots.len() * 64];
+        for &id in self.key_to_src.values() {
+            members[id] = true;
+        }
+        AvailDominators {
+            _names: (!self.key_to_src.is_empty()).then(|| self.names.clone()),
+            members,
+        }
     }
 
-    /// Join of two branch envs at an `if` merge: keep `key -> name` only when
-    /// both branches map that key to the same name AND `name` dominated the
-    /// branch entry (`dominate`), so a branch-local binding is never referenced
-    /// past the merge.
-    fn intersect_dominating(&self, other: &AvailEnv, dominate: &HashSet<String>) -> AvailEnv {
-        let mut out = AvailEnv::new();
-        for (k, n) in &self.key_to_src {
-            if other.key_to_src.get(k).map(String::as_str) == Some(n.as_str())
-                && dominate.contains(n)
-            {
-                if let Some(refs) = self.src_refs.get(n) {
-                    out.commit(k.clone(), n.clone(), refs.clone());
+    fn intersect_dominating(&self, other: &Self, dominate: &AvailDominators) -> Self {
+        assert!(Rc::ptr_eq(&self.names, &other.names));
+        let mut out = self.empty_branch();
+        for (key, &id) in &self.key_to_src {
+            if other.key_to_src.get(key) == Some(&id) && dominate.members.get(id) == Some(&true) {
+                if let Some((_, Some(refs))) = &self.slots[id / 64][id % 64].source {
+                    out.commit_ids(key.clone(), id, Some(refs.clone()), true);
                 }
             }
         }
         out
     }
 
-    /// View containing only entries safe to reuse inside a loop body: keep
-    /// `key -> name` iff `name` and none of its referenced vars are in `touched`
-    /// (written by the loop body/condition). The body runs 0+ times, so only
-    /// genuinely invariant values may be reused inside it.
-    fn restrict_to_invariants(&self, touched: &HashSet<String>) -> AvailEnv {
-        let mut out = AvailEnv::new();
-        for (k, n) in &self.key_to_src {
-            if touched.contains(n) {
+    fn restrict_to_invariants(&self, touched: &HashSet<String>) -> Self {
+        let mut marked = vec![false; self.names.borrow().names.len()];
+        for name in touched {
+            if let Some(&id) = self.names.borrow().ids.get(name.as_str()) {
+                marked[id] = true;
+            }
+        }
+        let mut out = self.empty_branch();
+        for (key, &id) in &self.key_to_src {
+            if marked[id] {
                 continue;
             }
-            let Some(refs) = self.src_refs.get(n) else {
-                continue;
-            };
-            if refs.iter().any(|r| touched.contains(r)) {
-                continue;
+            if let Some((_, Some(refs))) = &self.slots[id / 64][id % 64].source {
+                if !refs.iter().any(|&r| marked[r]) {
+                    out.commit_ids(key.clone(), id, Some(refs.clone()), true);
+                }
             }
-            out.commit(k.clone(), n.clone(), refs.clone());
         }
         out
     }
 
-    /// View containing only entries whose source binding already dominated this
-    /// point (was available on entry). Used at a nested-block exit so a binding
-    /// introduced inside the block can't be aliased once it is out of scope.
-    fn restrict_to_dominators(&self, dominate: &HashSet<String>) -> AvailEnv {
-        let mut out = AvailEnv::new();
-        for (k, n) in &self.key_to_src {
-            if dominate.contains(n) {
-                if let Some(refs) = self.src_refs.get(n) {
-                    out.commit(k.clone(), n.clone(), refs.clone());
+    fn restrict_to_dominators(&self, dominate: &AvailDominators) -> Self {
+        let mut out = self.empty_branch();
+        for (key, &id) in &self.key_to_src {
+            if dominate.members.get(id) == Some(&true) {
+                if let Some((_, Some(refs))) = &self.slots[id / 64][id % 64].source {
+                    out.commit_ids(key.clone(), id, Some(refs.clone()), true);
                 }
             }
         }
@@ -10420,12 +10962,12 @@ fn transform_gvn(
             let (then_b, then_out) = transform_gvn(*then_branch, env.clone(), pure_fns, changed);
             let (else_b, else_out) = match else_branch {
                 Some(e) => {
-                    let (e_b, e_out) = transform_gvn(*e, env.clone(), pure_fns, changed);
+                    let (e_b, e_out) = transform_gvn(*e, env, pure_fns, changed);
                     (Some(Box::new(e_b)), e_out)
                 }
                 // No else branch: the else path is a no-op, so it contributes the
                 // env as it entered the branch unchanged.
-                None => (None, env.clone()),
+                None => (None, env),
             };
             let env_out = then_out.intersect_dominating(&else_out, &dominating);
             (
@@ -10611,7 +11153,7 @@ fn block_gvn(
         // Analysis borrows `stmt`; the owned value is moved into `out` afterwards
         // (rebuilt only on the rewrite path — no clone of unchanged statements).
         let mut alias: Option<String> = None;
-        let mut staged: Option<(String, String, HashSet<String>)> = None; // (key, name, refs)
+        let mut staged: Option<(String, &str, HashSet<&str>)> = None; // (key, name, refs)
         if let AstNode::VariableDeclaration {
             name,
             value: Some(value),
@@ -10621,28 +11163,26 @@ fn block_gvn(
             if expr_is_pure(value, pure_fns) && !mutated.contains(name) {
                 let mut key = String::new();
                 if expr_key(value, &mut key) {
-                    if let Some(src) = env.key_to_src.get(&key).cloned() {
+                    if let Some(src) = env.key_to_src.get(key.as_str()).cloned() {
                         // Replace the redundant computation with an alias to the
                         // earlier dominating result.
-                        alias = Some(src);
+                        alias = Some(env.source_name(src));
                     } else {
                         let mut refs = HashSet::new();
-                        collect_referenced_vars(value, &mut refs);
-                        staged = Some((key, name.clone(), refs));
+                        collect_referenced_names(value, &mut refs);
+                        staged = Some((key, name, refs));
                     }
                 }
             }
         }
 
         // Invalidate entries clobbered by this statement's writes.
-        let mut writes = HashSet::new();
-        collect_written_vars(&stmt, &mut writes);
-        env.invalidate(&writes);
+        env.invalidate(&written_names(&stmt));
         if stmt_has_effect(&stmt, pure_fns) {
             // An effect may change get_field reads etc.; drop everything.
             env.clear();
         } else if let Some((key, name, refs)) = staged {
-            env.commit(key, name, refs);
+            env.commit(key.into(), name, &refs);
         }
 
         match (alias, stmt) {
@@ -10766,7 +11306,7 @@ struct Sroa {
     next_id: usize,
     env: HashMap<String, Rc<RefCell<SroaState>>>,
     /// Demoted state ids. Grows during ANALYZE; fixed input during REWRITE.
-    demoted: HashSet<usize>,
+    demoted: Vec<bool>,
     /// Element-source name -> states that captured it. A later rebind of the
     /// name invalidates those states' substitutions, so it demotes them.
     captured_by: HashMap<String, Vec<usize>>,
@@ -10864,7 +11404,7 @@ fn sroa_readonly_len_safe(name: &str) -> bool {
 }
 
 impl Sroa {
-    fn new(analyze: bool, demoted: HashSet<usize>) -> Self {
+    fn new(analyze: bool, demoted: Vec<bool>) -> Self {
         Sroa {
             analyze,
             next_id: 0,
@@ -10891,28 +11431,34 @@ impl Sroa {
     fn tracked(&self, name: &str) -> Option<Rc<RefCell<SroaState>>> {
         self.env
             .get(name)
-            .filter(|st| !self.demoted.contains(&st.borrow().id))
+            .filter(|st| !self.is_demoted(st.borrow().id))
             .cloned()
     }
 
+    fn is_demoted(&self, id: usize) -> bool {
+        self.demoted.get(id).copied().unwrap_or(false)
+    }
+
     fn demote_id(&mut self, id: usize, cause: &'static str) {
-        if !self.analyze && !self.demoted.contains(&id) {
+        if !self.analyze && !self.is_demoted(id) {
             self.replay_diverged = true;
             return;
         }
+        let already_demoted = self.is_demoted(id);
         if let Some(trace) = &mut self.trace {
-            if !self.demoted.contains(&id) {
+            if !already_demoted {
                 let name = self.state_names.get(id).cloned().unwrap_or_default();
                 trace.push((cause, name));
             }
         }
-        self.demoted.insert(id);
+        self.demoted.resize(self.demoted.len().max(id + 1), false);
+        self.demoted[id] = true;
     }
 
     fn demote(&mut self, st: &Rc<RefCell<SroaState>>, cause: &'static str) {
         let (id, demoted) = {
             let s = st.borrow();
-            (s.id, self.demoted.contains(&s.id))
+            (s.id, self.is_demoted(s.id))
         };
         if let Some(trace) = &mut self.trace {
             if !demoted {
@@ -10924,17 +11470,19 @@ impl Sroa {
             self.replay_diverged = true;
             return;
         }
-        self.demoted.insert(id);
+        self.demoted.resize(self.demoted.len().max(id + 1), false);
+        self.demoted[id] = true;
     }
 
     /// `name` is (re)bound to a new value: its old binding stops being tracked
     /// and every state that captured the old `name` as an element loses its
     /// substitutions (whole-state demotion, v1 granularity).
     fn rebind(&mut self, name: &str) {
-        if let Some(ids) = self.captured_by.get(name) {
-            for id in ids.clone() {
+        if let Some((key, ids)) = self.captured_by.remove_entry(name) {
+            for &id in &ids {
                 self.demote_id(id, "captured-rebind");
             }
+            self.captured_by.insert(key, ids);
         }
         self.env.remove(name);
         self.ints.remove(name);
@@ -10946,13 +11494,25 @@ impl Sroa {
     /// subtree are redirected to those snapshots, preserving scalarization in
     /// the owning block without leaking its empty backing handle.
     fn rewrite_opaque(&mut self, node: &AstNode) -> AstNode {
-        let mut written = HashSet::new();
-        collect_written_vars(node, &mut written);
+        let replacements = self.opaque_replacements(node);
+        if replacements.is_empty() {
+            node.clone()
+        } else {
+            rename_in(node.clone(), &replacements)
+        }
+    }
+
+    fn opaque_replacements(&mut self, node: &AstNode) -> HashMap<String, String> {
+        let written = written_names(node);
 
         let mut refs = HashSet::new();
-        collect_identifiers(node, &mut refs);
+        collect_referenced_names(node, &mut refs);
+        // Snapshot emission assigns fresh names and registers, so hash-table
+        // iteration must not determine its order (including during ANALYZE).
+        let mut refs: Vec<_> = refs.into_iter().collect();
+        refs.sort_unstable();
         let mut replacements = HashMap::new();
-        for name in &refs {
+        for name in refs {
             let Some(st) = self.tracked(name) else {
                 continue;
             };
@@ -10970,7 +11530,7 @@ impl Sroa {
                 }
             } else {
                 let snapshot = self.snapshot(&st, &node.location());
-                replacements.insert(name.clone(), snapshot);
+                replacements.insert(name.to_owned(), snapshot);
             }
         }
 
@@ -10981,16 +11541,7 @@ impl Sroa {
             self.rebind(w);
         }
 
-        if replacements.is_empty() {
-            node.clone()
-        } else {
-            // `written` includes declarations, assignments, loop variables,
-            // and mutator receivers. Therefore a name admitted to
-            // `replacements` has no shadowing binding site or write in this
-            // subtree, making this use+binding alpha-renamer equivalent to a
-            // free-use rewrite for the selected names.
-            rename_in(node.clone(), &replacements)
-        }
+        replacements
     }
 
     // ---- element capture ------------------------------------------------
@@ -11041,10 +11592,13 @@ impl Sroa {
         location: &SourceLocation,
     ) -> Option<String> {
         let st_id = st.borrow().id;
-        self.captured_by
-            .entry(name.to_string())
-            .or_default()
-            .push(st_id);
+        if let Some(ids) = self.captured_by.get_mut(name) {
+            if ids.last() != Some(&st_id) {
+                ids.push(st_id);
+            }
+        } else {
+            self.captured_by.insert(name.to_owned(), vec![st_id]);
+        }
         if let Some(other) = self.tracked(name) {
             if Rc::ptr_eq(&other, st) {
                 return None; // self-alias: same object either way
@@ -11065,17 +11619,18 @@ impl Sroa {
     }
 
     fn invalidate_captured_source(&mut self, name: &str, st: &Rc<RefCell<SroaState>>) -> bool {
-        let Some(capturers) = self.captured_by.get(name).cloned() else {
+        let Some((key, capturers)) = self.captured_by.remove_entry(name) else {
             return false;
         };
-        if capturers.is_empty() {
-            return false;
+        let captured = !capturers.is_empty();
+        if captured {
+            self.demote(st, "captured-source-mutated");
+            for &id in &capturers {
+                self.demote_id(id, "captured-source-mutated");
+            }
         }
-        self.demote(st, "captured-source-mutated");
-        for id in capturers {
-            self.demote_id(id, "captured-source-mutated");
-        }
-        true
+        self.captured_by.insert(key, capturers);
+        captured
     }
 
     // ---- snapshots --------------------------------------------------------
@@ -11366,14 +11921,16 @@ impl Sroa {
                 location,
             } => {
                 let rebuilt = self.bind(name, value.as_deref(), location);
-                self.out.push(AstNode::VariableDeclaration {
-                    name: name.clone(),
-                    type_annotation: type_annotation.clone(),
-                    value: rebuilt.map(Box::new),
-                    is_mutable: *is_mutable,
-                    is_secret: *is_secret,
-                    location: location.clone(),
-                });
+                if !self.analyze {
+                    self.out.push(AstNode::VariableDeclaration {
+                        name: name.clone(),
+                        type_annotation: type_annotation.clone(),
+                        value: rebuilt.map(Box::new),
+                        is_mutable: *is_mutable,
+                        is_secret: *is_secret,
+                        location: location.clone(),
+                    });
+                }
             }
             AstNode::Assignment {
                 target,
@@ -11382,11 +11939,13 @@ impl Sroa {
             } => match target.as_ref() {
                 AstNode::Identifier(name, _) => {
                     let rebuilt = self.bind(name, Some(value), location);
-                    self.out.push(AstNode::Assignment {
-                        target: target.clone(),
-                        value: Box::new(rebuilt.expect("assignment value present")),
-                        location: location.clone(),
-                    });
+                    if !self.analyze {
+                        self.out.push(AstNode::Assignment {
+                            target: target.clone(),
+                            value: Box::new(rebuilt.expect("assignment value present")),
+                            location: location.clone(),
+                        });
+                    }
                 }
                 _ => {
                     // Element/field store: substitute down to the mutated
@@ -11394,17 +11953,21 @@ impl Sroa {
                     // any captured substitutions).
                     let target2 = self.subst_store_target(target);
                     let value2 = self.subst_generic(value);
-                    self.out.push(AstNode::Assignment {
-                        target: Box::new(target2),
-                        value: Box::new(value2),
-                        location: location.clone(),
-                    });
+                    if !self.analyze {
+                        self.out.push(AstNode::Assignment {
+                            target: Box::new(target2),
+                            value: Box::new(value2),
+                            location: location.clone(),
+                        });
+                    }
                 }
             },
             AstNode::FunctionCall { .. } => {
                 if !self.growth_stmt(stmt) {
                     let call2 = self.subst_value(stmt);
-                    self.out.push(call2);
+                    if !self.analyze {
+                        self.out.push(call2);
+                    }
                 }
             }
             AstNode::DiscardStatement {
@@ -11413,30 +11976,44 @@ impl Sroa {
             } => {
                 if !self.growth_stmt(expression) {
                     let expr2 = self.subst_generic(expression);
-                    self.out.push(AstNode::DiscardStatement {
-                        expression: Box::new(expr2),
-                        location: location.clone(),
-                    });
+                    if !self.analyze {
+                        self.out.push(AstNode::DiscardStatement {
+                            expression: Box::new(expr2),
+                            location: location.clone(),
+                        });
+                    }
                 }
             }
             AstNode::Return { value, location } => {
                 let value2 = value.as_ref().map(|v| Box::new(self.subst_generic(v)));
-                self.out.push(AstNode::Return {
-                    value: value2,
-                    location: location.clone(),
-                });
+                if !self.analyze {
+                    self.out.push(AstNode::Return {
+                        value: value2,
+                        location: location.clone(),
+                    });
+                }
             }
             AstNode::Yield(value) => {
                 let value2 = value.as_ref().map(|v| Box::new(self.subst_generic(v)));
-                self.out.push(AstNode::Yield(value2));
+                if !self.analyze {
+                    self.out.push(AstNode::Yield(value2));
+                }
             }
-            AstNode::Break | AstNode::Continue => self.out.push(stmt.clone()),
+            AstNode::Break | AstNode::Continue => {
+                if !self.analyze {
+                    self.out.push(stmt.clone())
+                }
+            }
             // Control flow, nested definitions, and anything unmodeled: the
             // inner blocks were already scalarized independently by the
             // structural recursion; at this level they are opaque.
             other => {
-                let other2 = self.rewrite_opaque(other);
-                self.out.push(other2);
+                if self.analyze {
+                    self.opaque_replacements(other);
+                } else {
+                    let other2 = self.rewrite_opaque(other);
+                    self.out.push(other2);
+                }
             }
         }
     }
@@ -11539,7 +12116,7 @@ impl Sroa {
             husk: false,
             snapshot: None,
         }));
-        let mut new_elements = Vec::with_capacity(elements.len());
+        let mut new_elements = Vec::with_capacity(if self.analyze { 0 } else { elements.len() });
         for e in elements {
             let e2 = self.subst_value(e);
             let e2 = match e2 {
@@ -11564,8 +12141,10 @@ impl Sroa {
                     AstNode::Identifier(temp, location.clone())
                 }
             };
-            st.borrow_mut().elems.push(Some(e2.clone()));
-            new_elements.push(e2);
+            if !self.analyze {
+                new_elements.push(e2.clone());
+            }
+            st.borrow_mut().elems.push(Some(e2));
         }
         (st, new_elements)
     }
@@ -11747,29 +12326,66 @@ impl Sroa {
     }
 }
 
+/// Reachability over dense state ids. Reuse each edge's source slot as the
+/// next-edge link; only newly demoted states enter the worklist.
+fn propagate_sroa_demotions(
+    states: usize,
+    mut edges: Vec<(usize, usize)>,
+    demoted: &mut Vec<bool>,
+) {
+    if edges.is_empty() || demoted.is_empty() {
+        return;
+    }
+    let mut heads = vec![usize::MAX; states];
+    for (index, (source, _)) in edges.iter_mut().enumerate() {
+        *source = std::mem::replace(&mut heads[*source], index);
+    }
+    let mut pending: Vec<_> = demoted
+        .iter()
+        .enumerate()
+        .filter_map(|(id, &set)| set.then_some(id))
+        .collect();
+    demoted.resize(states, false);
+    while let Some(state) = pending.pop() {
+        let mut edge = heads[state];
+        while edge != usize::MAX {
+            let (next, target) = edges[edge];
+            if !std::mem::replace(&mut demoted[target], true) {
+                pending.push(target);
+            }
+            edge = next;
+        }
+    }
+}
+
 /// Scalarize one block's statement list: ANALYZE replay, transitive demotion
 /// propagation, then the REWRITE replay against the final demotion set.
 fn scalarize_block(stmts: Vec<AstNode>) -> Vec<AstNode> {
-    let mut analyzer = Sroa::new(true, HashSet::new());
+    // The first state can only come from a direct list binding. Capturing a
+    // nested literal requires an already tracked receiver; opaque statements
+    // cannot create states. Nested blocks are processed independently below.
+    if !stmts.iter().any(|stmt| match stmt {
+        AstNode::VariableDeclaration {
+            value: Some(value), ..
+        } => matches!(value.as_ref(), AstNode::ListLiteral { .. }),
+        AstNode::Assignment { target, value, .. } => {
+            matches!(target.as_ref(), AstNode::Identifier(..))
+                && matches!(value.as_ref(), AstNode::ListLiteral { .. })
+        }
+        _ => false,
+    }) {
+        return stmts;
+    }
+    let mut analyzer = Sroa::new(true, Vec::new());
     let _ = analyzer.run(&stmts);
     if analyzer.next_id == 0 {
         return stmts; // no candidates: nothing to rewrite
     }
-    let mut demoted = analyzer.demoted;
-    let edges = analyzer.demote_edges;
-    let direct_demotions = demoted.len();
+    let mut demoted = std::mem::take(&mut analyzer.demoted);
+    let edges = std::mem::take(&mut analyzer.demote_edges);
+    let direct_demotions = demoted.iter().filter(|&&set| set).count();
 
-    loop {
-        let mut changed = false;
-        for (a, b) in &edges {
-            if demoted.contains(a) && demoted.insert(*b) {
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    propagate_sroa_demotions(analyzer.next_id, edges, &mut demoted);
 
     if let Some(trace) = &analyzer.trace {
         if analyzer.next_id >= 100 {
@@ -11787,13 +12403,15 @@ fn scalarize_block(stmts: Vec<AstNode>) -> Vec<AstNode> {
                 "[sroa] block: {} states, {} demoted directly, {} after edge propagation",
                 analyzer.next_id,
                 direct_demotions,
-                demoted.len()
+                demoted.iter().filter(|&&set| set).count()
             );
             for ((cause, pat), n) in rows.into_iter().take(40) {
                 eprintln!("[sroa]   {n:6}  {cause:<20} {pat}");
             }
         }
     }
+    // Captured analysis elements must not overlap the rewrite's allocations.
+    drop(analyzer);
     let mut rewriter = Sroa::new(false, demoted);
     let rewritten = rewriter.run(&stmts);
     if rewriter.replay_diverged {
@@ -11898,6 +12516,203 @@ mod tests {
 
     fn make_loc() -> SourceLocation {
         SourceLocation::default()
+    }
+
+    #[test]
+    fn availability_ids_keep_sibling_bindings_and_invalidation_separate() {
+        let mut recycled = AvailEnv::new();
+        recycled.commit("old".into(), "old", &HashSet::<String>::new());
+        recycled.clear();
+        assert!(recycled.names.borrow().names.is_empty());
+        recycled.commit("new".into(), "new", &HashSet::<String>::new());
+        assert_eq!(recycled.key_to_src["new"], 0);
+        let pinned = recycled.dominating_names();
+        recycled.clear();
+        recycled.commit("later".into(), "later", &HashSet::<String>::new());
+        assert!(recycled
+            .restrict_to_dominators(&pinned)
+            .key_to_src
+            .is_empty());
+        let mut entry = AvailEnv::new();
+        entry.commit("k".into(), "shared", &HashSet::from(["input"]));
+        let dominate = entry.dominating_names();
+        let mut left = entry.clone();
+        let mut right = entry.clone();
+        left.commit("left-key".into(), "left", &HashSet::<String>::new());
+        right.commit("right-key".into(), "right", &HashSet::<String>::new());
+        let mut merged = left.intersect_dominating(&right, &dominate);
+        assert_eq!(merged.key_to_src.len(), 1);
+        assert_eq!(merged.source_name(merged.key_to_src["k"]), "shared");
+        merged.invalidate(&HashSet::from(["input"]));
+        assert!(merged.key_to_src.is_empty());
+        assert_eq!(entry.key_to_src.len(), 1);
+        merged.clear();
+        merged.commit("fresh".into(), "right", &HashSet::<String>::new());
+        assert_eq!(merged.source_name(merged.key_to_src["fresh"]), "right");
+    }
+
+    #[test]
+    fn repeated_sroa_capture_records_one_dependency_and_still_demotes() {
+        let mut pass = Sroa::new(true, Vec::new());
+        let (state, _) = pass.track_literal(Some("xs"), &[], &make_loc());
+        for _ in 0..100 {
+            pass.note_identifier_capture(&state, "element", &make_loc());
+        }
+        assert_eq!(pass.captured_by["element"], [state.borrow().id]);
+        assert!(pass.invalidate_captured_source("element", &state));
+        assert!(pass.is_demoted(state.borrow().id));
+        assert_eq!(pass.captured_by["element"].len(), 1);
+    }
+
+    #[test]
+    fn scheduling_scopes_hide_removed_and_cleared_parent_bindings() {
+        let mut interner = KeyInterner::default();
+        let original = interner.dep_node(vec![0], Vec::new());
+        let replacement = interner.dep_node(vec![2], Vec::new());
+        let mut outer = SchedEnv::new();
+        outer.insert(0, original.clone());
+        outer.insert(1, original.clone());
+        {
+            let mut child = outer.child();
+            child.remove(&99);
+            assert!(child.values.is_empty(), "absent names need no tombstone");
+            assert!(Rc::ptr_eq(child.get(&0).unwrap(), &original));
+            child.remove(&0);
+            assert!(child.get(&0).is_none());
+            child.insert(0, replacement.clone());
+            {
+                let mut nested = child.child();
+                assert!(Rc::ptr_eq(nested.get(&0).unwrap(), &replacement));
+                nested.clear();
+                assert!(nested.get(&0).is_none());
+                assert!(nested.get(&1).is_none());
+                nested.insert(2, original.clone());
+                assert!(nested.get(&2).is_some());
+            }
+            assert!(child.get(&1).is_some());
+            assert!(child.get(&2).is_none());
+        }
+        assert!(Rc::ptr_eq(outer.get(&0).unwrap(), &original));
+    }
+
+    #[test]
+    fn sroa_analysis_retains_elements_without_rebuilding_literal() {
+        let elements = vec![make_int_literal(1), make_int_literal(2)];
+        let mut analyzer = Sroa::new(true, Vec::new());
+        let (state, discarded) = analyzer.track_literal(Some("xs"), &elements, &make_loc());
+        assert!(discarded.is_empty());
+        assert_eq!(
+            state.borrow().elems,
+            elements.iter().cloned().map(Some).collect::<Vec<_>>()
+        );
+        let mut rewriter = Sroa::new(false, Vec::new());
+        let (_, rebuilt) = rewriter.track_literal(Some("xs"), &elements, &make_loc());
+        assert_eq!(rebuilt, elements);
+    }
+
+    #[test]
+    fn sroa_candidate_guard_ignores_literals_without_local_bindings() {
+        for stmts in [
+            vec![make_call("print", vec![make_int_list(&[1, 2])])],
+            vec![make_for(
+                "i",
+                make_range(0, 2),
+                vec![make_var_decl("inner", make_int_list(&[3, 4]))],
+            )],
+        ] {
+            let mut analyzer = Sroa::new(true, Vec::new());
+            analyzer.run(&stmts);
+            assert_eq!(analyzer.next_id, 0);
+            assert_eq!(scalarize_block(stmts.clone()), stmts);
+        }
+    }
+
+    #[test]
+    fn availability_replacement_and_length_join_keep_exact_facts() {
+        let mut env = AvailEnv::new();
+        let refs = &HashSet::from(["input".to_string()]);
+        env.commit("k1".into(), "a", refs);
+        env.commit("k2".into(), "a", refs);
+        assert!(!env.key_to_src.contains_key("k1"));
+        env.commit("k2".into(), "b", refs);
+        let id = env.names.borrow().ids["a"];
+        assert!(env.slots[id / 64][id % 64].source.is_none());
+        assert_eq!(env.source_name(env.key_to_src["k2"]), "b");
+        env.invalidate(&HashSet::from(["input".to_string()]));
+        assert!(env.key_to_src.is_empty());
+        assert!(env
+            .slots
+            .iter()
+            .flat_map(|page| page.iter())
+            .all(|slot| slot.source.is_none()));
+
+        let mut left = LenEnv::default();
+        left.shapes.insert("a".into(), Shape::flat(3));
+        left.ints.insert("keep".into(), 7);
+        left.ints.insert("drop".into(), 8);
+        left.alias_union("b", "a");
+        let mut right = left.clone();
+        right.ints.insert("drop".into(), 9);
+        let mut joined = meet_len_env(left, &right);
+        assert_eq!(joined.ints.len(), 1);
+        assert_eq!(joined.ints["keep"], 7);
+        joined.invalidate("b");
+        assert!(!joined.shapes.contains_key("a"));
+    }
+
+    #[test]
+    fn licm_owned_partition_preserves_unchanged_and_hoisted_loop_bodies() {
+        for (declaration, should_hoist) in [("var v = i + 1", false), ("var v = 7", true)] {
+            let source = format!("for i in 0..4:\n  {declaration}\n  print(i)\n");
+            let tokens = crate::lexer::tokenize(&source, "licm.stfl").unwrap();
+            let stmts = match crate::parser::parse(&tokens, "licm.stfl").unwrap() {
+                AstNode::Block(stmts) => stmts,
+                node => vec![node],
+            };
+            let original = stmts.clone();
+            let mut changed = false;
+            let output = block_licm(stmts, &HashSet::new(), &mut changed);
+            assert_eq!(changed, should_hoist);
+            if !should_hoist {
+                assert_eq!(output, original);
+            } else {
+                assert_eq!(output.len(), 2);
+                let AstNode::ForLoop { body, .. } = &original[0] else {
+                    panic!()
+                };
+                let AstNode::Block(body) = body.as_ref() else {
+                    panic!()
+                };
+                assert_eq!(output[0], body[0]);
+                assert_eq!(
+                    output[1],
+                    loop_with_body(original[0].clone(), body[1..].to_vec())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sroa_analysis_keeps_state_without_output() {
+        let loc = make_loc();
+        let stmts = vec![AstNode::VariableDeclaration {
+            name: "items".into(),
+            type_annotation: None,
+            value: Some(Box::new(AstNode::ListLiteral {
+                elements: vec![make_int_literal(1), make_int_literal(2)],
+                location: loc.clone(),
+            })),
+            is_mutable: true,
+            is_secret: false,
+            location: loc,
+        }];
+        let mut analyzer = Sroa::new(true, Vec::new());
+        assert!(analyzer.run(&stmts).is_empty());
+        assert!(analyzer.next_id > 0);
+        let mut rewriter = Sroa::new(false, analyzer.demoted);
+        assert!(!rewriter.run(&stmts).is_empty());
+        assert_eq!(analyzer.next_id, rewriter.next_id);
+        assert!(!rewriter.replay_diverged);
     }
 
     #[test]
@@ -12039,6 +12854,43 @@ mod tests {
                 value: Some(value), ..
             } if matches!(value.as_ref(), AstNode::BinaryOperation { op, .. } if op == "xor")
         ));
+    }
+
+    #[test]
+    fn unchanged_singleton_batch_does_not_extend_the_fixed_point() {
+        let input = AstNode::Block(vec![make_var_decl(
+            "product",
+            make_typed_batch_mul("left", "right"),
+        )]);
+        // The first pass may normalize call metadata. A subsequent pass over
+        // the flat singleton must report no further changes.
+        let normalized = optimize_multiplies(input);
+        let mut changed = false;
+        let result = optimize_multiplies_tracked(normalized.clone(), &mut changed);
+        assert_eq!(normalized, result);
+        assert!(!changed);
+    }
+
+    #[test]
+    fn batching_change_tracking_includes_flattening_and_reaches_a_fixed_point() {
+        let input = AstNode::Block(vec![AstNode::Block(vec![
+            make_var_decl("a", make_int_literal(1)),
+            make_var_decl("b", make_identifier("a")),
+        ])]);
+        let mut changed = false;
+        let flat = schedule_for_batching_tracked(input, &mut changed);
+        assert!(
+            changed,
+            "flattening alone must keep the fixed-point loop alive"
+        );
+        changed = false;
+        let stable = schedule_for_batching_tracked(flat.clone(), &mut changed);
+        let stable = optimize_multiplies_tracked(stable, &mut changed);
+        assert!(
+            !changed,
+            "an unchanged pass must terminate without cloning the AST"
+        );
+        assert_eq!(flat, stable);
     }
 
     #[test]
@@ -12428,7 +13280,7 @@ mod tests {
 
         // Mirror schedule_run's info collection, then build both ways.
         let mut interner = KeyInterner::default();
-        let mut env: SchedEnv = HashMap::new();
+        let mut env = SchedEnv::new();
         let infos: Vec<SchedInfo> = stmts
             .iter()
             .map(|stmt| {
@@ -13966,7 +14818,256 @@ mod tests {
         assert_eq!(count_decls(&out), 0, "both bindings collapse to nothing");
     }
 
+    #[test]
+    fn gate_journal_matches_nested_map_snapshots() {
+        let mut env = GateEnv::new();
+        let mut reference = HashMap::new();
+        let names: Vec<_> = (0..97).map(|i| format!("v{i}")).collect();
+        let mut checkpoints = Vec::new();
+        let mut seed = 41u32;
+        for step in 0..2000 {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            if step % 13 == 0 && checkpoints.len() < 5 {
+                checkpoints.push((env.checkpoint(), reference.clone()));
+            } else if step % 17 == 0 && !checkpoints.is_empty() {
+                let (mark, saved) = checkpoints.pop().unwrap();
+                env.rollback(mark);
+                reference = saved;
+            } else {
+                let name = &names[seed as usize % names.len()];
+                let value = ConstVal::List(Rc::new(vec![ConstVal::Int(step)]));
+                env.insert(name, value.clone());
+                reference.insert(name.clone(), value);
+                // Repeated writes in one frame save the slot only once; list
+                // mutation must not change an enclosing frame's saved value.
+                if let Some(ConstVal::List(list)) = env.get_mut(name) {
+                    Rc::make_mut(list).push(ConstVal::Secret);
+                }
+                if let Some(ConstVal::List(list)) = reference.get_mut(name) {
+                    Rc::make_mut(list).push(ConstVal::Secret);
+                }
+            }
+            for name in &names {
+                assert_eq!(env.get(name), reference.get(name), "step {step}: {name}");
+            }
+        }
+        while let Some((mark, saved)) = checkpoints.pop() {
+            env.rollback(mark);
+            for name in &names {
+                assert_eq!(env.get(name), saved.get(name));
+            }
+        }
+        assert!(env.undo.is_empty());
+        assert_eq!(env.depth, 0);
+    }
+
+    #[test]
+    fn scheduler_reuses_direct_reads_without_changing_dependency_cones() {
+        let mut interner = KeyInterner::default();
+        let mut env = SchedEnv::new();
+        let statements = [
+            make_var_decl("a", make_identifier("source")),
+            make_var_decl("b", make_identifier("a")),
+            AstNode::Assignment {
+                target: Box::new(make_identifier("a")),
+                value: Box::new(make_identifier("b")),
+                location: SourceLocation::default(),
+            },
+        ];
+        for stmt in &statements {
+            let (name, value) = match stmt {
+                AstNode::VariableDeclaration {
+                    name,
+                    value: Some(value),
+                    ..
+                } => (name, value),
+                AstNode::Assignment { target, value, .. } => {
+                    let AstNode::Identifier(name, _) = target.as_ref() else {
+                        unreachable!()
+                    };
+                    (name, value)
+                }
+                _ => unreachable!(),
+            };
+            let expected = logical_reads_node(value, &env, &mut interner);
+            let info = sched_info(stmt, &env, &mut interner);
+            update_sched_env(stmt, &mut env, &info, &mut interner);
+            let flatten = |node: &Rc<DepNode>| {
+                let mut keys = KeyUnion::default();
+                flatten_dep_node(node, &mut keys, &mut KeyUnion::default());
+                keys.keys.into_iter().collect::<HashSet<_>>()
+            };
+            assert_eq!(
+                flatten(&expected),
+                flatten(env.get(&interner.var_id(name)).unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn sroa_worklist_matches_exhaustive_propagation() {
+        for size in [0, 1, 17, 257] {
+            for seed in 0..16 {
+                let mut edges: Vec<_> = (1..size).rev().map(|i| (i - 1, i)).collect();
+                for i in 0..size {
+                    edges.extend([(i, i), (i, (i * 7 + seed) % size)]);
+                }
+                let mut expected: HashSet<_> = (0..size).filter(|i| (i + seed) % 13 == 0).collect();
+                let mut actual: Vec<_> = (0..size).map(|id| expected.contains(&id)).collect();
+                loop {
+                    let before = expected.len();
+                    for &(a, b) in &edges {
+                        if expected.contains(&a) {
+                            expected.insert(b);
+                        }
+                    }
+                    if expected.len() == before {
+                        break;
+                    }
+                }
+                propagate_sroa_demotions(size, edges, &mut actual);
+                assert_eq!(
+                    actual
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(id, &set)| set.then_some(id))
+                        .collect::<HashSet<_>>(),
+                    expected,
+                    "size={size}, seed={seed}"
+                );
+            }
+        }
+        let mut untouched = vec![false, false, false, true];
+        propagate_sroa_demotions(4, Vec::new(), &mut untouched);
+        assert_eq!(untouched, [false, false, false, true]);
+    }
+
     // ===== Round-minimizing list scheduler =====
+
+    #[test]
+    fn dense_key_scratch_resets_only_touched_membership() {
+        let mut scratch = KeyMarks::default();
+        for _ in 0..3 {
+            let mut keys = vec![4096, 64, 0, 63, 4096, 127, 64, 0];
+            scratch.dedup(&mut keys);
+            assert_eq!(keys, [4096, 64, 0, 63, 127]);
+        }
+        let mut interner = KeyInterner::default();
+        for _ in 0..3 {
+            let mut union = interner.key_union();
+            union.extend([4096, 64, 4096, 0]);
+            assert_eq!(interner.finish_union(union), [4096, 64, 0]);
+            assert_eq!(interner.free_marks.len(), 1);
+        }
+    }
+
+    #[test]
+    fn dense_dependency_memo_matches_transitive_set_union() {
+        let mut interner = KeyInterner::default();
+        let mut nodes = Vec::new();
+        let mut expected: Vec<HashSet<u32>> = Vec::new();
+        for i in 0..128 {
+            let own = vec![(i % 23) as u32];
+            let mut all: HashSet<_> = own.iter().copied().collect();
+            let mut parents = Vec::new();
+            if i > 0 {
+                for parent in [(i - 1) / 2, i - 1] {
+                    parents.push(Rc::clone(&nodes[parent]));
+                    all.extend(expected[parent].iter().copied());
+                }
+            }
+            nodes.push(interner.dep_node(own, parents));
+            expected.push(all);
+        }
+        let relevant: Vec<_> = (0..23).map(|i| i % 3 == 0).collect();
+        let mut memo = Vec::new();
+        let mut scratch = KeyMarks::default();
+        let mut visited = KeyUnion::default();
+        let mut flattened = KeyUnion::default();
+        let mut union = HashSet::new();
+        for i in [17, 9, 67, 127, 17] {
+            flatten_dep_node(&nodes[i], &mut flattened, &mut visited);
+            union.extend(expected[i].iter().copied());
+            assert_eq!(
+                flattened.keys.iter().copied().collect::<HashSet<_>>(),
+                union
+            );
+            let mut filtered: Vec<_> = expected[i]
+                .iter()
+                .copied()
+                .filter(|&key| relevant[key as usize])
+                .collect();
+            filtered.sort_unstable();
+            assert_eq!(
+                *pruned_cone(
+                    &nodes[i],
+                    &relevant,
+                    &mut memo,
+                    &mut scratch,
+                    &Rc::new(Vec::new())
+                ),
+                filtered
+            );
+        }
+        // A new node has a fresh identity even when old bindings are discarded.
+        nodes.clear();
+        let fresh = interner.dep_node(vec![21], Vec::new());
+        assert_eq!(
+            *pruned_cone(
+                &fresh,
+                &relevant,
+                &mut memo,
+                &mut scratch,
+                &Rc::new(Vec::new())
+            ),
+            [21]
+        );
+    }
+
+    #[test]
+    fn loop_scheduling_keeps_transitive_outer_dependencies() {
+        let mut interner = KeyInterner::default();
+        let mut env = SchedEnv::new();
+        let declarations = [
+            make_var_decl("alias", make_identifier("source")),
+            make_var_decl("saved", make_identifier("alias")),
+        ];
+        for stmt in &declarations {
+            let info = sched_info(stmt, &env, &mut interner);
+            update_sched_env(stmt, &mut env, &info, &mut interner);
+        }
+        // None of these surrounding bindings is read by the loop. The retained
+        // `saved` binding must still carry source/alias through its Rc parents.
+        let unrelated: Vec<_> = (0..1000)
+            .map(|index| format!("unrelated_{index}"))
+            .collect();
+        for name in &unrelated {
+            env.insert(
+                interner.var_id(name),
+                interner.dep_node(Vec::new(), Vec::new()),
+            );
+        }
+        let body = AstNode::Block(vec![make_for(
+            "j",
+            make_range(0, 2),
+            vec![
+                make_var_decl("local", make_identifier("saved")),
+                make_append("out", make_identifier("local")),
+            ],
+        )]);
+        let variables = ["i".to_string()];
+        let iterable = make_range(0, 2);
+        let info = loop_sched_info(&variables, &iterable, &body, &env, &mut interner);
+        for name in ["source", "alias", "saved", "local"] {
+            assert!(
+                info.logical_reads.contains(&interner.scalar(name)),
+                "lost {name}"
+            );
+        }
+        assert!(info.writes.contains(&interner.heap("out")));
+        assert!(!info.direct_reads.contains(&interner.scalar("i")));
+        assert!(!info.logical_reads.contains(&interner.scalar("j")));
+    }
 
     #[test]
     fn test_scheduler_clusters_independent_chains_by_round() {
@@ -14903,6 +16004,57 @@ mod tests {
     }
 
     #[test]
+    fn unrolled_names_are_independent_of_previous_optimizations() {
+        let input = || {
+            AstNode::Block(vec![make_for(
+                "i",
+                make_range(0, 2),
+                vec![
+                    make_var_decl("value", make_call("sample", vec![])),
+                    make_call("consume", vec![make_identifier("value")]),
+                ],
+            )])
+        };
+        let expected = optimize_all(input(), 3);
+        assert!(format!("{expected:?}").contains("__unroll"));
+        for _ in 0..8 {
+            next_inline_suffix();
+            assert_eq!(optimize_all(input(), 3), expected);
+        }
+    }
+
+    #[test]
+    fn optimization_names_are_independent_of_previous_and_parallel_calls() {
+        let input = || {
+            AstNode::Block(vec![
+                make_var_decl("first", make_share_open(make_identifier("a"))),
+                make_var_decl("second", make_share_open(make_identifier("b"))),
+            ])
+        };
+        let expected = optimize_all(input(), 2);
+        assert!(
+            format!("{expected:?}").contains("__batch"),
+            "exercise fresh names"
+        );
+        for _ in 0..8 {
+            generate_named_temp_name("unrelated");
+            assert_eq!(optimize_all(input(), 2), expected);
+        }
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    (0..8).map(|_| optimize_all(input(), 2)).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for thread in threads {
+            for output in thread.join().unwrap() {
+                assert_eq!(output, expected);
+            }
+        }
+    }
+
+    #[test]
     fn sroa_materializes_read_only_outer_aggregate_for_nested_loop() {
         let loop_read = AstNode::IndexAccess {
             base: Box::new(make_identifier("out")),
@@ -14933,6 +16085,60 @@ mod tests {
             1,
             "the nested loop should read one materialized snapshot"
         );
+    }
+
+    #[test]
+    fn sroa_opaque_snapshots_have_stable_order_and_preserve_references() {
+        // Reverse lexical declaration/use order, repeated reads, and fresh
+        // hash seeds on every replay exercise both ordering and deduplication.
+        for _ in 0..64 {
+            let out = scalarize_local_arrays(AstNode::Block(vec![
+                sroa_empty_list_decl("z"),
+                make_append("z", make_int_literal(20)),
+                sroa_empty_list_decl("a"),
+                make_append("a", make_int_literal(10)),
+                make_for(
+                    "i",
+                    make_range(0, 2),
+                    vec![
+                        sroa_decl("read_z", sroa_index_read("z", 0)),
+                        sroa_decl("read_a", sroa_index_read("a", 0)),
+                        sroa_decl("read_z_again", sroa_index_read("z", 0)),
+                    ],
+                ),
+            ]));
+            let stmts = sroa_stmts(&out);
+            assert_eq!(sroa_count_calls(stmts, "append"), 0);
+            let snapshots: Vec<_> = stmts
+                .iter()
+                .filter_map(|stmt| match stmt {
+                    AstNode::VariableDeclaration {
+                        name,
+                        value: Some(value),
+                        ..
+                    } if name.starts_with("__sroa_snap") => Some((name, value.as_ref())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(snapshots.len(), 2);
+            for ((_, value), expected) in snapshots.iter().zip([10, 20]) {
+                let AstNode::ListLiteral { elements, .. } = value else {
+                    panic!("expected snapshot literal");
+                };
+                assert_eq!(elements, &vec![make_int_literal(expected)]);
+            }
+            let Some(AstNode::ForLoop { body, .. }) = stmts.last() else {
+                panic!("expected preserved loop");
+            };
+            for (read, snapshot) in [("read_z", 1), ("read_a", 0), ("read_z_again", 1)] {
+                let Some(AstNode::IndexAccess { base, .. }) =
+                    sroa_decl_value(sroa_stmts(body), read)
+                else {
+                    panic!("expected redirected index read");
+                };
+                assert_eq!(base.as_ref(), &make_identifier(snapshots[snapshot].0));
+            }
+        }
     }
 
     #[test]

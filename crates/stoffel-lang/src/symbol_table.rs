@@ -394,6 +394,7 @@ pub enum SymbolDeclarationError {
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
     symbols: HashMap<String, SymbolInfo>,
+    builtins: Option<&'static HashMap<String, SymbolInfo>>,
     parent_scope_id: Option<usize>, // ID of the enclosing scope
                                     // pub children_scope_ids: Vec<usize>, // For debugging/visualization
 }
@@ -402,6 +403,7 @@ impl Scope {
     fn new(parent_scope_id: Option<usize>) -> Self {
         Scope {
             symbols: HashMap::new(),
+            builtins: None,
             parent_scope_id,
             // children_scope_ids: Vec::new(),
         }
@@ -409,7 +411,7 @@ impl Scope {
 
     /// Declares a symbol in this scope. Returns error if already declared.
     fn declare(&mut self, info: SymbolInfo) -> Result<(), SymbolDeclarationError> {
-        if let Some(existing_info) = self.symbols.get(&info.name) {
+        if let Some(existing_info) = self.lookup_local(&info.name) {
             if matches!(existing_info.kind, SymbolKind::BuiltinFunction { .. }) {
                 self.symbols.insert(info.name.clone(), info);
                 return Ok(());
@@ -428,7 +430,9 @@ impl Scope {
 
     /// Looks up a symbol only in this specific scope.
     fn lookup_local(&self, name: &str) -> Option<&SymbolInfo> {
-        self.symbols.get(name)
+        self.symbols
+            .get(name)
+            .or_else(|| self.builtins.and_then(|b| b.get(name)))
     }
 }
 
@@ -446,6 +450,8 @@ pub struct SymbolTable {
     /// Method-to-function suggestions for common method names that should be functions.
     /// Maps method name (e.g., "length") to suggestion string (e.g., "array_length(arr)").
     method_suggestions: HashMap<String, String>,
+    // Used only by the internal compiler constructor. Public `new` remains owned.
+    builtin_base: Option<&'static SymbolTable>,
 }
 
 impl Default for SymbolTable {
@@ -456,6 +462,25 @@ impl Default for SymbolTable {
 
 impl SymbolTable {
     pub fn new() -> Self {
+        let mut table = Self::empty();
+        table.add_builtins(true);
+        table
+    }
+
+    pub(crate) fn for_compiler() -> Self {
+        static BUILTINS: std::sync::OnceLock<SymbolTable> = std::sync::OnceLock::new();
+        let base = BUILTINS.get_or_init(|| {
+            let mut base = Self::empty();
+            base.add_builtins(false);
+            base
+        });
+        let mut table = Self::empty();
+        table.scopes[0].builtins = Some(&base.scopes[0].symbols);
+        table.builtin_base = Some(base);
+        table
+    }
+
+    fn empty() -> Self {
         let mut table = SymbolTable {
             scopes: Vec::new(),
             current_scope_id: 0,
@@ -464,22 +489,33 @@ impl SymbolTable {
             builtin_objects: HashMap::new(),
             user_objects: HashMap::new(),
             method_suggestions: HashMap::new(),
+            builtin_base: None,
         };
         // Create the global scope (ID 0)
         table.scopes.push(Scope::new(None));
-        table.add_builtins();
         table
     }
 
     /// Looks up a method suggestion for when users try to use method syntax.
     /// Returns a suggestion string if the method name has a known function equivalent.
     pub fn get_method_suggestion(&self, method_name: &str) -> Option<&String> {
-        self.method_suggestions.get(method_name)
+        self.builtin_base
+            .unwrap_or(self)
+            .method_suggestions
+            .get(method_name)
     }
 
     /// Looks up a builtin object type by name
     pub fn lookup_builtin_object(&self, name: &str) -> Option<&BuiltinObjectInfo> {
-        self.builtin_objects.get(name)
+        self.builtin_object_map().get(name)
+    }
+
+    fn builtin_object_map(&self) -> &HashMap<String, BuiltinObjectInfo> {
+        if self.builtin_base.is_some() {
+            &crate::builtin_registry::builtin_registry().objects
+        } else {
+            &self.builtin_objects
+        }
     }
 
     /// Registers a user-defined object type for constructor and field checks.
@@ -498,8 +534,7 @@ impl SymbolTable {
         object_name: &str,
         method_name: &str,
     ) -> Option<&ObjectMethodInfo> {
-        self.builtin_objects
-            .get(object_name)
+        self.lookup_builtin_object(object_name)
             .and_then(|obj| obj.methods.get(method_name))
     }
 
@@ -535,7 +570,7 @@ impl SymbolTable {
     }
 
     /// Adds built-in functions and types to the global scope.
-    fn add_builtins(&mut self) {
+    fn add_builtins(&mut self, own_objects: bool) {
         let registry = crate::builtin_registry::builtin_registry();
 
         for type_name in &registry.type_names {
@@ -568,7 +603,9 @@ impl SymbolTable {
         }
 
         for (name, object) in &registry.objects {
-            self.builtin_objects.insert(name.clone(), object.clone());
+            if own_objects {
+                self.builtin_objects.insert(name.clone(), object.clone());
+            }
             self.declare_global_builtin(SymbolInfo {
                 name: name.clone(),
                 kind: SymbolKind::BuiltinObject {
@@ -664,7 +701,11 @@ impl SymbolTable {
 
         while let Some(id) = scope_id {
             let scope = &self.scopes[id];
-            for name in scope.symbols.keys() {
+            for name in scope
+                .symbols
+                .keys()
+                .chain(scope.builtins.into_iter().flat_map(|b| b.keys()))
+            {
                 if !seen.contains(name) {
                     seen.insert(name.clone());
                     symbols.push(name.clone());
@@ -693,7 +734,7 @@ impl SymbolTable {
             .collect();
 
         // Add builtin object methods as "Object.method"
-        for (obj_name, obj_info) in &self.builtin_objects {
+        for (obj_name, obj_info) in self.builtin_object_map() {
             for method_name in obj_info.methods.keys() {
                 names.push(format!("{}.{}", obj_name, method_name));
             }
@@ -706,6 +747,58 @@ impl SymbolTable {
 mod tests {
     use super::*;
     use crate::errors::SourceLocation;
+
+    #[test]
+    fn compiler_builtin_overlay_preserves_shadowing_and_owned_api() {
+        let owned = SymbolTable::new();
+        let mut shared = SymbolTable::for_compiler();
+        let mut owned_names = owned.get_callable_names();
+        let mut shared_names = shared.get_callable_names();
+        owned_names.sort();
+        shared_names.sort();
+        assert_eq!(owned_names, shared_names);
+        assert!(owned.builtin_objects.contains_key("Share"));
+        assert!(std::ptr::eq(
+            shared.lookup_builtin_object("Share").unwrap(),
+            crate::builtin_registry::builtin_registry()
+                .objects
+                .get("Share")
+                .unwrap(),
+        ));
+        assert!(shared
+            .lookup_builtin_method("Share", "random_field")
+            .is_some());
+        let builtin = owned.scopes[0]
+            .symbols
+            .values()
+            .find(|s| matches!(s.kind, SymbolKind::BuiltinFunction { .. }))
+            .unwrap()
+            .clone();
+        let name = builtin.name.clone();
+        let mut replacement = builtin.clone();
+        replacement.kind = SymbolKind::Variable { is_mutable: true };
+        shared.declare_symbol(replacement);
+        assert!(shared.errors.is_empty());
+        assert!(matches!(
+            shared.lookup_symbol(&name).unwrap().kind,
+            SymbolKind::Variable { .. }
+        ));
+        assert!(matches!(
+            SymbolTable::for_compiler()
+                .lookup_symbol(&name)
+                .unwrap()
+                .kind,
+            SymbolKind::BuiltinFunction { .. }
+        ));
+        let type_info = owned.scopes[0]
+            .symbols
+            .values()
+            .find(|s| matches!(s.kind, SymbolKind::Type | SymbolKind::BuiltinObject { .. }))
+            .unwrap()
+            .clone();
+        shared.declare_symbol(type_info);
+        assert_eq!(shared.errors.len(), 1);
+    }
 
     fn make_loc() -> SourceLocation {
         SourceLocation::default()

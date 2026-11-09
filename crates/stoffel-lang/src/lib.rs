@@ -25,6 +25,7 @@ pub mod preprocessing_planner;
 pub mod register_allocator;
 mod scope_bindings;
 pub mod semantic;
+mod snapshot_env;
 pub mod suggestions;
 pub mod symbol_table;
 pub mod ufcs;

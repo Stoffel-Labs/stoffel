@@ -171,6 +171,73 @@ fn is_share_random_call(function: &AstNode) -> bool {
     matches!(function, AstNode::Identifier(name, _) if name == "Share.random")
 }
 
+/// A lexical scope saves only overwritten bindings, not the whole environment.
+#[derive(Debug)]
+struct ScopeMap<V> {
+    values: HashMap<String, V>,
+    introduced: Vec<String>,
+    replaced: Vec<(String, V)>,
+    depth: usize,
+}
+
+impl<V> Default for ScopeMap<V> {
+    fn default() -> Self {
+        Self {
+            values: HashMap::new(),
+            introduced: Vec::new(),
+            replaced: Vec::new(),
+            depth: 0,
+        }
+    }
+}
+
+impl<V: Clone> Clone for ScopeMap<V> {
+    fn clone(&self) -> Self {
+        Self {
+            values: self.values.clone(),
+            ..Self::default()
+        }
+    }
+}
+
+impl<V> std::ops::Deref for ScopeMap<V> {
+    type Target = HashMap<String, V>;
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl<V> ScopeMap<V> {
+    fn insert(&mut self, name: String, value: V) {
+        if self.depth == 0 {
+            self.values.insert(name, value);
+        } else {
+            match self.values.insert(name.clone(), value) {
+                Some(old) => self.replaced.push((name, old)),
+                None => self.introduced.push(name),
+            }
+        }
+    }
+
+    fn enter(&mut self) -> (usize, usize) {
+        self.depth += 1;
+        (self.introduced.len(), self.replaced.len())
+    }
+
+    fn exit(&mut self, (introduced, replaced): (usize, usize)) {
+        // Bindings can only be inserted while a scope is active. Restore
+        // overwrites first, then remove names that did not exist at entry.
+        while self.replaced.len() > replaced {
+            let (name, old) = self.replaced.pop().unwrap();
+            self.values.insert(name, old);
+        }
+        for name in self.introduced.drain(introduced..) {
+            self.values.remove(&name);
+        }
+        self.depth -= 1;
+    }
+}
+
 #[derive(Debug)]
 struct CodeGenerator {
     // Holds instructions using VirtualRegisters during generation for a scope.
@@ -183,11 +250,11 @@ struct CodeGenerator {
     // (VRs are minted sequentially from 0). True = Secret.
     vr_secrecy: Vec<bool>,
     // Variable symbol table (maps name to VirtualRegister index). Local to the current scope.
-    symbol_table: HashMap<String, usize>,
+    symbol_table: ScopeMap<usize>,
     // Source-level types for variables in this scope.
-    symbol_types: HashMap<String, SymbolType>,
+    symbol_types: ScopeMap<SymbolType>,
     // User object fields available for default construction in this scope.
-    object_field_types: HashMap<String, Vec<(String, SymbolType)>>,
+    object_field_types: ScopeMap<Vec<(String, SymbolType)>>,
     // `type Name = ...` aliases declared in this module, keyed by alias name.
     // Annotations are resolved through these so an alias such as
     // `type Amount = secret int64` keeps its `secret` qualifier in register
@@ -199,8 +266,6 @@ struct CodeGenerator {
     main_proc_chunk: Option<BytecodeChunk>,
     // If present, this chunk represents a pragma-marked entry function.
     entry_main_chunk: Option<BytecodeChunk>,
-    // Known built-in functions (names only, no bytecode generated).
-    known_builtins: HashSet<String>,
     // Pragma handlers: Maps pragma names to their handler functions.
     pragma_handlers: HashMap<String, PragmaHandler>,
     // Constants identified during code generation for this chunk.
@@ -388,22 +453,19 @@ impl CodeGenerator {
     }
 
     fn new() -> Self {
-        let known_builtins = crate::builtin_registry::builtin_registry().known_call_names();
-
         CodeGenerator {
             current_instructions: Vec::new(),
             current_labels: HashMap::new(),
             next_virtual_reg: 0, // Start virtual registers from 0
             vr_secrecy: Vec::new(),
             // Symbol table starts empty for each new generator instance (e.g., per function)
-            symbol_table: HashMap::new(),
-            symbol_types: HashMap::new(),
-            object_field_types: HashMap::new(),
+            symbol_table: ScopeMap::default(),
+            symbol_types: ScopeMap::default(),
+            object_field_types: ScopeMap::default(),
             type_aliases: HashMap::new(),
             compiled_functions: HashMap::new(),
             main_proc_chunk: None,
             entry_main_chunk: None,
-            known_builtins,
             pragma_handlers: Self::register_pragma_handlers(),
             identified_constants: Vec::new(),
             client_inputs: HashMap::new(),
@@ -2799,9 +2861,9 @@ impl CodeGenerator {
                 body,
                 location,
             } => {
-                let outer_bindings = self.symbol_table.clone();
-                let outer_types = self.symbol_types.clone();
-                let outer_objects = self.object_field_types.clone();
+                let outer_bindings = self.symbol_table.enter();
+                let outer_types = self.symbol_types.enter();
+                let outer_objects = self.object_field_types.enter();
                 // Support: single var over range a .. b (exclusive) or over a list/array
                 if variables.len() != 1 {
                     return Err(CompilerError::semantic_error(
@@ -2835,7 +2897,7 @@ impl CodeGenerator {
                         self.emit(Instruction::MOV(loop_vr.0, start_vr.0));
 
                         // Insert loop variable into symbol table, saving any previous binding
-                        let prev_binding = self.symbol_table.insert(var_name.clone(), loop_vr.0);
+                        self.symbol_table.insert(var_name.clone(), loop_vr.0);
 
                         // Labels
                         let loop_start_label =
@@ -2892,16 +2954,6 @@ impl CodeGenerator {
 
                         // End label
                         self.add_label(loop_end_label);
-
-                        // Restore/cleanup symbol table mapping
-                        match prev_binding {
-                            Some(old_idx) => {
-                                self.symbol_table.insert(var_name, old_idx);
-                            }
-                            None => {
-                                self.symbol_table.remove(&variables[0]);
-                            }
-                        }
                     }
                     _ => {
                         // Collection iteration: for item in list
@@ -2931,7 +2983,7 @@ impl CodeGenerator {
                         let elem_vr = self.allocate_virtual_register(collection_is_secret);
 
                         // Insert loop variable (element) into symbol table
-                        let prev_binding = self.symbol_table.insert(var_name.clone(), elem_vr.0);
+                        self.symbol_table.insert(var_name.clone(), elem_vr.0);
 
                         // Labels
                         let loop_start_label =
@@ -2984,25 +3036,15 @@ impl CodeGenerator {
 
                         // End label
                         self.add_label(loop_end_label);
-
-                        // Restore/cleanup symbol table mapping
-                        match prev_binding {
-                            Some(old_idx) => {
-                                self.symbol_table.insert(var_name, old_idx);
-                            }
-                            None => {
-                                self.symbol_table.remove(&variables[0]);
-                            }
-                        }
                     }
                 }
 
                 // For-loops evaluate to Unit
                 // For-loop declarations have lexical scope, while writes to
                 // existing outer registers retain their runtime effects.
-                self.symbol_table = outer_bindings;
-                self.symbol_types = outer_types;
-                self.object_field_types = outer_objects;
+                self.symbol_table.exit(outer_bindings);
+                self.symbol_types.exit(outer_types);
+                self.object_field_types.exit(outer_objects);
                 let nil_vr = self.allocate_virtual_register(false);
                 self.identified_constants.push(Constant::Unit);
                 self.emit(Instruction::LDI(nil_vr.0, crate::core_types::Value::Unit));
@@ -3031,10 +3073,6 @@ impl CodeGenerator {
                         handler(self, node, pragma)?;
                         // Check if the handler indicates compilation should be skipped
                         if pragma_name == "builtin" {
-                            // Register the function name as a known built-in.
-                            if let Some(name) = name {
-                                self.known_builtins.insert(name.clone());
-                            }
                             skip_compilation = true;
                         }
                     }
@@ -3757,6 +3795,30 @@ mod tests {
     use crate::core_types::Value;
     use crate::register_allocator::{PhysicalRegister, VirtualRegister};
     use std::collections::HashMap;
+
+    #[test]
+    fn lexical_maps_restore_nested_overwrites_and_local_types() {
+        let mut map = super::ScopeMap::default();
+        map.insert("outer".into(), vec![1]);
+        let outer = map.enter();
+        map.insert("outer".into(), vec![2]);
+        map.insert("local".into(), vec![3]);
+        let inner = map.enter();
+        map.insert("outer".into(), vec![4]);
+        map.insert("local".into(), vec![5]);
+        map.insert("inner".into(), vec![6]);
+        let captured = map.clone();
+        map.exit(inner);
+        assert_eq!(map.get("outer"), Some(&vec![2]));
+        assert_eq!(map.get("local"), Some(&vec![3]));
+        assert!(!map.contains_key("inner"));
+        map.insert("local".into(), vec![7]);
+        map.exit(outer);
+        assert_eq!(map.get("outer"), Some(&vec![1]));
+        assert_eq!(map.len(), 1);
+        assert_eq!(captured.get("outer"), Some(&vec![4]));
+        assert!(map.introduced.is_empty() && map.replaced.is_empty());
+    }
 
     fn count_op(instructions: &[Instruction], f: impl Fn(&Instruction) -> bool) -> usize {
         instructions.iter().filter(|i| f(i)).count()

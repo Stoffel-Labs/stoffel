@@ -22,7 +22,7 @@
 //! data-dependent loops) the analysis sets `dynamic = true` rather than silently
 //! undercounting.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use crate::ast::{AstNode, Parameter, Value};
 use stoffel_vm_types::compiled_binary::{MpcBackend, PreprocessingDemand};
@@ -34,7 +34,7 @@ use stoffel_vm_types::core_types::DEFAULT_FIXED_POINT_FRACTIONAL_BITS;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Len {
     /// A list of exactly `len` elements, each having element shape `elem`.
-    Known { len: usize, elem: Box<Len> },
+    Known { len: usize, elem: Rc<Len> },
     /// Not a list, or a length only known at runtime.
     Unknown,
 }
@@ -44,7 +44,7 @@ impl Len {
     fn flat(len: usize) -> Len {
         Len::Known {
             len,
-            elem: Box::new(Len::Unknown),
+            elem: Rc::new(Len::Unknown),
         }
     }
 
@@ -102,7 +102,7 @@ impl std::hash::Hash for Secrecy {
 
 /// The abstract value an expression evaluates to: its list shape, its secrecy,
 /// and — for clear integers — its constant value (used for loop bounds).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AbstractValue {
     len: Len,
     secrecy: Secrecy,
@@ -151,7 +151,7 @@ impl AbstractValue {
 }
 
 /// Per-scope binding of variable names to their abstract values.
-type Env = HashMap<String, AbstractValue>;
+type Env<'a> = crate::snapshot_env::SnapshotEnv<'a, AbstractValue>;
 
 /// Result of analysing a function body: the demand it incurs and the abstract
 /// value it returns.
@@ -221,6 +221,9 @@ pub fn plan_preprocessing_demand_for_backend(
     program: &AstNode,
     mpc_backend: MpcBackend,
 ) -> PreprocessingDemand {
+    if shallow_preprocessing_program(program) {
+        return plan_preprocessing_demand_inner(program, mpc_backend);
+    }
     // The analysis recurses through the program's call graph, which for large
     // straight-line circuits (e.g. the AES S-box and its callers) can nest many
     // frames deep. Run it on a dedicated thread with a generous stack so the
@@ -238,6 +241,93 @@ pub fn plan_preprocessing_demand_for_backend(
             .join()
             .expect("preprocessing-demand analysis thread panicked")
     })
+}
+
+/// Tiny, shallow programs without user calls cannot build a recursive call
+/// chain. Keep the large-stack worker for everything else.
+fn shallow_preprocessing_program(program: &AstNode) -> bool {
+    let definitions = match program {
+        AstNode::Block(definitions) => definitions.as_slice(),
+        node => std::slice::from_ref(node),
+    };
+    if definitions.len() > 8 {
+        return false;
+    }
+    let names: Vec<&str> = definitions
+        .iter()
+        .filter_map(|node| match node {
+            AstNode::FunctionDefinition { name, .. } => name.as_deref(),
+            _ => None,
+        })
+        .collect();
+    let mut pending: Vec<_> = definitions.iter().map(|node| (node, 1)).collect();
+    let mut count = 0;
+    while let Some((node, depth)) = pending.pop() {
+        count += 1;
+        if count + pending.len() > 128 || depth > 8 {
+            return false;
+        }
+        match node {
+            AstNode::Block(nodes)
+            | AstNode::ListLiteral {
+                elements: nodes, ..
+            }
+            | AstNode::TupleLiteral(nodes)
+            | AstNode::SetLiteral(nodes)
+                if nodes.len() > 128 - count =>
+            {
+                return false
+            }
+            AstNode::FunctionDefinition {
+                parameters, body, ..
+            } => {
+                if !parameters.is_empty() || depth != 1 {
+                    return false;
+                }
+                pending.push((body, depth + 1));
+            }
+            AstNode::FunctionCall { function, .. } => {
+                let AstNode::Identifier(name, _) = function.as_ref() else {
+                    return false;
+                };
+                let resolved = crate::builtin_registry::builtin_registry()
+                    .vm_symbol_for_call(name)
+                    .unwrap_or(name);
+                if names.contains(&name.as_str()) || names.contains(&resolved) {
+                    return false;
+                }
+                crate::optimizations::for_each_child(node, &mut |child| {
+                    if pending.len() < 129 {
+                        pending.push((child, depth + 1));
+                    }
+                });
+            }
+            AstNode::VariableDeclaration {
+                type_annotation,
+                value,
+                ..
+            } => {
+                for child in type_annotation.iter().chain(value.iter()) {
+                    if pending.len() < 129 {
+                        pending.push((child, depth + 1));
+                    };
+                }
+            }
+            AstNode::CommandCall { .. }
+            | AstNode::SecretType(_)
+            | AstNode::ListType(_)
+            | AstNode::TupleType(_)
+            | AstNode::DictType { .. }
+            | AstNode::FunctionType { .. }
+            | AstNode::GenericType { .. } => return false,
+            _ => crate::optimizations::for_each_child(node, &mut |child| {
+                if pending.len() < 129 {
+                    pending.push((child, depth + 1));
+                }
+            }),
+        }
+    }
+    true
 }
 
 fn plan_preprocessing_demand_inner(
@@ -398,7 +488,7 @@ impl<'a> Planner<'a> {
                 .copied()
                 .unwrap_or_else(|| param_element_secrecy(param));
             env.insert(
-                param.name.clone(),
+                param.name.as_str(),
                 AbstractValue {
                     len,
                     secrecy,
@@ -426,8 +516,8 @@ impl<'a> Planner<'a> {
     /// and (via `Return`) the function's `ret` value.
     fn eval_block_like(
         &mut self,
-        node: &AstNode,
-        env: &mut Env,
+        node: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         ret: &mut Option<AbstractValue>,
         call_stack: &mut Vec<String>,
@@ -466,12 +556,12 @@ impl<'a> Planner<'a> {
                             .and_then(annotation_fixed_frac_bits);
                     }
                 }
-                env.insert(name.clone(), value);
+                env.insert(name.as_str(), value);
             }
             AstNode::Assignment { target, value, .. } => {
                 let value = self.eval_expr(value, env, demand, call_stack);
                 if let AstNode::Identifier(name, _) = target.as_ref() {
-                    env.insert(name.clone(), value);
+                    env.insert(name.as_str(), value);
                 } else {
                     // Index/field assignment: evaluate the target for any
                     // embedded calls, but it does not rebind a simple name.
@@ -515,9 +605,9 @@ impl<'a> Planner<'a> {
     /// demand (the runtime must provision for whichever branch executes).
     fn eval_if_statement(
         &mut self,
-        then_branch: &AstNode,
-        else_branch: &Option<Box<AstNode>>,
-        env: &mut Env,
+        then_branch: &'a AstNode,
+        else_branch: &'a Option<Box<AstNode>>,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         ret: &mut Option<AbstractValue>,
         call_stack: &mut Vec<String>,
@@ -561,13 +651,18 @@ impl<'a> Planner<'a> {
         // length can undercount a later batch/loop (for example, a conditional
         // append inside a counted loop previously left an empty-list length of
         // zero visible to subsequent secret gates).
-        let before = env.clone();
-        for name in before.keys() {
-            if let (Some(then_value), Some(else_value)) = (then_env.get(name), else_env.get(name)) {
-                env.insert(
-                    name.clone(),
-                    merge_value(then_value.clone(), else_value.clone()),
-                );
+        for id in then_env.changed_slots(&else_env) {
+            if env.get_slot(id).is_some() {
+                if let (Some(left), Some(right)) = (then_env.get_slot(id), else_env.get_slot(id)) {
+                    env.set_slot(id, Some(merge_value(left.clone(), right.clone())));
+                }
+            }
+        }
+        // Both branches may agree on a new value. It must still replace the
+        // incoming value, even though it does not appear in their difference.
+        for id in env.changed_slots(&then_env) {
+            if env.get_slot(id).is_some() && then_env.get_slot(id) == else_env.get_slot(id) {
+                env.set_slot(id, then_env.get_slot(id).cloned());
             }
         }
     }
@@ -586,9 +681,9 @@ impl<'a> Planner<'a> {
     #[allow(clippy::too_many_arguments)]
     fn eval_while_loop(
         &mut self,
-        condition: &AstNode,
-        body: &AstNode,
-        env: &mut Env,
+        condition: &'a AstNode,
+        body: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         ret: &mut Option<AbstractValue>,
         call_stack: &mut Vec<String>,
@@ -602,7 +697,7 @@ impl<'a> Planner<'a> {
                 // A counted loop is scaled from one symbolic body. Its counter
                 // varies between iterations, so do not incorrectly specialize
                 // the body to the first value.
-                body_env.insert(var.to_string(), AbstractValue::clear());
+                body_env.insert(var, AbstractValue::clear());
             }
         }
         let mut body_demand = PreprocessingDemand::default();
@@ -623,7 +718,7 @@ impl<'a> Planner<'a> {
                 // The counter's post-loop value is loop-shape-dependent; keep it
                 // conservative (clear, value unknown) rather than stale-at-start.
                 if let Some((var, _, _)) = while_condition_parts(condition) {
-                    env.insert(var.to_string(), AbstractValue::clear());
+                    env.insert(var, AbstractValue::clear());
                 }
             }
             None => {
@@ -633,7 +728,7 @@ impl<'a> Planner<'a> {
                 }
                 apply_loop_length_growth_unknown(env, &body_env);
                 if let Some((var, _, _)) = while_condition_parts(condition) {
-                    env.insert(var.to_string(), AbstractValue::clear());
+                    env.insert(var, AbstractValue::clear());
                 }
             }
         }
@@ -647,9 +742,9 @@ impl<'a> Planner<'a> {
     /// `v = v * k` (`k >= 2`, ascending).
     fn while_trip_count(
         &mut self,
-        condition: &AstNode,
-        body: &AstNode,
-        env: &mut Env,
+        condition: &'a AstNode,
+        body: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         call_stack: &mut Vec<String>,
     ) -> Option<u64> {
@@ -690,10 +785,10 @@ impl<'a> Planner<'a> {
     #[allow(clippy::too_many_arguments)]
     fn eval_for_loop(
         &mut self,
-        variables: &[String],
-        iterable: &AstNode,
-        body: &AstNode,
-        env: &mut Env,
+        variables: &'a [String],
+        iterable: &'a AstNode,
+        body: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         ret: &mut Option<AbstractValue>,
         call_stack: &mut Vec<String>,
@@ -733,10 +828,10 @@ impl<'a> Planner<'a> {
         // unknown.)
         let mut body_env = env.clone();
         if let Some(first) = variables.first() {
-            body_env.insert(first.clone(), loop_var_value);
+            body_env.insert(first.as_str(), loop_var_value);
         }
         for extra in variables.iter().skip(1) {
-            body_env.insert(extra.clone(), AbstractValue::unknown());
+            body_env.insert(extra.as_str(), AbstractValue::unknown());
         }
 
         let mut body_demand = PreprocessingDemand::default();
@@ -779,8 +874,8 @@ impl<'a> Planner<'a> {
     /// incurs into `demand`.
     fn eval_expr(
         &mut self,
-        node: &AstNode,
-        env: &mut Env,
+        node: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         call_stack: &mut Vec<String>,
     ) -> AbstractValue {
@@ -815,7 +910,7 @@ impl<'a> Planner<'a> {
                 AbstractValue {
                     len: Len::Known {
                         len: elements.len(),
-                        elem: Box::new(element_shape.unwrap_or(Len::Unknown)),
+                        elem: Rc::new(element_shape.unwrap_or(Len::Unknown)),
                     },
                     secrecy,
                     int: None,
@@ -905,8 +1000,8 @@ impl<'a> Planner<'a> {
     /// branch's demand and value so the caller can take the per-branch maximum.
     fn eval_expr_branch(
         &mut self,
-        node: &AstNode,
-        env: &mut Env,
+        node: &'a AstNode,
+        env: &mut Env<'a>,
         call_stack: &mut Vec<String>,
     ) -> (PreprocessingDemand, AbstractValue) {
         let mut branch_demand = PreprocessingDemand::default();
@@ -918,9 +1013,9 @@ impl<'a> Planner<'a> {
     fn eval_binary_operation(
         &mut self,
         op: &str,
-        left: &AstNode,
-        right: &AstNode,
-        env: &mut Env,
+        left: &'a AstNode,
+        right: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         call_stack: &mut Vec<String>,
     ) -> AbstractValue {
@@ -986,9 +1081,9 @@ impl<'a> Planner<'a> {
 
     fn eval_function_call(
         &mut self,
-        function: &AstNode,
-        arguments: &[AstNode],
-        env: &mut Env,
+        function: &'a AstNode,
+        arguments: &'a [AstNode],
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         call_stack: &mut Vec<String>,
     ) -> AbstractValue {
@@ -1131,7 +1226,7 @@ impl<'a> Planner<'a> {
                 ) {
                     (Some(start), Some(end)) if end >= start => Len::Known {
                         len: (end - start) as usize,
-                        elem: Box::new(
+                        elem: Rc::new(
                             source
                                 .map(|value| value.len.element())
                                 .unwrap_or(Len::Unknown),
@@ -1242,11 +1337,11 @@ impl<'a> Planner<'a> {
     /// folding the element's secrecy into the list's element secrecy.
     fn list_grow(
         &self,
-        receiver: Option<&AstNode>,
+        receiver: Option<&'a AstNode>,
         n: usize,
         element_secrecy: Option<Secrecy>,
         element_shape: Option<Len>,
-        env: &mut Env,
+        env: &mut Env<'a>,
     ) {
         if let Some(AstNode::Identifier(name, _)) = receiver {
             if let Some(value) = env.get_mut(name) {
@@ -1262,7 +1357,7 @@ impl<'a> Planner<'a> {
                         };
                         Len::Known {
                             len: len + n,
-                            elem: Box::new(new_elem),
+                            elem: Rc::new(new_elem),
                         }
                     }
                     Len::Unknown => Len::Unknown,
@@ -1280,7 +1375,7 @@ impl<'a> Planner<'a> {
     }
 
     /// Mark the list variable named by `receiver` as having unknown length.
-    fn list_make_unknown(&self, receiver: Option<&AstNode>, env: &mut Env) {
+    fn list_make_unknown(&self, receiver: Option<&'a AstNode>, env: &mut Env<'a>) {
         if let Some(AstNode::Identifier(name, _)) = receiver {
             if let Some(value) = env.get_mut(name) {
                 value.len = Len::Unknown;
@@ -1440,9 +1535,12 @@ fn scale_demand(demand: &PreprocessingDemand, count: u64) -> PreprocessingDemand
 /// variable visible before the loop, the body's net per-iteration length change
 /// is multiplied by `count` and applied to the pre-loop length. New bindings
 /// introduced inside the loop body are loop-local and not propagated.
-fn apply_loop_length_growth(env: &mut Env, body_env: &Env, count: u64) {
-    for (name, before) in env.clone().iter() {
-        let Some(after) = body_env.get(name) else {
+fn apply_loop_length_growth<'a>(env: &mut Env<'a>, body_env: &Env<'a>, count: u64) {
+    for id in env.changed_slots(body_env) {
+        let Some(before) = env.get_slot(id) else {
+            continue;
+        };
+        let Some(after) = body_env.get_slot(id) else {
             continue;
         };
         let new_len = match (&before.len, &after.len) {
@@ -1472,7 +1570,7 @@ fn apply_loop_length_growth(env: &mut Env, body_env: &Env, count: u64) {
             // we cannot scale it reliably, so treat as unknown.
             (Len::Unknown, Len::Known { .. }) => Len::Unknown,
         };
-        if let Some(slot) = env.get_mut(name) {
+        if let Some(slot) = env.get_slot_mut(id) {
             slot.len = new_len;
         }
     }
@@ -1480,13 +1578,16 @@ fn apply_loop_length_growth(env: &mut Env, body_env: &Env, count: u64) {
 
 /// After an unbounded loop, any list whose length the body changed is no longer
 /// statically known.
-fn apply_loop_length_growth_unknown(env: &mut Env, body_env: &Env) {
-    for (name, before) in env.clone().iter() {
-        let Some(after) = body_env.get(name) else {
+fn apply_loop_length_growth_unknown<'a>(env: &mut Env<'a>, body_env: &Env<'a>) {
+    for id in env.changed_slots(body_env) {
+        let Some(before) = env.get_slot(id) else {
+            continue;
+        };
+        let Some(after) = body_env.get_slot(id) else {
             continue;
         };
         if before.len != after.len {
-            if let Some(slot) = env.get_mut(name) {
+            if let Some(slot) = env.get_slot_mut(id) {
                 slot.len = Len::Unknown;
             }
         }
@@ -1602,6 +1703,35 @@ mod tests {
     use super::*;
     use crate::compiler::{compile, CompilerOptions};
     use stoffel_vm_types::compiled_binary::MpcBackend;
+
+    #[test]
+    fn shallow_analysis_matches_worker_and_rejects_call_chains() {
+        let source = include_str!("../examples/fedavg/main.stfl");
+        let tokens = crate::lexer::tokenize(source, "small.stfl").unwrap();
+        let parsed = crate::parser::parse(&tokens, "small.stfl").unwrap();
+        let transformed = crate::ufcs::transform_ufcs(parsed);
+        let mut errors = crate::errors::ErrorReporter::new();
+        let program = crate::semantic::analyze(transformed, &mut errors, "small.stfl").unwrap();
+        assert!(shallow_preprocessing_program(&program));
+        let expected = plan_preprocessing_demand_inner(&program, MpcBackend::HoneyBadger);
+        let actual = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || plan_preprocessing_demand_for_backend(&program, MpcBackend::HoneyBadger))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(actual, expected);
+        let source =
+            "def helper():\n  return Share.random_field()\ndef main():\n  return helper()\n";
+        let tokens = crate::lexer::tokenize(source, "calls.stfl").unwrap();
+        let program = crate::parser::parse(&tokens, "calls.stfl").unwrap();
+        assert!(!shallow_preprocessing_program(&program));
+        let mut deep = AstNode::Identifier("x".into(), Default::default());
+        for _ in 0..10 {
+            deep = AstNode::Block(vec![deep]);
+        }
+        assert!(!shallow_preprocessing_program(&deep));
+    }
 
     fn demand_for(src: &str) -> PreprocessingDemand {
         // Compile on a dedicated large-stack thread. The compiler's parser /
@@ -1721,6 +1851,27 @@ def main(n: int64) -> int64:
             demand.triples >= 1,
             "unknown batch must provision at least one"
         );
+    }
+
+    #[test]
+    fn equal_branch_updates_replace_the_incoming_shape() {
+        let demand = demand_for(
+            r#"
+def main(flag: int64) -> int64:
+  var a: list[secret bool] = []
+  var b: list[secret bool] = []
+  if flag == 0:
+    a.append(Share.from_clear_int(1, 1))
+    b.append(Share.from_clear_int(0, 1))
+  else:
+    a.append(Share.from_clear_int(0, 1))
+    b.append(Share.from_clear_int(1, 1))
+  var products = Share.batch_mul(a, b)
+  return 0
+"#,
+        );
+        assert_eq!(demand.triples, 1);
+        assert!(!demand.dynamic);
     }
 
     #[test]

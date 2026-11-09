@@ -1407,7 +1407,7 @@ impl CompiledBinary {
         // Write labels in a stable order, so that serializing the same program
         // always yields the same bytes and therefore the same content address.
         write_usize_as_u16(writer, function.labels.len(), "label count")?;
-        let mut labels = function.labels.iter().collect::<Vec<_>>();
+        let mut labels: Vec<_> = function.labels.iter().collect();
         labels.sort_unstable_by_key(|(label, _)| *label);
         for (label, &offset) in labels {
             write_len_prefixed_str_u16(writer, label, "label name length")?;
@@ -3296,6 +3296,38 @@ mod tests {
             binary.functions[0].parameter_types
         );
         assert_eq!(function.return_type, binary.functions[0].return_type);
+    }
+
+    #[test]
+    fn label_serialization_is_deterministic_and_round_trips() {
+        let mut expected = None;
+        for seed in 0..64 {
+            let labels = (0..8)
+                .map(|i| {
+                    let offset = (i + seed) % 8;
+                    (format!("label_{offset}"), offset)
+                })
+                .collect();
+            let function = VMFunction::new(
+                "main".to_string(),
+                vec![],
+                vec![],
+                None,
+                1,
+                vec![Instruction::RET(0); 8],
+                labels,
+            );
+            let binary = CompiledBinary::from_vm_functions(&[function]);
+            let mut bytes = Vec::new();
+            binary.serialize(&mut bytes).unwrap();
+            let decoded = CompiledBinary::deserialize(&mut Cursor::new(&bytes)).unwrap();
+            assert_eq!(decoded.functions[0].labels, binary.functions[0].labels);
+            if let Some(expected) = &expected {
+                assert_eq!(&bytes, expected);
+            } else {
+                expected = Some(bytes);
+            }
+        }
     }
 
     #[test]

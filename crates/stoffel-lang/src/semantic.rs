@@ -55,7 +55,7 @@ pub struct SemanticError;
 impl<'a> SemanticAnalyzer<'a> {
     pub fn new(error_reporter: &'a mut ErrorReporter, _filename: &'a str) -> Self {
         SemanticAnalyzer {
-            symbol_table: SymbolTable::new(),
+            symbol_table: SymbolTable::for_compiler(),
             error_reporter,
             current_function_return_type: None,
             imported_symbols: HashMap::new(),
@@ -73,7 +73,7 @@ impl<'a> SemanticAnalyzer<'a> {
         imported_symbols: HashMap<String, SymbolInfo>,
     ) -> Self {
         SemanticAnalyzer {
-            symbol_table: SymbolTable::new(),
+            symbol_table: SymbolTable::for_compiler(),
             error_reporter,
             current_function_return_type: None,
             imported_symbols,

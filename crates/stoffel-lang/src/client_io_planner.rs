@@ -8,6 +8,7 @@
 //! The proven output contract replaces codegen's local guesses after lowering.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ast::{AstNode, Parameter, Pragma, Value};
 use crate::errors::{CompilerError, SourceLocation};
@@ -60,7 +61,9 @@ impl AbstractValue {
     }
 }
 
-type Env = HashMap<String, AbstractValue>;
+// Names live in the immutable AST for the entire planning pass. Borrow them so
+// branch/backedge snapshots copy values without allocating one string per local.
+type Env<'a> = crate::snapshot_env::SnapshotEnv<'a, AbstractValue>;
 type InferredInputs = HashMap<u64, Vec<Option<ShareType>>>;
 type InferredDynamicInputs = HashMap<u64, Vec<Option<ShareType>>>;
 type InferredOutputCounts = HashMap<u64, usize>;
@@ -74,6 +77,91 @@ enum Aggregate {
     Object(HashMap<String, AbstractValue>),
 }
 
+// Snapshots share immutable pages. Only a page written after a snapshot is
+// copied, and merges can skip every page still shared with their input state.
+// Keep aggregate identities append-only, including allocations on either branch.
+const HEAP_PAGE_SIZE: usize = 64;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Heap {
+    pages: Vec<Rc<Vec<Aggregate>>>,
+    len: usize,
+}
+
+impl Heap {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn push(&mut self, value: Aggregate) {
+        if self.len.is_multiple_of(HEAP_PAGE_SIZE) {
+            self.pages.push(Rc::new(Vec::with_capacity(HEAP_PAGE_SIZE)));
+        }
+        Rc::make_mut(self.pages.last_mut().unwrap()).push(value);
+        self.len += 1;
+    }
+
+    fn get(&self, id: usize) -> Option<&Aggregate> {
+        (id < self.len).then(|| &self.pages[id / HEAP_PAGE_SIZE][id % HEAP_PAGE_SIZE])
+    }
+
+    fn get_mut(&mut self, id: usize) -> Option<&mut Aggregate> {
+        if id >= self.len {
+            return None;
+        }
+        Some(&mut Rc::make_mut(&mut self.pages[id / HEAP_PAGE_SIZE])[id % HEAP_PAGE_SIZE])
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Aggregate> {
+        self.pages
+            .iter_mut()
+            .flat_map(|page| Rc::make_mut(page).iter_mut())
+    }
+
+    fn restore_prefix(&mut self, before: &Self) {
+        let full = before.len / HEAP_PAGE_SIZE;
+        self.pages[..full].clone_from_slice(&before.pages[..full]);
+        let tail = before.len % HEAP_PAGE_SIZE;
+        if tail != 0 {
+            if self.len == before.len {
+                self.pages[full] = Rc::clone(&before.pages[full]);
+            } else {
+                Rc::make_mut(&mut self.pages[full])[..tail]
+                    .clone_from_slice(&before.pages[full][..tail]);
+            }
+        }
+    }
+
+    fn changed_ids(&self, after: &Self) -> Vec<usize> {
+        let mut changed = Vec::new();
+        for (page_index, page) in self.pages.iter().enumerate() {
+            let other = &after.pages[page_index];
+            if !Rc::ptr_eq(page, other) {
+                for (offset, value) in page.iter().enumerate() {
+                    if value != &other[offset] {
+                        changed.push(page_index * HEAP_PAGE_SIZE + offset);
+                    }
+                }
+            }
+        }
+        changed
+    }
+}
+
+impl std::ops::Index<usize> for Heap {
+    type Output = Aggregate;
+
+    fn index(&self, id: usize) -> &Aggregate {
+        self.get(id).expect("valid aggregate id")
+    }
+}
+
+impl std::ops::IndexMut<usize> for Heap {
+    fn index_mut(&mut self, id: usize) -> &mut Aggregate {
+        self.get_mut(id).expect("valid aggregate id")
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Control {
     #[default]
@@ -85,24 +173,26 @@ enum Control {
 
 struct FunctionInfo<'a> {
     parameters: &'a [Parameter],
+    parameter_types: Rc<[Option<SymbolType>]>,
     body: &'a AstNode,
     is_entry: bool,
     returns_list: bool,
     return_type: Option<SymbolType>,
 }
 
-struct LoopSnapshot {
-    env: Env,
-    heap: Vec<Aggregate>,
+struct LoopSnapshot<'a> {
+    env: Env<'a>,
+    heap: Heap,
     offsets: HashMap<u64, BTreeSet<usize>>,
 }
 
 #[derive(Default)]
-struct LoopFrame {
-    breaks: Vec<LoopSnapshot>,
-    continues: Vec<LoopSnapshot>,
+struct LoopFrame<'a> {
+    breaks: Vec<LoopSnapshot<'a>>,
+    continues: Vec<LoopSnapshot<'a>>,
 }
 
+#[derive(Default)]
 struct Planner<'a> {
     functions: HashMap<String, FunctionInfo<'a>>,
     relevant: HashSet<String>,
@@ -112,19 +202,111 @@ struct Planner<'a> {
     output_counts: InferredOutputCounts,
     call_stack: Vec<(String, Vec<AbstractValue>)>,
     scalar_cache: HashMap<(String, Vec<AbstractValue>), AbstractValue>,
-    heap: Vec<Aggregate>,
+    heap: Heap,
     uncertain_lengths: HashSet<usize>,
     aggregate_aliases: HashMap<usize, BTreeSet<usize>>,
+    // Reverse edges contain only original referents; proxy ids are append-only.
+    alias_dependents: HashMap<usize, Vec<usize>>,
     outputs: InferredOutputs,
     output_offsets: HashMap<u64, BTreeSet<usize>>,
     object_types: HashMap<String, Vec<crate::ast::FieldDefinition>>,
     errors: Vec<CompilerError>,
     output_locations: HashMap<u64, SourceLocation>,
     control: Control,
-    loops: Vec<LoopFrame>,
+    loops: Vec<LoopFrame<'a>>,
     returns: Vec<AbstractValue>,
     steps: usize,
+    integer_invariants: Option<Box<IntegerInvariants>>,
     needs_output_shapes: bool,
+}
+
+// Only exact, plain integer arithmetic is cached. Aggregate facts and calls
+// remain dynamic; writes anywhere in the loop exclude a binding entirely.
+type IntegerInvariants = [Option<(*const AstNode, i128, usize)>; 32];
+
+fn loop_integer_invariants<'a>(
+    condition: &'a AstNode,
+    body: &'a AstNode,
+    env: &Env<'a>,
+) -> Option<Box<IntegerInvariants>> {
+    fn writes<'a>(node: &'a AstNode, names: &mut HashSet<&'a str>) {
+        match node {
+            AstNode::VariableDeclaration { name, .. } => {
+                names.insert(name);
+            }
+            AstNode::Assignment { target, .. } => {
+                if let AstNode::Identifier(name, _) = target.as_ref() {
+                    names.insert(name);
+                }
+            }
+            AstNode::ForLoop { variables, .. } => {
+                names.extend(variables.iter().map(String::as_str))
+            }
+            _ => {}
+        }
+        crate::optimizations::for_each_child(node, &mut |child| writes(child, names));
+    }
+    fn gather(
+        node: &AstNode,
+        env: &Env<'_>,
+        writes: &HashSet<&str>,
+        cache: &mut IntegerInvariants,
+    ) -> Option<(i128, usize)> {
+        let value = match node {
+            AstNode::Literal {
+                value: Value::Int { value, .. },
+                ..
+            } => i128::try_from(*value).ok().map(|v| (v, 1)),
+            AstNode::Literal {
+                value: Value::Bool(value),
+                ..
+            } => Some((i128::from(*value), 1)),
+            AstNode::Identifier(name, _) if !writes.contains(name.as_str()) => env
+                .get(name)
+                .and_then(|value| value.int.filter(|&n| *value == AbstractValue::int(n)))
+                .map(|v| (v, 1)),
+            AstNode::BinaryOperation {
+                op, left, right, ..
+            } => {
+                let left = gather(left, env, writes, cache);
+                let right = gather(right, env, writes, cache);
+                left.zip(right).and_then(|((a, ac), (b, bc))| {
+                    eval_binary(op, Some(a), Some(b)).map(|v| (v, 1 + ac + bc))
+                })
+            }
+            AstNode::UnaryOperation { op, operand, .. } => gather(operand, env, writes, cache)
+                .and_then(|(value, cost)| {
+                    let result = match op.as_str() {
+                        "-" => value.checked_neg(),
+                        "+" => Some(value),
+                        "not" => Some(i128::from(value == 0)),
+                        "~" => Some(!value),
+                        _ => None,
+                    };
+                    result.map(|v| (v, cost + 1))
+                }),
+            _ => {
+                crate::optimizations::for_each_child(node, &mut |child| {
+                    gather(child, env, writes, cache);
+                });
+                None
+            }
+        };
+        if let Some((value, cost)) = value {
+            if cost > 1 {
+                let key = node as *const AstNode;
+                cache[((key as usize) >> 4) & 31] = Some((key, value, cost));
+            }
+        }
+        value
+    }
+    let mut mutated = HashSet::new();
+    writes(condition, &mut mutated);
+    writes(body, &mut mutated);
+    let mut cache = Box::new([None; 32]);
+    gather(condition, env, &mutated, &mut cache);
+    gather(body, env, &mutated, &mut cache);
+    cache.iter().any(Option::is_some).then_some(cache)
 }
 
 const MAX_STATIC_LOOP_ITERATIONS: usize = 1_000_000;
@@ -269,6 +451,14 @@ fn plan_client_io<'a>(
     entry_points: &[String],
     infer_output_shapes: bool,
 ) -> Planner<'a> {
+    // With no client operations anywhere in the checked program, all inferred
+    // schemas are empty. In particular, do not abstractly execute large
+    // inlined/unrolled circuits just to rediscover that fact. Scan every
+    // function, including closure targets and additional entrypoints, rather
+    // than assuming that only `main` can perform I/O.
+    if !has_client_io(program) {
+        return Planner::default();
+    }
     let mut functions = HashMap::new();
     collect_functions(program, &mut functions);
 
@@ -362,9 +552,10 @@ fn plan_client_io<'a>(
         output_counts: HashMap::new(),
         call_stack: Vec::new(),
         scalar_cache: HashMap::new(),
-        heap: Vec::new(),
+        heap: Heap::default(),
         uncertain_lengths: HashSet::new(),
         aggregate_aliases: HashMap::new(),
+        alias_dependents: HashMap::new(),
         outputs: HashMap::new(),
         output_offsets: HashMap::new(),
         object_types,
@@ -374,17 +565,54 @@ fn plan_client_io<'a>(
         loops: Vec::new(),
         returns: Vec::new(),
         steps: 0,
+        integer_invariants: None,
         needs_output_shapes,
     };
 
     // Top-level executable statements are an entry form too. Function
     // definitions are scope declarations and are skipped by `visit`.
     planner.visit(program, &mut Env::new());
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
         planner.output_offsets.clear();
-        planner.visit_user_call(&entry, &[], &Env::new());
+        // Only the final entry may omit its unused tail: earlier entries still
+        // consume the same shared visitor budget before the next entry runs.
+        planner.visit_user_call(entry, &[], index + 1 == entries.len());
     }
     planner
+}
+
+fn has_client_io(node: &AstNode) -> bool {
+    match node {
+        AstNode::FunctionDefinition {
+            body, parameters, ..
+        } => {
+            return has_client_io(body)
+                || parameters.iter().any(|parameter| {
+                    parameter
+                        .default_value
+                        .as_deref()
+                        .is_some_and(has_client_io)
+                });
+        }
+        AstNode::FunctionCall { function, .. }
+        | AstNode::CommandCall {
+            command: function, ..
+        } => {
+            if matches!(function.as_ref(), AstNode::Identifier(name, _)
+                if is_client_input_call(name) || is_client_output_call(name))
+            {
+                return true;
+            }
+        }
+        _ => {}
+    }
+    let mut found = false;
+    crate::optimizations::for_each_child(node, &mut |child| {
+        if !found {
+            found = has_client_io(child);
+        }
+    });
+    found
 }
 
 /// Resolve output domains from actual calls before optimization erases source
@@ -446,6 +674,10 @@ fn collect_functions<'a>(node: &'a AstNode, out: &mut HashMap<String, FunctionIn
             out.insert(
                 name.clone(),
                 FunctionInfo {
+                    parameter_types: parameters
+                        .iter()
+                        .map(|p| p.type_annotation.as_deref().map(SymbolType::from_ast))
+                        .collect(),
                     parameters,
                     body,
                     is_entry: pragmas
@@ -503,8 +735,47 @@ fn collect_calls(node: &AstNode, calls: &mut HashSet<String>, reads_client: &mut
     });
 }
 
-impl Planner<'_> {
-    fn visit(&mut self, node: &AstNode, env: &mut Env) -> AbstractValue {
+impl<'a> Planner<'a> {
+    fn may_perform_client_io(&self, node: &AstNode) -> bool {
+        if let AstNode::FunctionCall { function, .. }
+        | AstNode::CommandCall {
+            command: function, ..
+        } = node
+        {
+            match function.as_ref() {
+                AstNode::Identifier(name, _) => {
+                    if is_client_input_call(name)
+                        || is_client_output_call(name)
+                        || self.relevant.contains(name)
+                        || matches!(name.as_str(), "call_closure" | "call_closure_with_arg")
+                    {
+                        return true;
+                    }
+                }
+                _ => return true,
+            }
+        }
+        let mut found = false;
+        crate::optimizations::for_each_child(node, &mut |child| {
+            found = found || self.may_perform_client_io(child);
+        });
+        found
+    }
+
+    fn visit_statements(&mut self, nodes: &'a [AstNode], env: &mut Env<'a>) -> AbstractValue {
+        let mut value = AbstractValue::default();
+        for node in nodes {
+            if self.control != Control::Next {
+                break;
+            }
+            if !matches!(node, AstNode::FunctionDefinition { .. }) {
+                value = self.visit(node, env);
+            }
+        }
+        value
+    }
+
+    fn visit(&mut self, node: &'a AstNode, env: &mut Env<'a>) -> AbstractValue {
         self.steps += 1;
         if self.steps > 5_000_000 {
             if self.steps == 5_000_001 && self.needs_output_shapes {
@@ -514,6 +785,20 @@ impl Planner<'_> {
                 opaque: true,
                 ..AbstractValue::default()
             };
+        }
+        if matches!(
+            node,
+            AstNode::BinaryOperation { .. } | AstNode::UnaryOperation { .. }
+        ) {
+            if let Some(cache) = &self.integer_invariants {
+                let key = node as *const AstNode;
+                if let Some((cached, value, cost)) = cache[((key as usize) >> 4) & 31] {
+                    if cached == key && self.steps + cost - 1 <= 5_000_000 {
+                        self.steps += cost - 1;
+                        return AbstractValue::int(value);
+                    }
+                }
+            }
         }
         match node {
             AstNode::Literal { value, .. } => match value {
@@ -527,7 +812,7 @@ impl Planner<'_> {
                 Value::Bool(value) => AbstractValue::int(i128::from(*value)),
                 _ => AbstractValue::default(),
             },
-            AstNode::Identifier(name, _) => env.get(name).copied().unwrap_or_default(),
+            AstNode::Identifier(name, _) => env.get_ast(name.as_str()).copied().unwrap_or_default(),
             AstNode::VariableDeclaration {
                 name,
                 value,
@@ -545,13 +830,13 @@ impl Planner<'_> {
                         value = self.default_value(&ty, 0);
                     }
                 }
-                env.insert(name.clone(), value);
+                env.insert(name.as_str(), value);
                 value
             }
             AstNode::Assignment { target, value, .. } => {
                 let value = self.visit(value, env);
                 if let AstNode::Identifier(name, _) = target.as_ref() {
-                    env.insert(name.clone(), value);
+                    env.insert(name.as_str(), value);
                 } else {
                     self.assign_aggregate(target, value, env);
                 }
@@ -618,18 +903,7 @@ impl Planner<'_> {
                     ..AbstractValue::default()
                 }
             }
-            AstNode::Block(nodes) => {
-                let mut value = AbstractValue::default();
-                for node in nodes {
-                    if self.control != Control::Next {
-                        break;
-                    }
-                    if !matches!(node, AstNode::FunctionDefinition { .. }) {
-                        value = self.visit(node, env);
-                    }
-                }
-                value
-            }
+            AstNode::Block(nodes) => self.visit_statements(nodes, env),
             AstNode::FunctionDefinition { .. } => AbstractValue::default(),
             AstNode::FunctionCall {
                 function,
@@ -695,7 +969,7 @@ impl Planner<'_> {
                 self.output_counts.clone_from(&outputs_before);
                 self.outputs.clone_from(&types_before);
                 self.output_offsets.clone_from(&offsets_before);
-                self.heap[..heap_before.len()].clone_from_slice(&heap_before);
+                self.heap.restore_prefix(&heap_before);
                 self.control = Control::Next;
                 let mut else_env = original.clone();
                 let else_value = else_branch
@@ -720,7 +994,12 @@ impl Planner<'_> {
                 } else {
                     self.output_offsets = else_offsets;
                 }
-                for (id, then) in then_heap.iter().enumerate().take(heap_before.len()) {
+                for id in then_heap
+                    .changed_ids(&self.heap)
+                    .into_iter()
+                    .filter(|&id| id < heap_before.len())
+                {
+                    let then = &then_heap[id];
                     if different_list_lengths(then, &self.heap[id]) {
                         self.uncertain_lengths.insert(id);
                     }
@@ -778,12 +1057,13 @@ impl Planner<'_> {
                     .int
                     .and_then(|n| usize::try_from(n).ok());
                 if let Some(Aggregate::List(values)) =
-                    base.aggregate.and_then(|id| self.heap.get(id)).cloned()
+                    base.aggregate.and_then(|id| self.heap.get(id))
                 {
                     if let Some(index) = index {
                         return values.get(index).copied().unwrap_or_default();
                     }
                     return values
+                        .clone()
                         .into_iter()
                         .reduce(|a, b| self.join_value(a, b))
                         .unwrap_or_default();
@@ -862,16 +1142,28 @@ impl Planner<'_> {
 
     fn visit_call(
         &mut self,
-        function: &AstNode,
-        arguments: &[AstNode],
+        function: &'a AstNode,
+        arguments: &'a [AstNode],
         resolved_return_type: Option<&SymbolType>,
-        env: &mut Env,
+        env: &mut Env<'a>,
         location: &SourceLocation,
     ) -> AbstractValue {
-        let argument_values = arguments
-            .iter()
-            .map(|argument| self.visit(argument, env))
-            .collect::<Vec<_>>();
+        // ponytail: common calls fit four values; larger calls use the existing
+        // vector path. Both evaluate arguments exactly once, left to right.
+        let mut local = [AbstractValue::default(); 4];
+        let spill;
+        let argument_values: &[AbstractValue] = if arguments.len() <= local.len() {
+            for (slot, argument) in local.iter_mut().zip(arguments) {
+                *slot = self.visit(argument, env);
+            }
+            &local[..arguments.len()]
+        } else {
+            spill = arguments
+                .iter()
+                .map(|argument| self.visit(argument, env))
+                .collect::<Vec<_>>();
+            &spill
+        };
         let AstNode::Identifier(name, _) = function else {
             self.visit(function, env);
             return AbstractValue::default();
@@ -902,7 +1194,7 @@ impl Planner<'_> {
                 .cloned()
             {
                 if self.functions.contains_key(&target) {
-                    return self.visit_user_call(&target, &argument_values[1..], env);
+                    return self.visit_user_call(&target, &argument_values[1..], false);
                 }
             }
             if self.needs_output_shapes {
@@ -944,13 +1236,13 @@ impl Planner<'_> {
                 ..AbstractValue::default()
             };
         } else if is_client_input_sum_call(name) {
-            self.record_client_input_sum(name, &argument_values, resolved_return_type);
+            self.record_client_input_sum(name, argument_values, resolved_return_type);
         } else if is_client_input_call(name) {
-            self.record_client_input(name, &argument_values, resolved_return_type);
+            self.record_client_input(name, argument_values, resolved_return_type);
         } else if is_client_output_call(name) {
-            self.record_client_output(name, &argument_values);
+            self.record_client_output(name, argument_values);
             if self.needs_output_shapes {
-                self.record_output_domains(name, &argument_values, location);
+                self.record_output_domains(name, argument_values, location);
             }
         } else if matches!(name.as_str(), "len" | "array_length") {
             return AbstractValue {
@@ -963,14 +1255,14 @@ impl Planner<'_> {
             };
         } else if matches!(name.as_str(), "append" | "array_push" | "insert") {
             if let Some(AstNode::Identifier(receiver, _)) = arguments.first() {
-                if let Some(value) = env.get_mut(receiver) {
+                if let Some(value) = env.get_mut(receiver.as_str()) {
                     value.list_len = value.list_len.and_then(|len| len.checked_add(1));
                 }
             }
         } else if name == "extend" {
             if let Some(AstNode::Identifier(receiver, _)) = arguments.first() {
                 let extension_len = argument_values.get(1).and_then(|value| value.list_len);
-                if let Some(value) = env.get_mut(receiver) {
+                if let Some(value) = env.get_mut(receiver.as_str()) {
                     value.list_len = value
                         .list_len
                         .zip(extension_len)
@@ -981,17 +1273,15 @@ impl Planner<'_> {
             || self.functions.get(name).is_some_and(|info| {
                 self.needs_output_shapes
                     && (self.domain_sensitive.contains(name)
-                        || info.parameters.iter().zip(&argument_values).any(
+                        || info.parameter_types.iter().zip(argument_values).any(
                             |(parameter, value)| {
                                 value.aggregate.is_some()
                                 || (value.opaque && value.share.is_none())
                                 || parameter
-                                    .type_annotation
-                                    .as_deref()
-                                    .map(SymbolType::from_ast)
+                                    .as_ref()
                                     .and_then(|ty| {
                                         crate::codegen::share_type_for_secret_scalar_symbol_type(
-                                            &ty,
+                                            ty,
                                         )
                                     })
                                     .is_some_and(|expected| {
@@ -1005,7 +1295,7 @@ impl Planner<'_> {
                         }))
             })
         {
-            return self.visit_user_call(name, &argument_values, env);
+            return self.visit_user_call(name, argument_values, false);
         }
         if let Some(id) = argument_values.first().and_then(|v| v.aggregate) {
             match name.as_str() {
@@ -1133,7 +1423,7 @@ impl Planner<'_> {
             if let Some(Aggregate::Object(fields)) =
                 value.aggregate.and_then(|id| self.heap.get_mut(id))
             {
-                for (arg, value) in arguments.iter().zip(&argument_values) {
+                for (arg, value) in arguments.iter().zip(argument_values) {
                     if let AstNode::NamedArgument { name, .. } = arg {
                         fields.insert(name.clone(), *value);
                     }
@@ -1141,20 +1431,21 @@ impl Planner<'_> {
             }
             return value;
         }
-        self.builtin_value(name, &argument_values, resolved_return_type)
+        self.builtin_value(name, argument_values, resolved_return_type)
     }
 
     fn visit_user_call(
         &mut self,
         name: &str,
         arguments: &[AbstractValue],
-        _caller_env: &Env,
+        discard_tail: bool,
     ) -> AbstractValue {
-        let cacheable =
-            !self.relevant.contains(name) && arguments.iter().all(|a| a.aggregate.is_none());
-        let cache_key = (name.to_owned(), arguments.to_vec());
-        if cacheable {
-            if let Some(value) = self.scalar_cache.get(&cache_key) {
+        let cacheable = !discard_tail
+            && !self.relevant.contains(name)
+            && arguments.iter().all(|a| a.aggregate.is_none());
+        let cache_key = cacheable.then(|| (name.to_owned(), arguments.to_vec()));
+        if let Some(key) = &cache_key {
+            if let Some(value) = self.scalar_cache.get(key) {
                 return *value;
             }
         }
@@ -1181,31 +1472,47 @@ impl Planner<'_> {
             return AbstractValue::default();
         };
         let parameters = info.parameters;
+        let parameter_types = info.parameter_types.clone();
         let body = info.body;
         let return_type = info.return_type.clone();
         let mut env = Env::new();
-        for (index, parameter) in parameters.iter().enumerate() {
+        for (index, (parameter, ty)) in parameters.iter().zip(parameter_types.iter()).enumerate() {
             let value = arguments.get(index).copied().unwrap_or_else(|| {
-                parameter
-                    .type_annotation
-                    .as_deref()
-                    .map(SymbolType::from_ast)
-                    .map(|ty| self.typed_value(&ty))
+                ty.as_ref()
+                    .map(|ty| self.typed_value(ty))
                     .unwrap_or_default()
             });
-            let value = parameter
-                .type_annotation
-                .as_deref()
-                .map(SymbolType::from_ast)
-                .map(|ty| self.apply_type(value, &ty))
+            let value = ty
+                .as_ref()
+                .map(|ty| self.apply_type(value, ty))
                 .unwrap_or(value);
-            env.insert(parameter.name.clone(), value);
+            env.insert(parameter.name.as_str(), value);
         }
         let saved_control = self.control;
         let saved_returns = std::mem::take(&mut self.returns);
         self.control = Control::Next;
         self.call_stack.push((name.to_string(), arguments.to_vec()));
-        let last = self.visit(body, &mut env);
+        let last = if let AstNode::Block(nodes) = body {
+            if discard_tail && !self.needs_output_shapes {
+                let end = nodes
+                    .iter()
+                    .rposition(|node| self.may_perform_client_io(node))
+                    .map_or(0, |index| index + 1);
+                self.steps += 1; // the block node itself
+                if self.steps > 5_000_000 {
+                    AbstractValue {
+                        opaque: true,
+                        ..AbstractValue::default()
+                    }
+                } else {
+                    self.visit_statements(&nodes[..end], &mut env)
+                }
+            } else {
+                self.visit(body, &mut env)
+            }
+        } else {
+            self.visit(body, &mut env)
+        };
         self.call_stack.pop();
         let returns = std::mem::replace(&mut self.returns, saved_returns);
         self.control = saved_control;
@@ -1217,8 +1524,8 @@ impl Planner<'_> {
             .as_ref()
             .map(|ty| self.apply_type(value, ty))
             .unwrap_or(value);
-        if cacheable && value.aggregate.is_none() {
-            self.scalar_cache.insert(cache_key, value);
+        if let Some(key) = cache_key.filter(|_| value.aggregate.is_none()) {
+            self.scalar_cache.insert(key, value);
         }
         value
     }
@@ -1332,24 +1639,24 @@ impl Planner<'_> {
 
     fn visit_for(
         &mut self,
-        variables: &[String],
-        iterable: &AstNode,
-        body: &AstNode,
-        env: &mut Env,
+        variables: &'a [String],
+        iterable: &'a AstNode,
+        body: &'a AstNode,
+        env: &mut Env<'a>,
     ) {
         let mut names = HashSet::new();
-        fn declarations(node: &AstNode, names: &mut HashSet<String>) {
+        fn declarations<'a>(node: &'a AstNode, names: &mut HashSet<&'a str>) {
             if let AstNode::VariableDeclaration { name, .. } = node {
-                names.insert(name.clone());
+                names.insert(name.as_str());
             }
             crate::optimizations::for_each_child(node, &mut |child| declarations(child, names));
         }
         declarations(body, &mut names);
-        names.extend(variables.iter().cloned());
+        names.extend(variables.iter().map(String::as_str));
         let bindings: Vec<_> = names
             .into_iter()
             .map(|name| {
-                let value = env.get(&name).copied();
+                let value = env.get(name).copied();
                 (name, value)
             })
             .collect();
@@ -1360,17 +1667,17 @@ impl Planner<'_> {
             if let Some(value) = value {
                 env.insert(name, value);
             } else {
-                env.remove(&name);
+                env.remove(name);
             }
         }
     }
 
     fn visit_for_inner(
         &mut self,
-        variables: &[String],
-        iterable: &AstNode,
-        body: &AstNode,
-        env: &mut Env,
+        variables: &'a [String],
+        iterable: &'a AstNode,
+        body: &'a AstNode,
+        env: &mut Env<'a>,
     ) {
         if let AstNode::BinaryOperation {
             op, left, right, ..
@@ -1386,7 +1693,7 @@ impl Planner<'_> {
                     {
                         for value in start..end {
                             if let Some(variable) = variables.first() {
-                                env.insert(variable.clone(), AbstractValue::int(value));
+                                env.insert(variable.as_str(), AbstractValue::int(value));
                             }
                             self.visit(body, env);
                             self.merge_continues(env);
@@ -1416,7 +1723,7 @@ impl Planner<'_> {
         {
             for value in values {
                 if let Some(variable) = variables.first() {
-                    env.insert(variable.clone(), value);
+                    env.insert(variable.as_str(), value);
                 }
                 self.visit(body, env);
                 self.merge_continues(env);
@@ -1452,20 +1759,22 @@ impl Planner<'_> {
         };
         let setup = variables
             .iter()
-            .map(|name| (name.clone(), element))
+            .map(|name| (name.as_str(), element))
             .collect::<Vec<_>>();
         self.visit_dynamic_loop(body, env, &setup, None, iterable.location());
     }
 
-    fn visit_while(&mut self, condition: &AstNode, body: &AstNode, env: &mut Env) {
+    fn visit_while(&mut self, condition: &'a AstNode, body: &'a AstNode, env: &mut Env<'a>) {
+        let invariants = loop_integer_invariants(condition, body, env);
+        let saved = std::mem::replace(&mut self.integer_invariants, invariants);
         self.loops.push(LoopFrame::default());
         self.visit_while_inner(condition, body, env);
         self.finish_loop(env);
+        self.integer_invariants = saved;
     }
 
-    fn visit_while_inner(&mut self, condition: &AstNode, body: &AstNode, env: &mut Env) {
+    fn visit_while_inner(&mut self, condition: &'a AstNode, body: &'a AstNode, env: &mut Env<'a>) {
         for _ in 0..MAX_STATIC_LOOP_ITERATIONS {
-            let dynamic_client_counter = dynamic_client_loop_counter(condition, env);
             match self.visit(condition, env).int {
                 Some(0) => return,
                 Some(_) => {
@@ -1519,7 +1828,11 @@ impl Planner<'_> {
                     let mut setup = Vec::new();
                     // Runtime client counters represent a range of slots, not
                     // a literal first slot in the manifest.
-                    if let Some((counter, first_client_slot)) = dynamic_client_counter {
+                    // The recognized condition only reads two identifiers, so
+                    // its evaluation cannot change the counter environment.
+                    if let Some((counter, first_client_slot)) =
+                        dynamic_client_loop_counter(condition, env)
+                    {
                         setup.push((
                             counter,
                             AbstractValue {
@@ -1530,9 +1843,9 @@ impl Planner<'_> {
                     } else if let AstNode::BinaryOperation { left, right, .. } = condition {
                         for operand in [left, right] {
                             if let AstNode::Identifier(name, _) = operand.as_ref() {
-                                let mut value = env.get(name).copied().unwrap_or_default();
+                                let mut value = env.get(name.as_str()).copied().unwrap_or_default();
                                 value.int = None;
-                                setup.push((name.clone(), value));
+                                setup.push((name.as_str(), value));
                             }
                         }
                     }
@@ -1559,16 +1872,16 @@ impl Planner<'_> {
     }
 }
 
-impl Planner<'_> {
+impl<'a> Planner<'a> {
     /// Join the zero-iteration path and every reachable backedge until the
     /// abstract state stabilizes. A single body visit misses delayed domain
     /// changes (for example `result = previous; previous = new_domain`).
     fn visit_dynamic_loop(
         &mut self,
-        body: &AstNode,
-        env: &mut Env,
-        setup: &[(String, AbstractValue)],
-        condition: Option<&AstNode>,
+        body: &'a AstNode,
+        env: &mut Env<'a>,
+        setup: &[(&'a str, AbstractValue)],
+        condition: Option<&'a AstNode>,
         location: SourceLocation,
     ) {
         let counts_before = self.output_counts.clone();
@@ -1576,7 +1889,7 @@ impl Planner<'_> {
         let returns_before = self.returns.len();
         for iteration in 0..64 {
             for (name, value) in setup {
-                env.insert(name.clone(), *value);
+                env.insert(name, *value);
             }
             let header = self.loop_snapshot(env);
             let uncertain_before = self.uncertain_lengths.clone();
@@ -1615,8 +1928,8 @@ impl Planner<'_> {
             opaque: true,
             ..AbstractValue::default()
         };
-        for (name, value) in env.iter_mut() {
-            if initial.env.get(name) != Some(value) {
+        for id in initial.env.changed_slots(env) {
+            if let Some(value) = env.get_slot_mut(id) {
                 *value = unknown;
             }
         }
@@ -1629,7 +1942,7 @@ impl Planner<'_> {
         self.returns[returns_before..].fill(unknown);
     }
 
-    fn loop_snapshot(&self, env: &Env) -> LoopSnapshot {
+    fn loop_snapshot(&self, env: &Env<'a>) -> LoopSnapshot<'a> {
         LoopSnapshot {
             env: env.clone(),
             heap: self.heap.clone(),
@@ -1637,12 +1950,12 @@ impl Planner<'_> {
         }
     }
 
-    fn merge_snapshot(&mut self, env: &mut Env, snapshot: LoopSnapshot) {
+    fn merge_snapshot(&mut self, env: &mut Env<'a>, snapshot: LoopSnapshot<'a>) {
         self.merge_loop_state(env, &snapshot.env, &snapshot.heap);
         self.output_offsets = merge_offsets(&self.output_offsets, &snapshot.offsets);
     }
 
-    fn merge_continues(&mut self, env: &mut Env) {
+    fn merge_continues(&mut self, env: &mut Env<'a>) {
         let snapshots = self
             .loops
             .last_mut()
@@ -1659,7 +1972,7 @@ impl Planner<'_> {
         }
     }
 
-    fn finish_loop(&mut self, env: &mut Env) {
+    fn finish_loop(&mut self, env: &mut Env<'a>) {
         let Some(frame) = self.loops.pop() else {
             return;
         };
@@ -1691,24 +2004,31 @@ impl Planner<'_> {
             };
             self.heap[*referent] = next;
         }
-        // Cached joins must reflect later writes through either the merged
-        // reference or one of its original aliases.
-        for (proxy, sources) in self.aggregate_aliases.clone() {
-            if !sources.is_disjoint(&refs) {
-                let mut values = sources
-                    .iter()
-                    .map(|source| self.heap[*source].clone())
-                    .collect::<Vec<_>>()
-                    .into_iter();
-                if let Some(mut joined) = values.next() {
-                    for value in values {
-                        if different_list_lengths(&joined, &value) {
-                            self.uncertain_lengths.insert(proxy);
-                        }
-                        joined = self.join_aggregate(&joined, &value);
+        // Snapshot the affected proxy ids before joining: nested joins may add
+        // new aliases. Reverse edges avoid scanning all unrelated alias groups.
+        let mut affected: Vec<_> = refs
+            .iter()
+            .filter_map(|source| self.alias_dependents.get(source))
+            .flatten()
+            .copied()
+            .collect();
+        affected.sort_unstable();
+        affected.dedup();
+        for proxy in affected {
+            let sources = &self.aggregate_aliases[&proxy];
+            let mut values = sources
+                .iter()
+                .map(|source| self.heap[*source].clone())
+                .collect::<Vec<_>>()
+                .into_iter();
+            if let Some(mut joined) = values.next() {
+                for value in values {
+                    if different_list_lengths(&joined, &value) {
+                        self.uncertain_lengths.insert(proxy);
                     }
-                    self.heap[proxy] = joined;
+                    joined = self.join_aggregate(&joined, &value);
                 }
+                self.heap[proxy] = joined;
             }
         }
     }
@@ -1762,15 +2082,19 @@ impl Planner<'_> {
         }
     }
 
-    fn merge_loop_state(&mut self, env: &mut Env, original: &Env, heap_before: &[Aggregate]) {
-        for (id, before) in heap_before.iter().enumerate() {
+    fn merge_loop_state(&mut self, env: &mut Env<'a>, original: &Env<'a>, heap_before: &Heap) {
+        for id in heap_before.changed_ids(&self.heap) {
+            let before = &heap_before[id];
             if different_list_lengths(before, &self.heap[id]) {
                 self.uncertain_lengths.insert(id);
             }
             self.heap[id] = self.join_aggregate(before, &self.heap[id].clone());
         }
-        let after = env.clone();
-        self.merge_env(env, original, &after);
+        for id in original.changed_slots(env) {
+            let before = original.get_slot(id).copied().unwrap_or_default();
+            let after = env.get_slot(id).copied().unwrap_or_default();
+            env.set_slot(id, Some(self.join_value(before, after)));
+        }
     }
 
     fn list(&mut self, values: Vec<AbstractValue>) -> AbstractValue {
@@ -1851,6 +2175,9 @@ impl Planner<'_> {
                 self.heap.push(value);
                 let mut refs = self.referents(a);
                 refs.extend(self.referents(b));
+                for &source in &refs {
+                    self.alias_dependents.entry(source).or_default().push(id);
+                }
                 self.aggregate_aliases.insert(id, refs);
                 Some(id)
             }
@@ -1911,16 +2238,12 @@ impl Planner<'_> {
         }
     }
 
-    fn merge_env(&mut self, target: &mut Env, a: &Env, b: &Env) {
-        target.clear();
-        for key in a.keys().chain(b.keys()) {
-            target.insert(
-                key.clone(),
-                self.join_value(
-                    a.get(key).copied().unwrap_or_default(),
-                    b.get(key).copied().unwrap_or_default(),
-                ),
-            );
+    fn merge_env(&mut self, target: &mut Env<'a>, a: &Env<'a>, b: &Env<'a>) {
+        *target = a.clone();
+        for id in a.changed_slots(b) {
+            let left = a.get_slot(id).copied().unwrap_or_default();
+            let right = b.get_slot(id).copied().unwrap_or_default();
+            target.set_slot(id, Some(self.join_value(left, right)));
         }
     }
 
@@ -1935,7 +2258,7 @@ impl Planner<'_> {
         Some(self.list(values.repeat(count)))
     }
 
-    fn assign_aggregate(&mut self, target: &AstNode, value: AbstractValue, env: &mut Env) {
+    fn assign_aggregate(&mut self, target: &'a AstNode, value: AbstractValue, env: &mut Env<'a>) {
         match target {
             AstNode::FieldAccess {
                 object, field_name, ..
@@ -1955,6 +2278,20 @@ impl Planner<'_> {
                     .visit(index, env)
                     .int
                     .and_then(|i| usize::try_from(i).ok());
+                // A concrete write with no abstract aliases touches one element.
+                // Heap::get_mut preserves branch/backedge snapshots via COW.
+                if let (Some(id), Some(index)) = (base.aggregate, index) {
+                    if !self.aggregate_aliases.contains_key(&id)
+                        && !self.alias_dependents.contains_key(&id)
+                    {
+                        if let Some(Aggregate::List(values)) = self.heap.get_mut(id) {
+                            if let Some(slot) = values.get_mut(index) {
+                                *slot = value;
+                            }
+                            return;
+                        }
+                    }
+                }
                 if let Some(Aggregate::List(values)) =
                     base.aggregate.and_then(|id| self.heap.get(id)).cloned()
                 {
@@ -2166,7 +2503,10 @@ fn merge_output_types(a: &InferredOutputs, b: &InferredOutputs) -> InferredOutpu
         .collect()
 }
 
-fn dynamic_client_loop_counter(condition: &AstNode, env: &Env) -> Option<(String, u64)> {
+fn dynamic_client_loop_counter<'a>(
+    condition: &'a AstNode,
+    env: &Env<'_>,
+) -> Option<(&'a str, u64)> {
     let AstNode::BinaryOperation {
         op, left, right, ..
     } = condition
@@ -2183,16 +2523,16 @@ fn dynamic_client_loop_counter(condition: &AstNode, env: &Env) -> Option<(String
         return None;
     };
     if !env
-        .get(client_count)
+        .get(client_count.as_str())
         .is_some_and(|value| value.runtime_client_count)
     {
         return None;
     }
     let first_client_slot = env
-        .get(counter)
+        .get(counter.as_str())
         .and_then(|value| value.int)
         .and_then(|value| u64::try_from(value).ok())?;
-    Some((counter.clone(), first_client_slot))
+    Some((counter.as_str(), first_client_slot))
 }
 
 fn is_list_return_type(node: &AstNode) -> bool {
@@ -2288,8 +2628,332 @@ fn merge_branch_output_counts(
 
 #[cfg(test)]
 mod tests {
+    use super::{AbstractValue, Aggregate, Planner};
     use crate::compiler::{compile, CompilerOptions};
     use stoffel_vm_types::core_types::ShareType;
+
+    #[test]
+    fn unused_entry_tail_preserves_io_and_keeps_output_diagnostics() {
+        for call in [
+            "read_input()",
+            "call_closure(create_closure(\"read_input\"))",
+        ] {
+            let source = format!("def read_input() -> None:\n  var s = ClientStore.take_share_bool(2, 3)\ndef main() -> int64:\n  {call}\n  var x = 0\n  for i in 0..100:\n    x = x + i\n  return x\n");
+            let tokens = crate::lexer::tokenize(&source, "tail.stfl").unwrap();
+            let ast =
+                crate::ufcs::transform_ufcs(crate::parser::parse(&tokens, "tail.stfl").unwrap());
+            for needs_output_shapes in [false, true] {
+                let mut full = Planner {
+                    needs_output_shapes,
+                    ..Planner::default()
+                };
+                let mut trimmed = Planner {
+                    needs_output_shapes,
+                    ..Planner::default()
+                };
+                for planner in [&mut full, &mut trimmed] {
+                    super::collect_functions(&ast, &mut planner.functions);
+                    planner.relevant.insert("read_input".into());
+                }
+                full.visit_user_call("main", &[], false);
+                trimmed.visit_user_call("main", &[], true);
+                assert_eq!(full.inputs[&2].len(), 4);
+                assert_eq!(trimmed.inputs, full.inputs);
+                assert_eq!(trimmed.output_counts, full.output_counts);
+                assert_eq!(trimmed.errors.len(), full.errors.len());
+                if needs_output_shapes {
+                    assert_eq!(trimmed.steps, full.steps);
+                } else {
+                    assert!(trimmed.steps < full.steps / 2);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn integer_loop_cache_preserves_values_writes_and_budget() {
+        use super::{AstNode, Env, LoopFrame, SourceLocation, Value};
+        let loc = SourceLocation::default();
+        let id = |name: &str| AstNode::Identifier(name.into(), loc.clone());
+        let lit = |n| AstNode::Literal {
+            value: Value::Int {
+                value: n,
+                kind: None,
+            },
+            location: loc.clone(),
+        };
+        let binary = |op: &str, left, right| AstNode::BinaryOperation {
+            op: op.into(),
+            left: Box::new(left),
+            right: Box::new(right),
+            location: loc.clone(),
+        };
+        let assign = |name: &str, value| AstNode::Assignment {
+            target: Box::new(id(name)),
+            value: Box::new(value),
+            location: loc.clone(),
+        };
+        for mutate_limit in [false, true] {
+            let condition = binary("<", id("i"), binary("*", id("limit"), lit(2)));
+            let mut statements = vec![assign("i", binary("+", id("i"), lit(1)))];
+            if mutate_limit {
+                statements.push(assign("limit", binary("-", id("limit"), lit(1))));
+            }
+            let body = AstNode::Block(statements);
+            for steps in [0, 4_999_990] {
+                let mut original = Env::new();
+                original.insert("i", AbstractValue::int(0));
+                original.insert("limit", AbstractValue::int(2));
+                let mut cached_env = original.clone();
+                let mut uncached = Planner {
+                    steps,
+                    ..Planner::default()
+                };
+                let mut cached = Planner {
+                    steps,
+                    integer_invariants: super::loop_integer_invariants(
+                        &condition,
+                        &body,
+                        &cached_env,
+                    ),
+                    ..Planner::default()
+                };
+                if mutate_limit {
+                    assert!(cached.integer_invariants.is_none());
+                } else {
+                    assert!(cached.integer_invariants.is_some());
+                }
+                uncached.loops.push(LoopFrame::default());
+                cached.loops.push(LoopFrame::default());
+                uncached.visit_while_inner(&condition, &body, &mut original);
+                cached.visit_while_inner(&condition, &body, &mut cached_env);
+                assert_eq!(original, cached_env);
+                assert_eq!(uncached.steps, cached.steps);
+                assert_eq!(uncached.errors.len(), cached.errors.len());
+                assert!(uncached.control == cached.control);
+            }
+        }
+    }
+
+    #[test]
+    fn concrete_index_access_preserves_heap_snapshots() {
+        use super::{AstNode, Env, SourceLocation, Value};
+        for index in [0, 2, 99] {
+            let loc = SourceLocation::default();
+            let target = AstNode::IndexAccess {
+                base: Box::new(AstNode::Identifier("items".into(), loc.clone())),
+                index: Box::new(AstNode::Literal {
+                    value: Value::Int {
+                        value: index,
+                        kind: None,
+                    },
+                    location: loc.clone(),
+                }),
+                location: loc,
+            };
+            let mut planner = Planner::default();
+            let mut expected = vec![AbstractValue::int(1); 3];
+            let list = planner.list(expected.clone());
+            let before = planner.heap.clone();
+            let mut env = Env::new();
+            env.insert("items", list);
+            planner.assign_aggregate(&target, AbstractValue::int(7), &mut env);
+            if let Some(slot) = expected.get_mut(index as usize) {
+                *slot = AbstractValue::int(7);
+            }
+            assert_eq!(
+                planner.visit(&target, &mut env),
+                expected.get(index as usize).copied().unwrap_or_default()
+            );
+            assert_eq!(planner.heap[0], Aggregate::List(expected));
+            assert_eq!(before[0], Aggregate::List(vec![AbstractValue::int(1); 3]));
+        }
+    }
+
+    #[test]
+    fn heap_snapshots_preserve_branches_across_page_boundaries() {
+        let mut heap = super::Heap::default();
+        let mut flat = Vec::new();
+        for i in 0..150 {
+            let value = Aggregate::List(vec![AbstractValue::int(i)]);
+            heap.push(value.clone());
+            flat.push(value);
+        }
+        let before = heap.clone();
+        let original = flat.clone();
+        for i in [0, 63, 64, 127, 149] {
+            heap[i] = Aggregate::Unknown;
+            flat[i] = Aggregate::Unknown;
+        }
+        for i in 0..130 {
+            heap.push(Aggregate::Closure(i.to_string()));
+            flat.push(Aggregate::Closure(i.to_string()));
+        }
+        let expected: Vec<_> = original
+            .iter()
+            .zip(&flat)
+            .enumerate()
+            .filter_map(|(i, (a, b))| (a != b).then_some(i))
+            .collect();
+        assert_eq!(before.changed_ids(&heap), expected);
+        heap.restore_prefix(&before);
+        flat[..original.len()].clone_from_slice(&original);
+        assert_eq!(heap.len(), flat.len());
+        for (i, value) in flat.iter().enumerate() {
+            assert_eq!(&heap[i], value);
+        }
+        assert!(before.changed_ids(&heap).is_empty());
+        let mut exact = before.clone();
+        exact[149] = Aggregate::Unknown;
+        exact.restore_prefix(&before);
+        assert_eq!(exact, before);
+    }
+
+    #[test]
+    fn indexed_alias_updates_match_exhaustive_propagation() {
+        fn exhaustive_write(planner: &mut Planner<'_>, id: usize, value: Aggregate) {
+            let refs = planner.referents(id);
+            for &source in &refs {
+                let next = if refs.len() == 1 {
+                    value.clone()
+                } else {
+                    if super::different_list_lengths(&planner.heap[source], &value) {
+                        planner.uncertain_lengths.insert(source);
+                    }
+                    planner.join_aggregate(&planner.heap[source].clone(), &value)
+                };
+                planner.heap[source] = next;
+            }
+            let mut affected: Vec<_> = planner
+                .aggregate_aliases
+                .iter()
+                .filter(|(_, sources)| !sources.is_disjoint(&refs))
+                .map(|(&id, sources)| (id, sources.clone()))
+                .collect();
+            affected.sort_unstable_by_key(|(id, _)| *id);
+            for (proxy, sources) in affected {
+                let mut values = sources
+                    .iter()
+                    .map(|&id| planner.heap[id].clone())
+                    .collect::<Vec<_>>()
+                    .into_iter();
+                if let Some(mut joined) = values.next() {
+                    for value in values {
+                        if super::different_list_lengths(&joined, &value) {
+                            planner.uncertain_lengths.insert(proxy);
+                        }
+                        joined = planner.join_aggregate(&joined, &value);
+                    }
+                    planner.heap[proxy] = joined;
+                }
+            }
+        }
+        let mut planner = Planner::default();
+        let mut values: Vec<_> = (0..8)
+            .map(|i| planner.list(vec![AbstractValue::int(i)]))
+            .collect();
+        for i in 0..7 {
+            values.push(planner.join_value(values[i], values[i + 1]));
+        }
+        let left = planner.list(values[..4].to_vec());
+        let right = planner.list(values[4..8].to_vec());
+        values.push(left);
+        values.push(right);
+        values.push(planner.join_value(left, right));
+        let mut reference = Planner {
+            heap: planner.heap.clone(),
+            aggregate_aliases: planner.aggregate_aliases.clone(),
+            alias_dependents: planner.alias_dependents.clone(),
+            uncertain_lengths: planner.uncertain_lengths.clone(),
+            ..Planner::default()
+        };
+        for step in 0..80 {
+            let id = values[(step * 7) % values.len()].aggregate.unwrap();
+            let value = Aggregate::List(vec![AbstractValue::int(step as i128 % 3); step % 4]);
+            exhaustive_write(&mut reference, id, value.clone());
+            planner.write_heap(id, value);
+            assert_eq!(planner.heap, reference.heap, "write {step}");
+            assert_eq!(planner.aggregate_aliases, reference.aggregate_aliases);
+            assert_eq!(planner.uncertain_lengths, reference.uncertain_lengths);
+        }
+    }
+
+    #[test]
+    fn writes_refresh_merged_aliases_without_changing_unrelated_lists() {
+        let mut planner = Planner::default();
+        let value = AbstractValue::int;
+        let a = planner.list(vec![value(1)]);
+        let b = planner.list(vec![value(1)]);
+        let merged = planner.join_value(a, b).aggregate.unwrap();
+        let c = planner.list(vec![value(4)]);
+        let d = planner.list(vec![value(4)]);
+        let unrelated = planner.join_value(c, d).aggregate.unwrap();
+        let original = planner.heap[unrelated].clone();
+
+        planner.write_heap(a.aggregate.unwrap(), Aggregate::List(vec![value(2)]));
+        let Aggregate::List(values) = &planner.heap[merged] else {
+            panic!("expected merged list")
+        };
+        assert_eq!(values[0].int, None, "the other referent still contains one");
+        planner.write_heap(b.aggregate.unwrap(), Aggregate::List(vec![value(2)]));
+        let Aggregate::List(values) = &planner.heap[merged] else {
+            panic!("expected merged list")
+        };
+        assert_eq!(values[0].int, Some(2), "both referents now agree");
+        assert_eq!(planner.heap[unrelated], original);
+
+        planner.write_heap(merged, Aggregate::List(vec![value(3)]));
+        for id in [a.aggregate.unwrap(), b.aggregate.unwrap(), merged] {
+            let Aggregate::List(values) = &planner.heap[id] else {
+                panic!("expected aliased list")
+            };
+            assert_eq!(
+                values[0].int, None,
+                "a merged reference requires weak updates"
+            );
+        }
+        assert_eq!(planner.heap[unrelated], original);
+    }
+
+    #[test]
+    fn programs_without_client_io_do_not_execute_the_planner() {
+        let tokens = crate::lexer::tokenize(
+            "def main() -> int64:\n  var x = 0\n  for i in 0..1000000:\n    x += i\n  return x\n",
+            "no_io.stfl",
+        )
+        .unwrap();
+        let ast = crate::parser::parse(&tokens, "no_io.stfl").unwrap();
+        for output_shapes in [false, true] {
+            let planner = super::plan_client_io(&ast, &[], output_shapes);
+            assert_eq!(planner.steps, 0);
+            assert!(planner.inputs.is_empty());
+            assert!(planner.outputs.is_empty());
+        }
+    }
+
+    #[test]
+    fn client_io_fast_path_preserves_top_level_and_extra_entry_outputs() {
+        for source in [
+            "var x = ClientStore.take_share_bool(2, 0)\nx.send_to_client(2)\n",
+            "def helper() -> None:\n  var x = ClientStore.take_share_bool(2, 0)\n  x.send_to_client(2)\ndef main() -> None:\n  helper()\n",
+            "def other() -> None:\n  var x = ClientStore.take_share_bool(2, 0)\n  x.send_to_client(2)\ndef main() -> int64:\n  return 0\n",
+        ] {
+            for level in 0..=3 {
+                let options = CompilerOptions {
+                    optimize: level > 0,
+                    optimization_level: level,
+                    entry_points: vec!["other".to_string()],
+                    ..Default::default()
+                };
+                let program = compile(source, "io.stfl", &options).unwrap();
+                let schema = program.client_io_manifest.clients.iter()
+                    .find(|schema| schema.client_slot == 2).unwrap();
+                assert_eq!(schema.inputs.len(), 1);
+                assert_eq!(schema.outputs.len(), 1);
+                assert_eq!(schema.inputs, schema.outputs);
+            }
+        }
+    }
 
     #[test]
     fn follows_literal_integer_arguments_through_nested_client_input_helpers() {
