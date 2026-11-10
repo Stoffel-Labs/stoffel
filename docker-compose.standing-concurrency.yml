@@ -12,7 +12,7 @@ x-build: &build
     networking: "${STOFFEL_NETWORK_CONTEXT:?Set an absolute networking checkout}"
 
 x-node-environment: &node-environment
-  STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:-stoffel-standing-compose-token}
+  STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
   STOFFEL_STANDING_POOL_ID: ${STOFFEL_STANDING_POOL_ID:?Set a unique nonzero standing pool ID}
   STOFFEL_PREPROCESSING_TRIPLES: ${STOFFEL_STANDING_TEST_TRIPLES:-2048}
   STOFFEL_EXECUTION_COORDINATION_TIMEOUT_SECONDS: ${STOFFEL_EXECUTION_COORDINATION_TIMEOUT_SECONDS:-120}
@@ -71,7 +71,7 @@ x-client: &client
   profiles: ["tools"]
   environment:
     STOFFEL_ROLE: client
-    STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:-stoffel-standing-compose-token}
+    STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
     STOFFEL_EXECUTION_COORDINATION_TIMEOUT_SECONDS: ${STOFFEL_EXECUTION_COORDINATION_TIMEOUT_SECONDS:-120}
     STOFFEL_MPC_PROTOCOL_TIMEOUT_SECONDS: ${STOFFEL_MPC_PROTOCOL_TIMEOUT_SECONDS:-600}
     RUST_LOG: ${RUST_LOG:-info}
@@ -113,6 +113,8 @@ services:
       start_period: 5s
     networks:
       standing-net: {ipv4_address: 172.33.0.5}
+    volumes:
+      - ./ids/server_key.der:/app/ids/server_key.der:ro
 
   party0:
     <<: *node

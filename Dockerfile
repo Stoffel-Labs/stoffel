@@ -46,12 +46,12 @@ RUN mkdir -p /build/.cargo && \
       'git-fetch-with-cli = true' \
       '' \
       '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
-      'stoffel-mpc-coordinator-off-chain = { path = "/opt/stoffel-coordinator/crates/off-chain" }' \
-      'stoffel-mpc-coordinator-shared = { path = "/opt/stoffel-coordinator/crates/coord-shared" }' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/build/vendor/stoffel-mpc-coordinator-off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/build/vendor/stoffel-mpc-coordinator-shared" }' \
       '' \
       '[patch.crates-io]' \
-      'stoffel-mpc-coordinator-off-chain = { path = "/opt/stoffel-coordinator/crates/off-chain" }' \
-      'stoffel-mpc-coordinator-shared = { path = "/opt/stoffel-coordinator/crates/coord-shared" }' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/build/vendor/stoffel-mpc-coordinator-off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/build/vendor/stoffel-mpc-coordinator-shared" }' \
       'stoffelnet = { path = "/opt/stoffelnet" }' \
       '' \
       > /build/.cargo/config.toml
@@ -251,6 +251,4 @@ COPY ids/clients/*.crt /app/ids/clients/
 # ============================================================================
 # Preserve the default image contract for existing non-standing Compose stacks.
 # New deployments should mount per-principal private credentials at runtime.
-FROM runtime-base AS runtime
-
-COPY ids /app/ids
+FROM standing-runtime AS runtime

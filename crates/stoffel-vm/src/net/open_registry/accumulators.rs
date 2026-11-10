@@ -10,6 +10,7 @@ pub(super) enum OpenResult {
 
 #[derive(Clone, Default)]
 pub(super) struct OpenAccumulator {
+    pub(super) locally_started: bool,
     pub(super) shares: Vec<Vec<u8>>,
     pub(super) party_ids: Vec<usize>,
     pub(super) result: Option<OpenResult>,
@@ -47,6 +48,7 @@ pub(super) type ExpKey = usize;
 
 #[derive(Default, Clone)]
 pub struct ExpOpenAccumulator {
+    pub(super) locally_started: bool,
     pub partial_points: Vec<(usize, Vec<u8>)>, // (share_id, serialized affine point)
     pub party_ids: Vec<usize>,
     pub result: Option<Vec<u8>>,

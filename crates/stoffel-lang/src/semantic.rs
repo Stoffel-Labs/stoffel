@@ -1234,6 +1234,9 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     fn refine_type_with_expected(inferred: &SymbolType, expected: &SymbolType) -> SymbolType {
+        if Self::requires_explicit_reveal(inferred, expected) {
+            return inferred.clone();
+        }
         match (inferred, expected) {
             (SymbolType::Unknown, expected) | (SymbolType::TypeVar(_), expected) => {
                 expected.clone()
@@ -1289,6 +1292,10 @@ impl<'a> SemanticAnalyzer<'a> {
         inferred_type: &SymbolType,
         expected_type: &SymbolType,
     ) -> (AstNode, SymbolType) {
+        // Context may refine a literal's width, but cannot authorize disclosure.
+        if Self::requires_explicit_reveal(inferred_type, expected_type) {
+            return (expr, inferred_type.clone());
+        }
         let refined_type = match (&expr, inferred_type, expected_type) {
             (AstNode::Literal { .. }, _, expected)
                 if expected.underlying_type() == &SymbolType::Bool
@@ -3570,6 +3577,18 @@ impl<'a> SemanticAnalyzer<'a> {
                     *value
                 };
                 let (checked_value, value_type) = self.analyze_node(value)?;
+                // Register reassignment emits MOV, whose secret-to-clear case opens.
+                // Table/field writes use set_field and retain the boxed secret value.
+                if matches!(checked_target, AstNode::Identifier(..))
+                    && Self::is_share_alias_type(&target_type)
+                    && value_type.is_secret()
+                {
+                    self.error_reporter.add_error(CompilerError::type_error(
+                        "Cannot assign a secret scalar to a clear Share handle; keep the destination secret".to_string(),
+                        location.clone(),
+                    ));
+                    return Err(());
+                }
                 let (checked_value, value_type) =
                     if Self::is_typed_assignment_target(&checked_target)
                         && target_type != SymbolType::Unknown
@@ -5107,13 +5126,23 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 }
 
+                // Resolve aliases while the semantic callee identity is known.
+                // A user function named `reveal` must retain its own call target.
+                let resolved_call_name = if is_builtin_call {
+                    crate::builtin_registry::builtin_registry()
+                        .vm_symbol_for_call(&function_name)
+                        .unwrap_or(&function_name)
+                        .to_owned()
+                } else {
+                    function_name.clone()
+                };
                 // 6. Reconstruct the node with checked parts and resolved return type
                 let resolved_function_node = match &checked_function_node {
                     AstNode::Identifier(_, loc) => {
-                        AstNode::Identifier(function_name.clone(), loc.clone())
+                        AstNode::Identifier(resolved_call_name.clone(), loc.clone())
                     }
                     AstNode::FieldAccess { location, .. } => {
-                        AstNode::Identifier(function_name.clone(), location.clone())
+                        AstNode::Identifier(resolved_call_name, location.clone())
                     }
                     _ => checked_function_node,
                 };

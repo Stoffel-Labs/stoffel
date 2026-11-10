@@ -20,11 +20,9 @@ x-party-common: &party-common
       networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
   networks:
     stoffel-net:
-  volumes:
-    - stoffel-local-store:/app/local-store
   cap_add: [NET_ADMIN]
   environment: &party-env
-    STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:-stoffel-compose-honeybadger-token}
+    STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
     STOFFEL_N_PARTIES: ${STOFFEL_N_PARTIES:-5}
     STOFFEL_THRESHOLD: ${STOFFEL_THRESHOLD:-1}
     STOFFEL_PROGRAM: ${STOFFEL_PROGRAM:-/app/programs/mpc_aes128_circuit.stflb}
@@ -86,6 +84,8 @@ services:
       timeout: 3s
       retries: 20
       start_period: 10s
+    volumes:
+      - ./ids/server_key.der:/app/ids/server_key.der:ro
 
   party0:
     <<: *party-common
@@ -106,6 +106,7 @@ services:
       STOFFEL_LOCAL_STORE: /app/local-store/party-0.redb
       STOFFEL_CERT: /app/ids/nodes/cert0.crt
       STOFFEL_KEY: /app/ids/nodes/key0.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
       NET_EXTRA_RTT_MS: "${PARTY0_EXTRA_RTT_MS:-0}"
     networks:
       stoffel-net:
@@ -121,6 +122,9 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
+    volumes:
+      - ./ids/nodes/key0.der:/app/ids/nodes/key0.der:ro
+      - stoffel-party0-local:/app/local-store
 
   party1:
     <<: *party-common
@@ -144,6 +148,7 @@ services:
       STOFFEL_LOCAL_STORE: /app/local-store/party-1.redb
       STOFFEL_CERT: /app/ids/nodes/cert1.crt
       STOFFEL_KEY: /app/ids/nodes/key1.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
       NET_EXTRA_RTT_MS: "${PARTY1_EXTRA_RTT_MS:-0}"
     networks:
       stoffel-net:
@@ -151,6 +156,9 @@ services:
     ports:
       - "9001:9001/tcp"
       - "9001:9001/udp"
+    volumes:
+      - ./ids/nodes/key1.der:/app/ids/nodes/key1.der:ro
+      - stoffel-party1-local:/app/local-store
 
   party2:
     <<: *party-common
@@ -174,6 +182,7 @@ services:
       STOFFEL_LOCAL_STORE: /app/local-store/party-2.redb
       STOFFEL_CERT: /app/ids/nodes/cert2.crt
       STOFFEL_KEY: /app/ids/nodes/key2.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
       NET_EXTRA_RTT_MS: "${PARTY2_EXTRA_RTT_MS:-0}"
     networks:
       stoffel-net:
@@ -181,6 +190,9 @@ services:
     ports:
       - "9002:9002/tcp"
       - "9002:9002/udp"
+    volumes:
+      - ./ids/nodes/key2.der:/app/ids/nodes/key2.der:ro
+      - stoffel-party2-local:/app/local-store
 
   party3:
     <<: *party-common
@@ -204,6 +216,7 @@ services:
       STOFFEL_LOCAL_STORE: /app/local-store/party-3.redb
       STOFFEL_CERT: /app/ids/nodes/cert3.crt
       STOFFEL_KEY: /app/ids/nodes/key3.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
       NET_EXTRA_RTT_MS: "${PARTY3_EXTRA_RTT_MS:-0}"
     networks:
       stoffel-net:
@@ -211,6 +224,9 @@ services:
     ports:
       - "9003:9003/tcp"
       - "9003:9003/udp"
+    volumes:
+      - ./ids/nodes/key3.der:/app/ids/nodes/key3.der:ro
+      - stoffel-party3-local:/app/local-store
 
   party4:
     <<: *party-common
@@ -234,6 +250,7 @@ services:
       STOFFEL_LOCAL_STORE: /app/local-store/party-4.redb
       STOFFEL_CERT: /app/ids/nodes/cert4.crt
       STOFFEL_KEY: /app/ids/nodes/key4.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
       NET_EXTRA_RTT_MS: "${PARTY4_EXTRA_RTT_MS:-0}"
     networks:
       stoffel-net:
@@ -241,6 +258,9 @@ services:
     ports:
       - "9004:9004/tcp"
       - "9004:9004/udp"
+    volumes:
+      - ./ids/nodes/key4.der:/app/ids/nodes/key4.der:ro
+      - stoffel-party4-local:/app/local-store
 
 networks:
   stoffel-net:
@@ -251,4 +271,8 @@ networks:
           gateway: 172.28.0.1
 
 volumes:
-  stoffel-local-store:
+  stoffel-party0-local:
+  stoffel-party1-local:
+  stoffel-party2-local:
+  stoffel-party3-local:
+  stoffel-party4-local:

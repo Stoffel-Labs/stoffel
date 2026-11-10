@@ -823,7 +823,7 @@ var opened_fixed: list[fix64] = Share.batch_open_fixed(shares)
 "#;
     let analyzed = analyze_source_ast(source).expect("semantic analysis succeeds");
     let mut return_types = Vec::new();
-    collect_call_return_types(&analyzed, "Share.batch_open_fixed", &mut return_types);
+    collect_call_return_types(&analyzed, "Share.batch_open", &mut return_types);
 
     assert_eq!(
         return_types,
@@ -1330,7 +1330,7 @@ opened[0] = Share.batch_open_fixed(shares)
 "#;
     let analyzed = analyze_source_ast(source).expect("semantic analysis succeeds");
     let mut return_types = Vec::new();
-    collect_call_return_types(&analyzed, "Share.batch_open_fixed", &mut return_types);
+    collect_call_return_types(&analyzed, "Share.batch_open", &mut return_types);
 
     assert_eq!(return_types, vec![list_of(SymbolType::Fixed { bits: 64 })]);
 }
@@ -1348,7 +1348,7 @@ var opened: list[fix64] = open_as_fixed(shares)
 "#;
     let analyzed = analyze_source_ast(source).expect("semantic analysis succeeds");
     let mut return_types = Vec::new();
-    collect_call_return_types(&analyzed, "Share.batch_open_fixed", &mut return_types);
+    collect_call_return_types(&analyzed, "Share.batch_open", &mut return_types);
 
     assert_eq!(return_types, vec![list_of(SymbolType::Fixed { bits: 64 })]);
 }

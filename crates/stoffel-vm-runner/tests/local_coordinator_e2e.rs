@@ -10,6 +10,78 @@ use stoffel_vm_types::core_types::{ShareDataFormat, ShareType, Value};
 use stoffel_vm_types::functions::VMFunction;
 use stoffel_vm_types::instructions::Instruction;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "starts real local MPC parties for both backends"]
+async fn sparse_private_outputs_do_not_disclose_a_secret_return() {
+    for backend in [
+        stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+        stoffel_vm_types::compiled_binary::MpcBackend::Avss,
+    ] {
+        let source = "def main() -> Share:\n  var a = ClientStore.take_share(1, 0)\n  var b = ClientStore.take_share(2, 0)\n  MpcOutput.send_to_client(1, a)\n  return b\n";
+        let compiled = stoffellang::compile(
+            source,
+            "veria-routing.stfl",
+            &stoffellang::CompilerOptions {
+                mpc_backend: backend,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let output = LocalCoordinatorRunner::builder(
+            env!("CARGO_BIN_EXE_stoffel-run"),
+            stoffellang::convert_to_binary(&compiled),
+        )
+        .client_input(1, [11])
+        .client_input(2, [22])
+        .timeout(Duration::from_secs(120))
+        .build()
+        .unwrap()
+        .run()
+        .await
+        .unwrap();
+        assert_eq!(output.client_outputs.len(), 1);
+        assert_eq!(output.client_outputs[0].client_slot, 1);
+        assert_eq!(output.client_outputs[0].values, vec![11]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "starts real local MPC parties for both backends"]
+async fn coordinator_boolean_inputs_are_checked_before_execution() {
+    for backend in [
+        stoffel_vm_types::compiled_binary::MpcBackend::HoneyBadger,
+        stoffel_vm_types::compiled_binary::MpcBackend::Avss,
+    ] {
+        for bit in [0, 1, 2] {
+            let source = "def main() -> int64:\n  var bit = ClientStore.take_share_bool(1, 0)\n  MpcOutput.send_to_client(1, bit)\n  return 0\n";
+            let compiled = stoffellang::compile(
+                source,
+                "veria-boolean.stfl",
+                &stoffellang::CompilerOptions {
+                    mpc_backend: backend,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let result = LocalCoordinatorRunner::builder(
+                env!("CARGO_BIN_EXE_stoffel-run"),
+                stoffellang::convert_to_binary(&compiled),
+            )
+            .client_input(1, [bit])
+            .timeout(Duration::from_secs(120))
+            .build()
+            .unwrap()
+            .run()
+            .await;
+            if bit < 2 {
+                assert_eq!(result.unwrap().client_outputs[0].values, vec![bit as u64]);
+            } else {
+                assert!(result.unwrap_err().to_string().contains("not zero or one"));
+            }
+        }
+    }
+}
+
 fn assert_all_parties_proposed(output: &LocalCoordinatorRunOutput, round: &str) {
     let needle = format!("proposing {round}");
     let proposals = output.combined_output.matches(&needle).count();

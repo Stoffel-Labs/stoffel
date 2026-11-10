@@ -944,7 +944,7 @@ def increment_counter_byte_carry(byte: list[secret bool], carry_in: secret bool)
 
 def increment_counter_block(counter: list[list[secret bool]]) -> list[list[secret bool]]:
   var out: list[list[secret bool]] = []
-  var carry = Share.from_clear_int(1, 1)
+  var carry: secret bool = Share.from_clear_int(1, 1)
   for offset in 0..16:
     var byte_index = 15 - offset
     out.insert(0, increment_counter_byte(counter[byte_index], carry))

@@ -79,15 +79,16 @@ impl OpenMessageRouter {
         let deadline = tokio::time::Instant::now() + open_registry_wait_timeout();
 
         loop {
-            match self.try_handle_wire_message(authenticated_sender_id, payload) {
+            match self.try_handle_any_wire_message(authenticated_sender_id, payload) {
                 Err(error)
-                    if is_batch_capacity_error(&error)
-                        && batch_frame_fits_empty_retention_window(payload) =>
+                    if Self::is_retryable_capacity_error(&error)
+                        && (!is_batch_capacity_error(&error)
+                            || batch_frame_fits_empty_retention_window(payload)) =>
                 {
                     let now = tokio::time::Instant::now();
                     if now >= deadline {
                         return Err(format!(
-                            "timed out waiting for batch-open router capacity: {error}"
+                            "timed out waiting for open router capacity: {error}"
                         ));
                     }
                     tokio::time::sleep_until(deadline.min(now + Duration::from_millis(5))).await;
@@ -95,6 +96,30 @@ impl OpenMessageRouter {
                 result => return result,
             }
         }
+    }
+
+    pub fn is_retryable_capacity_error(error: &str) -> bool {
+        is_batch_capacity_error(error)
+            || error == "open_share retention budget exceeded"
+            || error == "open-in-exponent retention budget exceeded"
+    }
+
+    /// Route all opening variants through the same bounded retry contract.
+    pub fn try_handle_any_wire_message(
+        &self,
+        sender: usize,
+        payload: &[u8],
+    ) -> Result<bool, String> {
+        if self.try_handle_wire_message(sender, payload)? {
+            return Ok(true);
+        }
+        if self.try_handle_hb_open_exp_wire_message(sender, payload)? {
+            return Ok(true);
+        }
+        if self.try_handle_avss_open_exp_wire_message(sender, payload)? {
+            return Ok(true);
+        }
+        self.try_handle_avss_g2_exp_wire_message(sender, payload)
     }
 
     /// Attempt to consume an incoming transport payload as an open-registry wire message.

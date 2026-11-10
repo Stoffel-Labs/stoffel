@@ -28,8 +28,8 @@ RUN mkdir -p /build/.cargo && \
       'git-fetch-with-cli = true' \
       '' \
       '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
-      'stoffel-mpc-coordinator-off-chain = { path = "/opt/stoffel-coordinator/crates/off-chain" }' \
-      'stoffel-mpc-coordinator-shared = { path = "/opt/stoffel-coordinator/crates/coord-shared" }' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/build/vendor/stoffel-mpc-coordinator-off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/build/vendor/stoffel-mpc-coordinator-shared" }' \
       '' \
       > /build/.cargo/config.toml
 
@@ -42,6 +42,8 @@ ARG PROFILE_BUILD=false
 
 COPY --from=planner /build/recipe.json /build/recipe.json
 COPY --from=planner /build/.cargo /build/.cargo
+COPY --from=planner /build/vendor/stoffel-mpc-coordinator-off-chain /build/vendor/stoffel-mpc-coordinator-off-chain
+COPY --from=planner /build/vendor/stoffel-mpc-coordinator-shared /build/vendor/stoffel-mpc-coordinator-shared
 COPY --from=planner /opt/stoffel-coordinator /opt/stoffel-coordinator
 
 RUN mkdir -p ~/.ssh && \
@@ -68,8 +70,8 @@ RUN mkdir -p /build/.cargo && \
       'git-fetch-with-cli = true' \
       '' \
       '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
-      'stoffel-mpc-coordinator-off-chain = { path = "/opt/stoffel-coordinator/crates/off-chain" }' \
-      'stoffel-mpc-coordinator-shared = { path = "/opt/stoffel-coordinator/crates/coord-shared" }' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/build/vendor/stoffel-mpc-coordinator-off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/build/vendor/stoffel-mpc-coordinator-shared" }' \
       '' \
       > /build/.cargo/config.toml
 
@@ -139,6 +141,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+RUN mkdir -p /app/ids/nodes /app/ids/clients
+COPY ids/server_cert.crt /app/ids/server_cert.crt
+COPY ids/nodes/*.crt /app/ids/nodes/
+COPY ids/clients/*.crt /app/ids/clients/
 
 COPY --from=builder /build/artifacts/stoffel-run /app/stoffel-run
 COPY --from=builder /build/programs /app/programs

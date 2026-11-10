@@ -5760,8 +5760,6 @@ dependencies = [
 [[package]]
 name = "stoffel-mpc-coordinator-off-chain"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "634f718425ce17689484b8418b2ee7c4a451aee12848be914a4a0550b812b22a"
 dependencies = [
  "ark-bls12-381",
  "ark-ff 0.5.0",
@@ -5785,8 +5783,6 @@ dependencies = [
 [[package]]
 name = "stoffel-mpc-coordinator-shared"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05b778ad21edc063970349baa809a1c51cf00d7c19881415291b97c0c402c602"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",

@@ -1,5 +1,6 @@
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
@@ -22,6 +23,10 @@ const MAX_PENDING_BATCH_ENTRIES: usize = 256;
 const MAX_PENDING_BATCH_POSITIONS: usize = 256 * MAX_BATCH_ELEMENTS;
 const MAX_PENDING_BATCH_BYTES: usize = 64 * MAX_WIRE_MESSAGE_LEN;
 const MAX_COMPLETED_BATCH_ENTRIES: usize = 64;
+const MAX_PENDING_SCALAR_ENTRIES_PER_SENDER: usize = 8;
+const MAX_PENDING_SCALAR_ENTRIES: usize = 256;
+const MAX_PENDING_SCALAR_BYTES: usize = 64 * MAX_WIRE_MESSAGE_LEN;
+type ShareValidator = Arc<dyn Fn(usize, &[u8]) -> Result<(), String> + Send + Sync>;
 
 fn checked_batch_payload_bytes(shares: &[Vec<u8>]) -> Result<usize, String> {
     shares.iter().try_fold(0usize, |total, share| {
@@ -181,6 +186,10 @@ pub struct InstanceRegistry {
     // open share accumulation
     pub(super) single: Mutex<HashMap<SingleKey, OpenAccumulator>>,
     single_notify: Notify,
+    single_sequences: Mutex<HashMap<(usize, String), usize>>,
+    single_completed: Mutex<VecDeque<SingleKey>>,
+    single_floor: Mutex<HashMap<String, usize>>,
+    share_validator: Mutex<Option<ShareValidator>>,
     pub(super) batch: Mutex<HashMap<BatchKey, BatchOpenAccumulator>>,
     batch_next_sequences: Mutex<HashMap<(usize, String, usize), usize>>,
     batch_completed_order: Mutex<VecDeque<BatchKey>>,
@@ -191,6 +200,9 @@ pub struct InstanceRegistry {
     // second EXP registry for AVSS G2 operations
     pub exp_g2: Mutex<HashMap<ExpKey, ExpOpenAccumulator>>,
     pub exp_g2_notify: Notify,
+    exp_sequences: Mutex<HashMap<(bool, usize), usize>>,
+    exp_completed: Mutex<VecDeque<(bool, usize)>>,
+    exp_floor: Mutex<[usize; 2]>,
     // HB consensus
     pub rbc: Mutex<RbcState>,
     pub rbc_notify: Notify,
@@ -202,6 +214,10 @@ impl InstanceRegistry {
             instance_id,
             single: Mutex::new(HashMap::new()),
             single_notify: Notify::new(),
+            single_sequences: Mutex::new(HashMap::new()),
+            single_completed: Mutex::new(VecDeque::new()),
+            single_floor: Mutex::new(HashMap::new()),
+            share_validator: Mutex::new(None),
             batch: Mutex::new(HashMap::new()),
             batch_next_sequences: Mutex::new(HashMap::new()),
             batch_completed_order: Mutex::new(VecDeque::new()),
@@ -210,6 +226,9 @@ impl InstanceRegistry {
             exp_notify: Notify::new(),
             exp_g2: Mutex::new(HashMap::new()),
             exp_g2_notify: Notify::new(),
+            exp_sequences: Mutex::new(HashMap::new()),
+            exp_completed: Mutex::new(VecDeque::new()),
+            exp_floor: Mutex::new([0; 2]),
             rbc: Mutex::new(RbcState::default()),
             rbc_notify: Notify::new(),
         }
@@ -217,6 +236,46 @@ impl InstanceRegistry {
 
     pub fn instance_id(&self) -> u64 {
         self.instance_id
+    }
+
+    pub(crate) fn set_share_validator(&self, validator: ShareValidator) {
+        *self.share_validator.lock() = Some(validator);
+    }
+
+    fn next_single(&self, party: usize, ty: &str) -> Result<usize, String> {
+        let mut sequences = self.single_sequences.lock();
+        let next = sequences.entry((party, ty.to_owned())).or_default();
+        let value = *next;
+        *next = next.checked_add(1).ok_or("single sequence overflow")?;
+        Ok(value)
+    }
+
+    fn next_exp(&self, kind: ExpOpenRegistryKind, party: usize) -> Result<usize, String> {
+        let mut sequences = self.exp_sequences.lock();
+        let next = sequences
+            .entry((kind == ExpOpenRegistryKind::G2, party))
+            .or_default();
+        let value = *next;
+        *next = next.checked_add(1).ok_or("exponent sequence overflow")?;
+        Ok(value)
+    }
+
+    fn retain_completed_single(
+        &self,
+        key: SingleKey,
+        reg: &mut HashMap<SingleKey, OpenAccumulator>,
+    ) {
+        let mut order = self.single_completed.lock();
+        order.push_back(key);
+        while order.len() > MAX_COMPLETED_BATCH_ENTRIES {
+            let (seq, ty) = order.pop_front().unwrap();
+            reg.remove(&(seq, ty.clone()));
+            self.single_floor
+                .lock()
+                .entry(ty)
+                .and_modify(|floor| *floor = (*floor).max(seq + 1))
+                .or_insert(seq + 1);
+        }
     }
 
     fn missing_sequence_error(operation: &str) -> String {
@@ -327,20 +386,10 @@ impl InstanceRegistry {
         if my_sequence.is_none() {
             let seq = match sequence {
                 Some(seq) => seq,
-                None => {
-                    let mut seq = 0usize;
-                    loop {
-                        let entry = reg.entry(seq).or_default();
-                        if !entry.party_ids.contains(&party_id) {
-                            break seq;
-                        }
-                        seq = seq.checked_add(1).ok_or_else(|| {
-                            "open-in-exponent sequence allocator overflowed".to_string()
-                        })?;
-                    }
-                }
+                None => self.next_exp(kind, party_id)?,
             };
             let entry = reg.entry(seq).or_default();
+            entry.locally_started = true;
             if let Some(pos) = entry.party_ids.iter().position(|id| *id == party_id) {
                 if entry.partial_points.get(pos) != Some(&(share_id, partial_point.to_vec())) {
                     return Err(format!(
@@ -396,6 +445,20 @@ impl InstanceRegistry {
             .get_mut(&sequence)
             .ok_or_else(|| Self::missing_exp_entry_error(kind, sequence))?;
         entry.result = Some(result);
+        entry.partial_points.clear();
+        let is_g2 = kind == ExpOpenRegistryKind::G2;
+        let mut completed = self.exp_completed.lock();
+        completed.push_back((is_g2, sequence));
+        // Each group has its own registry lock; prune only this group's oldest
+        // results to avoid cross-group lock ordering.
+        while completed.iter().filter(|(g2, _)| *g2 == is_g2).count() > MAX_COMPLETED_BATCH_ENTRIES
+        {
+            let position = completed.iter().position(|(g2, _)| *g2 == is_g2).unwrap();
+            let (_, expired) = completed.remove(position).unwrap();
+            reg.remove(&expired);
+            let mut floors = self.exp_floor.lock();
+            floors[usize::from(is_g2)] = floors[usize::from(is_g2)].max(expired + 1);
+        }
         drop(reg);
         self.notify_exp_registry(kind);
         Ok(())
@@ -513,8 +576,55 @@ impl InstanceRegistry {
         sender_party_id: usize,
         share: Vec<u8>,
     ) -> Result<(), String> {
+        if let Some(validate) = self.share_validator.lock().as_ref() {
+            validate(sender_party_id, &share)?;
+        }
         let mut reg = self.single.lock();
         let type_key = type_key.to_owned();
+        if seq
+            < self
+                .single_floor
+                .lock()
+                .get(&type_key)
+                .copied()
+                .unwrap_or(0)
+        {
+            return Ok(());
+        }
+        if reg
+            .get(&(seq, type_key.clone()))
+            .is_some_and(|entry| entry.result.is_some())
+        {
+            return Ok(());
+        }
+        let duplicate = reg
+            .get(&(seq, type_key.clone()))
+            .is_some_and(|entry| entry.party_ids.contains(&sender_party_id));
+        let locally_started = reg
+            .get(&(seq, type_key.clone()))
+            .is_some_and(|entry| entry.locally_started);
+        if !duplicate && !locally_started {
+            let pending = reg
+                .values()
+                .filter(|entry| entry.result.is_none() && !entry.locally_started)
+                .collect::<Vec<_>>();
+            let peer_count = pending
+                .iter()
+                .filter(|entry| entry.party_ids.contains(&sender_party_id))
+                .count();
+            let bytes: usize = pending
+                .iter()
+                .flat_map(|entry| &entry.shares)
+                .map(Vec::len)
+                .sum();
+            if peer_count >= MAX_PENDING_SCALAR_ENTRIES_PER_SENDER
+                || (!reg.contains_key(&(seq, type_key.clone()))
+                    && pending.len() >= MAX_PENDING_SCALAR_ENTRIES)
+                || share.len() > MAX_PENDING_SCALAR_BYTES.saturating_sub(bytes)
+            {
+                return Err("open_share retention budget exceeded".to_owned());
+            }
+        }
         let entry = reg.entry((seq, type_key.clone())).or_default();
         if let Some(pos) = entry.party_ids.iter().position(|id| *id == sender_party_id) {
             if entry.shares.get(pos) == Some(&share) {
@@ -539,20 +649,14 @@ impl InstanceRegistry {
     ) -> Result<usize, String> {
         let mut reg = self.single.lock();
         let type_key = type_key.to_owned();
-        let mut seq = 0usize;
-        loop {
-            let entry = reg.entry((seq, type_key.clone())).or_default();
-            if !entry.party_ids.contains(&sender_party_id) {
-                entry.shares.push(share);
-                entry.party_ids.push(sender_party_id);
-                drop(reg);
-                self.single_notify.notify_waiters();
-                return Ok(seq);
-            }
-            seq = seq
-                .checked_add(1)
-                .ok_or_else(|| "open_share sequence allocator overflowed".to_string())?;
-        }
+        let seq = self.next_single(sender_party_id, &type_key)?;
+        let entry = reg.entry((seq, type_key)).or_default();
+        entry.locally_started = true;
+        entry.shares.push(share);
+        entry.party_ids.push(sender_party_id);
+        drop(reg);
+        self.single_notify.notify_waiters();
+        Ok(seq)
     }
 
     /// Contribute a single share and wait until `required` parties have contributed.
@@ -795,20 +899,10 @@ impl InstanceRegistry {
                 if my_sequence.is_none() {
                     let seq = match sequence {
                         Some(seq) => seq,
-                        None => {
-                            let mut seq = 0usize;
-                            loop {
-                                let entry = reg.entry((seq, type_key.clone())).or_default();
-                                if !entry.party_ids.contains(&party_id) {
-                                    break seq;
-                                }
-                                seq = seq.checked_add(1).ok_or_else(|| {
-                                    "open_share sequence allocator overflowed".to_string()
-                                })?;
-                            }
-                        }
+                        None => self.next_single(party_id, &type_key)?,
                     };
                     let entry = reg.entry((seq, type_key.clone())).or_default();
+                    entry.locally_started = true;
                     if let Some(pos) = entry.party_ids.iter().position(|id| *id == party_id) {
                         if entry.shares.get(pos) != Some(&share_bytes) {
                             return Err(format!(
@@ -845,6 +939,8 @@ impl InstanceRegistry {
                         .get_mut(&key)
                         .ok_or_else(|| Self::missing_single_entry_error(seq, &type_key))?;
                     entry.result = Some((codec.wrap_result)(value.clone()));
+                    entry.shares.clear();
+                    self.retain_completed_single(key, &mut reg);
                     drop(reg);
                     self.single_notify.notify_waiters();
                     return Ok(value);
@@ -897,20 +993,10 @@ impl InstanceRegistry {
             if my_sequence.is_none() {
                 let seq = match sequence {
                     Some(seq) => seq,
-                    None => {
-                        let mut seq = 0usize;
-                        loop {
-                            let entry = reg.entry((seq, type_key.clone())).or_default();
-                            if !entry.party_ids.contains(&party_id) {
-                                break seq;
-                            }
-                            seq = seq.checked_add(1).ok_or_else(|| {
-                                "open_share sequence allocator overflowed".to_string()
-                            })?;
-                        }
-                    }
+                    None => self.next_single(party_id, &type_key)?,
                 };
                 let entry = reg.entry((seq, type_key.clone())).or_default();
+                entry.locally_started = true;
                 if let Some(pos) = entry.party_ids.iter().position(|id| *id == party_id) {
                     if entry.shares.get(pos).map(Vec::as_slice) != Some(share_bytes) {
                         return Err(format!(
@@ -945,6 +1031,8 @@ impl InstanceRegistry {
                     .get_mut(&key)
                     .ok_or_else(|| Self::missing_single_entry_error(seq, &type_key))?;
                 entry.result = Some((codec.wrap_result)(value.clone()));
+                entry.shares.clear();
+                self.retain_completed_single(key, &mut reg);
                 return Ok(value);
             }
 
@@ -1020,20 +1108,14 @@ impl InstanceRegistry {
         partial_point: Vec<u8>,
     ) -> Result<usize, String> {
         let mut reg = self.exp_registry(kind).lock();
-        let mut seq = 0usize;
-        loop {
-            let entry = reg.entry(seq).or_default();
-            if !entry.party_ids.contains(&sender_party_id) {
-                entry.partial_points.push((share_id, partial_point));
-                entry.party_ids.push(sender_party_id);
-                drop(reg);
-                self.notify_exp_registry(kind);
-                return Ok(seq);
-            }
-            seq = seq
-                .checked_add(1)
-                .ok_or_else(|| "open-in-exponent sequence allocator overflowed".to_string())?;
-        }
+        let seq = self.next_exp(kind, sender_party_id)?;
+        let entry = reg.entry(seq).or_default();
+        entry.locally_started = true;
+        entry.partial_points.push((share_id, partial_point));
+        entry.party_ids.push(sender_party_id);
+        drop(reg);
+        self.notify_exp_registry(kind);
+        Ok(seq)
     }
 
     fn insert_exp_for_kind(
@@ -1045,6 +1127,37 @@ impl InstanceRegistry {
         partial_point: Vec<u8>,
     ) -> Result<(), String> {
         let mut reg = self.exp_registry(kind).lock();
+        if seq < self.exp_floor.lock()[usize::from(kind == ExpOpenRegistryKind::G2)] {
+            return Ok(());
+        }
+        if reg.get(&seq).is_some_and(|entry| entry.result.is_some()) {
+            return Ok(());
+        }
+        let duplicate = reg
+            .get(&seq)
+            .is_some_and(|entry| entry.party_ids.contains(&sender_party_id));
+        let locally_started = reg.get(&seq).is_some_and(|entry| entry.locally_started);
+        if !duplicate && !locally_started {
+            let pending = reg
+                .values()
+                .filter(|entry| entry.result.is_none() && !entry.locally_started)
+                .collect::<Vec<_>>();
+            let peer_count = pending
+                .iter()
+                .filter(|entry| entry.party_ids.contains(&sender_party_id))
+                .count();
+            let bytes: usize = pending
+                .iter()
+                .flat_map(|entry| &entry.partial_points)
+                .map(|(_, bytes)| bytes.len())
+                .sum();
+            if peer_count >= MAX_PENDING_SCALAR_ENTRIES_PER_SENDER
+                || (!reg.contains_key(&seq) && pending.len() >= MAX_PENDING_SCALAR_ENTRIES)
+                || partial_point.len() > MAX_PENDING_SCALAR_BYTES.saturating_sub(bytes)
+            {
+                return Err("open-in-exponent retention budget exceeded".to_owned());
+            }
+        }
         let entry = reg.entry(seq).or_default();
         if let Some(pos) = entry.party_ids.iter().position(|id| *id == sender_party_id) {
             if entry.partial_points.get(pos) == Some(&(share_id, partial_point.clone())) {
@@ -1071,6 +1184,11 @@ impl InstanceRegistry {
         sender_party_id: usize,
         shares: Vec<Vec<u8>>,
     ) -> Result<(), String> {
+        if let Some(validate) = self.share_validator.lock().as_ref() {
+            for share in &shares {
+                validate(sender_party_id, share)?;
+            }
+        }
         if shares.is_empty() {
             return Ok(());
         }

@@ -1,4 +1,14 @@
 use super::*;
+
+#[test]
+fn manifest_slots_are_not_roster_positions() {
+    let store = ClientInputStore::new();
+    store.set_client_roster([0, 2, 3]);
+    assert_eq!(store.client_id_for_slot(ClientInputIndex::new(2)), Some(2));
+    assert_eq!(store.client_id_for_slot(ClientInputIndex::new(3)), Some(3));
+    assert_eq!(store.client_id_for_slot(ClientInputIndex::new(1)), None);
+    assert_eq!(store.client_id_at(ClientInputIndex::new(2)), Some(3));
+}
 use ark_bls12_381::Fr;
 use ark_bls12_381::G1Projective as G1;
 use std::num::NonZeroUsize;

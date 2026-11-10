@@ -11,9 +11,7 @@ use std::{
     time::Duration,
 };
 use stoffelnet::network_utils::{Network, NodePublicKey, PartyId};
-use stoffelnet::transports::quic::{
-    NetworkManager, PeerConnection, QuicNetworkConfig, QuicNetworkManager,
-};
+use stoffelnet::transports::quic::{NetworkManager, PeerConnection, QuicNetworkManager};
 
 fn registration_progress_interval() -> Option<Duration> {
     std::env::var("STOFFEL_SESSION_REGISTRATION_PROGRESS_INTERVAL_SECONDS")
@@ -156,21 +154,75 @@ pub async fn run_bootnode_with_config_ready(
     expected_parties: usize,
     ready: Option<oneshot::Sender<()>>,
 ) -> Result<(), String> {
-    let required_auth_token = required_discovery_auth_token("bootnode discovery registration")?;
-    eprintln!("[bootnode] Discovery registration authentication enabled");
-    run_bootnode_with_config_and_auth(bind, expected_parties, required_auth_token, ready).await
+    let cert = std::env::var("STOFFEL_CERT").map_err(|_| "bootnode requires STOFFEL_CERT")?;
+    let key = std::env::var("STOFFEL_KEY").map_err(|_| "bootnode requires STOFFEL_KEY")?;
+    let paths = std::env::var("STOFFEL_PARTY_CERTIFICATES")
+        .map_err(|_| "bootnode requires STOFFEL_PARTY_CERTIFICATES")?;
+    let roster = paths
+        .split(',')
+        .enumerate()
+        .map(|(party, path)| {
+            let cert = std::fs::read(path.trim()).map_err(|e| e.to_string())?;
+            Ok((
+                party,
+                QuicNetworkManager::public_key_from_certificate_der(&cert)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    run_bootnode_with_identity_ready(
+        bind,
+        expected_parties,
+        roster,
+        std::fs::read(cert).map_err(|e| e.to_string())?,
+        std::fs::read(key).map_err(|e| e.to_string())?,
+        ready,
+    )
+    .await
 }
 
+pub async fn run_bootnode_with_identity_ready(
+    bind: SocketAddr,
+    expected_parties: usize,
+    roster: Vec<(PartyId, NodePublicKey)>,
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+    ready: Option<oneshot::Sender<()>>,
+) -> Result<(), String> {
+    let roster = full_party_public_key_map(&roster, expected_parties, "bootnode roster")?;
+    let required_auth_token = required_discovery_auth_token("bootnode discovery registration")?;
+    if roster.get(&0)
+        != Some(&QuicNetworkManager::public_key_from_certificate_der(
+            &cert_der,
+        )?)
+    {
+        return Err("bootnode certificate must match roster party zero".to_owned());
+    }
+    let mut net = QuicNetworkManager::new();
+    net.set_local_certificate_der(cert_der, key_der)?;
+    net.install_expected_server_public_keys(roster.values().cloned())?;
+    net.listen(bind).await?;
+    let state = BootnodeState::with_roster(expected_parties, roster);
+    if let Some(ready) = ready {
+        let _ = ready.send(());
+    }
+    loop {
+        let conn = net.accept().await?;
+        spawn_connection_handler(conn, state.clone(), required_auth_token.clone());
+    }
+}
+
+#[cfg(test)]
 async fn run_bootnode_with_config_and_auth(
     bind: SocketAddr,
     expected_parties: usize,
     required_auth_token: String,
     ready: Option<oneshot::Sender<()>>,
 ) -> Result<(), String> {
-    let mut net = QuicNetworkManager::with_config(QuicNetworkConfig {
-        use_tls: false,
-        ..Default::default()
-    });
+    let mut net =
+        QuicNetworkManager::with_config(stoffelnet::transports::quic::QuicNetworkConfig {
+            use_tls: false,
+            ..Default::default()
+        });
     net.listen(bind).await?;
     let state = BootnodeState::new(expected_parties);
     if let Some(ready) = ready {
@@ -448,10 +500,11 @@ pub struct SessionRegistrationConfig {
     pub n_parties: usize,
     pub threshold: usize,
     pub timeout: Duration,
-    /// Optional locally provisioned logical-party to full-SPKI roster. When
-    /// present, discovery must announce this exact roster and the transport
-    /// freezes it before establishing the party mesh.
+    /// Locally provisioned logical-party to full-SPKI roster. Missing rosters
+    /// are rejected; discovery must announce exactly these identities.
     pub expected_party_public_keys: Option<Vec<(PartyId, NodePublicKey)>>,
+    /// Local certificate/key used for the separately authenticated discovery connection.
+    pub discovery_identity: (Vec<u8>, Vec<u8>),
 }
 
 fn full_party_public_key_map(
@@ -511,6 +564,7 @@ pub async fn register_and_wait_for_session(
         threshold,
         timeout,
         expected_party_public_keys,
+        discovery_identity,
     } = config;
     if execution_id.is_zero() {
         return Err("the all-zero execution ID cannot identify a session".to_string());
@@ -521,7 +575,10 @@ pub async fn register_and_wait_for_session(
     let local_public_key = net.get_public_key().cloned().ok_or_else(|| {
         "session registration requires an installed local certificate".to_string()
     })?;
-    let expected_party_public_key_map = expected_party_public_keys
+    let expected_party_public_keys = expected_party_public_keys.ok_or_else(|| {
+        "session discovery requires a provisioned party certificate roster".to_owned()
+    })?;
+    let expected_party_public_key_map = Some(expected_party_public_keys)
         .as_deref()
         .map(|entries| full_party_public_key_map(entries, n_parties, "configured party roster"))
         .transpose()?;
@@ -544,11 +601,24 @@ pub async fn register_and_wait_for_session(
     // Use a separate temporary manager for the bootnode discovery connection
     // so that the bootnode's TLS public key doesn't pollute the party mesh
     // manager's peer_public_keys (which would give N+1 sorted party IDs).
-    let mut bn_mgr = QuicNetworkManager::with_config(QuicNetworkConfig {
-        use_tls: false,
-        ..Default::default()
-    });
-    let bn_conn = bn_mgr.connect(bootnode).await?;
+    let mut bn_mgr = QuicNetworkManager::new();
+    bn_mgr.set_local_certificate_der(discovery_identity.0, discovery_identity.1)?;
+    let bootstrap_key = expected_party_public_key_map
+        .as_ref()
+        .unwrap()
+        .get(&0)
+        .ok_or_else(|| "party roster omits bootstrap party zero".to_owned())?;
+    bn_mgr.install_expected_server_public_keys(
+        expected_party_public_key_map
+            .as_ref()
+            .unwrap()
+            .values()
+            .cloned(),
+    )?;
+    let bn_conn = bn_mgr.connect_as_client(bootnode).await?;
+    if bn_conn.authenticated_peer_public_key().as_ref() != Some(bootstrap_key) {
+        return Err("discovery connection did not authenticate bootstrap party zero".to_owned());
+    }
     let auth_token = required_discovery_auth_token("session discovery registration")?;
 
     eprintln!(
@@ -568,7 +638,7 @@ pub async fn register_and_wait_for_session(
         party_id: my_party_id,
         listen_addr: my_listen,
         program_id,
-        entry,
+        entry: entry.clone(),
         n_parties,
         threshold,
         auth_token,
@@ -629,6 +699,15 @@ pub async fn register_and_wait_for_session(
                             execution_id,
                             hex::encode(program_id)
                         ));
+                    }
+                    if info.entry != entry
+                        || info.n_parties != n_parties
+                        || info.threshold != threshold
+                    {
+                        return Err(
+                            "bootnode session entry or topology differs from local configuration"
+                                .to_owned(),
+                        );
                     }
                     eprintln!(
                         "[party {}] Received SessionAnnounce: instance_id={}, {} parties",

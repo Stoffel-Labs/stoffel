@@ -23,13 +23,16 @@ jobs:
     outputs:
       tag: ${{ steps.ref.outputs.tag }}
       version: ${{ steps.ref.outputs.version }}
-      ref: ${{ steps.ref.outputs.ref }}
+      ref: ${{ steps.provenance.outputs.sha }}
     steps:
       - name: Resolve release ref
         id: ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ inputs.tag }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
             echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
           else
             tag="${GITHUB_REF_NAME}"
@@ -48,6 +51,13 @@ jobs:
           ref: ${{ steps.ref.outputs.ref }}
           fetch-depth: 0
 
+      - name: Check tag commit is contained in main
+        id: provenance
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -58,11 +68,6 @@ jobs:
           if [ "$crate_version" != "${{ steps.ref.outputs.version }}" ]; then
             echo "Tag ${{ steps.ref.outputs.tag }} does not match stoffel version $crate_version"; exit 1
           fi
-
-      - name: Check tag commit is contained in main
-        run: |
-          git fetch origin main
-          git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/main'
 
   # ---- Build each target natively (no cross-compilation). ----
   build:
@@ -190,7 +195,7 @@ jobs:
             echo "Install:  curl -fsSL https://get.stoffelmpc.com | sh"
             echo
             echo "Prebuilt targets: linux x86_64/aarch64, macOS arm64."
-            echo "commit: https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+            echo "commit: https://github.com/${GITHUB_REPOSITORY}/commit/${{ needs.meta.outputs.ref }}"
             echo "Checksums are attached as the SHA256SUMS asset."
             echo
             echo "Each archive is signed with Sigstore and has a matching .bundle. Verify with:"

@@ -246,6 +246,22 @@ impl ClientInputStore {
         }
     }
 
+    /// Resolve a program's literal manifest slot. An explicit roster contains
+    /// slot identities, not a dense array of interchangeable input positions.
+    pub fn client_id_for_slot(&self, slot: ClientInputIndex) -> Option<ClientId> {
+        let state = self.state.read();
+        if state.client_roster.is_empty() {
+            // Legacy embedders without a manifest roster use positional input.
+            state.entries.keys().nth(slot.index()).copied()
+        } else {
+            state
+                .client_roster
+                .iter()
+                .copied()
+                .find(|id| *id == slot.index())
+        }
+    }
+
     /// Return all client IDs in sorted order.
     pub fn client_ids(&self) -> Vec<ClientId> {
         let state = self.state.read();

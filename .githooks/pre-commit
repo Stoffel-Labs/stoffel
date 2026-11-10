@@ -26,7 +26,7 @@ git grep -n -E "(package[[:space:]]*=[[:space:]]*\"(${published_package_pattern}
   ':!.githooks/pre-commit' |
   grep -v -E 'version[[:space:]]*=' |
   grep -v -E \
-    '^(crates/stoffel-cli/Cargo.toml|crates/stoffel-rust-sdk/Cargo.toml|crates/stoffel-lang/examples/mpc_aes128_cbc_client_io/Cargo.toml|crates/stoffel-cli/tests/cli.rs):' \
+    '^(Cargo.toml|docker/coordinator-wrapper/Cargo.toml|vendor/stoffel-mpc-coordinator-off-chain/Cargo.toml|crates/stoffel-cli/Cargo.toml|crates/stoffel-rust-sdk/Cargo.toml|crates/stoffel-lang/examples/mpc_aes128_cbc_client_io/Cargo.toml|crates/stoffel-cli/tests/cli.rs):' \
   >>"$stale_package_refs" || true
 
 git grep -n -E "(-p|--package)[[:space:]]+stoffel-vm[[:space:]]+--bin[[:space:]]+${runner_bin}" -- \
@@ -58,6 +58,15 @@ if [ -f "$ci_workflow" ] && ! grep -Eq "cargo build .*--package[[:space:]]+${run
 error: ${ci_workflow} does not build ${runner_bin} from ${runner_package}.
 MSG
   exit 1
+fi
+
+git diff --cached --check
+# Cargo builds can execute build.rs and repository-configured tools. Committing
+# a reviewed branch must not silently grant that code execution permission.
+# Developers can explicitly opt in after trusting the checkout.
+if [ "${STOFFEL_HOOK_RUN_BUILD_CHECKS:-0}" != "1" ]; then
+  echo "pre-commit: static checks passed; run CI checks explicitly for trusted code"
+  exit 0
 fi
 
 # Match CI even when a developer has a directory override or an older nightly.

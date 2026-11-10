@@ -100,7 +100,7 @@ services:
       - --initial-mpc-nodes
       - /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     volumes:
-      - ./ids:/app/ids:ro
+      - ./ids/server_key.der:/app/ids/server_key.der:ro
     networks:
       stoffel-coord-net:
         ipv4_address: 172.29.0.5
@@ -125,6 +125,7 @@ services:
       STOFFEL_RPC_ADDR: 172.29.0.10:16180
       STOFFEL_CERT: /app/ids/nodes/cert0.crt
       STOFFEL_KEY: /app/ids/nodes/key0.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-coord-net:
         ipv4_address: 172.29.0.10
@@ -144,6 +145,8 @@ services:
       timeout: 3s
       retries: 20
       start_period: 10s
+    volumes:
+      - ./ids/nodes/key0.der:/app/ids/nodes/key0.der:ro
 
   party1:
     <<: *party-common
@@ -158,6 +161,7 @@ services:
       STOFFEL_RPC_ADDR: 172.29.0.11:16181
       STOFFEL_CERT: /app/ids/nodes/cert1.crt
       STOFFEL_KEY: /app/ids/nodes/key1.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-coord-net:
         ipv4_address: 172.29.0.11
@@ -166,6 +170,8 @@ services:
         condition: service_healthy
       party0:
         condition: service_healthy
+    volumes:
+      - ./ids/nodes/key1.der:/app/ids/nodes/key1.der:ro
 
   party2:
     <<: *party-common
@@ -180,6 +186,7 @@ services:
       STOFFEL_RPC_ADDR: 172.29.0.12:16182
       STOFFEL_CERT: /app/ids/nodes/cert2.crt
       STOFFEL_KEY: /app/ids/nodes/key2.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-coord-net:
         ipv4_address: 172.29.0.12
@@ -188,6 +195,8 @@ services:
         condition: service_healthy
       party0:
         condition: service_healthy
+    volumes:
+      - ./ids/nodes/key2.der:/app/ids/nodes/key2.der:ro
 
   party3:
     <<: *party-common
@@ -202,6 +211,7 @@ services:
       STOFFEL_RPC_ADDR: 172.29.0.13:16183
       STOFFEL_CERT: /app/ids/nodes/cert3.crt
       STOFFEL_KEY: /app/ids/nodes/key3.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-coord-net:
         ipv4_address: 172.29.0.13
@@ -210,6 +220,8 @@ services:
         condition: service_healthy
       party0:
         condition: service_healthy
+    volumes:
+      - ./ids/nodes/key3.der:/app/ids/nodes/key3.der:ro
 
   party4:
     <<: *party-common
@@ -224,6 +236,7 @@ services:
       STOFFEL_RPC_ADDR: 172.29.0.14:16184
       STOFFEL_CERT: /app/ids/nodes/cert4.crt
       STOFFEL_KEY: /app/ids/nodes/key4.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-coord-net:
         ipv4_address: 172.29.0.14
@@ -232,6 +245,8 @@ services:
         condition: service_healthy
       party0:
         condition: service_healthy
+    volumes:
+      - ./ids/nodes/key4.der:/app/ids/nodes/key4.der:ro
 
   client0:
     <<: *client-common
@@ -243,6 +258,7 @@ services:
       STOFFEL_CLIENT_INDEX: ${STOFFEL_CLIENT0_INDEX:-0}
       STOFFEL_CERT: /app/ids/clients/cert0.crt
       STOFFEL_KEY: /app/ids/clients/key0.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-coord-net:
         ipv4_address: 172.29.0.100
@@ -259,6 +275,8 @@ services:
         condition: service_started
       party4:
         condition: service_started
+    volumes:
+      - ./ids/clients/key0.der:/app/ids/clients/key0.der:ro
 
   client1:
     <<: *client-common
@@ -270,6 +288,7 @@ services:
       STOFFEL_CLIENT_INDEX: ${STOFFEL_CLIENT1_INDEX:-1}
       STOFFEL_CERT: /app/ids/clients/cert1.crt
       STOFFEL_KEY: /app/ids/clients/key1.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-coord-net:
         ipv4_address: 172.29.0.101
@@ -286,6 +305,8 @@ services:
         condition: service_started
       party4:
         condition: service_started
+    volumes:
+      - ./ids/clients/key1.der:/app/ids/clients/key1.der:ro
 
 networks:
   stoffel-coord-net:

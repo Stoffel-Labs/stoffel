@@ -52,6 +52,13 @@ jobs:
           ref: ${{ steps.ref.outputs.tag }}
           fetch-depth: 0
 
+      - name: Check tag commit is contained in main
+        id: provenance
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -86,11 +93,6 @@ jobs:
               sys.exit(f"Cannot publish {crate}:\n  " + "\n  ".join(errs))
           print(f"OK: {crate} {want}")
           PY
-
-      - name: Check tag commit is contained in main
-        run: |
-          git fetch origin main
-          git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/main'
 
       # Packages and verifies the crate (and resolves its registry deps), so a
       # missing upstream version — e.g. stoffellang needing stoffel-vm-types on
@@ -203,7 +205,7 @@ jobs:
             echo "$CRATE $VERSION"
             echo
             echo "crates.io: https://crates.io/crates/$CRATE/$VERSION"
-            echo "commit: https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+            echo "commit: https://github.com/${GITHUB_REPOSITORY}/commit/${{ steps.provenance.outputs.sha }}"
             echo "crate sha256: ${{ steps.checksum.outputs.sha256 }}"
             echo
             echo "The .crate is signed with Sigstore. Verify it with:"

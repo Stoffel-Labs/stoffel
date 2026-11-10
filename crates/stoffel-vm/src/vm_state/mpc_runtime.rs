@@ -172,7 +172,7 @@ impl MpcRuntimeState {
     }
 
     pub(super) fn client_id_at_index(&self, index: ClientInputIndex) -> Option<ClientId> {
-        self.client_store.client_id_at(index)
+        self.client_store.client_id_for_slot(index)
     }
 
     pub(super) fn clear_client_inputs(&self) {
@@ -280,7 +280,6 @@ impl MpcRuntimeState {
         self.client_store.get_client_share(client_id, index)
     }
 
-    #[cfg(test)]
     pub(super) fn client_share_as(
         &self,
         client_id: ClientId,
@@ -315,27 +314,16 @@ impl MpcRuntimeState {
         share_index: ClientShareIndex,
         request: ClientShareRequest,
     ) -> VmResult<Value> {
-        let requested_type = request.requested_type();
-        let (client_id, share) = self
+        let client_id = self
             .client_store
-            .get_client_share_data_at(client_index, share_index)
+            .client_id_for_slot(client_index)
             .ok_or_else(|| {
                 format!(
                     "No client share at client slot {} and share index {}",
                     client_index, share_index
                 )
             })?;
-        if let Some(stored_type) = share.share_type() {
-            if stored_type != requested_type {
-                return Err(VmError::ClientShareTypeMismatch {
-                    client_id,
-                    index: share_index,
-                    stored_type,
-                    requested_type,
-                });
-            }
-        }
-        Ok(Value::Share(requested_type, share.into_data()))
+        self.client_share_as(client_id, share_index, request)
     }
 
     pub(super) fn sum_client_shares_at(

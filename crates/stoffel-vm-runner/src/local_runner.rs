@@ -659,7 +659,13 @@ impl LocalCoordinatorRunner {
         let mut n_inputs = 0_u64;
         let output_clients = client_bindings
             .iter()
-            .map(|(_slot, identity)| identity.clone())
+            .filter(|(slot, _)| {
+                self.output_count_for_slot(*slot) > 0
+                    || self
+                        .expected_clients
+                        .is_some_and(|count| *slot < count as u64)
+            })
+            .map(|(_, identity)| identity.clone())
             .collect::<Vec<_>>();
         if self.binary.client_io_manifest.clients.is_empty() {
             for input in &self.client_inputs {
@@ -698,6 +704,23 @@ impl LocalCoordinatorRunner {
         context: SpawnPartyContext<'_>,
     ) -> LocalCoordinatorRunnerResult<(String, Child)> {
         let mut command = Command::new(&self.runner_path);
+        let identity_dir = context
+            .identity
+            .cert_path
+            .parent()
+            .expect("identity directory");
+        command.env(
+            "STOFFEL_PARTY_CERTIFICATES",
+            (0..self.parties)
+                .map(|index| {
+                    identity_dir
+                        .join(format!("node{index}.cert.der"))
+                        .display()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        );
         command
             .arg(context.program_path)
             .arg(&self.entry)
@@ -2583,6 +2606,30 @@ exec sleep 30
             .expect("binding");
         assert_eq!(n_inputs, 0);
         assert_eq!(output_clients, vec![vec![10], vec![11]]);
+    }
+
+    #[test]
+    fn input_only_clients_are_not_registered_for_outputs() {
+        let mut binary = CompiledBinary::new();
+        binary.client_io_manifest.clients = vec![
+            ClientIoSchema {
+                client_slot: 1,
+                inputs: vec![ShareType::default_secret_int()],
+                outputs: vec![],
+            },
+            ClientIoSchema {
+                client_slot: 2,
+                inputs: vec![],
+                outputs: vec![ShareType::default_secret_int()],
+            },
+        ];
+        let runner = test_runner(binary).client_input(1, [42]).build().unwrap();
+        assert_eq!(
+            runner
+                .coordinator_client_io_binding(&[(1, vec![11]), (2, vec![22])])
+                .unwrap(),
+            (1, vec![vec![22]])
+        );
     }
 
     #[test]

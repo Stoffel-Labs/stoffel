@@ -9,6 +9,10 @@ path = "src/main.rs"
 
 [workspace]
 
+[patch.crates-io]
+stoffel-mpc-coordinator-shared = { path = "../../vendor/stoffel-mpc-coordinator-shared" }
+stoffel-mpc-coordinator-off-chain = { path = "../../vendor/stoffel-mpc-coordinator-off-chain" }
+
 [dependencies]
 ark-bn254 = "=0.5.0"
 ark-bls12-381 = "=0.5.0"

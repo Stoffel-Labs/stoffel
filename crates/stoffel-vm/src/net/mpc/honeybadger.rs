@@ -198,6 +198,34 @@ where
         3 * threshold + 1
     }
 
+    fn validated_open_registry(
+        router: &crate::net::open_registry::OpenMessageRouter,
+        instance_id: u64,
+        topology: MpcSessionTopology,
+    ) -> Arc<crate::net::open_registry::InstanceRegistry> {
+        let registry = router.register_instance(instance_id);
+        registry.set_share_validator(Arc::new(move |sender, bytes| {
+            let mut remaining = bytes;
+            let share =
+                <RobustShare<F> as ark_serialize::CanonicalDeserialize>::deserialize_compressed(
+                    &mut remaining,
+                )
+                .map_err(|error| format!("invalid HoneyBadger opening share: {error}"))?;
+            if !remaining.is_empty()
+                || sender >= topology.n_parties()
+                || share.id != sender
+                || share.degree != topology.threshold()
+            {
+                return Err(
+                    "HoneyBadger opening share does not match its authenticated sender or degree"
+                        .to_owned(),
+                );
+            }
+            Ok(())
+        }));
+        registry
+    }
+
     pub fn open_message_router(&self) -> Arc<crate::net::open_registry::OpenMessageRouter> {
         self.open_message_router.clone()
     }
@@ -312,7 +340,11 @@ where
             *node = new_node;
         }
 
-        let new_registry = self.open_message_router.register_instance(new_instance_id);
+        let new_registry = Self::validated_open_registry(
+            &self.open_message_router,
+            new_instance_id,
+            self.topology,
+        );
         let old_registry = {
             let mut slot = self
                 .open_registry
@@ -438,7 +470,11 @@ where
             client_output_id_map: RwLock::new(BTreeMap::new()),
             strict_client_output_id_map: AtomicBool::new(false),
             client_reservation_identities: RwLock::new(None),
-            open_registry: StdRwLock::new(open_message_router.register_instance(instance_id)),
+            open_registry: StdRwLock::new(Self::validated_open_registry(
+                &open_message_router,
+                instance_id,
+                topology,
+            )),
             open_message_router,
             deployment_mode,
         }))
@@ -636,7 +672,11 @@ where
             client_output_id_map: RwLock::new(BTreeMap::new()),
             strict_client_output_id_map: AtomicBool::new(false),
             client_reservation_identities: RwLock::new(None),
-            open_registry: StdRwLock::new(open_message_router.register_instance(instance_id)),
+            open_registry: StdRwLock::new(Self::validated_open_registry(
+                &open_message_router,
+                instance_id,
+                topology,
+            )),
             open_message_router,
             deployment_mode,
         })

@@ -2,6 +2,7 @@ use super::{registration_token_is_valid, send_ctrl, send_session_announce, Disco
 use crate::net::session::{
     derive_instance_id_for_execution, ExecutionId, SessionInfo, SessionMessage,
 };
+use bincode::Options;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use stoffelnet::network_utils::{NodePublicKey, PartyId};
 use stoffelnet::transports::quic::PeerConnection;
@@ -43,6 +44,7 @@ pub(super) struct SessionRegistrationReport {
 pub(super) struct BootnodeState {
     session: Arc<Mutex<SessionState>>,
     expected_parties: usize,
+    expected_keys: Option<HashMap<PartyId, NodePublicKey>>,
     session_tx: watch::Sender<Option<SessionInfo>>,
     ice_tx: broadcast::Sender<DiscoveryMessage>,
 }
@@ -60,9 +62,16 @@ impl BootnodeState {
         Self {
             session: Arc::new(Mutex::new(SessionState::default())),
             expected_parties,
+            expected_keys: None,
             session_tx,
             ice_tx,
         }
+    }
+
+    pub fn with_roster(expected_parties: usize, keys: HashMap<PartyId, NodePublicKey>) -> Self {
+        let mut state = Self::new(expected_parties);
+        state.expected_keys = Some(keys);
+        state
     }
 
     pub fn subscribe_session(&self) -> watch::Receiver<Option<SessionInfo>> {
@@ -96,6 +105,14 @@ impl BootnodeState {
         };
 
         let target_parties = self.expected_parties;
+        if let Some(expected) = &self.expected_keys {
+            if expected.get(&registration.party_id) != Some(&NodePublicKey(tls_public_key.clone()))
+            {
+                return Err(
+                    "registration certificate does not match provisioned party slot".to_owned(),
+                );
+            }
+        }
         if target_parties == 0
             || registration.n_parties != target_parties
             || registration.party_id >= target_parties
@@ -333,9 +350,9 @@ impl BootnodeConnection {
     }
 
     async fn handle_buffer(&mut self, buf: Vec<u8>) {
-        if let Ok(message) = bincode::deserialize::<DiscoveryMessage>(&buf) {
+        if let Ok(message) = decode_bounded_control::<DiscoveryMessage>(&buf) {
             self.handle_discovery_message(message).await;
-        } else if let Ok(message) = bincode::deserialize::<SessionMessage>(&buf) {
+        } else if let Ok(message) = decode_bounded_control::<SessionMessage>(&buf) {
             self.handle_session_message(message);
         }
     }
@@ -468,6 +485,17 @@ impl BootnodeConnection {
         auth_token: String,
     ) {
         let party_id = registration.party_id;
+        if self.state.expected_keys.is_some()
+            && self.conn.authenticated_peer_public_key().as_ref()
+                != registration
+                    .tls_public_key
+                    .as_ref()
+                    .map(|key| NodePublicKey(key.clone()))
+                    .as_ref()
+        {
+            self.waiting_for_session = false;
+            return;
+        }
         if !registration_token_is_valid(&self.required_auth_token, &auth_token) {
             eprintln!(
                 "[bootnode] Rejected RegisterWithSession from party {} (invalid auth token)",
@@ -556,6 +584,20 @@ impl PendingSession {
             tls_public_keys: self.tls_public_keys.into_iter().collect(),
         }
     }
+}
+
+fn decode_bounded_control<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, bincode::Error> {
+    const LIMIT: u64 = 65_536;
+    if bytes.len() as u64 > LIMIT {
+        return Err(Box::new(bincode::ErrorKind::SizeLimit));
+    }
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(LIMIT)
+        .reject_trailing_bytes()
+        .deserialize(bytes)
 }
 
 #[cfg(test)]
@@ -785,6 +827,43 @@ mod tests {
             .register_session(registration(1, program_id))
             .await
             .expect("valid second identity registers")
+            .ready_session
+            .is_some());
+    }
+
+    #[test]
+    fn discovery_decoder_bounds_lengths_and_rejects_trailing_bytes() {
+        let message = DiscoveryMessage::IceExchangeRequest {
+            execution_id: ExecutionId::from_bytes([1; 32]),
+            from_party_id: 0,
+            to_party_id: 1,
+        };
+        let mut bytes = bincode::serialize(&message).unwrap();
+        assert!(decode_bounded_control::<DiscoveryMessage>(&bytes).is_ok());
+        bytes.push(0);
+        assert!(decode_bounded_control::<DiscoveryMessage>(&bytes).is_err());
+        assert!(decode_bounded_control::<DiscoveryMessage>(&vec![0; 65_537]).is_err());
+        assert!(decode_bounded_control::<Vec<u8>>(&u64::MAX.to_le_bytes()).is_err());
+    }
+
+    #[tokio::test]
+    async fn provisioned_roster_rejects_other_partys_key_for_slot() {
+        let keys = (0..2)
+            .map(|party| (party, NodePublicKey(tls_public_key(party))))
+            .collect();
+        let state = BootnodeState::with_roster(2, keys);
+        let mut spoofed = registration(1, [8; 32]);
+        spoofed.tls_public_key = Some(tls_public_key(0));
+        spoofed.tls_derived_id = Some(NodePublicKey(tls_public_key(0)).derive_id());
+        assert!(state.register_session(spoofed).await.is_err());
+        state
+            .register_session(registration(0, [8; 32]))
+            .await
+            .unwrap();
+        assert!(state
+            .register_session(registration(1, [8; 32]))
+            .await
+            .unwrap()
             .ready_session
             .is_some());
     }

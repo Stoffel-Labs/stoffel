@@ -24,6 +24,49 @@ fn next_instance_id() -> u64 {
     NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+#[test]
+fn malformed_opening_contributions_never_enter_the_quorum() {
+    use ark_serialize::CanonicalSerialize;
+    let instance = next_instance_id();
+    let router = Arc::new(crate::net::open_registry::OpenMessageRouter::new());
+    let _engine = test_engine(router.clone(), instance, 0, 5, 1);
+    let bad = crate::net::open_registry::encode_single_share_wire_message(
+        instance,
+        0,
+        "hb-int-64",
+        1,
+        &[0],
+    )
+    .unwrap();
+    assert!(router.try_handle_wire_message(1, &bad).is_err());
+    let mut wrong_degree = Vec::new();
+    RobustShare::new(ark_bls12_381::Fr::from(7u64), 1, 0)
+        .serialize_compressed(&mut wrong_degree)
+        .unwrap();
+    let wrong_degree = crate::net::open_registry::encode_single_share_wire_message(
+        instance,
+        0,
+        "hb-int-64",
+        1,
+        &wrong_degree,
+    )
+    .unwrap();
+    assert!(router.try_handle_wire_message(1, &wrong_degree).is_err());
+    let mut bytes = Vec::new();
+    RobustShare::new(ark_bls12_381::Fr::from(7u64), 1, 1)
+        .serialize_compressed(&mut bytes)
+        .unwrap();
+    let good = crate::net::open_registry::encode_single_share_wire_message(
+        instance,
+        0,
+        "hb-int-64",
+        1,
+        &bytes,
+    )
+    .unwrap();
+    assert!(router.try_handle_wire_message(1, &good).unwrap());
+}
+
 fn test_engine(
     open_message_router: Arc<crate::net::open_registry::OpenMessageRouter>,
     instance_id: u64,

@@ -94,6 +94,7 @@ pub struct ServerBuilder {
     avss_engine: Option<AvssEngine>,
     verified_ordering: Option<VerifiedOrdering>,
     runner_path: Option<PathBuf>,
+    party_certificates: Vec<PathBuf>,
     bootstrap_addr: Option<String>,
     advertise_addr: Option<SocketAddr>,
     entry: String,
@@ -117,6 +118,7 @@ impl ServerBuilder {
             avss_engine: None,
             verified_ordering: None,
             runner_path: None,
+            party_certificates: Vec::new(),
             bootstrap_addr: None,
             advertise_addr: None,
             entry: "main".to_owned(),
@@ -271,6 +273,17 @@ impl ServerBuilder {
                 self.config_error = Some(format!("invalid server advertise address: {error}"));
             }
         }
+        self
+    }
+
+    /// Pin the discovery certificate roster in logical party order (leader first).
+    /// When omitted, the launcher reads STOFFEL_PARTY_CERTIFICATES.
+    pub fn party_certificates<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.party_certificates = paths.into_iter().map(Into::into).collect();
         self
     }
 
@@ -538,6 +551,7 @@ impl ServerBuilder {
             state: Arc::new(AtomicU8::new(ServerState::Created.as_u8())),
             verified_ordering: self.verified_ordering,
             runner_path: self.runner_path,
+            party_certificates: self.party_certificates,
             bootstrap_addr: self.bootstrap_addr,
             advertise_addr: self.advertise_addr,
             entry: self.entry,
@@ -694,6 +708,7 @@ pub struct StoffelServer {
     state: Arc<AtomicU8>,
     verified_ordering: Option<VerifiedOrdering>,
     runner_path: Option<PathBuf>,
+    party_certificates: Vec<PathBuf>,
     bootstrap_addr: Option<String>,
     advertise_addr: Option<SocketAddr>,
     entry: String,
@@ -775,6 +790,7 @@ impl StoffelServer {
         program.save_bytecode(&program_path)?;
 
         let args = self.runner_args(&program_path, mpc_config)?;
+        let party_certificates = self.discovery_certificate_paths(mpc_config.parties)?;
         if self.advertise_addr.is_none() && bind_ip_is_unspecified(&self.bind_addr) {
             eprintln!(
                 "[stoffel] warning: party {} binds {} without an advertise address; parties on other hosts cannot dial it",
@@ -785,6 +801,14 @@ impl StoffelServer {
         let mut command = Command::new(runner_path);
         command
             .args(args)
+            .env(
+                "STOFFEL_PARTY_CERTIFICATES",
+                party_certificates
+                    .iter()
+                    .map(|path| path.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
@@ -797,6 +821,26 @@ impl StoffelServer {
         });
         self.set_state(ServerState::Running);
         Ok(())
+    }
+
+    fn discovery_certificate_paths(&self, n_parties: usize) -> Result<Vec<PathBuf>> {
+        let paths = if self.party_certificates.is_empty() {
+            std::env::var("STOFFEL_PARTY_CERTIFICATES")
+                .map(|value| value.split(',').map(|path| PathBuf::from(path.trim())).collect())
+                .map_err(|_| Error::Configuration("server discovery requires party_certificates or STOFFEL_PARTY_CERTIFICATES".to_owned()))?
+        } else {
+            self.party_certificates.clone()
+        };
+        if paths.len() != n_parties {
+            return Err(Error::Configuration(format!(
+                "discovery requires {n_parties} party certificates, got {}",
+                paths.len()
+            )));
+        }
+        for path in &paths {
+            validate_existing_file("discovery party certificate", path)?;
+        }
+        Ok(paths)
     }
 
     /// Build the `stoffel-run` argument list for this server.
@@ -1187,6 +1231,25 @@ mod tests {
         let args = runner_args_for(&server)?;
         let index = args.iter().position(|arg| arg == "--execution-id").unwrap();
         assert_eq!(args[index + 1], execution_id.to_string().as_str());
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_roster_is_validated_before_spawning_a_runner() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths: Vec<_> = (0..5)
+            .map(|party| dir.path().join(format!("party{party}.crt")))
+            .collect();
+        for path in &paths {
+            std::fs::write(path, "certificate fixture")?;
+        }
+        let server = five_party_builder(0)
+            .party_certificates(paths.clone())
+            .build()?;
+        assert_eq!(server.discovery_certificate_paths(5)?, paths);
+        assert!(server.discovery_certificate_paths(4).is_err());
+        std::fs::remove_file(&paths[0])?;
+        assert!(server.discovery_certificate_paths(5).is_err());
         Ok(())
     }
 

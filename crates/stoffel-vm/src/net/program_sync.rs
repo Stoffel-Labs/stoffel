@@ -49,6 +49,8 @@ pub enum ProgramSyncError {
     },
     #[error("program_id mismatch: expected {expected}, got {actual}")]
     ProgramIdMismatch { expected: String, actual: String },
+    #[error("entry point mismatch: expected {expected}, got {actual}")]
+    EntryMismatch { expected: String, actual: String },
     #[error("downloaded program hash mismatch: expected {expected}, got {actual}")]
     DownloadedProgramHashMismatch { expected: String, actual: String },
 }
@@ -141,7 +143,7 @@ fn program_size_to_usize(size: u64) -> ProgramSyncResult<usize> {
 }
 
 /// Ensures the cache directory exists
-pub fn ensure_cache_dir() -> ProgramSyncResult<()> {
+pub fn ensure_cache_dir() -> Result<(), ProgramSyncError> {
     let dir = cache_dir();
     fs::create_dir_all(&dir).map_err(|error| cache_io_error("create", &dir, error))
 }
@@ -150,7 +152,7 @@ pub fn ensure_cache_dir() -> ProgramSyncResult<()> {
 pub async fn send_ctrl(
     conn: &dyn PeerConnection,
     msg: &ProgramSyncMessage,
-) -> ProgramSyncResult<()> {
+) -> Result<(), ProgramSyncError> {
     let bytes = bincode::serialize(msg).map_err(|error| ProgramSyncError::Encode {
         reason: error.to_string(),
     })?;
@@ -183,7 +185,7 @@ pub async fn send_program_bytes(
     conn: &dyn PeerConnection,
     program_id: [u8; 32],
     bytes: Arc<Vec<u8>>,
-) -> ProgramSyncResult<()> {
+) -> Result<(), ProgramSyncError> {
     let msg = ProgramSyncMessage::ProgramBytes {
         program_id,
         bytes: bytes.to_vec(),
@@ -221,7 +223,7 @@ pub async fn recv_program_bytes(
     program_bytes_from_message(msg, expected_id)
 }
 
-fn verify_program_id(expected_id: &[u8; 32], bytes: &[u8]) -> ProgramSyncResult<()> {
+fn verify_program_id(expected_id: &[u8; 32], bytes: &[u8]) -> Result<(), ProgramSyncError> {
     let actual_id = program_id_from_bytes(bytes);
     if actual_id == *expected_id {
         Ok(())
@@ -279,6 +281,8 @@ pub async fn agree_and_sync_program(
         }
     };
 
+    validate_announcement(pid, entry, agreed_pid, &agreed_entry)?;
+
     // Ack
     let ack = ProgramSyncMessage::ProgramAck {
         party_id: my_party,
@@ -314,9 +318,44 @@ pub async fn agree_and_sync_program(
     Ok((agreed_pid, agreed_size, agreed_entry))
 }
 
+fn validate_announcement(
+    pid: [u8; 32],
+    entry: &str,
+    agreed_pid: [u8; 32],
+    agreed_entry: &str,
+) -> Result<(), ProgramSyncError> {
+    if agreed_entry != entry {
+        return Err(ProgramSyncError::EntryMismatch {
+            expected: entry.to_owned(),
+            actual: agreed_entry.to_owned(),
+        });
+    }
+    if pid != [0; 32] && agreed_pid != pid {
+        return Err(ProgramSyncError::ProgramIdMismatch {
+            expected: program_id_hex(&pid),
+            actual: program_id_hex(&agreed_pid),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn announcement_must_match_requested_entry_and_known_program() {
+        assert!(matches!(
+            validate_announcement([1; 32], "private", [1; 32], "public"),
+            Err(ProgramSyncError::EntryMismatch { .. })
+        ));
+        assert!(matches!(
+            validate_announcement([1; 32], "main", [2; 32], "main"),
+            Err(ProgramSyncError::ProgramIdMismatch { .. })
+        ));
+        validate_announcement([1; 32], "main", [1; 32], "main").unwrap();
+        validate_announcement([0; 32], "main", [2; 32], "main").unwrap();
+    }
 
     #[test]
     fn program_size_conversion_round_trips_representable_lengths() {

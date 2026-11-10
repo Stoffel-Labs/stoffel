@@ -177,7 +177,7 @@ pub use avss_server::{
 // Re-export discovery helpers
 pub use discovery::{
     register_and_wait_for_session, run_bootnode_with_config, run_bootnode_with_config_ready,
-    DiscoveryMessage, SessionRegistrationConfig,
+    run_bootnode_with_identity_ready, DiscoveryMessage, SessionRegistrationConfig,
 };
 // Re-export program sync + session helpers
 pub use program_sync::{

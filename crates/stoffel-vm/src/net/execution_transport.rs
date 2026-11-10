@@ -392,26 +392,34 @@ pub struct ExecutionInboundMessage {
 
 /// Retained payload bytes are bounded twice: once for the destination
 /// execution and once across the whole mux. The bounded route channels provide
-/// the item limit, so duplicating item counters here only creates state which
-/// can drift from the channels.
+/// the first item limit; leases also bound messages retained by downstream retry
+/// tasks after they leave those channels.
 #[derive(Debug)]
 struct IngressAccounting {
     limits: ExecutionIngressLimits,
     global_bytes: Arc<Semaphore>,
+    global_client_bytes: Arc<Semaphore>,
+    global_items: Arc<Semaphore>,
+    global_client_items: Arc<Semaphore>,
 }
 
 impl IngressAccounting {
     fn new(limits: ExecutionIngressLimits) -> Self {
         Self {
             limits,
+            global_items: Arc::new(Semaphore::new(4096)),
+            global_client_items: Arc::new(Semaphore::new(2048)),
             global_bytes: Arc::new(Semaphore::new(limits.global_byte_capacity)),
+            global_client_bytes: Arc::new(Semaphore::new((limits.global_byte_capacity / 2).max(1))),
         }
     }
 
     fn reserve(
         &self,
         execution_bytes: Arc<Semaphore>,
+        execution_items: Arc<Semaphore>,
         payload_bytes: usize,
+        is_client: bool,
     ) -> Result<ExecutionIngressLease, ()> {
         let permits = u32::try_from(payload_bytes).map_err(|_| ())?;
         let execution = execution_bytes
@@ -420,9 +428,30 @@ impl IngressAccounting {
         let global = Arc::clone(&self.global_bytes)
             .try_acquire_many_owned(permits)
             .map_err(|_| ())?;
+        let item = execution_items.try_acquire_owned().map_err(|_| ())?;
+        let global_item = self
+            .global_items
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ())?;
+        let client_item = if is_client {
+            Some(
+                self.global_client_items
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| ())?,
+            )
+        } else {
+            None
+        };
         Ok(ExecutionIngressLease {
+            _client_item: client_item,
+            _item: item,
+            _global_item: global_item,
             _execution: execution,
             _global: global,
+            _client: None,
+            _global_client: None,
         })
     }
 
@@ -436,8 +465,13 @@ impl IngressAccounting {
 
 #[derive(Debug)]
 struct ExecutionIngressLease {
+    _client_item: Option<OwnedSemaphorePermit>,
+    _item: OwnedSemaphorePermit,
+    _global_item: OwnedSemaphorePermit,
     _execution: OwnedSemaphorePermit,
     _global: OwnedSemaphorePermit,
+    _client: Option<OwnedSemaphorePermit>,
+    _global_client: Option<OwnedSemaphorePermit>,
 }
 
 /// The three bounded ingress queues owned by one execution.
@@ -455,6 +489,8 @@ struct ExecutionInboxSenders {
     expected_client_identities: Option<Vec<CertificateIdentity>>,
     client_routes: Mutex<HashMap<ClientId, Weak<dyn PeerConnection>>>,
     execution_bytes: Arc<Semaphore>,
+    execution_items: Arc<Semaphore>,
+    client_bytes: Arc<Semaphore>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -656,6 +692,12 @@ impl ExecutionTransportMux {
                 expected_client_identities,
                 client_routes: Mutex::new(HashMap::new()),
                 execution_bytes,
+                execution_items: Arc::new(Semaphore::new(self.inbox_capacity.saturating_mul(3))),
+                // Preserve room for protocol/control traffic while clients
+                // wait for preprocessing and their inbox is not being drained.
+                client_bytes: Arc::new(Semaphore::new(
+                    (self.ingress.limits.execution_byte_capacity / 2).max(1),
+                )),
             }),
         );
         Ok(ExecutionInbox {
@@ -819,10 +861,41 @@ impl ExecutionTransportMux {
 
         let kind = envelope.kind();
         let payload_bytes = envelope.payload().len();
-        let ingress_lease = self
+        let client_lease = if matches!(authenticated_source, ExecutionTransportSource::Client(_)) {
+            Some(
+                Arc::clone(&senders.client_bytes)
+                    .try_acquire_many_owned(u32::try_from(payload_bytes).map_err(|_| {
+                        ExecutionTransportError::InboxByteCapacityExceeded { execution_id }
+                    })?)
+                    .map_err(|_| ExecutionTransportError::InboxByteCapacityExceeded {
+                        execution_id,
+                    })?,
+            )
+        } else {
+            None
+        };
+        let global_client_lease = if client_lease.is_some() {
+            Some(
+                Arc::clone(&self.ingress.global_client_bytes)
+                    .try_acquire_many_owned(payload_bytes as u32)
+                    .map_err(|_| ExecutionTransportError::InboxByteCapacityExceeded {
+                        execution_id,
+                    })?,
+            )
+        } else {
+            None
+        };
+        let mut ingress_lease = self
             .ingress
-            .reserve(Arc::clone(&senders.execution_bytes), payload_bytes)
+            .reserve(
+                Arc::clone(&senders.execution_bytes),
+                Arc::clone(&senders.execution_items),
+                payload_bytes,
+                matches!(authenticated_source, ExecutionTransportSource::Client(_)),
+            )
             .map_err(|()| ExecutionTransportError::InboxByteCapacityExceeded { execution_id })?;
+        ingress_lease._client = client_lease;
+        ingress_lease._global_client = global_client_lease;
         let message = ExecutionInboundMessage {
             source,
             kind,
@@ -877,23 +950,13 @@ impl ExecutionTransportMux {
         cancel: &CancellationToken,
         deadline: Instant,
     ) -> Result<(), ExecutionTransportError> {
-        let route = self.inbox_route(
-            authenticated_source,
-            envelope.kind(),
-            envelope.execution_id(),
-        )?;
         loop {
             match self.route_envelope(authenticated_source, source, envelope) {
                 Err(error @ ExecutionTransportError::InboxFull { .. })
                 | Err(error @ ExecutionTransportError::InboxByteCapacityExceeded { .. }) => {
                     if Instant::now() >= deadline {
-                        if matches!(error, ExecutionTransportError::InboxFull { .. }) {
-                            if let Some(senders) =
-                                self.entries.read().get(&envelope.execution_id()).cloned()
-                            {
-                                senders.disable_route(route);
-                            }
-                        }
+                        // A slow or hostile sender cannot permanently disable
+                        // the shared route used by honest peers.
                         return Err(error);
                     }
                     tokio::select! {
@@ -1184,6 +1247,108 @@ mod tests {
 
     fn frame(execution_id: ExecutionId, kind: ExecutionMessageKind, payload: &[u8]) -> Vec<u8> {
         encode_execution_frame(execution_id, kind, payload).unwrap()
+    }
+
+    #[test]
+    fn tiny_client_messages_cannot_exhaust_the_global_item_budget() {
+        let accounting = IngressAccounting::new(ExecutionIngressLimits::production(4096));
+        let bytes = Arc::new(Semaphore::new(8192));
+        let items = Arc::new(Semaphore::new(8192));
+        let mut held = Vec::new();
+        for _ in 0..2048 {
+            held.push(
+                accounting
+                    .reserve(bytes.clone(), items.clone(), 1, true)
+                    .unwrap(),
+            );
+        }
+        assert!(accounting
+            .reserve(bytes.clone(), items.clone(), 1, true)
+            .is_err());
+        assert!(accounting
+            .reserve(bytes.clone(), items.clone(), 1, false)
+            .is_ok());
+        drop(held);
+        assert!(accounting.reserve(bytes, items, 1, true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn client_backlog_preserves_party_and_control_capacity() {
+        let mux = ExecutionTransportMux::new_with_limits(ExecutionIngressLimits {
+            inbox_capacity: 8,
+            execution_byte_capacity: 32,
+            global_byte_capacity: 64,
+        })
+        .unwrap();
+        let id = execution(91);
+        let mut inbox = mux.register(id).unwrap();
+        route_client_frame(&mux, id, ExecutionMessageKind::Mpc, &[0; 16]).unwrap();
+        assert!(matches!(
+            route_client_frame(&mux, id, ExecutionMessageKind::Mpc, &[0]),
+            Err(ExecutionTransportError::InboxByteCapacityExceeded { .. })
+        ));
+        mux.route_party_frame(1, &frame(id, ExecutionMessageKind::Mpc, &[1; 8]))
+            .unwrap();
+        mux.route_party_frame(2, &frame(id, ExecutionMessageKind::Control, &[2; 8]))
+            .unwrap();
+        assert_eq!(inbox.party.recv().await.unwrap().payload, vec![1; 8]);
+        assert_eq!(inbox.control.recv().await.unwrap().payload, vec![2; 8]);
+        drop(inbox.client.recv().await.unwrap());
+        assert_eq!(mux.ingress.queued_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn many_client_backlogs_preserve_global_party_capacity() {
+        let mux = ExecutionTransportMux::new_with_limits(ExecutionIngressLimits {
+            inbox_capacity: 8,
+            execution_byte_capacity: 32,
+            global_byte_capacity: 64,
+        })
+        .unwrap();
+        let mut inboxes = (1..=4)
+            .map(|id| mux.register(execution(id)).unwrap())
+            .collect::<Vec<_>>();
+        route_client_frame(&mux, execution(1), ExecutionMessageKind::Mpc, &[0; 16]).unwrap();
+        route_client_frame(&mux, execution(2), ExecutionMessageKind::Mpc, &[0; 16]).unwrap();
+        assert!(
+            route_client_frame(&mux, execution(3), ExecutionMessageKind::Mpc, &[0; 16]).is_err()
+        );
+        mux.route_party_frame(1, &frame(execution(4), ExecutionMessageKind::Mpc, &[1; 16]))
+            .unwrap();
+        mux.route_party_frame(
+            2,
+            &frame(execution(4), ExecutionMessageKind::Control, &[2; 16]),
+        )
+        .unwrap();
+        assert_eq!(inboxes[3].party.recv().await.unwrap().payload, vec![1; 16]);
+        assert_eq!(
+            inboxes[3].control.recv().await.unwrap().payload,
+            vec![2; 16]
+        );
+    }
+
+    #[tokio::test]
+    async fn saturation_timeout_does_not_disable_honest_party_delivery() {
+        let mux = ExecutionTransportMux::new(1).unwrap();
+        let id = execution(92);
+        let mut inbox = mux.register(id).unwrap();
+        mux.route_party_frame(1, &frame(id, ExecutionMessageKind::Mpc, b"first"))
+            .unwrap();
+        let blocked = frame(id, ExecutionMessageKind::Mpc, b"blocked");
+        assert!(mux
+            .route_envelope_with_backpressure_until(
+                ExecutionTransportSource::Party(1),
+                ExecutionTransportSource::Party(1),
+                ExecutionEnvelopeV1::decode(&blocked).unwrap(),
+                &CancellationToken::new(),
+                Instant::now(),
+            )
+            .await
+            .is_err());
+        drop(inbox.party.recv().await.unwrap());
+        mux.route_party_frame(2, &frame(id, ExecutionMessageKind::Mpc, b"honest"))
+            .unwrap();
+        assert_eq!(inbox.party.recv().await.unwrap().payload, b"honest");
     }
 
     fn route_client_frame(

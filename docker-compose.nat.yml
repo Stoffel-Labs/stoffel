@@ -36,6 +36,10 @@ services:
     hostname: leader
     environment:
       - STOFFEL_ROLE=leader
+      - STOFFEL_AUTH_TOKEN=${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
+      - STOFFEL_CERT=/app/ids/nodes/cert0.crt
+      - STOFFEL_KEY=/app/ids/nodes/key0.der
+      - STOFFEL_PARTY_CERTIFICATES=${STOFFEL_PARTY_CERTIFICATES:-/app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt}
       - STOFFEL_EXECUTION_ID=${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001}
       - STOFFEL_PARTY_ID=0
       - STOFFEL_BIND_ADDR=0.0.0.0:9000
@@ -47,6 +51,8 @@ services:
       - STOFFEL_STUN_SERVERS=74.125.250.129:19302,74.125.250.127:19302
       - RUST_LOG=info
       - RUST_BACKTRACE=1
+    volumes:
+      - ./ids/nodes/key0.der:/app/ids/nodes/key0.der:ro
     network_mode: host
     # Host network mode for proper NAT traversal
 
@@ -65,6 +71,10 @@ services:
     hostname: party
     environment:
       - STOFFEL_ROLE=party
+      - STOFFEL_AUTH_TOKEN=${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
+      - STOFFEL_CERT=/app/ids/nodes/cert${PARTY_ID:-1}.crt
+      - STOFFEL_KEY=/app/ids/nodes/key${PARTY_ID:-1}.der
+      - STOFFEL_PARTY_CERTIFICATES=${STOFFEL_PARTY_CERTIFICATES:-/app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt}
       - STOFFEL_EXECUTION_ID=${STOFFEL_EXECUTION_ID:-0000000000000000000000000000000000000000000000000000000000000001}
       - STOFFEL_PARTY_ID=${PARTY_ID:-1}
       - STOFFEL_BIND_ADDR=0.0.0.0:9001
@@ -77,5 +87,7 @@ services:
       - STOFFEL_STUN_SERVERS=74.125.250.129:19302,74.125.250.127:19302
       - RUST_LOG=info
       - RUST_BACKTRACE=1
+    volumes:
+      - ./ids/nodes/key${PARTY_ID:-1}.der:/app/ids/nodes/key${PARTY_ID:-1}.der:ro
     network_mode: host
     # Host network mode for proper NAT traversal

@@ -16,6 +16,8 @@ FROM chef AS planner
 
 COPY crates/stoffel-vm-types /StoffelVM/crates/stoffel-vm-types
 COPY --from=coordinator . /build/coordinator
+COPY vendor/stoffel-mpc-coordinator-off-chain /build/vendor/stoffel-mpc-coordinator-off-chain
+COPY vendor/stoffel-mpc-coordinator-shared /build/vendor/stoffel-mpc-coordinator-shared
 COPY docker/coordinator-wrapper /build/coordinator-wrapper
 
 RUN mkdir -p /build/.cargo && \
@@ -27,12 +29,12 @@ RUN mkdir -p /build/.cargo && \
       'stoffel-vm-types = { path = "/StoffelVM/crates/stoffel-vm-types" }' \
       '' \
       '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
-      'stoffel-mpc-coordinator-off-chain = { path = "/build/coordinator/crates/off-chain" }' \
-      'stoffel-mpc-coordinator-shared = { path = "/build/coordinator/crates/coord-shared" }' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/build/vendor/stoffel-mpc-coordinator-off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/build/vendor/stoffel-mpc-coordinator-shared" }' \
       '' \
       '[patch.crates-io]' \
-      'stoffel-mpc-coordinator-off-chain = { path = "/build/coordinator/crates/off-chain" }' \
-      'stoffel-mpc-coordinator-shared = { path = "/build/coordinator/crates/coord-shared" }' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/build/vendor/stoffel-mpc-coordinator-off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/build/vendor/stoffel-mpc-coordinator-shared" }' \
       > /build/.cargo/config.toml
 
 WORKDIR /build/coordinator-wrapper
@@ -46,6 +48,7 @@ WORKDIR /build
 COPY --from=planner /build/coordinator-wrapper/recipe.json /build/coordinator-wrapper/recipe.json
 COPY --from=planner /build/.cargo /build/.cargo
 COPY --from=planner /build/coordinator /build/coordinator
+COPY --from=planner /build/vendor /build/vendor
 COPY --from=planner /StoffelVM/crates/stoffel-vm-types /StoffelVM/crates/stoffel-vm-types
 
 WORKDIR /build/coordinator-wrapper
@@ -66,18 +69,18 @@ RUN mkdir -p /build/.cargo && \
       'stoffel-vm-types = { path = "/StoffelVM/crates/stoffel-vm-types" }' \
       '' \
       '[patch."https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git"]' \
-      'stoffel-mpc-coordinator-off-chain = { path = "/build/coordinator/crates/off-chain" }' \
-      'stoffel-mpc-coordinator-shared = { path = "/build/coordinator/crates/coord-shared" }' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/build/vendor/stoffel-mpc-coordinator-off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/build/vendor/stoffel-mpc-coordinator-shared" }' \
       '' \
       '[patch.crates-io]' \
-      'stoffel-mpc-coordinator-off-chain = { path = "/build/coordinator/crates/off-chain" }' \
-      'stoffel-mpc-coordinator-shared = { path = "/build/coordinator/crates/coord-shared" }' \
+      'stoffel-mpc-coordinator-off-chain = { path = "/build/vendor/stoffel-mpc-coordinator-off-chain" }' \
+      'stoffel-mpc-coordinator-shared = { path = "/build/vendor/stoffel-mpc-coordinator-shared" }' \
       > /build/.cargo/config.toml
 
 RUN --mount=type=cache,id=stoffel-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=stoffel-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=stoffel-coordinator-target,target=/build/coordinator-wrapper/target,sharing=locked \
-    find /build/coordinator/crates/off-chain /build/coordinator/crates/coord-shared \
+    find /build/vendor/stoffel-mpc-coordinator-off-chain /build/vendor/stoffel-mpc-coordinator-shared \
       -type f -exec touch {} + && \
     cargo build --release && \
     mkdir -p /build/artifacts && \
@@ -94,6 +97,9 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY --from=builder /build/artifacts/stoffel-coordinator-docker /app/stoffel-coordinator
-COPY ids /app/ids
+RUN mkdir -p /app/ids/nodes /app/ids/clients
+COPY ids/server_cert.crt /app/ids/server_cert.crt
+COPY ids/nodes/*.crt /app/ids/nodes/
+COPY ids/clients/*.crt /app/ids/clients/
 
 ENTRYPOINT ["/app/stoffel-coordinator"]

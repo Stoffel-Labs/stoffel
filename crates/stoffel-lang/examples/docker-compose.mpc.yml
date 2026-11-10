@@ -21,11 +21,10 @@ x-party-common: &party-common
       networking: "${STOFFEL_NETWORK_CONTEXT:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}"
   volumes:
     - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
-    - stoffel-local-store:/app/local-store
   networks:
     stoffel-examples:
   environment: &party-env
-    STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:-stoffel-examples-token}
+    STOFFEL_AUTH_TOKEN: ${STOFFEL_AUTH_TOKEN:?Set STOFFEL_AUTH_TOKEN}
     STOFFEL_N_PARTIES: ${STOFFEL_N_PARTIES:-5}
     STOFFEL_THRESHOLD: ${STOFFEL_THRESHOLD:-1}
     STOFFEL_PROGRAM: /app/examples/${STOFFEL_PROGRAM_NAME:-mpc_runtime_info.stflb}
@@ -50,9 +49,14 @@ services:
       STOFFEL_LOCAL_STORE: /app/local-store/party-0.redb
       STOFFEL_CERT: /app/ids/nodes/cert0.crt
       STOFFEL_KEY: /app/ids/nodes/key0.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-examples:
         ipv4_address: 172.29.0.10
+    volumes:
+      - ${STOFFEL_VM_DIR:-../../..}/ids/nodes/key0.der:/app/ids/nodes/key0.der:ro
+      - stoffel-party0-local:/app/local-store
+      - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
 
   party1:
     <<: *party-common
@@ -69,9 +73,14 @@ services:
       STOFFEL_LOCAL_STORE: /app/local-store/party-1.redb
       STOFFEL_CERT: /app/ids/nodes/cert1.crt
       STOFFEL_KEY: /app/ids/nodes/key1.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-examples:
         ipv4_address: 172.29.0.11
+    volumes:
+      - ${STOFFEL_VM_DIR:-../../..}/ids/nodes/key1.der:/app/ids/nodes/key1.der:ro
+      - stoffel-party1-local:/app/local-store
+      - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
 
   party2:
     <<: *party-common
@@ -88,9 +97,14 @@ services:
       STOFFEL_LOCAL_STORE: /app/local-store/party-2.redb
       STOFFEL_CERT: /app/ids/nodes/cert2.crt
       STOFFEL_KEY: /app/ids/nodes/key2.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-examples:
         ipv4_address: 172.29.0.12
+    volumes:
+      - ${STOFFEL_VM_DIR:-../../..}/ids/nodes/key2.der:/app/ids/nodes/key2.der:ro
+      - stoffel-party2-local:/app/local-store
+      - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
 
   party3:
     <<: *party-common
@@ -107,9 +121,14 @@ services:
       STOFFEL_LOCAL_STORE: /app/local-store/party-3.redb
       STOFFEL_CERT: /app/ids/nodes/cert3.crt
       STOFFEL_KEY: /app/ids/nodes/key3.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-examples:
         ipv4_address: 172.29.0.13
+    volumes:
+      - ${STOFFEL_VM_DIR:-../../..}/ids/nodes/key3.der:/app/ids/nodes/key3.der:ro
+      - stoffel-party3-local:/app/local-store
+      - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
 
   party4:
     <<: *party-common
@@ -126,9 +145,14 @@ services:
       STOFFEL_LOCAL_STORE: /app/local-store/party-4.redb
       STOFFEL_CERT: /app/ids/nodes/cert4.crt
       STOFFEL_KEY: /app/ids/nodes/key4.der
+      STOFFEL_PARTY_CERTIFICATES: /app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
     networks:
       stoffel-examples:
         ipv4_address: 172.29.0.14
+    volumes:
+      - ${STOFFEL_VM_DIR:-../../..}/ids/nodes/key4.der:/app/ids/nodes/key4.der:ro
+      - stoffel-party4-local:/app/local-store
+      - ${STOFFEL_EXAMPLES_OUT:-./dist}:/app/examples:ro
 
 networks:
   stoffel-examples:
@@ -138,4 +162,8 @@ networks:
         - subnet: 172.29.0.0/24
 
 volumes:
-  stoffel-local-store:
+  stoffel-party0-local:
+  stoffel-party1-local:
+  stoffel-party2-local:
+  stoffel-party3-local:
+  stoffel-party4-local:

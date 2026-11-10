@@ -2592,10 +2592,7 @@ impl CodeGenerator {
                     };
 
                 // 2. Map source-level builtin aliases to actual VM function names.
-                let function_name = crate::builtin_registry::builtin_registry()
-                    .vm_symbol_for_call(&raw_function_name)
-                    .map(str::to_string)
-                    .unwrap_or(raw_function_name);
+                let function_name = raw_function_name;
 
                 self.record_client_io_call(&function_name, arguments);
                 self.record_share_list_append_call(&function_name, arguments);

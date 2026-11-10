@@ -55,6 +55,7 @@ services:
       - STOFFEL_PARTY_ID=0
       - STOFFEL_CERT=/app/ids/nodes/cert0.crt
       - STOFFEL_KEY=/app/ids/nodes/key0.der
+      - STOFFEL_PARTY_CERTIFICATES=/app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
       - STOFFEL_BIND_ADDR=172.29.0.10:9000
       - STOFFEL_N_PARTIES=5
       - STOFFEL_THRESHOLD=1
@@ -66,6 +67,7 @@ services:
       - RUST_LOG=info
       - RUST_BACKTRACE=1
     volumes:
+      - ./ids/nodes/key0.der:/app/ids/nodes/key0.der:ro
       - stoffel-avss-party0-local:/app/data
     networks:
       stoffel-avss-net:
@@ -92,6 +94,7 @@ services:
       - STOFFEL_PARTY_ID=1
       - STOFFEL_CERT=/app/ids/nodes/cert1.crt
       - STOFFEL_KEY=/app/ids/nodes/key1.der
+      - STOFFEL_PARTY_CERTIFICATES=/app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
       - STOFFEL_BIND_ADDR=172.29.0.11:9001
       - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
       - STOFFEL_N_PARTIES=5
@@ -104,6 +107,7 @@ services:
       - RUST_LOG=info
       - RUST_BACKTRACE=1
     volumes:
+      - ./ids/nodes/key1.der:/app/ids/nodes/key1.der:ro
       - stoffel-avss-party1-local:/app/data
     networks:
       stoffel-avss-net:
@@ -127,6 +131,7 @@ services:
       - STOFFEL_PARTY_ID=2
       - STOFFEL_CERT=/app/ids/nodes/cert2.crt
       - STOFFEL_KEY=/app/ids/nodes/key2.der
+      - STOFFEL_PARTY_CERTIFICATES=/app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
       - STOFFEL_BIND_ADDR=172.29.0.12:9002
       - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
       - STOFFEL_N_PARTIES=5
@@ -139,6 +144,7 @@ services:
       - RUST_LOG=info
       - RUST_BACKTRACE=1
     volumes:
+      - ./ids/nodes/key2.der:/app/ids/nodes/key2.der:ro
       - stoffel-avss-party2-local:/app/data
     networks:
       stoffel-avss-net:
@@ -162,6 +168,7 @@ services:
       - STOFFEL_PARTY_ID=3
       - STOFFEL_CERT=/app/ids/nodes/cert3.crt
       - STOFFEL_KEY=/app/ids/nodes/key3.der
+      - STOFFEL_PARTY_CERTIFICATES=/app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
       - STOFFEL_BIND_ADDR=172.29.0.13:9003
       - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
       - STOFFEL_N_PARTIES=5
@@ -174,6 +181,7 @@ services:
       - RUST_LOG=info
       - RUST_BACKTRACE=1
     volumes:
+      - ./ids/nodes/key3.der:/app/ids/nodes/key3.der:ro
       - stoffel-avss-party3-local:/app/data
     networks:
       stoffel-avss-net:
@@ -197,6 +205,7 @@ services:
       - STOFFEL_PARTY_ID=4
       - STOFFEL_CERT=/app/ids/nodes/cert4.crt
       - STOFFEL_KEY=/app/ids/nodes/key4.der
+      - STOFFEL_PARTY_CERTIFICATES=/app/ids/nodes/cert0.crt,/app/ids/nodes/cert1.crt,/app/ids/nodes/cert2.crt,/app/ids/nodes/cert3.crt,/app/ids/nodes/cert4.crt
       - STOFFEL_BIND_ADDR=172.29.0.14:9004
       - STOFFEL_BOOTSTRAP_ADDR=172.29.0.10:9000
       - STOFFEL_N_PARTIES=5
@@ -209,6 +218,7 @@ services:
       - RUST_LOG=info
       - RUST_BACKTRACE=1
     volumes:
+      - ./ids/nodes/key4.der:/app/ids/nodes/key4.der:ro
       - stoffel-avss-party4-local:/app/data
     networks:
       stoffel-avss-net:

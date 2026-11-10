@@ -11,6 +11,108 @@ use super::wire::{
 use super::*;
 
 #[test]
+fn relaying_another_broadcast_does_not_consume_own_broadcast_quota() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(29001);
+    let payload = b"other broadcaster".to_vec();
+    registry
+        .insert_rbc_relay(
+            false,
+            0,
+            0,
+            1,
+            *blake3::hash(&payload).as_bytes(),
+            Some(payload),
+        )
+        .unwrap();
+    registry
+        .insert_rbc_broadcast(0, 1, b"honest own broadcast".to_vec())
+        .unwrap();
+}
+
+#[test]
+fn scalar_and_exponent_retention_are_bounded_per_sender() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(29002);
+    for sequence in 0..8 {
+        registry.insert_single(sequence, "key", 1, vec![0]).unwrap();
+        registry.insert_exp(sequence, 1, 1, vec![0]).unwrap();
+    }
+    assert!(registry
+        .insert_single(8, "different-key", 1, vec![0])
+        .is_err());
+    assert!(registry.insert_exp(8, 1, 1, vec![0]).is_err());
+    registry.insert_single(8, "key", 2, vec![0]).unwrap();
+    registry.insert_exp(8, 2, 2, vec![0]).unwrap();
+}
+
+#[test]
+fn completed_single_opens_use_monotonic_sequences_and_bounded_history() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(29003);
+    for _ in 0..100 {
+        registry
+            .open_share_wait(0, "key", &[0], 1, |_| Ok(ClearShareValue::Integer(7)))
+            .unwrap();
+    }
+    assert!(registry.single.lock().len() <= 64);
+    registry.insert_single(0, "key", 1, vec![0]).unwrap();
+    assert!(!registry.single.lock().contains_key(&(0, "key".to_owned())));
+}
+
+#[tokio::test]
+async fn scalar_and_exp_frames_wait_for_capacity() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(29004);
+    for seq in 0..8 {
+        registry.insert_single(seq, "key", 1, vec![0]).unwrap();
+        registry.insert_exp(seq, 1, 1, vec![0]).unwrap();
+    }
+    let scalar = encode_single_share_wire_message(29004, 8, "key", 1, &[8]).unwrap();
+    let exp = encode_hb_open_exp_wire_message(29004, 8, 1, 1, &[8]).unwrap();
+    let release = async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        registry.single.lock().remove(&(0, "key".to_owned()));
+        registry.exp.lock().remove(&0);
+    };
+    let (scalar, exp, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(
+            router.handle_wire_message(1, &scalar),
+            router.handle_wire_message(1, &exp),
+            release
+        )
+    })
+    .await
+    .unwrap();
+    assert!(scalar.unwrap());
+    assert!(exp.unwrap());
+    assert!(registry.single.lock().contains_key(&(8, "key".to_owned())));
+    assert!(registry.exp.lock().contains_key(&8));
+}
+
+#[tokio::test]
+async fn future_scalar_flood_cannot_block_the_locally_active_open() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(29005);
+    for seq in 1..=8 {
+        registry.insert_single(seq, "key", 1, vec![1]).unwrap();
+    }
+    let message = encode_single_share_wire_message(29005, 0, "key", 1, &[1]).unwrap();
+    let (handled, result) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(
+            router.handle_wire_message(1, &message),
+            registry.open_share_at_async(0, "key".to_owned(), 0, vec![0], 2, |_| Ok(
+                ClearShareValue::Integer(7)
+            ))
+        )
+    })
+    .await
+    .unwrap();
+    assert!(handled.unwrap());
+    assert_eq!(result.unwrap(), ClearShareValue::Integer(7));
+}
+
+#[test]
 fn unknown_sender_single_is_rejected() {
     let router = OpenMessageRouter::new();
     let msg = encode_single_share_wire_message(1, 0, "test-key", 0, b"share0").unwrap();

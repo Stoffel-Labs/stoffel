@@ -74,12 +74,18 @@ fn admit_rbc_candidate(
             "RBC aggregate candidate budget is full (max {MAX_PENDING_RBC_CANDIDATES})"
         ));
     }
+    // A relayed candidate must not consume the capacity reserved for the
+    // relay's own broadcast. Separate the two ownership classes.
+    let own_broadcast = key.1 == source_sender;
     let sender_candidates = registry
         .candidate_sources
-        .values()
-        .filter(|sender| **sender == source_sender)
+        .iter()
+        .filter(|(candidate, sender)| {
+            **sender == source_sender && (candidate.1 == source_sender) == own_broadcast
+        })
         .count();
-    if sender_candidates >= MAX_PENDING_RBC_CANDIDATES_PER_SENDER {
+    let limit = MAX_PENDING_RBC_CANDIDATES_PER_SENDER;
+    if sender_candidates >= limit {
         return Err(format!(
             "RBC sender {source_sender} candidate quota is full (max {MAX_PENDING_RBC_CANDIDATES_PER_SENDER})"
         ));
@@ -89,13 +95,15 @@ fn admit_rbc_candidate(
         .iter()
         .filter(|(candidate_key, _)| {
             registry.candidate_sources.get(candidate_key) == Some(&source_sender)
+                && (candidate_key.1 == source_sender) == own_broadcast
         })
         .try_fold(0usize, |total, (_, message)| {
             total.checked_add(message.len())
         })
         .and_then(|total| total.checked_add(message_len))
         .ok_or_else(|| "RBC retained payload byte count overflowed".to_string())?;
-    if retained > MAX_PENDING_RBC_PAYLOAD_BYTES_PER_SENDER {
+    let byte_limit = MAX_PENDING_RBC_PAYLOAD_BYTES_PER_SENDER * limit;
+    if retained > byte_limit {
         return Err(format!(
             "RBC sender {source_sender} retained payload budget exceeded: {retained} bytes (max {MAX_PENDING_RBC_PAYLOAD_BYTES_PER_SENDER})"
         ));

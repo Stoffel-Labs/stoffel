@@ -127,6 +127,28 @@ client inputs). `--network --config` uses SDK network configuration: an off-chai
 client config executes through the coordinator/node RPC path, while a network
 config validates and connects to real node addresses.
 
+For a manually launched one-shot party mesh, set `STOFFEL_PARTY_CERTIFICATES`
+to the comma-separated certificate paths in logical party order, starting with
+the leader at slot 0. Discovery uses the party's configured certificate and key
+and verifies the full roster before admitting peers. The local runner supplies
+these bindings automatically. Compose stacks require `STOFFEL_AUTH_TOKEN` and
+mount each service's own private key read-only.
+
+Private results must use `MpcOutput.send_to_client` (or `Share.send_to_client`).
+A secret function return is retained as a party-local share and is not implicitly
+broadcast to clients. Clients with no declared outputs are input-only unless the
+operator explicitly configures output capability. Persistent storage in one-shot
+runs is scoped to the program hash; existing unscoped records are not loaded by
+other programs.
+
+Coordinator output snapshots preserve protocol party order (lexicographically sorted
+certificate SPKI bytes), with empty
+`(encapped_key, ciphertext)` byte arrays for parties that have not submitted.
+Clients must preserve these positions when decrypting (including the WASM external
+HPKE path) so share IDs can be checked against the authenticated sender. Deploy
+this coordinator and the rebuilt native/WASM clients together; older clients that
+compact snapshots do not implement this validation.
+
 ### Run on a standing mesh
 
 A local run starts its own coordinator and parties and stops them afterwards. A
@@ -663,6 +685,11 @@ Platform-specific library names:
 - Windows: `stoffel_vm.dll`
 
 ## Build and Test
+
+After reviewing a checkout, run `scripts/install-git-hooks.sh` to install or
+refresh the local pre-commit snapshot. Reinstall if an older setup points
+`core.hooksPath` at `.githooks`. The snapshot runs static checks by default;
+`STOFFEL_HOOK_RUN_BUILD_CHECKS=1` also runs Cargo checks for a trusted checkout.
 
 Build everything:
 

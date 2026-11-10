@@ -382,7 +382,8 @@ impl StoffelWasmExecution {
 
     /// The non-key-dependent half of `decrypt_outputs`: robustly
     /// reconstruct and type-convert outputs from already-decrypted
-    /// plaintext shares (one `Vec<u8>` per encrypted share that was
+    /// plaintext shares in authenticated party-roster order, with empty byte arrays
+    /// for missing or invalid contributions. One `Vec<u8>` per encrypted share that was
     /// received, each the plaintext bytes an external HPKE-open produced -
     /// see `decryptShare` in the browser client library). This is what
     /// lets the WebAuthn session-key path stay entirely out of the
@@ -534,17 +535,22 @@ fn decrypt_fields_core(
     let mut plaintexts = Vec::with_capacity(encrypted_shares.len());
 
     for encrypted in encrypted_shares {
-        let encapped = <KemImpl as Kem>::EncappedKey::from_bytes(&encrypted.encapped_key)
-            .map_err(|_| ClientError::OutputDecryption)?;
-        let plaintext = single_shot_open::<AeadImpl, KdfImpl, KemImpl>(
+        let Ok(encapped) = <KemImpl as Kem>::EncappedKey::from_bytes(&encrypted.encapped_key)
+        else {
+            plaintexts.push(Vec::new());
+            continue;
+        };
+        let Ok(plaintext) = single_shot_open::<AeadImpl, KdfImpl, KemImpl>(
             &OpModeR::Base,
             &hpke_secret,
             &encapped,
             &info,
             &encrypted.ciphertext,
             b"",
-        )
-        .map_err(|_| ClientError::OutputDecryption)?;
+        ) else {
+            plaintexts.push(Vec::new());
+            continue;
+        };
         plaintexts.push(plaintext);
     }
 
@@ -563,14 +569,19 @@ fn reconstruct_outputs_core(
 ) -> Result<Vec<Fr>, ClientError> {
     let mut by_output = vec![Vec::<RobustShare<Fr>>::new(); output_count];
 
-    for plaintext in plaintexts {
-        let shares = Vec::<RobustShare<Fr>>::deserialize_compressed(plaintext.as_slice())
-            .map_err(|_| ClientError::InvalidShare)?;
-        if shares.len() != output_count {
-            return Err(ClientError::OutputArity {
-                expected: output_count,
-                actual: shares.len(),
-            });
+    for (party_index, plaintext) in plaintexts.iter().enumerate() {
+        let Ok(shares) = Vec::<RobustShare<Fr>>::deserialize_compressed(plaintext.as_slice())
+        else {
+            continue;
+        };
+        if shares.len() != output_count
+            || !shares.iter().all(|share| {
+                party_index < core.parties
+                    && share.id == party_index
+                    && share.degree == core.threshold
+            })
+        {
+            continue;
         }
         for (index, share) in shares.into_iter().enumerate() {
             by_output[index].push(share);
@@ -1059,6 +1070,14 @@ mod tests {
             decrypt_fields_core(&client.core, &execution_id, expected.len(), &encrypted).unwrap(),
             expected.map(field_from_i64)
         );
+        encrypted.push(EncryptedOutputShare {
+            encapped_key: vec![0],
+            ciphertext: vec![0],
+        });
+        assert_eq!(
+            decrypt_fields_core(&client.core, &execution_id, expected.len(), &encrypted).unwrap(),
+            expected.map(field_from_i64)
+        );
     }
 
     /// A fixed, deterministic HPKE vector shared with the browser client
@@ -1110,6 +1129,35 @@ mod tests {
     /// The split `decrypt_fields_core` = HPKE-open (now done externally, in
     /// JS, for the WebAuthn session-key path) + `reconstruct_outputs_core`
     /// (unchanged math) must produce identical results either way.
+    #[test]
+    fn forged_output_metadata_does_not_poison_honest_quorum() {
+        let client =
+            StoffelWasmClient::from_secret_key(SecretKey::from_slice(&[7u8; 32]).unwrap(), 5, 1)
+                .unwrap();
+        let domain = Radix2EvaluationDomain::<Fr>::new(5).unwrap();
+        for (bad_id, bad_degree) in [(0, 1), (4, 0), (99, 1)] {
+            let mut plaintexts = Vec::new();
+            for party in 0..5 {
+                let mut share = ProtocolRobustShare::new(
+                    Fr::from(7u64) + Fr::from(3u64) * domain.element(party),
+                    party,
+                    1,
+                );
+                if party == 4 {
+                    share.id = bad_id;
+                    share.degree = bad_degree;
+                }
+                let mut bytes = Vec::new();
+                vec![share].serialize_compressed(&mut bytes).unwrap();
+                plaintexts.push(bytes);
+            }
+            assert_eq!(
+                reconstruct_outputs_core(&client.core, 1, &plaintexts).unwrap(),
+                vec![Fr::from(7u64)]
+            );
+        }
+    }
+
     #[test]
     fn reconstruct_outputs_core_matches_decrypt_fields_core_given_the_same_plaintexts() {
         let secret_key = SecretKey::from_slice(&[7u8; 32]).unwrap();

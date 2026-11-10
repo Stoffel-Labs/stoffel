@@ -44,7 +44,7 @@ use stoffel_vm::net::{
 };
 use stoffel_vm::net::{
     program_id_from_bytes, register_and_wait_for_session, run_bootnode_with_config,
-    run_bootnode_with_config_ready, SessionRegistrationConfig,
+    run_bootnode_with_identity_ready, SessionRegistrationConfig,
 };
 use stoffel_vm::net::{MpcBackendKind, MpcCurveConfig};
 use stoffel_vm::runtime_hooks::{HookContext, HookEvent};
@@ -143,6 +143,35 @@ fn group_output_shares_by_client<T>(
             .append(&mut shares);
     }
     grouped
+}
+
+type ClientOutputSubmissions<T> = Vec<(Vec<u8>, Vec<T>)>;
+
+fn coordinator_output_submissions<T>(
+    identities: &[Vec<u8>],
+    roster: &[usize],
+    records: impl IntoIterator<Item = (ClientId, Vec<T>)>,
+) -> Result<ClientOutputSubmissions<T>, String> {
+    if !roster.is_empty() && roster.len() != identities.len() {
+        return Err("client roster and authenticated identity counts differ".to_owned());
+    }
+    let mut recipients = BTreeMap::new();
+    let mut seen_identities = HashSet::new();
+    for (position, identity) in identities.iter().enumerate() {
+        let slot = roster.get(position).copied().unwrap_or(position);
+        if recipients.insert(slot, identity).is_some() || !seen_identities.insert(identity) {
+            return Err("duplicate client slot or authenticated identity".to_owned());
+        }
+    }
+    group_output_shares_by_client(records)
+        .into_iter()
+        .map(|(slot, shares)| {
+            recipients
+                .get(&slot)
+                .map(|identity| ((*identity).clone(), shares))
+                .ok_or_else(|| format!("output slot {slot} has no authenticated client identity"))
+        })
+        .collect()
 }
 
 fn read_trimmed_u64(path: &str) -> Option<u64> {
@@ -582,6 +611,63 @@ fn plan_preprocessing(
         n_prandbit: prandbits as usize,
         n_prandint: prandints as usize,
     }
+}
+
+fn plan_preprocessing_with_input_validation(
+    demand: &stoffel_vm_types::compiled_binary::PreprocessingDemand,
+    threshold: usize,
+    n_client_random: usize,
+    input_types: &BTreeMap<usize, Vec<ShareType>>,
+) -> PlannedPreprocessing {
+    let mut plan = plan_preprocessing(demand, threshold, n_client_random);
+    let bits = input_types
+        .values()
+        .flatten()
+        .filter(|ty| **ty == ShareType::boolean())
+        .count();
+    if bits > 0 {
+        plan.n_triples =
+            band_pow2(plan.n_triples.saturating_add(bits).max(2 * threshold + 1) as u64) as usize;
+    }
+    plan
+}
+
+async fn validate_boolean_client_inputs(
+    vm: &VirtualMachine,
+    engine: &dyn AsyncMpcEngine,
+    input_types: &BTreeMap<usize, Vec<ShareType>>,
+) -> Result<(), String> {
+    // Reveal only the zero-test polynomial. Valid bits always reveal zero;
+    // no honest client's bit is opened while rejecting malformed inputs.
+    for (&slot, types) in input_types {
+        for (index, ty) in types.iter().enumerate() {
+            if *ty != ShareType::boolean() {
+                continue;
+            }
+            let share = vm
+                .client_share_data(
+                    slot,
+                    stoffel_vm::net::client_store::ClientShareIndex::new(index),
+                )
+                .ok_or_else(|| format!("missing Boolean input {slot}:{index}"))?;
+            let data = share.into_data();
+            let minus_one = engine
+                .sub_share_scalar_local(ShareType::SecretField, data.as_bytes(), 1)
+                .map_err(|error| error.to_string())?;
+            let check = engine
+                .multiply_share_async(ShareType::SecretField, data.as_bytes(), &minus_one)
+                .await
+                .map_err(|error| error.to_string())?;
+            let opened = engine
+                .open_share_as_field_async(ShareType::SecretField, check.as_bytes())
+                .await
+                .map_err(|error| error.to_string())?;
+            if opened.is_empty() || opened.iter().any(|byte| *byte != 0) {
+                return Err(format!("Boolean input {slot}:{index} is not zero or one"));
+            }
+        }
+    }
+    Ok(())
 }
 
 type HbOffChainCoordinator<F> = OffChainCoordinatorClient<F, HbCoordinatorShare<F>>;
@@ -2814,11 +2900,6 @@ fn format_vm_object(
     }
     format!("{{{}}}", parts.join(", "))
 }
-fn coordinator_output_share_bytes(vm: &mut VirtualMachine, result: &Value) -> Option<Vec<u8>> {
-    vm.read_share_object(result)
-        .ok()
-        .map(|(_ty, share_data)| share_data.as_bytes().to_vec())
-}
 fn parse_inputs_as_field<F: PrimeField>(inputs_str: &str) -> Vec<F> {
     // An output-only client has no inputs.
     if inputs_str.trim().is_empty() {
@@ -4699,8 +4780,13 @@ where
         client_count_hint,
         client_input_count,
     )?;
-    let plan = plan_preprocessing(&preprocessing_demand, t, n_client_random)
-        .checked_scale(preprocessing_burst_capacity)?;
+    let plan = plan_preprocessing_with_input_validation(
+        &preprocessing_demand,
+        t,
+        n_client_random,
+        client_input_types,
+    )
+    .checked_scale(preprocessing_burst_capacity)?;
     let n_triples = plan.n_triples;
     let n_random = plan.n_random;
     let n_prandbit = plan.n_prandbit;
@@ -4816,6 +4902,7 @@ where
     let (processor_ready_tx, processor_ready_rx) = oneshot::channel();
     spawn_execution_task(execution_tasks, async move {
         let _ = processor_ready_tx.send(());
+        let mut pending_opens = tokio::task::JoinSet::new();
         let mut inbound = stoffel_vm::net::mpc::honeybadger::HoneyBadgerInboundQueue::default();
         let mut retry = tokio::time::interval(Duration::from_millis(2));
         retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -4828,6 +4915,7 @@ where
                 break;
             }
             tokio::select! {
+                Some(_) = pending_opens.join_next(), if !pending_opens.is_empty() => {}
                 _ = retry.tick(), if !inbound.is_empty() => {}
                 Some(message) = server_rx.recv() => {
                     let sender_id = match message.source {
@@ -4837,23 +4925,26 @@ where
                             continue;
                         }
                     };
-                    let raw_msg = message.payload;
-                    match processing_router.try_handle_wire_message(sender_id, &raw_msg) {
+                    match processing_router.try_handle_any_wire_message(sender_id, &message.payload) {
                         Ok(true) => continue,
+                        Err(error) if stoffel_vm::net::OpenMessageRouter::is_retryable_capacity_error(&error) => {
+                            let router = processing_router.clone();
+                            pending_opens.spawn(async move {
+                                let retained = message;
+                                // Retain the complete message, including its byte/item lease.
+                                if let Err(error) = router.handle_wire_message(sender_id, &retained.payload).await {
+                                    eprintln!("Failed to retry open message from {sender_id}: {error}");
+                                }
+                            });
+                            continue;
+                        }
                         Err(error) => {
                             eprintln!("[party {}] Failed to route open message from {}: {}", process_party_id, sender_id, error);
                             continue;
                         }
                         Ok(false) => {}
                     }
-                    match processing_router.try_handle_hb_open_exp_wire_message(sender_id, &raw_msg) {
-                        Ok(true) => continue,
-                        Err(error) => {
-                            eprintln!("[party {}] Failed to route open-exp message from {}: {}", process_party_id, sender_id, error);
-                            continue;
-                        }
-                        Ok(false) => {}
-                    }
+                    let raw_msg = message.payload;
                     if let Err(error) = inbound.push(sender_id, raw_msg) {
                         eprintln!("[party {}] Dropping over-budget message from {}: {}", process_party_id, sender_id, error);
                     }
@@ -5282,8 +5373,13 @@ where
         client_count_hint,
         client_input_count,
     )?;
-    let planned = plan_preprocessing(&preprocessing_demand, t, n_client_random)
-        .checked_scale(preprocessing_burst_capacity)?;
+    let planned = plan_preprocessing_with_input_validation(
+        &preprocessing_demand,
+        t,
+        n_client_random,
+        client_input_types,
+    )
+    .checked_scale(preprocessing_burst_capacity)?;
     let engine = AvssMpcEngine::<F, G>::from_config(
         AvssEngineConfig::new(session, sk_i, pk_map)
             .with_deployment_mode(deployment_mode)
@@ -5336,8 +5432,10 @@ where
     let (processor_ready_tx, processor_ready_rx) = oneshot::channel();
     spawn_execution_task(execution_tasks, async move {
         let _ = processor_ready_tx.send(());
+        let mut pending_opens = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
+                Some(_) = pending_opens.join_next(), if !pending_opens.is_empty() => {}
                 Some(message) = party_rx.recv() => {
                     let sender_id = match message.source {
                         ExecutionTransportSource::Party(sender_id) => sender_id,
@@ -5346,17 +5444,22 @@ where
                             continue;
                         }
                     };
-                    let data = message.payload;
-                    if open_message_router.try_handle_wire_message(sender_id, &data).unwrap_or(false)
-                        || open_message_router
-                            .try_handle_avss_open_exp_wire_message(sender_id, &data)
-                            .unwrap_or(false)
-                        || open_message_router
-                            .try_handle_avss_g2_exp_wire_message(sender_id, &data)
-                            .unwrap_or(false)
-                    {
-                        continue;
+                    match open_message_router.try_handle_any_wire_message(sender_id, &message.payload) {
+                        Ok(true) => continue,
+                        Err(error) if stoffel_vm::net::OpenMessageRouter::is_retryable_capacity_error(&error) => {
+                            let router = open_message_router.clone();
+                            pending_opens.spawn(async move {
+                                let retained = message;
+                                if let Err(error) = router.handle_wire_message(sender_id, &retained.payload).await {
+                                    eprintln!("Failed to retry AVSS opening from {sender_id}: {error}");
+                                }
+                            });
+                            continue;
+                        }
+                        Err(error) => { eprintln!("Rejected AVSS opening from {sender_id}: {error}"); continue; }
+                        Ok(false) => {}
                     }
+                    let data = message.payload;
                     if let Err(error) = processing_engine
                         .process_wrapped_message(sender_id, &data)
                         .await
@@ -5829,6 +5932,7 @@ where
         .map_err(|e| e.to_string())?;
 
     eprintln!("Starting VM execution of '{}'...", agreed_entry);
+    validate_boolean_client_inputs(vm, engine.as_ref(), client_input_types).await?;
     let (result, cooperative_metrics) = vm
         .execute_async_with_metrics(agreed_entry, engine.as_ref())
         .await
@@ -5847,21 +5951,13 @@ where
             .await
             .map_err(|e| e.to_string())?;
 
-        let outputs_by_client = group_output_shares_by_client(
+        let submissions = coordinator_output_submissions(
+            &input_ids,
+            client_roster,
             captured_outputs
                 .into_iter()
                 .map(|record| (record.client_id, record.shares)),
-        );
-        let mut submissions = Vec::with_capacity(outputs_by_client.len());
-        for (client_id, shares) in outputs_by_client {
-            let client_key = input_ids.get(client_id).ok_or_else(|| {
-                format!(
-                    "AVSS output client index {} has no matching coordinator client identity",
-                    client_id
-                )
-            })?;
-            submissions.push((client_key.clone(), shares));
-        }
+        )?;
         for (_, result) in send_output_shares_bounded(&coord, submissions).await {
             result.map_err(|e| format!("send_output_shares: {e}"))?;
         }
@@ -6061,10 +6157,11 @@ fn standing_reservoir_plan(
 ) -> Result<(PlannedPreprocessing, PlannedPreprocessing, usize), String> {
     let client_input_total =
         checked_client_input_total(manifest.clients.iter().map(|client| client.inputs.len()))?;
-    let per_execution = plan_preprocessing(
+    let per_execution = plan_preprocessing_with_input_validation(
         &manifest.preprocessing_demand,
         threshold,
         client_input_total,
+        &manifest_client_input_types(manifest, None),
     );
     let material_capacity = burst_capacity
         .checked_add(1)
@@ -6830,6 +6927,7 @@ impl StandingRunnerExecutionHandler {
             .wait_for_round(Round::MPCExecution)
             .await
             .map_err(|error| error.to_string())?;
+        validate_boolean_client_inputs(vm, engine.as_ref(), client_input_types).await?;
         let (result, metrics) = vm
             .execute_async_with_metrics(&admission.entry, engine.as_ref())
             .await
@@ -7022,6 +7120,7 @@ impl StandingRunnerExecutionHandler {
             .wait_for_round(Round::MPCExecution)
             .await
             .map_err(|error| error.to_string())?;
+        validate_boolean_client_inputs(vm, engine.as_ref(), client_input_types).await?;
         let (result, metrics) = vm
             .execute_async_with_metrics(&admission.entry, engine.as_ref())
             .await
@@ -7298,6 +7397,32 @@ fn standing_host_port(args: &[String], name: &str) -> Result<(String, u16), Stri
     Ok((host.to_owned(), port))
 }
 
+fn one_shot_party_public_keys(n: usize) -> Result<Vec<(usize, NodePublicKey)>, String> {
+    let paths = env::var("STOFFEL_PARTY_CERTIFICATES").map_err(|_| {
+        "set STOFFEL_PARTY_CERTIFICATES to the ordered, comma-separated party certificate paths"
+            .to_owned()
+    })?;
+    let keys = paths
+        .split(',')
+        .enumerate()
+        .map(|(party, path)| {
+            let cert = fs::read(path.trim())
+                .map_err(|error| format!("read party certificate: {error}"))?;
+            Ok((
+                party,
+                QuicNetworkManager::public_key_from_certificate_der(&cert)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if keys.len() != n {
+        return Err(format!(
+            "party certificate roster has {} entries, expected {n}",
+            keys.len()
+        ));
+    }
+    Ok(keys)
+}
+
 fn load_standing_party_public_keys(
     directory: &Path,
     parties: usize,
@@ -7470,9 +7595,19 @@ async fn run_standing_node(raw_args: &[String]) -> Result<(), String> {
     let (bootnode, party_bind) = if as_leader {
         let bootnode = bind;
         let (bootnode_ready_tx, bootnode_ready_rx) = tokio::sync::oneshot::channel();
+        let bootstrap_keys = party_public_keys.clone();
+        let bootstrap_cert = cert_der.clone();
+        let bootstrap_key = key_der.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                run_bootnode_with_config_ready(bootnode, parties, Some(bootnode_ready_tx)).await
+            if let Err(error) = run_bootnode_with_identity_ready(
+                bootnode,
+                parties,
+                bootstrap_keys,
+                bootstrap_cert,
+                bootstrap_key,
+                Some(bootnode_ready_tx),
+            )
+            .await
             {
                 eprintln!("standing bootnode failed: {error}");
             }
@@ -7527,6 +7662,7 @@ async fn run_standing_node(raw_args: &[String]) -> Result<(), String> {
             threshold,
             timeout: session_registration_timeout(),
             expected_party_public_keys: Some(party_public_keys.clone()),
+            discovery_identity: (cert_der.clone(), key_der.clone()),
         },
     )
     .await
@@ -8675,10 +8811,22 @@ async fn main() {
         let bootnode_bind = bind;
         let bootnode_n = n;
         let (bootnode_ready_tx, bootnode_ready_rx) = tokio::sync::oneshot::channel();
+        let bootstrap_keys = one_shot_party_public_keys(n).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            exit(2);
+        });
+        let bootstrap_cert = cert_der.clone().expect("party certificate");
+        let bootstrap_key = key_der.clone().expect("party key");
         tokio::spawn(async move {
-            if let Err(e) =
-                run_bootnode_with_config_ready(bootnode_bind, bootnode_n, Some(bootnode_ready_tx))
-                    .await
+            if let Err(e) = run_bootnode_with_identity_ready(
+                bootnode_bind,
+                bootnode_n,
+                bootstrap_keys,
+                bootstrap_cert,
+                bootstrap_key,
+                Some(bootnode_ready_tx),
+            )
+            .await
             {
                 eprintln!("Bootnode error: {}", e);
             }
@@ -8737,7 +8885,16 @@ async fn main() {
                 n_parties: n,
                 threshold: t,
                 timeout: session_registration_timeout(),
-                expected_party_public_keys: None,
+                expected_party_public_keys: Some(one_shot_party_public_keys(n).unwrap_or_else(
+                    |error| {
+                        eprintln!("{error}");
+                        exit(2);
+                    },
+                )),
+                discovery_identity: (
+                    cert_der.clone().expect("party certificate"),
+                    key_der.clone().expect("party key"),
+                ),
             },
         )
         .await
@@ -8826,7 +8983,16 @@ async fn main() {
                 n_parties: n,
                 threshold: t,
                 timeout: session_registration_timeout(),
-                expected_party_public_keys: None,
+                expected_party_public_keys: Some(one_shot_party_public_keys(n).unwrap_or_else(
+                    |error| {
+                        eprintln!("{error}");
+                        exit(2);
+                    },
+                )),
+                discovery_identity: (
+                    cert_der.clone().expect("party certificate"),
+                    key_der.clone().expect("party key"),
+                ),
             },
         )
         .await
@@ -8891,7 +9057,7 @@ async fn main() {
                 exit(3);
             }
         };
-        vm_builder = vm_builder.with_local_storage(storage);
+        vm_builder = vm_builder.with_local_storage(storage.with_namespace(program_id));
     }
     let mut vm = vm_builder.build();
 
@@ -9559,6 +9725,12 @@ async fn main() {
     let online_started_at = std::time::Instant::now();
     let (execution_result, cooperative_metrics) = if let Some(engine) = cooperative_engine.as_ref()
     {
+        if let Err(error) =
+            validate_boolean_client_inputs(&vm, engine.as_ref(), &client_input_types).await
+        {
+            eprintln!("Invalid client input: {error}");
+            exit(4);
+        }
         match vm
             .execute_async_with_metrics(&agreed_entry, engine.as_ref())
             .await
@@ -9587,19 +9759,14 @@ async fn main() {
 
                 if let Some(ref mut coord) = coord_opt {
                     handled_by_coordinator = true;
-                    // Coordinator output delivery
-                    let output_share = if output_ids.is_empty() {
-                        None
-                    } else {
-                        coordinator_output_share_bytes(&mut vm, &result)
-                    };
+                    // Only explicit program outputs authorize client disclosure.
                     let captured_outputs = if let Some(engine) = hb_bls12381_coord_engine.as_ref() {
                         engine.drain_client_output_records().await
                     } else {
                         Vec::new()
                     };
 
-                    if output_share.is_some() || !captured_outputs.is_empty() {
+                    if !captured_outputs.is_empty() {
                         eprintln!("[party] proposing OutputDistribution");
                         if let Err(error) = coord.send_output().await {
                             eprintln!(
@@ -9614,42 +9781,17 @@ async fn main() {
                             exit(13);
                         }
 
-                        let mut output_shares_by_client: Vec<
-                            Vec<HbCoordinatorShare<ark_bls12_381::Fr>>,
-                        > = vec![Vec::new(); output_ids.len()];
-
-                        if let Some(output_share) = output_share {
-                            let share: HbCoordinatorShare<ark_bls12_381::Fr> =
-                                ark_serialize::CanonicalDeserialize::deserialize_compressed(
-                                    output_share.as_slice(),
-                                )
-                                .expect("deserialize output share");
-                            for shares in output_shares_by_client.iter_mut() {
-                                shares.push(share.clone());
-                            }
-                        }
-
-                        for record in captured_outputs {
-                            let Some(shares) = output_shares_by_client.get_mut(record.client_id)
-                            else {
-                                eprintln!(
-                                    "Execution error in '{}': HoneyBadger output client index {} has no matching coordinator client identity",
-                                    agreed_entry, record.client_id
-                                );
-                                exit(4);
-                            };
-                            shares.extend(record.shares);
-                        }
-
-                        let mut submissions = Vec::with_capacity(output_ids.len());
-                        for (cid, output_shares) in
-                            output_ids.iter().zip(output_shares_by_client.into_iter())
-                        {
-                            if output_shares.is_empty() {
-                                continue;
-                            }
-                            submissions.push((cid.clone(), output_shares));
-                        }
+                        let submissions = coordinator_output_submissions(
+                            &output_ids,
+                            &client_roster,
+                            captured_outputs
+                                .into_iter()
+                                .map(|record| (record.client_id, record.shares)),
+                        )
+                        .unwrap_or_else(|error| {
+                            eprintln!("Invalid coordinator output routing: {error}");
+                            exit(4);
+                        });
                         for (cid, result) in send_output_shares_bounded(coord, submissions).await {
                             if let Err(e) = result {
                                 eprintln!(
@@ -9877,6 +10019,21 @@ Examples:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn coordinator_output_slots_are_identity_bound() {
+        let ids = vec![vec![11], vec![22]];
+        assert_eq!(
+            super::coordinator_output_submissions(&ids, &[1, 2], [(1, vec![7])]).unwrap(),
+            vec![(vec![11], vec![7])]
+        );
+        assert_eq!(
+            super::coordinator_output_submissions(&ids, &[1, 2], [(2, vec![9])]).unwrap(),
+            vec![(vec![22], vec![9])]
+        );
+        assert!(super::coordinator_output_submissions(&ids, &[1, 2], [(0, vec![7])]).is_err());
+        assert!(super::coordinator_output_submissions(&ids, &[1, 1], [(1, vec![7])]).is_err());
+        assert!(super::coordinator_output_submissions(&ids, &[1], [(1, vec![7])]).is_err());
+    }
     use super::{
         band_pow2, bind_admitted_client_slots, canonical_mask_reservation_runs,
         checked_client_input_total, cli_positional_arguments, client_input_completion_quorum,

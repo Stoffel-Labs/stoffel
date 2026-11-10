@@ -156,7 +156,8 @@ pub async fn start_party(party_id: usize) -> Result<StoffelServer, Box<dyn std::
                 .map(|peer_id| (peer_id, deployment.servers[peer_id].clone())),
         )
         .expected_clients(1)
-        .offchain_coordinator(offchain);
+        .offchain_coordinator(offchain)
+        .party_certificates((0..config.parties).map(|party| identity_path(party, "cert")));
     if party_id > 0 {
         let bootstrap_address = resolve_socket_address(
             "bootstrap",

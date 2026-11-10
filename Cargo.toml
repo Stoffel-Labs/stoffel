@@ -15,4 +15,11 @@ resolver = "2"
 exclude = [
     "vendor/mpc-protocols-limit-test",
     "vendor/stoffel-mpc-coordinator-browser",
+    "vendor/stoffel-mpc-coordinator-off-chain",
+    "vendor/stoffel-mpc-coordinator-shared",
 ]
+
+[patch.crates-io]
+stoffel-mpc-coordinator-off-chain = { path = "vendor/stoffel-mpc-coordinator-off-chain" }
+
+stoffel-mpc-coordinator-shared = { path = "vendor/stoffel-mpc-coordinator-shared" }
