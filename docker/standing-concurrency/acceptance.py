@@ -98,7 +98,11 @@ class Harness:
                     self.coordination_seconds
                 ),
                 "STOFFEL_MPC_PROTOCOL_TIMEOUT_SECONDS": str(self.protocol_seconds),
-                "RUST_LOG": os.environ.get("STOFFEL_ACCEPTANCE_RUST_LOG", "info"),
+                # Preserve readiness markers under Docker's bounded log retention.
+                # Dependency trace payloads at INFO can rotate them away during warmup.
+                "RUST_LOG": os.environ.get(
+                    "STOFFEL_ACCEPTANCE_RUST_LOG", "warn,stoffel_vm=info,stoffel_run=info"
+                ),
             }
         )
         self.paused: set[str] = set()

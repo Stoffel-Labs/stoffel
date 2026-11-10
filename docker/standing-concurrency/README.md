@@ -145,3 +145,5 @@ per-sender backlog until session capacity is available. Current parent and
 reconstruction sessions continue to drain, and completed-session history covers
 the planned material so delayed packets cannot recreate finished work. The
 underlying protocol's active-session admission limits remain unchanged.
+
+The full example catalog allows up to one hour for cold-start preprocessing. Set `WAIT_TIMEOUT_SECS` to override this startup/test-harness allowance; `PROTOCOL_TIMEOUT_SECS` separately controls individual MPC executions.

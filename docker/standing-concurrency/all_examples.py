@@ -169,6 +169,9 @@ def augment_source(name: str, source: str, _inputs: dict[int, list[str]]) -> tup
 class AllExamplesHarness(Harness):
     def __init__(self, selected_examples: set[str] | None = None) -> None:
         super().__init__("all-examples")
+        # The full catalog can require millions of preprocessing shares before
+        # its first execution, so allow a longer cold start than small fixtures.
+        self.wait_seconds = int(os.environ.get("WAIT_TIMEOUT_SECS", "3600"))
         self.examples_dir = self.root / "crates/stoffel-lang/examples"
         self.selected_examples = selected_examples
         self.client_identities = self.state / "client-identities"

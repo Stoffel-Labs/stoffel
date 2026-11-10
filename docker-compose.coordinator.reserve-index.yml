@@ -9,14 +9,14 @@
 #   STOFFEL_AUTH_TOKEN=replace-with-random-secret \
 #   docker compose -f docker-compose.coordinator.reserve-index.yml up --build
 #
-# Swap client order by swapping the reserved indices:
+# Swap mask reservation indices while preserving authenticated client slots:
 #   STOFFEL_AUTH_TOKEN=replace-with-random-secret \
 #   STOFFEL_CLIENT0_INDEX=1 \
 #   STOFFEL_CLIENT1_INDEX=0 \
 #   docker compose -f docker-compose.coordinator.reserve-index.yml up --build
 #
-# The program computes client[0] - client[1], so changing which client claims
-# index 0 vs 1 changes the result deterministically without depending on race timing.
+# Both runs compute client[0] - client[1] = 15 - 25 = -10. Reservation indices
+# identify preprocessing masks; they cannot change an identity's manifest input slot.
 # The default execution ID below is only for this example stack. Set STOFFEL_EXECUTION_ID to a
 # fresh nonzero 64-hex-character value for each real or overlapping invocation.
 

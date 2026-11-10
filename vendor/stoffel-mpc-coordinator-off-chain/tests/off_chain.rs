@@ -860,7 +860,9 @@ async fn end_to_end() {
         .map(|i| ("127.0.0.1".to_string(), 12349u16 + i as u16))
         .collect();
 
-    let certs = (0..7).map(|_| client_cert()).collect::<Vec<_>>();
+    let mut certs = (0..7).map(|_| client_cert()).collect::<Vec<_>>();
+    // Share IDs follow the protocol's authenticated party order.
+    certs[..n as usize].sort_by_key(|cert| cert.signing_key.public_key_raw().to_vec());
     let public_keys = certs
         .iter()
         .map(|c| c.signing_key.public_key_raw().to_vec())
@@ -1064,7 +1066,9 @@ async fn end_to_end() {
         }
     });
 
-    barrier.wait().await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), barrier.wait())
+        .await
+        .expect("end-to-end coordinator clients must complete");
 }
 
 #[tokio::test]
@@ -1079,7 +1083,9 @@ async fn end_to_end_fake_coord() {
         .map(|i| ("127.0.0.1".to_string(), 12353u16 + i as u16))
         .collect();
 
-    let certs = (0..7).map(|_| client_cert()).collect::<Vec<_>>();
+    let mut certs = (0..7).map(|_| client_cert()).collect::<Vec<_>>();
+    // Share IDs follow the protocol's authenticated party order.
+    certs[..n].sort_by_key(|cert| cert.signing_key.public_key_raw().to_vec());
     let public_keys = certs
         .iter()
         .map(|c| c.signing_key.public_key_raw().to_vec())
@@ -1288,7 +1294,9 @@ async fn end_to_end_fake_coord() {
         }
     });
 
-    barrier.wait().await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), barrier.wait())
+        .await
+        .expect("end-to-end coordinator clients must complete");
 }
 
 #[tokio::test]
@@ -1296,7 +1304,8 @@ async fn output_waiters_receive_threshold_and_later_share_snapshots() {
     stoffel_mpc_coordinator_shared::setup_test();
 
     let execution_id = ExecutionId::from_bytes([0x65; 32]);
-    let node_certs = [client_cert(), client_cert(), client_cert(), client_cert()];
+    let mut node_certs = [client_cert(), client_cert(), client_cert(), client_cert()];
+    node_certs.sort_by_key(|cert| cert.signing_key.public_key_raw().to_vec());
     let node_ids = node_certs
         .iter()
         .map(|cert| cert.signing_key.public_key_raw().to_vec())
@@ -1346,12 +1355,39 @@ async fn output_waiters_receive_threshold_and_later_share_snapshots() {
     let mut waiter_a = CoordinatorRPCBaseClient::obtain_output_shares(&output_rpc, execution_id)
         .await
         .unwrap();
-    let outputs = [
-        (vec![1], vec![11]),
-        (vec![2], vec![22]),
-        (vec![3], vec![33]),
-        (vec![4], vec![44]),
-    ];
+    use hpke::{Deserializable, Serializable};
+    use rand::SeedableRng;
+    let recipient =
+        <hpke::kem::DhP256HkdfSha256 as hpke::Kem>::PublicKey::from_bytes(&output_id).unwrap();
+    let mut rng = rand::rngs::StdRng::from_os_rng();
+    let outputs = [11, 22, 33, 44].map(|value| {
+        let (encapsulated, ciphertext) = hpke::single_shot_seal::<
+            hpke::aead::AesGcm256,
+            hpke::kdf::HkdfSha256,
+            hpke::kem::DhP256HkdfSha256,
+            _,
+        >(
+            &hpke::OpModeS::Base,
+            &recipient,
+            b"snapshot fixture",
+            &[value],
+            b"",
+            &mut rng,
+        )
+        .unwrap();
+        (encapsulated.to_bytes().to_vec(), ciphertext)
+    });
+    for round in [
+        Round::Preprocessing,
+        Round::MPCExecution,
+        Round::OutputDistribution,
+    ] {
+        for node_rpc in &node_rpcs {
+            CoordinatorRPCBaseClient::transition(node_rpc, execution_id, round)
+                .await
+                .unwrap();
+        }
+    }
     assert!(CoordinatorRPCBaseClient::send_output_shares(
         &node_rpcs[0],
         execution_id,
@@ -1403,8 +1439,16 @@ async fn output_waiters_receive_threshold_and_later_share_snapshots() {
         .expect("threshold snapshot must be delivered")
         .expect("subscription must remain open")
         .expect("threshold snapshot must deserialize");
-    assert_eq!(snapshot.len(), 3);
-    assert!(outputs[..3].iter().all(|output| snapshot.contains(output)));
+    assert_eq!(
+        snapshot,
+        vec![
+            outputs[0].clone(),
+            outputs[1].clone(),
+            outputs[2].clone(),
+            (Vec::new(), Vec::new()),
+        ],
+        "threshold snapshots retain the authenticated sender positions",
+    );
 
     CoordinatorRPCBaseClient::send_output_shares(
         &node_rpcs[3],
@@ -1419,8 +1463,7 @@ async fn output_waiters_receive_threshold_and_later_share_snapshots() {
         .expect("additional-share snapshot must be delivered")
         .expect("subscription must remain open after threshold delivery")
         .expect("additional-share snapshot must deserialize");
-    assert_eq!(snapshot.len(), 4);
-    assert!(outputs.iter().all(|output| snapshot.contains(output)));
+    assert_eq!(snapshot, outputs.to_vec());
 }
 
 // A client that abandons a still-pending `receive_assigned_mask_shares` subscription (e.g. it

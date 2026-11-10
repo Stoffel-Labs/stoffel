@@ -326,9 +326,19 @@ async fn test_vm_mesh_full_integration() {
                 .wait_for_all_inputs(Duration::from_secs(90))
                 .await
                 .expect("Failed to get client inputs");
-            input_store
+            // The VM addresses manifest slots; the transport addresses client identities.
+            client_ids
                 .iter()
-                .map(|(client, shares)| (*client, shares.clone()))
+                .enumerate()
+                .map(|(slot, client_id)| {
+                    (
+                        slot,
+                        input_store
+                            .get(client_id)
+                            .expect("registered client input")
+                            .clone(),
+                    )
+                })
                 .collect()
         };
 
@@ -702,9 +712,19 @@ async fn test_vm_mesh_average_salary_integration() {
                 .wait_for_all_inputs(Duration::from_secs(30))
                 .await
                 .expect("Failed to get client inputs");
-            input_store
+            // The VM addresses manifest slots; the transport addresses client identities.
+            client_ids
                 .iter()
-                .map(|(client, shares)| (*client, shares.clone()))
+                .enumerate()
+                .map(|(slot, client_id)| {
+                    (
+                        slot,
+                        input_store
+                            .get(client_id)
+                            .expect("registered client input")
+                            .clone(),
+                    )
+                })
                 .collect()
         };
         let vm = vm_arc.lock();
@@ -735,8 +755,8 @@ async fn test_vm_mesh_average_salary_integration() {
         for (_party_id, vm_arc) in vms.iter().enumerate() {
             let vm = vm_arc.lock();
             let mut sum: Option<RobustShare<Fr>> = None;
-            for client_id in &client_ids {
-                if let Some(share) = vm.client_share::<Fr>(*client_id, ClientShareIndex::new(0)) {
+            for client_slot in 0..client_ids.len() {
+                if let Some(share) = vm.client_share::<Fr>(client_slot, ClientShareIndex::new(0)) {
                     sum = Some(match sum {
                         None => share.clone(),
                         Some(s) => (s + share.clone()).expect("Share addition failed"),
@@ -1447,9 +1467,19 @@ async fn test_vm_mesh_output_client_integration() {
                 .wait_for_all_inputs(Duration::from_secs(90))
                 .await
                 .expect("Failed to get client inputs");
-            input_store
+            // The VM addresses manifest slots; the transport addresses client identities.
+            client_ids
                 .iter()
-                .map(|(client, shares)| (*client, shares.clone()))
+                .enumerate()
+                .map(|(slot, client_id)| {
+                    (
+                        slot,
+                        input_store
+                            .get(client_id)
+                            .expect("registered client input")
+                            .clone(),
+                    )
+                })
                 .collect()
         };
         let vm = vm_arc.lock();
@@ -1937,9 +1967,19 @@ async fn test_vm_mesh_matrix_average_integration() {
                 .wait_for_all_inputs(Duration::from_secs(30))
                 .await
                 .expect("Failed to get client inputs");
-            input_store
+            // The VM addresses manifest slots; the transport addresses client identities.
+            client_ids
                 .iter()
-                .map(|(client, shares)| (*client, shares.clone()))
+                .enumerate()
+                .map(|(slot, client_id)| {
+                    (
+                        slot,
+                        input_store
+                            .get(client_id)
+                            .expect("registered client input")
+                            .clone(),
+                    )
+                })
                 .collect()
         };
         let vm = vm_arc.lock();
@@ -2733,14 +2773,24 @@ async fn test_vm_mesh_matrix_average_fixed_point_integration() {
         .enumerate()
         .map(|(party_id, server)| {
             let mut input = server.node.preprocess.input.clone();
+            let client_ids = client_ids.clone();
             async move {
                 let input_store = input
                     .wait_for_all_inputs(input_timeout)
                     .await
                     .map_err(|e| format!("Party {} failed to get inputs: {:?}", party_id, e))?;
-                let shares: Vec<(ClientId, Vec<RobustShare<Fr>>)> = input_store
+                let shares: Vec<(ClientId, Vec<RobustShare<Fr>>)> = client_ids
                     .iter()
-                    .map(|(client, shares)| (*client, shares.clone()))
+                    .enumerate()
+                    .map(|(slot, client_id)| {
+                        (
+                            slot,
+                            input_store
+                                .get(client_id)
+                                .expect("registered client input")
+                                .clone(),
+                        )
+                    })
                     .collect();
                 Ok::<_, String>((party_id, shares))
             }

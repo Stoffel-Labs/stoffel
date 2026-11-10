@@ -564,6 +564,8 @@ STOFFEL_EXECUTION_ID="$(openssl rand -hex 32)" \
 docker compose -f docker-compose.coordinator.reserve-index.yml up --build
 ```
 
+Mask reservation indices select preprocessing material; they do not change the authenticated client's manifest input slot. Swapping `STOFFEL_CLIENT0_INDEX` and `STOFFEL_CLIENT1_INDEX` still computes `15 - 25 = -10`.
+
 That coordinator path runs through the HoneyBadger/BLS12-381 VM path. The AVSS compose stack is separate and covers AVSS curves and local share storage:
 
 ```bash

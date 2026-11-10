@@ -567,9 +567,19 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
                 .wait_for_all_inputs(Duration::from_secs(30))
                 .await
                 .expect("Failed to get client inputs");
-            input_store
+            // The VM addresses manifest slots; the transport addresses client identities.
+            client_ids
                 .iter()
-                .map(|(client, shares)| (*client, shares.clone()))
+                .enumerate()
+                .map(|(slot, client_id)| {
+                    (
+                        slot,
+                        input_store
+                            .get(client_id)
+                            .expect("registered client input")
+                            .clone(),
+                    )
+                })
                 .collect()
         };
         let vm = vm_arc.lock();

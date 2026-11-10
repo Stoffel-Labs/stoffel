@@ -1684,8 +1684,9 @@ fn hb_vm_turmoil_full_client_flow_e2e() {
                             }
                         }
                     };
+                    // ClientStore slot 0 belongs to transport identity INPUT_CLIENT_ID.
                     vm.try_store_client_input(
-                        INPUT_CLIENT_ID,
+                        0,
                         inputs
                             .get(&INPUT_CLIENT_ID)
                             .cloned()
@@ -1848,8 +1849,9 @@ fn run_avss_vm_turmoil_full_client_flow(
                             }
                         }
                     };
+                    // ClientStore slot 0 belongs to transport identity INPUT_CLIENT_ID.
                     vm.try_store_client_input_feldman(
-                        INPUT_CLIENT_ID,
+                        0,
                         inputs
                             .get(&INPUT_CLIENT_ID)
                             .cloned()

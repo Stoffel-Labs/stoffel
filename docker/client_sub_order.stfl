@@ -1,4 +1,4 @@
-# Subtract inputs in reserved-index order and return the result to both clients.
+# Subtract authenticated client-slot inputs and return the result to both clients.
 def main() -> int64:
   var left: secret int64 = ClientStore.take_share(0, 0)
   var right: secret int64 = ClientStore.take_share(1, 0)
