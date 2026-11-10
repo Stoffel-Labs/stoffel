@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLES_DIR="${ROOT_DIR}/examples"
 WORKSPACE_DIR="$(cd "${ROOT_DIR}/../.." && pwd)"
 VM_DIR="${STOFFEL_VM_DIR:-${WORKSPACE_DIR}}"
-COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#feature/no-feature-gates-and-multi-type-awareness}}"
-NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://github.com/Stoffel-Labs/stoffel-networking.git#feature/robust-identity-based-on-cert}}"
+COORDINATOR_CONTEXT="${STOFFEL_COORDINATOR_CONTEXT:-${STOFFEL_COORDINATOR_DIR:-https://github.com/Stoffel-Labs/stoffel-mpc-coordinator.git#b68b2ce7ab9d148597b78a420f2b81fe1917fc00}}"
+NETWORK_CONTEXT="${STOFFEL_NETWORK_CONTEXT:-${STOFFEL_NETWORK_DIR:-https://github.com/Stoffel-Labs/stoffel-networking.git#v0.1.1}}"
 OUT_DIR="${STOFFEL_EXAMPLES_OUT:-${EXAMPLES_DIR}/dist}"
 RUN_DOCKER_MPC=0
 RUN_HOST_MPC=0
@@ -79,6 +79,10 @@ find "$EXAMPLES_DIR" -path "$OUT_DIR" -prune -o -name main.stfl -print | sort | 
     avss_certificate/*)
       mpc_backend="avss"
       mpc_curve="p-256"
+      ;;
+    mpc_dh_psi|mpc_oprf|threshold_signatures/threshold_bls_bls12381)
+      mpc_backend="avss"
+      mpc_curve="bls12-381"
       ;;
     threshold_signatures/threshold_ecdsa_p256)
       mpc_backend="avss"
@@ -178,7 +182,7 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
   run_docker_mpc mpc_share_arithmetic.stflb
   run_docker_mpc mpc_share_toolkit.stflb
   run_docker_mpc mpc_protocol_coordination.stflb
-  run_docker_mpc threshold_signatures_threshold_bls_bls12381.stflb honeybadger bls12-381
+  run_docker_mpc threshold_signatures_threshold_bls_bls12381.stflb avss bls12-381
   run_docker_mpc threshold_signatures_threshold_schnorr_ed25519.stflb avss ed25519
   run_docker_mpc threshold_signatures_threshold_eddsa_ed25519.stflb avss ed25519
   run_docker_mpc threshold_signatures_threshold_ecdsa_secp256k1.stflb avss secp256k1
@@ -189,7 +193,7 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
   STOFFEL_CLIENT_INPUT_COUNT=1 \
   STOFFEL_COORDINATOR_N_INPUTS=2 \
   STOFFEL_OUTPUTS=1 \
-  STOFFEL_CLIENT1_OUTPUTS=0 \
+  STOFFEL_CLIENT1_OUTPUTS=1 \
   STOFFEL_CLIENT0_INPUT=100 \
   STOFFEL_CLIENT1_INPUT=20 \
   STOFFEL_CLIENT0_INDEX=0 \
@@ -203,8 +207,8 @@ if [ "$RUN_DOCKER_MPC" -eq 1 ]; then
   STOFFEL_OUTPUTS=6 \
   STOFFEL_CLIENT1_OUTPUTS=0 \
   STOFFEL_OUTPUT_FIXED_POINT_FRACTIONAL_BITS=16 \
-  STOFFEL_CLIENT0_INPUT='65536,131072,196608,262144,327680,393216' \
-  STOFFEL_CLIENT1_INPUT='458752,524288,589824,655360,720896,786432' \
+  STOFFEL_CLIENT0_INPUT='1,2,3,4,5,6' \
+  STOFFEL_CLIENT1_INPUT='7,8,9,10,11,12' \
   STOFFEL_CLIENT0_INDEX=0 \
   STOFFEL_CLIENT1_INDEX=6 \
   EXPECTED_OUTPUT='8, 10, 12, 14, 16, 18' \
@@ -223,7 +227,7 @@ if [ "$RUN_LOCAL_MPC" -eq 1 ]; then
   CLI="${WORKSPACE_DIR}/target/debug/stoffel"
   if [ ! -x "$CLI" ]; then
     echo "Building stoffel CLI..."
-    cargo build --quiet --manifest-path "${WORKSPACE_DIR}/Cargo.toml" -p stoffel-cli
+    cargo build --quiet --manifest-path "${WORKSPACE_DIR}/Cargo.toml" -p stoffel
   fi
   CAP="${STOFFEL_LOCAL_MPC_TIMEOUT:-120}"
   lm_pass=0

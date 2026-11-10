@@ -4,7 +4,9 @@ use super::codec::{
 use super::{ShareAlgebraError, ShareAlgebraResult};
 use ark_ec::CurveGroup;
 use ark_ff::{FftField, PrimeField};
+use stoffel_vm_types::core_types::ShareData;
 use stoffel_vm_types::core_types::ShareType;
+use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 
 use crate::net::curve::{field_from_i64, MpcCurveConfig};
@@ -49,6 +51,82 @@ pub(crate) fn sub_share_for_curve(
         curve_config,
         share_binary_op_typed(lhs_bytes, rhs_bytes, ShareBinaryOp::Sub)
     )
+}
+
+/// Sum a homogeneous batch of local shares with one serialization of the
+/// result. This is materially cheaper than repeatedly invoking binary add,
+/// which decodes the accumulator and serializes it again at every step.
+pub(crate) fn sum_share_data_for_curve(
+    curve_config: MpcCurveConfig,
+    _ty: ShareType,
+    shares: &[ShareData],
+) -> ShareAlgebraResult<ShareData> {
+    let template = shares.first().ok_or(ShareAlgebraError::ShareSumEmpty)?;
+    let result_bytes = match template {
+        ShareData::Opaque(_) => {
+            dispatch_share_curve_config!(curve_config, sum_robust_shares_typed(shares))?
+        }
+        ShareData::Feldman { .. } => {
+            dispatch_share_curve_config!(curve_config, sum_feldman_shares_typed(shares))?
+        }
+    };
+    super::codec::preserve_share_data_format_for_curve(curve_config, template, result_bytes)
+}
+
+fn sum_robust_shares_typed<F, G>(shares: &[ShareData]) -> ShareAlgebraResult<Vec<u8>>
+where
+    F: FftField + PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    // Keep the uniform two-parameter curve dispatch signature used by the
+    // surrounding share-algebra helpers even though robust shares only store F.
+    let _curve = std::marker::PhantomData::<G>;
+    let first = shares.first().ok_or(ShareAlgebraError::ShareSumEmpty)?;
+    let first =
+        super::codec::decode_exact_typed::<RobustShare<F>>(first.as_bytes(), "RobustShare")?;
+    let mut value = first.share[0];
+
+    for (index, encoded) in shares.iter().enumerate().skip(1) {
+        let share =
+            super::codec::decode_exact_typed::<RobustShare<F>>(encoded.as_bytes(), "RobustShare")
+                .map_err(|source| ShareAlgebraError::DecodeShareAt {
+                index,
+                source: Box::new(source),
+            })?;
+        if share.id != first.id || share.degree != first.degree {
+            return Err(ShareAlgebraError::ShareMetadataMismatch);
+        }
+        value += share.share[0];
+    }
+
+    encode_share_bytes_typed(&RobustShare::new(value, first.id, first.degree))
+}
+
+fn sum_feldman_shares_typed<F, G>(shares: &[ShareData]) -> ShareAlgebraResult<Vec<u8>>
+where
+    F: FftField + PrimeField,
+    G: CurveGroup<ScalarField = F>,
+{
+    let first = shares.first().ok_or(ShareAlgebraError::ShareSumEmpty)?;
+    let mut sum = super::codec::decode_exact_typed::<FeldmanShamirShare<F, G>>(
+        first.as_bytes(),
+        "FeldmanShamirShare",
+    )?;
+
+    for (index, encoded) in shares.iter().enumerate().skip(1) {
+        let share = super::codec::decode_exact_typed::<FeldmanShamirShare<F, G>>(
+            encoded.as_bytes(),
+            "FeldmanShamirShare",
+        )
+        .map_err(|source| ShareAlgebraError::DecodeShareAt {
+            index,
+            source: Box::new(source),
+        })?;
+        sum = (sum + share)
+            .map_err(|error| ShareAlgebraError::feldman_operation("sum Feldman shares", error))?;
+    }
+
+    encode_share_bytes_typed(&sum)
 }
 
 pub(crate) fn neg_share_for_curve(
@@ -265,11 +343,17 @@ where
     G: CurveGroup<ScalarField = F>,
 {
     let share = decode_share_bytes_typed::<F, G>(share_bytes)?;
-    let scalar_f = F::deserialize_compressed(scalar_bytes).map_err(|e| {
+    let mut input = scalar_bytes;
+    let scalar_f = F::deserialize_compressed(&mut input).map_err(|e| {
         ShareAlgebraError::FieldElementDecode {
             source: e.to_string(),
         }
     })?;
+    if !input.is_empty() {
+        return Err(ShareAlgebraError::FieldElementDecode {
+            source: "trailing bytes in field element".to_owned(),
+        });
+    }
     match share {
         DecodedShare::Robust(share) => {
             let new_share = RobustShare::new(share.share[0] * scalar_f, share.id, share.degree);
@@ -293,11 +377,17 @@ where
     G: CurveGroup<ScalarField = F>,
 {
     let share = decode_share_bytes_typed::<F, G>(share_bytes)?;
-    let field = F::deserialize_compressed(field_bytes).map_err(|e| {
+    let mut input = field_bytes;
+    let field = F::deserialize_compressed(&mut input).map_err(|e| {
         ShareAlgebraError::FieldElementDecode {
             source: e.to_string(),
         }
     })?;
+    if !input.is_empty() {
+        return Err(ShareAlgebraError::FieldElementDecode {
+            source: "trailing bytes in field element".to_owned(),
+        });
+    }
     match share {
         DecodedShare::Robust(share) => {
             let new_share = RobustShare::new(share.share[0] + field, share.id, share.degree);

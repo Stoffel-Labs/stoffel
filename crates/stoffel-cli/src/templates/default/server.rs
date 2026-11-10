@@ -74,6 +74,7 @@ struct DeploymentAddresses {
     coordinator_host: String,
     coordinator_port: u16,
     timestamp: u64,
+    execution_id: stoffel::ExecutionId,
     node_bind_addresses: Vec<String>,
     servers: Vec<String>,
     node_rpc_addresses: Vec<String>,
@@ -130,6 +131,7 @@ pub async fn start_party(party_id: usize) -> Result<StoffelServer, Box<dyn std::
             identity_path(party_id, "cert"),
             identity_path(party_id, "key"),
         )
+        .execution_id(deployment.execution_id)
         .timestamp(deployment.timestamp)
         .expected_client_cert(client_certificate())
         .build()?;

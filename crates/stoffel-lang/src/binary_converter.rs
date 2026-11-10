@@ -56,8 +56,10 @@ pub fn convert_to_binary(program: &CompiledProgram) -> CompiledBinary {
     );
     binary.functions.push(main_function);
 
-    // Convert function chunks
-    for (name, chunk) in &program.function_chunks {
+    // Function order also determines shared constant-pool indices.
+    let mut chunks: Vec<_> = program.function_chunks.iter().collect();
+    chunks.sort_unstable_by_key(|(name, _)| *name);
+    for (name, chunk) in chunks {
         // Determine parent function (if any)
         let parent = if name.contains("::") {
             let parts: Vec<&str> = name.rsplitn(2, "::").collect();
@@ -771,7 +773,8 @@ pub fn disassemble(binary: &CompiledBinary) -> String {
             total, clear_count, secret_count
         );
         if !func.labels.is_empty() {
-            let _ = writeln!(out, "  ; labels: {:?}", func.labels);
+            let labels: std::collections::BTreeMap<_, _> = func.labels.iter().collect();
+            let _ = writeln!(out, "  ; labels: {:?}", labels);
         }
         let _ = writeln!(out, "  ; instructions ({}):", func.instructions.len());
         for (i, instr) in func.instructions.iter().enumerate() {
@@ -781,4 +784,46 @@ pub fn disassemble(binary: &CompiledBinary) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod determinism_tests {
+    use super::*;
+
+    #[test]
+    fn binary_and_disassembly_ignore_function_and_label_map_order() {
+        let mut expected = None;
+        for seed in 0..64 {
+            let mut program = CompiledProgram::default();
+            for index in 0..8 {
+                let n = (index + seed) % 8;
+                let mut chunk = BytecodeChunk {
+                    instructions: vec![Instruction::LDI(0, Value::I64(n)), Instruction::RET(0)],
+                    ..BytecodeChunk::default()
+                };
+                for offset in 0..2 {
+                    let offset = (offset + seed as usize) % 2;
+                    chunk.labels.insert(format!("label_{offset}"), offset);
+                }
+                program.function_chunks.insert(format!("fn_{n}"), chunk);
+            }
+            let binary = convert_to_binary(&program);
+            assert_eq!(binary.functions[0].name, "main");
+            for (n, function) in binary.functions[1..].iter().enumerate() {
+                assert_eq!(function.name, format!("fn_{n}"));
+                let CompiledInstruction::LDI(_, constant) = function.instructions[0] else {
+                    panic!("expected constant load");
+                };
+                assert_eq!(binary.constants[constant], Value::I64(n as i64));
+            }
+            let mut bytes = Vec::new();
+            binary.serialize(&mut bytes).unwrap();
+            let actual = (bytes, disassemble(&binary));
+            if let Some(expected) = &expected {
+                assert_eq!(&actual, expected);
+            } else {
+                expected = Some(actual);
+            }
+        }
+    }
 }

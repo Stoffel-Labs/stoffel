@@ -15,7 +15,10 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use stoffel_vm_types::core_types::{ClearShareInput, ClearShareValue, ShareData, ShareType, Value};
+use stoffel_vm_types::core_types::{
+    ClearShareInput, ClearShareValue, ShareData, ShareType, Value,
+    DEFAULT_FIXED_POINT_FRACTIONAL_BITS, DEFAULT_FIXED_POINT_TOTAL_BITS,
+};
 use stoffel_vm_types::functions::VMFunction;
 use stoffel_vm_types::instructions::Instruction;
 use stoffelmpc_mpc::avss_mpc::triple_gen::BeaverTriple;
@@ -23,11 +26,13 @@ use stoffelmpc_mpc::avss_mpc::{AvssMPCClient, AvssMPCNode, AvssMPCNodeOpts, Avss
 use stoffelmpc_mpc::common::rbc::rbc::Avid;
 use stoffelmpc_mpc::common::share::avss::verify_feldman;
 use stoffelmpc_mpc::common::share::feldman::FeldmanShamirShare;
+use stoffelmpc_mpc::common::types::fixed::FixedPointPrecision;
 use stoffelmpc_mpc::common::{MPCProtocol, SecretSharingScheme};
 use stoffelmpc_mpc::honeybadger::robust_interpolate::robust_interpolate::RobustShare;
 use stoffelmpc_mpc::honeybadger::triple_gen::ShamirBeaverTriple;
 use stoffelmpc_mpc::honeybadger::{
     HoneyBadgerMPCClient, HoneyBadgerMPCNode, HoneyBadgerMPCNodeOpts, SessionId as HbSessionId,
+    MIN_STATISTICAL_SECURITY,
 };
 use stoffelnet::network_utils::{ClientId, Network, NetworkError, Node, PartyId, VerifiedOrdering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1106,8 +1111,11 @@ fn hb_opts() -> HoneyBadgerMPCNodeOpts {
         INSTANCE_ID as u32,
         0,
         0,
-        0,
-        0,
+        FixedPointPrecision::new(
+            DEFAULT_FIXED_POINT_TOTAL_BITS,
+            DEFAULT_FIXED_POINT_FRACTIONAL_BITS,
+        ),
+        MIN_STATISTICAL_SECURITY,
         Duration::from_secs(30),
     )
     .expect("HB opts should be valid")
@@ -1220,7 +1228,8 @@ async fn process_hb_node_message(
     message: Vec<u8>,
 ) -> Result<(), String> {
     if router
-        .try_handle_wire_message(sender.id(), &message)
+        .handle_wire_message(sender.id(), &message)
+        .await
         .map_err(|error| format!("HB open-router error: {error}"))?
     {
         return Ok(());
@@ -1239,7 +1248,8 @@ async fn process_avss_node_message(
     message: Vec<u8>,
 ) -> Result<(), String> {
     if router
-        .try_handle_wire_message(sender.id(), &message)
+        .handle_wire_message(sender.id(), &message)
+        .await
         .map_err(|error| format!("AVSS open-router error: {error}"))?
     {
         return Ok(());
@@ -1410,8 +1420,6 @@ fn hb_vm_turmoil_mul_open_e2e() {
                 let node = Arc::new(Mutex::new(create_hb_node(party_id, Vec::new()).await));
                 node.lock().await.preprocessing_material.lock().await.add(
                     Some(party_triples),
-                    None,
-                    None,
                     None,
                     None,
                     None,
@@ -1634,7 +1642,7 @@ fn hb_vm_turmoil_full_client_flow_e2e() {
                         .preprocessing_material
                         .lock()
                         .await
-                        .add(Some(party_triples), None, None, None, None, None);
+                        .add(Some(party_triples), None, None, None);
                     let router = Arc::new(OpenMessageRouter::new());
                     let engine = Arc::new(HbTurmoilVmEngine::new(
                         topology_for(party_id),

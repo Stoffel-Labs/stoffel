@@ -22,10 +22,10 @@
 //! data-dependent loops) the analysis sets `dynamic = true` rather than silently
 //! undercounting.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use crate::ast::{AstNode, Parameter, Value};
-use stoffel_vm_types::compiled_binary::PreprocessingDemand;
+use stoffel_vm_types::compiled_binary::{MpcBackend, PreprocessingDemand};
 use stoffel_vm_types::core_types::DEFAULT_FIXED_POINT_FRACTIONAL_BITS;
 
 /// Statically known list shape of a value: its length and, recursively, the
@@ -34,7 +34,7 @@ use stoffel_vm_types::core_types::DEFAULT_FIXED_POINT_FRACTIONAL_BITS;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Len {
     /// A list of exactly `len` elements, each having element shape `elem`.
-    Known { len: usize, elem: Box<Len> },
+    Known { len: usize, elem: Rc<Len> },
     /// Not a list, or a length only known at runtime.
     Unknown,
 }
@@ -44,7 +44,7 @@ impl Len {
     fn flat(len: usize) -> Len {
         Len::Known {
             len,
-            elem: Box::new(Len::Unknown),
+            elem: Rc::new(Len::Unknown),
         }
     }
 
@@ -102,7 +102,7 @@ impl std::hash::Hash for Secrecy {
 
 /// The abstract value an expression evaluates to: its list shape, its secrecy,
 /// and — for clear integers — its constant value (used for loop bounds).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AbstractValue {
     len: Len,
     secrecy: Secrecy,
@@ -151,7 +151,7 @@ impl AbstractValue {
 }
 
 /// Per-scope binding of variable names to their abstract values.
-type Env = HashMap<String, AbstractValue>;
+type Env<'a> = crate::snapshot_env::SnapshotEnv<'a, AbstractValue>;
 
 /// Result of analysing a function body: the demand it incurs and the abstract
 /// value it returns.
@@ -188,6 +188,7 @@ struct CallKey {
     name: String,
     arg_lens: Vec<LenKey>,
     arg_secrecy: Vec<Secrecy>,
+    arg_ints: Vec<Option<u64>>,
 }
 
 /// A user-defined function the planner can analyse.
@@ -201,6 +202,7 @@ struct FunctionInfo<'a> {
 struct Planner<'a> {
     functions: HashMap<String, &'a FunctionInfo<'a>>,
     memo: HashMap<CallKey, CallResult>,
+    mpc_backend: MpcBackend,
 }
 
 /// Compute the total preprocessing demand of `program` (the top-level AST, a
@@ -208,6 +210,20 @@ struct Planner<'a> {
 /// top-level function's demand, so whichever entry the runtime selects is
 /// covered.
 pub fn plan_preprocessing_demand(program: &AstNode) -> PreprocessingDemand {
+    plan_preprocessing_demand_for_backend(program, MpcBackend::default())
+}
+
+/// Compute preprocessing demand using the material pools consumed by
+/// `mpc_backend`. Random integer generation is backed by PRandInt under
+/// HoneyBadger, while AVSS currently implements it using ordinary random field
+/// shares.
+pub fn plan_preprocessing_demand_for_backend(
+    program: &AstNode,
+    mpc_backend: MpcBackend,
+) -> PreprocessingDemand {
+    if shallow_preprocessing_program(program) {
+        return plan_preprocessing_demand_inner(program, mpc_backend);
+    }
     // The analysis recurses through the program's call graph, which for large
     // straight-line circuits (e.g. the AES S-box and its callers) can nest many
     // frames deep. Run it on a dedicated thread with a generous stack so the
@@ -218,14 +234,106 @@ pub fn plan_preprocessing_demand(program: &AstNode) -> PreprocessingDemand {
         std::thread::Builder::new()
             .name("preprocessing-demand-analysis".to_string())
             .stack_size(ANALYSIS_STACK_SIZE)
-            .spawn_scoped(scope, || plan_preprocessing_demand_inner(program))
+            .spawn_scoped(scope, || {
+                plan_preprocessing_demand_inner(program, mpc_backend)
+            })
             .expect("failed to spawn preprocessing-demand analysis thread")
             .join()
             .expect("preprocessing-demand analysis thread panicked")
     })
 }
 
-fn plan_preprocessing_demand_inner(program: &AstNode) -> PreprocessingDemand {
+/// Tiny, shallow programs without user calls cannot build a recursive call
+/// chain. Keep the large-stack worker for everything else.
+fn shallow_preprocessing_program(program: &AstNode) -> bool {
+    let definitions = match program {
+        AstNode::Block(definitions) => definitions.as_slice(),
+        node => std::slice::from_ref(node),
+    };
+    if definitions.len() > 8 {
+        return false;
+    }
+    let names: Vec<&str> = definitions
+        .iter()
+        .filter_map(|node| match node {
+            AstNode::FunctionDefinition { name, .. } => name.as_deref(),
+            _ => None,
+        })
+        .collect();
+    let mut pending: Vec<_> = definitions.iter().map(|node| (node, 1)).collect();
+    let mut count = 0;
+    while let Some((node, depth)) = pending.pop() {
+        count += 1;
+        if count + pending.len() > 128 || depth > 8 {
+            return false;
+        }
+        match node {
+            AstNode::Block(nodes)
+            | AstNode::ListLiteral {
+                elements: nodes, ..
+            }
+            | AstNode::TupleLiteral(nodes)
+            | AstNode::SetLiteral(nodes)
+                if nodes.len() > 128 - count =>
+            {
+                return false
+            }
+            AstNode::FunctionDefinition {
+                parameters, body, ..
+            } => {
+                if !parameters.is_empty() || depth != 1 {
+                    return false;
+                }
+                pending.push((body, depth + 1));
+            }
+            AstNode::FunctionCall { function, .. } => {
+                let AstNode::Identifier(name, _) = function.as_ref() else {
+                    return false;
+                };
+                let resolved = crate::builtin_registry::builtin_registry()
+                    .vm_symbol_for_call(name)
+                    .unwrap_or(name);
+                if names.contains(&name.as_str()) || names.contains(&resolved) {
+                    return false;
+                }
+                crate::optimizations::for_each_child(node, &mut |child| {
+                    if pending.len() < 129 {
+                        pending.push((child, depth + 1));
+                    }
+                });
+            }
+            AstNode::VariableDeclaration {
+                type_annotation,
+                value,
+                ..
+            } => {
+                for child in type_annotation.iter().chain(value.iter()) {
+                    if pending.len() < 129 {
+                        pending.push((child, depth + 1));
+                    };
+                }
+            }
+            AstNode::CommandCall { .. }
+            | AstNode::SecretType(_)
+            | AstNode::ListType(_)
+            | AstNode::TupleType(_)
+            | AstNode::DictType { .. }
+            | AstNode::FunctionType { .. }
+            | AstNode::GenericType { .. } => return false,
+            _ => crate::optimizations::for_each_child(node, &mut |child| {
+                if pending.len() < 129 {
+                    pending.push((child, depth + 1));
+                }
+            }),
+        }
+    }
+    true
+}
+
+fn plan_preprocessing_demand_inner(
+    program: &AstNode,
+    mpc_backend: MpcBackend,
+) -> PreprocessingDemand {
     let mut infos: Vec<(String, FunctionInfo)> = Vec::new();
     collect_functions(program, &mut infos);
 
@@ -237,6 +345,7 @@ fn plan_preprocessing_demand_inner(program: &AstNode) -> PreprocessingDemand {
     let mut planner = Planner {
         functions,
         memo: HashMap::new(),
+        mpc_backend,
     };
 
     // Program entries are the functions the runtime can actually invoke as a
@@ -323,25 +432,36 @@ impl<'a> Planner<'a> {
     fn analyze_entry(&mut self, name: &str, info: &FunctionInfo<'a>) -> CallResult {
         let arg_lens: Vec<Len> = info.parameters.iter().map(|_| Len::Unknown).collect();
         let arg_secrecy: Vec<Secrecy> = info.parameters.iter().map(param_element_secrecy).collect();
+        let arg_ints = vec![None; info.parameters.len()];
         let mut call_stack = Vec::new();
-        self.analyze_call(name, info, &arg_lens, &arg_secrecy, &mut call_stack)
+        self.analyze_call(
+            name,
+            info,
+            &arg_lens,
+            &arg_secrecy,
+            &arg_ints,
+            &mut call_stack,
+        )
     }
 
     /// Analyse one call of `name` with the given argument shapes, memoised on
-    /// `(name, arg_lens, arg_secrecy)`. Recursion (the same name already on the
-    /// call stack) yields a `dynamic` floor.
+    /// `(name, arg_lens, arg_secrecy, arg_ints)`. Constant clear-integer arguments
+    /// are part of the call shape because helpers commonly use them as loop bounds.
+    /// Recursion (the same name already on the call stack) yields a `dynamic` floor.
     fn analyze_call(
         &mut self,
         name: &str,
         info: &FunctionInfo<'a>,
         arg_lens: &[Len],
         arg_secrecy: &[Secrecy],
+        arg_ints: &[Option<u64>],
         call_stack: &mut Vec<String>,
     ) -> CallResult {
         let key = CallKey {
             name: name.to_string(),
             arg_lens: arg_lens.iter().map(LenKey::from).collect(),
             arg_secrecy: arg_secrecy.to_vec(),
+            arg_ints: arg_ints.to_vec(),
         };
         if let Some(cached) = self.memo.get(&key) {
             return cached.clone();
@@ -368,11 +488,11 @@ impl<'a> Planner<'a> {
                 .copied()
                 .unwrap_or_else(|| param_element_secrecy(param));
             env.insert(
-                param.name.clone(),
+                param.name.as_str(),
                 AbstractValue {
                     len,
                     secrecy,
-                    int: None,
+                    int: arg_ints.get(index).copied().flatten(),
                     frac_bits: param_frac_bits(param),
                 },
             );
@@ -396,8 +516,8 @@ impl<'a> Planner<'a> {
     /// and (via `Return`) the function's `ret` value.
     fn eval_block_like(
         &mut self,
-        node: &AstNode,
-        env: &mut Env,
+        node: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         ret: &mut Option<AbstractValue>,
         call_stack: &mut Vec<String>,
@@ -428,13 +548,20 @@ impl<'a> Planner<'a> {
                         .is_some_and(annotation_contains_secret);
                 if declared_secret {
                     value.secrecy = Secrecy::Secret;
+                    // `secret fix64` pins the fixed-point scale even when the
+                    // initialiser (e.g. a user call) does not carry it.
+                    if value.frac_bits.is_none() {
+                        value.frac_bits = type_annotation
+                            .as_deref()
+                            .and_then(annotation_fixed_frac_bits);
+                    }
                 }
-                env.insert(name.clone(), value);
+                env.insert(name.as_str(), value);
             }
             AstNode::Assignment { target, value, .. } => {
                 let value = self.eval_expr(value, env, demand, call_stack);
                 if let AstNode::Identifier(name, _) = target.as_ref() {
-                    env.insert(name.clone(), value);
+                    env.insert(name.as_str(), value);
                 } else {
                     // Index/field assignment: evaluate the target for any
                     // embedded calls, but it does not rebind a simple name.
@@ -478,9 +605,9 @@ impl<'a> Planner<'a> {
     /// demand (the runtime must provision for whichever branch executes).
     fn eval_if_statement(
         &mut self,
-        then_branch: &AstNode,
-        else_branch: &Option<Box<AstNode>>,
-        env: &mut Env,
+        then_branch: &'a AstNode,
+        else_branch: &'a Option<Box<AstNode>>,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         ret: &mut Option<AbstractValue>,
         call_stack: &mut Vec<String>,
@@ -496,7 +623,7 @@ impl<'a> Planner<'a> {
             call_stack,
         );
 
-        let (else_demand, else_ret) = match else_branch {
+        let (else_env, else_demand, else_ret) = match else_branch {
             Some(else_branch) => {
                 let mut else_env = env.clone();
                 let mut else_demand = PreprocessingDemand::default();
@@ -508,9 +635,9 @@ impl<'a> Planner<'a> {
                     &mut else_ret,
                     call_stack,
                 );
-                (else_demand, else_ret)
+                (else_env, else_demand, else_ret)
             }
-            None => (PreprocessingDemand::default(), ret.clone()),
+            None => (env.clone(), PreprocessingDemand::default(), ret.clone()),
         };
 
         // Demand of a conditional is the per-element maximum of its branches.
@@ -519,9 +646,25 @@ impl<'a> Planner<'a> {
         // The function return value may come from either branch.
         *ret = merge_opt_ret(then_ret, else_ret);
 
-        // Branch-local bindings cannot be reconciled, so leave `env` unchanged
-        // for names whose value diverges; subsequent uses fall back to the
-        // pre-`if` binding (conservative).
+        // Reconcile pre-existing bindings across the two possible branches.
+        // Divergent list lengths must become unknown: retaining the pre-`if`
+        // length can undercount a later batch/loop (for example, a conditional
+        // append inside a counted loop previously left an empty-list length of
+        // zero visible to subsequent secret gates).
+        for id in then_env.changed_slots(&else_env) {
+            if env.get_slot(id).is_some() {
+                if let (Some(left), Some(right)) = (then_env.get_slot(id), else_env.get_slot(id)) {
+                    env.set_slot(id, Some(merge_value(left.clone(), right.clone())));
+                }
+            }
+        }
+        // Both branches may agree on a new value. It must still replace the
+        // incoming value, even though it does not appear in their difference.
+        for id in env.changed_slots(&then_env) {
+            if env.get_slot(id).is_some() && then_env.get_slot(id) == else_env.get_slot(id) {
+                env.set_slot(id, then_env.get_slot(id).cloned());
+            }
+        }
     }
 
     /// Evaluate a `while` loop. The counted shape codegen emits everywhere —
@@ -538,9 +681,9 @@ impl<'a> Planner<'a> {
     #[allow(clippy::too_many_arguments)]
     fn eval_while_loop(
         &mut self,
-        condition: &AstNode,
-        body: &AstNode,
-        env: &mut Env,
+        condition: &'a AstNode,
+        body: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         ret: &mut Option<AbstractValue>,
         call_stack: &mut Vec<String>,
@@ -549,9 +692,13 @@ impl<'a> Planner<'a> {
         let count = self.while_trip_count(condition, body, env, demand, call_stack);
 
         let mut body_env = env.clone();
-        if let Some((var, _, _)) = while_condition_parts(condition) {
-            // The counter's per-iteration value varies; never fold its start.
-            body_env.insert(var.to_string(), AbstractValue::clear());
+        if count.is_some() {
+            if let Some((var, _, _)) = while_condition_parts(condition) {
+                // A counted loop is scaled from one symbolic body. Its counter
+                // varies between iterations, so do not incorrectly specialize
+                // the body to the first value.
+                body_env.insert(var, AbstractValue::clear());
+            }
         }
         let mut body_demand = PreprocessingDemand::default();
         let mut body_ret = ret.clone();
@@ -571,7 +718,7 @@ impl<'a> Planner<'a> {
                 // The counter's post-loop value is loop-shape-dependent; keep it
                 // conservative (clear, value unknown) rather than stale-at-start.
                 if let Some((var, _, _)) = while_condition_parts(condition) {
-                    env.insert(var.to_string(), AbstractValue::clear());
+                    env.insert(var, AbstractValue::clear());
                 }
             }
             None => {
@@ -581,7 +728,7 @@ impl<'a> Planner<'a> {
                 }
                 apply_loop_length_growth_unknown(env, &body_env);
                 if let Some((var, _, _)) = while_condition_parts(condition) {
-                    env.insert(var.to_string(), AbstractValue::clear());
+                    env.insert(var, AbstractValue::clear());
                 }
             }
         }
@@ -595,9 +742,9 @@ impl<'a> Planner<'a> {
     /// `v = v * k` (`k >= 2`, ascending).
     fn while_trip_count(
         &mut self,
-        condition: &AstNode,
-        body: &AstNode,
-        env: &mut Env,
+        condition: &'a AstNode,
+        body: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         call_stack: &mut Vec<String>,
     ) -> Option<u64> {
@@ -638,10 +785,10 @@ impl<'a> Planner<'a> {
     #[allow(clippy::too_many_arguments)]
     fn eval_for_loop(
         &mut self,
-        variables: &[String],
-        iterable: &AstNode,
-        body: &AstNode,
-        env: &mut Env,
+        variables: &'a [String],
+        iterable: &'a AstNode,
+        body: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         ret: &mut Option<AbstractValue>,
         call_stack: &mut Vec<String>,
@@ -681,10 +828,10 @@ impl<'a> Planner<'a> {
         // unknown.)
         let mut body_env = env.clone();
         if let Some(first) = variables.first() {
-            body_env.insert(first.clone(), loop_var_value);
+            body_env.insert(first.as_str(), loop_var_value);
         }
         for extra in variables.iter().skip(1) {
-            body_env.insert(extra.clone(), AbstractValue::unknown());
+            body_env.insert(extra.as_str(), AbstractValue::unknown());
         }
 
         let mut body_demand = PreprocessingDemand::default();
@@ -727,8 +874,8 @@ impl<'a> Planner<'a> {
     /// incurs into `demand`.
     fn eval_expr(
         &mut self,
-        node: &AstNode,
-        env: &mut Env,
+        node: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         call_stack: &mut Vec<String>,
     ) -> AbstractValue {
@@ -763,7 +910,7 @@ impl<'a> Planner<'a> {
                 AbstractValue {
                     len: Len::Known {
                         len: elements.len(),
-                        elem: Box::new(element_shape.unwrap_or(Len::Unknown)),
+                        elem: Rc::new(element_shape.unwrap_or(Len::Unknown)),
                     },
                     secrecy,
                     int: None,
@@ -798,7 +945,7 @@ impl<'a> Planner<'a> {
                     len: base.len.element(),
                     secrecy: base.secrecy,
                     int: None,
-                    frac_bits: None,
+                    frac_bits: base.frac_bits,
                 }
             }
             AstNode::FieldAccess { object, .. } => {
@@ -853,8 +1000,8 @@ impl<'a> Planner<'a> {
     /// branch's demand and value so the caller can take the per-branch maximum.
     fn eval_expr_branch(
         &mut self,
-        node: &AstNode,
-        env: &mut Env,
+        node: &'a AstNode,
+        env: &mut Env<'a>,
         call_stack: &mut Vec<String>,
     ) -> (PreprocessingDemand, AbstractValue) {
         let mut branch_demand = PreprocessingDemand::default();
@@ -866,9 +1013,9 @@ impl<'a> Planner<'a> {
     fn eval_binary_operation(
         &mut self,
         op: &str,
-        left: &AstNode,
-        right: &AstNode,
-        env: &mut Env,
+        left: &'a AstNode,
+        right: &'a AstNode,
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         call_stack: &mut Vec<String>,
     ) -> AbstractValue {
@@ -883,7 +1030,24 @@ impl<'a> Planner<'a> {
                 if left_value.secrecy == Secrecy::Secret
                     && right_value.secrecy == Secrecy::Secret =>
             {
+                // Secret fixed-point `*` additionally truncates, like `mul`.
+                match fixed_frac_bits(&[left_value.clone(), right_value.clone()]) {
+                    Some(f) if op == "*" => demand.add(1, 0, f as u64, 1),
+                    _ => demand.add(1, 0, 0, 0),
+                }
+            }
+            // Field access through a user-defined object is not yet represented
+            // in the abstract-value environment.  The type checker has already
+            // accepted these boolean operators, so an unknown operand may be a
+            // secret boolean (for example `share.bits[i]`).  Provision one
+            // conservative gate and mark the estimate dynamic rather than
+            // emitting an all-zero manifest that can starve the runtime.
+            "and" | "or" | "xor"
+                if left_value.secrecy != Secrecy::Clear
+                    || right_value.secrecy != Secrecy::Clear =>
+            {
                 demand.add(1, 0, 0, 0);
+                demand.dynamic = true;
             }
             // secret fixed-point division runs the truncation protocol: `f`
             // random bits + 1 random int, where `f` is the left operand's
@@ -917,9 +1081,9 @@ impl<'a> Planner<'a> {
 
     fn eval_function_call(
         &mut self,
-        function: &AstNode,
-        arguments: &[AstNode],
-        env: &mut Env,
+        function: &'a AstNode,
+        arguments: &'a [AstNode],
+        env: &mut Env<'a>,
         demand: &mut PreprocessingDemand,
         call_stack: &mut Vec<String>,
     ) -> AbstractValue {
@@ -948,11 +1112,23 @@ impl<'a> Planner<'a> {
 
         match name.as_str() {
             // --- Operations that consume preprocessing material ---------------
-            "Share.mul" => {
-                demand.add(1, 0, 0, 0);
-                AbstractValue::secret()
+            // Semantic overload resolution lowers the Share VM primitive to
+            // its unqualified bytecode symbol (`mul`) while some compiler
+            // paths retain the source-qualified spelling. Count both.
+            // A secret fixed-point multiply also runs the truncation protocol,
+            // consuming `f` random bits + 1 random int on top of the triple.
+            "Share.mul" | "mul" => {
+                let frac_bits = fixed_frac_bits(&arg_values);
+                match frac_bits {
+                    Some(f) => demand.add(1, 0, f as u64, 1),
+                    None => demand.add(1, 0, 0, 0),
+                }
+                AbstractValue {
+                    frac_bits,
+                    ..AbstractValue::secret()
+                }
             }
-            "Share.batch_mul" => {
+            "Share.batch_mul" | "batch_mul" => {
                 let input_len = arg_values
                     .first()
                     .map(|value| value.len.clone())
@@ -1007,6 +1183,16 @@ impl<'a> Planner<'a> {
                 AbstractValue::clear()
             }
 
+            // `copy` creates a distinct list object but preserves the complete
+            // abstract value shape. The O3 multiply batcher seeds each fused
+            // operand accumulator with `copy(first_operand)` and then extends
+            // it; losing the seed length here makes an otherwise fully static
+            // `Share.batch_mul` appear runtime-sized, forcing online top-ups.
+            "copy" => arg_values
+                .first()
+                .cloned()
+                .unwrap_or_else(AbstractValue::unknown),
+
             // --- List/object constructors ------------------------------------
             "create_array" => AbstractValue {
                 len: Len::flat(0),
@@ -1019,25 +1205,102 @@ impl<'a> Planner<'a> {
             | "print"
             | "to_string"
             | "assert"
+            | "ClientStore.get_number_clients"
+            | "Mpc.has_capability"
             | "MpcOutput.send_to_client"
             | "Share.send_to_client" => AbstractValue::clear(),
-            "get_field" | "slice" => AbstractValue::unknown(),
+            "get_field" => arg_values
+                .first()
+                .map(|collection| AbstractValue {
+                    len: collection.len.element(),
+                    secrecy: collection.secrecy,
+                    int: None,
+                    frac_bits: collection.frac_bits,
+                })
+                .unwrap_or_else(AbstractValue::unknown),
+            "slice" => {
+                let source = arg_values.first();
+                let len = match (
+                    arg_values.get(1).and_then(|value| value.int),
+                    arg_values.get(2).and_then(|value| value.int),
+                ) {
+                    (Some(start), Some(end)) if end >= start => Len::Known {
+                        len: (end - start) as usize,
+                        elem: Rc::new(
+                            source
+                                .map(|value| value.len.element())
+                                .unwrap_or(Len::Unknown),
+                        ),
+                    },
+                    _ => Len::Unknown,
+                };
+                AbstractValue {
+                    len,
+                    secrecy: source
+                        .map(|value| value.secrecy)
+                        .unwrap_or(Secrecy::Unknown),
+                    int: None,
+                    frac_bits: source.and_then(|value| value.frac_bits),
+                }
+            }
             "contains" => AbstractValue::clear(),
 
             // --- Client input: a secret scalar share -------------------------
             "ClientStore.take_share"
             | "ClientStore.take_share_bool"
-            | "ClientStore.take_share_fixed" => AbstractValue::secret(),
+            | "ClientStore.sum_shares"
+            | "ClientStore.sum_shares_bool" => AbstractValue::secret(),
+            "ClientStore.take_share_fixed" | "ClientStore.sum_shares_fixed" => AbstractValue {
+                frac_bits: Some(DEFAULT_FIXED_POINT_FRACTIONAL_BITS),
+                ..AbstractValue::secret()
+            },
+
+            // --- Operations that consume random preprocessing material -------
+            // random_field always uses the random-share pool. A typed
+            // `Share.random()` is lowered to random_int(bit_length), whose
+            // backing pool depends on the selected runtime backend.
+            "Share.random_field" => {
+                demand.add(0, 1, 0, 0);
+                AbstractValue::secret()
+            }
+            "Share.random" | "Share.random_int" => {
+                match self.mpc_backend {
+                    MpcBackend::HoneyBadger => {
+                        match arg_values.first().and_then(|v| v.int) {
+                            Some(1) => demand.add(0, 0, 1, 0),
+                            Some(_) => demand.add(0, 0, 0, 1),
+                            // A runtime bit width may select either pool.
+                            None => demand.add(0, 0, 1, 1),
+                        }
+                    }
+                    MpcBackend::Avss => demand.add(0, 1, 0, 0),
+                }
+                AbstractValue::secret()
+            }
 
             // --- Free MPC builtins (secrecy effects only, no demand) ---------
+            // Linear ops keep a fixed-point operand's scale.
             "Share.add" | "Share.sub" | "Share.mul_scalar" | "Share.add_constant"
-            | "Share.add_scalar" => AbstractValue::secret(),
-            "Share.from_clear"
+            | "Share.add_scalar" => AbstractValue {
+                frac_bits: fixed_frac_bits(&arg_values),
+                ..AbstractValue::secret()
+            },
+            "Share.from_field"
+            | "Share.from_clear"
             | "Share.from_clear_int"
-            | "Share.from_clear_uint"
-            | "Share.from_clear_fixed" => AbstractValue::secret(),
+            | "Share.from_clear_uint" => AbstractValue::secret(),
+            // `Share.from_clear_fixed(value, total_bits, frac_bits)`.
+            "Share.from_clear_fixed" => AbstractValue {
+                frac_bits: Some(
+                    arg_values
+                        .get(2)
+                        .and_then(|value| value.int)
+                        .map(|f| f as usize)
+                        .unwrap_or(DEFAULT_FIXED_POINT_FRACTIONAL_BITS),
+                ),
+                ..AbstractValue::secret()
+            },
             "Share.open" => AbstractValue::clear(),
-            "Share.random" | "Share.random_field" | "Share.random_int" => AbstractValue::secret(),
 
             // --- User functions: recurse with the call's argument shapes -----
             _ => {
@@ -1046,8 +1309,16 @@ impl<'a> Planner<'a> {
                         arg_values.iter().map(|value| value.len.clone()).collect();
                     let arg_secrecy: Vec<Secrecy> =
                         arg_values.iter().map(|value| value.secrecy).collect();
-                    let result =
-                        self.analyze_call(&name, info, &arg_lens, &arg_secrecy, call_stack);
+                    let arg_ints: Vec<Option<u64>> =
+                        arg_values.iter().map(|value| value.int).collect();
+                    let result = self.analyze_call(
+                        &name,
+                        info,
+                        &arg_lens,
+                        &arg_secrecy,
+                        &arg_ints,
+                        call_stack,
+                    );
                     add_demand(demand, &result.demand);
                     result.ret
                 } else {
@@ -1066,11 +1337,11 @@ impl<'a> Planner<'a> {
     /// folding the element's secrecy into the list's element secrecy.
     fn list_grow(
         &self,
-        receiver: Option<&AstNode>,
+        receiver: Option<&'a AstNode>,
         n: usize,
         element_secrecy: Option<Secrecy>,
         element_shape: Option<Len>,
-        env: &mut Env,
+        env: &mut Env<'a>,
     ) {
         if let Some(AstNode::Identifier(name, _)) = receiver {
             if let Some(value) = env.get_mut(name) {
@@ -1086,7 +1357,7 @@ impl<'a> Planner<'a> {
                         };
                         Len::Known {
                             len: len + n,
-                            elem: Box::new(new_elem),
+                            elem: Rc::new(new_elem),
                         }
                     }
                     Len::Unknown => Len::Unknown,
@@ -1104,7 +1375,7 @@ impl<'a> Planner<'a> {
     }
 
     /// Mark the list variable named by `receiver` as having unknown length.
-    fn list_make_unknown(&self, receiver: Option<&AstNode>, env: &mut Env) {
+    fn list_make_unknown(&self, receiver: Option<&'a AstNode>, env: &mut Env<'a>) {
         if let Some(AstNode::Identifier(name, _)) = receiver {
             if let Some(value) = env.get_mut(name) {
                 value.len = Len::Unknown;
@@ -1264,9 +1535,12 @@ fn scale_demand(demand: &PreprocessingDemand, count: u64) -> PreprocessingDemand
 /// variable visible before the loop, the body's net per-iteration length change
 /// is multiplied by `count` and applied to the pre-loop length. New bindings
 /// introduced inside the loop body are loop-local and not propagated.
-fn apply_loop_length_growth(env: &mut Env, body_env: &Env, count: u64) {
-    for (name, before) in env.clone().iter() {
-        let Some(after) = body_env.get(name) else {
+fn apply_loop_length_growth<'a>(env: &mut Env<'a>, body_env: &Env<'a>, count: u64) {
+    for id in env.changed_slots(body_env) {
+        let Some(before) = env.get_slot(id) else {
+            continue;
+        };
+        let Some(after) = body_env.get_slot(id) else {
             continue;
         };
         let new_len = match (&before.len, &after.len) {
@@ -1296,7 +1570,7 @@ fn apply_loop_length_growth(env: &mut Env, body_env: &Env, count: u64) {
             // we cannot scale it reliably, so treat as unknown.
             (Len::Unknown, Len::Known { .. }) => Len::Unknown,
         };
-        if let Some(slot) = env.get_mut(name) {
+        if let Some(slot) = env.get_slot_mut(id) {
             slot.len = new_len;
         }
     }
@@ -1304,13 +1578,16 @@ fn apply_loop_length_growth(env: &mut Env, body_env: &Env, count: u64) {
 
 /// After an unbounded loop, any list whose length the body changed is no longer
 /// statically known.
-fn apply_loop_length_growth_unknown(env: &mut Env, body_env: &Env) {
-    for (name, before) in env.clone().iter() {
-        let Some(after) = body_env.get(name) else {
+fn apply_loop_length_growth_unknown<'a>(env: &mut Env<'a>, body_env: &Env<'a>) {
+    for id in env.changed_slots(body_env) {
+        let Some(before) = env.get_slot(id) else {
+            continue;
+        };
+        let Some(after) = body_env.get_slot(id) else {
             continue;
         };
         if before.len != after.len {
-            if let Some(slot) = env.get_mut(name) {
+            if let Some(slot) = env.get_slot_mut(id) {
                 slot.len = Len::Unknown;
             }
         }
@@ -1351,15 +1628,45 @@ fn annotation_contains_secret(annotation: &AstNode) -> bool {
     }
 }
 
+/// Fractional bits of a `secret fix64` / `list[secret fix64]` annotation, or
+/// `None` for any other type. Every fixed-point width uses the project default
+/// scale, matching the runtime's `SecretFixedPoint` precision.
+fn annotation_fixed_frac_bits(annotation: &AstNode) -> Option<usize> {
+    match annotation {
+        AstNode::SecretType(inner) | AstNode::ListType(inner) => annotation_fixed_frac_bits(inner),
+        AstNode::Identifier(name, _) => matches!(
+            name.as_str(),
+            "fixed" | "fixed64" | "fix64" | "fixed32" | "fix32"
+        )
+        .then_some(DEFAULT_FIXED_POINT_FRACTIONAL_BITS),
+        _ => None,
+    }
+}
+
+/// Fractional bits of the first secret fixed-point operand, if any: a secret
+/// multiply involving one runs the truncation protocol.
+fn fixed_frac_bits(values: &[AbstractValue]) -> Option<usize> {
+    values
+        .iter()
+        .find(|value| value.secrecy == Secrecy::Secret && value.frac_bits.is_some())
+        .and_then(|value| value.frac_bits)
+}
+
 /// Fractional-bit count of a parameter whose leaf type is a secret fixed-point,
-/// used to size the `/` truncation cost.
-///
-/// The AES examples operate over secret booleans, never secret fixed-point
-/// division, so a precise per-parameter fractional-bit count is not needed here.
-/// Returning `None` makes `/` fall back to the project default, matching the
-/// previous codegen behaviour for fixed-point division.
-fn param_frac_bits(_param: &Parameter) -> Option<usize> {
-    None
+/// used to size `/` and fixed-point multiply truncation cost.
+fn param_frac_bits(param: &Parameter) -> Option<usize> {
+    if !param.is_secret
+        && !param
+            .type_annotation
+            .as_deref()
+            .is_some_and(annotation_contains_secret)
+    {
+        return None;
+    }
+    param
+        .type_annotation
+        .as_deref()
+        .and_then(annotation_fixed_frac_bits)
 }
 
 /// Direct child expressions of a node, for conservative descent into constructs
@@ -1397,6 +1704,35 @@ mod tests {
     use crate::compiler::{compile, CompilerOptions};
     use stoffel_vm_types::compiled_binary::MpcBackend;
 
+    #[test]
+    fn shallow_analysis_matches_worker_and_rejects_call_chains() {
+        let source = include_str!("../examples/fedavg/main.stfl");
+        let tokens = crate::lexer::tokenize(source, "small.stfl").unwrap();
+        let parsed = crate::parser::parse(&tokens, "small.stfl").unwrap();
+        let transformed = crate::ufcs::transform_ufcs(parsed);
+        let mut errors = crate::errors::ErrorReporter::new();
+        let program = crate::semantic::analyze(transformed, &mut errors, "small.stfl").unwrap();
+        assert!(shallow_preprocessing_program(&program));
+        let expected = plan_preprocessing_demand_inner(&program, MpcBackend::HoneyBadger);
+        let actual = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || plan_preprocessing_demand_for_backend(&program, MpcBackend::HoneyBadger))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(actual, expected);
+        let source =
+            "def helper():\n  return Share.random_field()\ndef main():\n  return helper()\n";
+        let tokens = crate::lexer::tokenize(source, "calls.stfl").unwrap();
+        let program = crate::parser::parse(&tokens, "calls.stfl").unwrap();
+        assert!(!shallow_preprocessing_program(&program));
+        let mut deep = AstNode::Identifier("x".into(), Default::default());
+        for _ in 0..10 {
+            deep = AstNode::Block(vec![deep]);
+        }
+        assert!(!shallow_preprocessing_program(&deep));
+    }
+
     fn demand_for(src: &str) -> PreprocessingDemand {
         // Compile on a dedicated large-stack thread. The compiler's parser /
         // semantic / codegen passes recurse over the AST, and the bundled AES
@@ -1432,6 +1768,22 @@ mod tests {
     /// report ZERO demand with `dynamic: false` (the stale pre-loop list
     /// length made the post-loop `batch_mul` count len 0), starving the
     /// runtime preprocessing pool.
+    #[test]
+    fn generic_random_covers_boolean_lowering() {
+        let demand = demand_for(
+            "def main() -> bool:\n  var bit: secret bool = Share.random()\n  return bit.reveal()\n",
+        );
+        assert_eq!(demand.prandbits, 1);
+        assert_eq!(demand.prandints, 1);
+    }
+
+    #[test]
+    fn one_bit_randomness_uses_randbit_material() {
+        let demand = demand_for("def main() -> Share:\n  return Share.random_int(1)\n");
+        assert_eq!(demand.prandbits, 1);
+        assert_eq!(demand.prandints, 0);
+    }
+
     #[test]
     fn counted_while_batch_mul_provisions_like_for() {
         let src = r#"
@@ -1502,6 +1854,81 @@ def main(n: int64) -> int64:
     }
 
     #[test]
+    fn equal_branch_updates_replace_the_incoming_shape() {
+        let demand = demand_for(
+            r#"
+def main(flag: int64) -> int64:
+  var a: list[secret bool] = []
+  var b: list[secret bool] = []
+  if flag == 0:
+    a.append(Share.from_clear_int(1, 1))
+    b.append(Share.from_clear_int(0, 1))
+  else:
+    a.append(Share.from_clear_int(0, 1))
+    b.append(Share.from_clear_int(1, 1))
+  var products = Share.batch_mul(a, b)
+  return 0
+"#,
+        );
+        assert_eq!(demand.triples, 1);
+        assert!(!demand.dynamic);
+    }
+
+    #[test]
+    fn conditional_append_does_not_leave_a_stale_zero_length() {
+        let src = r#"
+def fold(bits: list[secret bool]) -> secret bool:
+  var acc: secret bool = Share.from_clear_int(1, 1)
+  var i = 0
+  while i < bits.len():
+    acc = acc and bits[i]
+    i += 1
+  return acc
+
+def main() -> int64:
+  var bits: list[secret bool] = []
+  var i = 0
+  while i < 8:
+    var bit: secret bool = ClientStore.take_share_bool(0, i)
+    if i < 4:
+      bits.append(bit)
+    i += 1
+  var result: secret bool = fold(bits)
+  return 0
+"#;
+        let demand = demand_for(src);
+        assert!(
+            demand.dynamic,
+            "conditional list growth cannot be sized exactly"
+        );
+        assert!(
+            demand.triples >= 1,
+            "a later secret fold must retain a preprocessing floor"
+        );
+    }
+
+    #[test]
+    fn dynamic_outer_loop_preserves_first_iteration_bound_for_nested_loop() {
+        let src = r#"
+def main() -> int64:
+  var width = 16
+  while width > 1:
+    var j = 0
+    while j < width / 2:
+      discard Share.random_field()
+      j += 1
+    width = width / 2
+  return 0
+"#;
+        let demand = demand_for(src);
+        assert_eq!(
+            demand.randoms, 8,
+            "the first outer iteration has a statically visible inner width"
+        );
+        assert!(demand.dynamic, "the shrinking outer loop remains dynamic");
+    }
+
+    #[test]
     fn batch_mul_over_known_literal_list() {
         let src = r#"
 def main() -> int64:
@@ -1520,6 +1947,33 @@ def main() -> int64:
     }
 
     #[test]
+    fn copy_extend_and_slice_preserve_static_batch_lengths() {
+        let src = r#"
+def main() -> int64:
+  var xs: list[secret bool] = []
+  var ys: list[secret bool] = []
+  for i in 0..4:
+    xs.append(ClientStore.take_share_bool(0, i))
+    ys.append(ClientStore.take_share_bool(1, i))
+  var lefts = copy(xs)
+  var rights = copy(ys)
+  lefts.extend(xs)
+  rights.extend(ys)
+  var products = Share.batch_mul(lefts, rights)
+  var first = slice(products, 0, 4)
+  var first_copy = copy(first)
+  var products2 = Share.batch_mul(first_copy, first)
+  return 0
+"#;
+        let demand = demand_for(src);
+        assert_eq!(demand.triples, 12, "8-element batch plus 4-element batch");
+        assert!(
+            !demand.dynamic,
+            "shape-preserving list plumbing must not force online top-ups"
+        );
+    }
+
+    #[test]
     fn secret_xor_helper_in_literal_loop() {
         let src = r#"
 def gate(a: secret bool, b: secret bool) -> secret bool:
@@ -1535,6 +1989,87 @@ def main() -> int64:
         let demand = demand_for(src);
         assert_eq!(demand.triples, 10);
         assert!(!demand.dynamic);
+    }
+
+    #[test]
+    fn secret_boolean_fields_get_a_conservative_dynamic_floor() {
+        let src = r#"
+object bit_vector:
+  bits: list[secret bool]
+  length: int64
+
+def XOR(a: bit_vector, b: bit_vector) -> bit_vector:
+  var result: bit_vector
+  result.length = a.length
+  for i in 0..result.length:
+    result.bits.append(a.bits[i] xor b.bits[i])
+  return result
+
+def main(a: list[secret bool], b: list[secret bool]) -> None:
+  var left: bit_vector
+  left.bits = a
+  left.length = len(a)
+  var right: bit_vector
+  right.bits = b
+  right.length = len(b)
+  var result = XOR(left, right)
+"#;
+        let demand = demand_for(src);
+        assert_eq!(demand.triples, 1);
+        assert!(
+            demand.dynamic,
+            "untracked object-field lengths must retain runtime headroom"
+        );
+    }
+
+    #[test]
+    fn zero_argument_wrapper_propagates_parameterized_object_field_demand() {
+        let src = r#"
+object bit_vector:
+  bits: list[secret bool]
+  length: int64
+
+def XOR(a: bit_vector, b: bit_vector) -> bit_vector:
+  var result: bit_vector
+  result.length = a.length
+  for i in 0..result.length:
+    result.bits.append(a.bits[i] xor b.bits[i])
+  return result
+
+def parameterized(a: list[secret bool], b: list[secret bool]) -> None:
+  var left: bit_vector
+  left.bits = a
+  left.length = len(a)
+  var right: bit_vector
+  right.bits = b
+  right.length = len(b)
+  var result = XOR(left, right)
+
+def main() -> None:
+  parameterized(
+    [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)],
+    [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)],
+  )
+"#;
+        let demand = demand_for(src);
+        assert_eq!(demand.triples, 1);
+        assert!(demand.dynamic);
+    }
+
+    #[test]
+    fn bitwise_share_catalog_wrapper_has_preprocessing_floor() {
+        let original = include_str!("../examples/mpc_bitwise_share/main.stfl");
+        let renamed = original.replacen("def main(", "def __example_parameterized_main(", 1);
+        let source = format!(
+            "{renamed}\n\
+             def __standing_example_main() -> None:\n  \
+             __example_parameterized_main(\
+             [Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1)], \
+             [Share.from_clear_int(1, 1), Share.from_clear_int(0, 1), Share.from_clear_int(1, 1), Share.from_clear_int(0, 1)])\n"
+        );
+        let demand = demand_for(&source);
+        assert!(demand.triples >= 4, "observed demand: {demand:?}");
+        assert!(demand.dynamic);
     }
 
     #[test]
@@ -1601,6 +2136,113 @@ def main() -> int64:
         // then-branch needs 2 triples (and + xor), else-branch 1 (or); max = 2.
         assert_eq!(demand.triples, 2);
         assert!(!demand.dynamic);
+    }
+
+    #[test]
+    fn retrying_random_bit_counts_its_multiplication() {
+        let src = r#"
+def random_bit() -> secret bool:
+  while True:
+    var r = Share.random_field()
+    var squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(squared):
+      continue
+    return Share.retag(r, 1)
+
+def main() -> bool:
+  return random_bit().reveal()
+"#;
+        let demand = demand_for(src);
+        assert_eq!(demand.triples, 1);
+        assert_eq!(demand.randoms, 1);
+        assert!(demand.dynamic);
+    }
+
+    #[test]
+    fn literal_integer_arguments_bound_helper_loops() {
+        let src = r#"
+def random_bit() -> Share:
+  while True:
+    var r = Share.random_field()
+    var squared = Share.open_field(Share.mul(r, r))
+    if Field.is_zero(squared):
+      continue
+    return Share.retag(r, 1)
+
+def make_bits(l: int64, kappa: int64) -> int64:
+  var i = 0
+  while i < l + kappa:
+    discard random_bit()
+    i = i + 1
+  return i
+
+def main() -> int64:
+  return make_bits(8, 8)
+"#;
+        let demand = demand_for(src);
+        assert_eq!(demand.triples, 16);
+        assert_eq!(demand.randoms, 16);
+        // random_bit retries with a data-dependent loop, so its one-attempt
+        // floor remains dynamic even though the outer helper loop is exact.
+        assert!(demand.dynamic);
+    }
+
+    #[test]
+    fn receiver_style_share_multiplication_counts_a_triple() {
+        let src = r#"
+def main() -> int64:
+  var score = Share.from_clear_int(7, 64)
+  score = score.mul(Share.from_clear_int(1, 64))
+  return score.open()
+"#;
+        let demand = demand_for(src);
+        assert_eq!(demand.triples, 1);
+        assert_eq!(demand.prandbits, 0);
+        assert_eq!(demand.prandints, 0);
+    }
+
+    /// A secret fixed-point multiply truncates its product, consuming `f`
+    /// random bits + 1 random int per multiply. Standing nodes size their
+    /// per-execution allocation from this manifest alone, so omitting it
+    /// starved `client-prod` ("Error trying to take RandBit shares").
+    #[test]
+    fn fixed_point_multiplication_counts_truncation_material() {
+        let src = r#"
+def main() -> fix64:
+  var n_clients: int64 = 2
+  var i: int64 = 0
+  var result: secret fix64 = Share.from_clear_fixed(1.0, 64, 16)
+
+  while i < n_clients:
+    var input0: secret fix64 = ClientStore.take_share_fixed(i, 0)
+    var input1: secret fix64 = ClientStore.take_share_fixed(i, 1)
+    result = result.mul(input0.add(input1))
+    i = i + 1
+
+  return result.open_fixed()
+"#;
+        let demand = demand_for(src);
+        let f = DEFAULT_FIXED_POINT_FRACTIONAL_BITS as u64;
+        assert_eq!(demand.triples, 2);
+        assert_eq!(demand.prandbits, 2 * f);
+        assert_eq!(demand.prandints, 2);
+    }
+
+    #[test]
+    fn fixed_point_star_operator_counts_truncation_material() {
+        let src = r#"
+def scale(a: secret fix64, b: secret fix64) -> secret fix64:
+  return a * b
+
+def main() -> fix64:
+  var x: secret fix64 = ClientStore.take_share_fixed(0, 0)
+  var y: secret fix64 = ClientStore.take_share_fixed(0, 1)
+  return scale(x, y).open_fixed()
+"#;
+        let demand = demand_for(src);
+        assert_eq!(demand.triples, 1);
+        assert_eq!(demand.prandbits, DEFAULT_FIXED_POINT_FRACTIONAL_BITS as u64);
+        assert_eq!(demand.prandints, 1);
     }
 
     /// Compile each bundled AES-128 example via the real example/bindgen compile

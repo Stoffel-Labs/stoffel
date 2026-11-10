@@ -1,3 +1,4 @@
+mod mesh;
 mod project;
 
 use std::collections::BTreeMap;
@@ -13,7 +14,9 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use stoffel::prelude::*;
 
-use crate::project::{init_library_project, BuildConfig, Project, Template};
+use crate::project::{
+    init_library_project, validate_project_controlled_path, BuildConfig, Project, Template,
+};
 
 macro_rules! print {
     ($($arg:tt)*) => {{
@@ -79,6 +82,10 @@ enum Command {
     Run(RunArgs),
     /// Watch a project and rerun it on local MPC when files change.
     Dev(DevArgs),
+    /// Start a named standing MPC mesh that `stoffel run --mesh` runs programs on.
+    StartMesh(mesh::StartMeshArgs),
+    /// Stop a standing MPC mesh started with `stoffel start-mesh`.
+    StopMesh(mesh::StopMeshArgs),
     /// Run no-argument Stoffel test functions.
     Test(TestArgs),
     /// Show project health and environment status.
@@ -297,7 +304,8 @@ struct RunArgs {
     /// Load named function inputs from a .json, .csv, or .txt file.
     #[arg(long = "input-file", value_name = "FILE")]
     input_files: Vec<PathBuf>,
-    /// Local simulation input for a numeric client slot, written as SLOT=VALUE.
+    /// Semantic input for a numeric client slot, written as SLOT=VALUE.
+    /// Fixed-point values are scaled automatically from ordinary integers or decimals.
     #[arg(
         long = "client-input",
         visible_alias = "client-inputs",
@@ -329,6 +337,9 @@ struct RunArgs {
     /// MPC network/off-chain client TOML file. Do not pass project Stoffel.toml here.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Run on the standing mesh with this name, started with `stoffel start-mesh`.
+    #[arg(long, value_name = "NAME")]
+    mesh: Option<String>,
     /// Print function/instruction metadata before executing.
     #[arg(long = "program-info", visible_aliases = ["inspect", "info"])]
     program_info: bool,
@@ -419,6 +430,25 @@ impl RunBuildArgs {
     }
 }
 
+impl BuildArgs {
+    /// Arguments that compile or load `path` the way `stoffel run <path>` does.
+    fn for_path(path: PathBuf) -> Self {
+        RunBuildArgs {
+            path: Some(path),
+            print_ir: false,
+            opt_level: None,
+            optimize: false,
+            release: false,
+            backend: None,
+            field: None,
+            parties: None,
+            threshold: None,
+            instance_id: None,
+        }
+        .to_build_args()
+    }
+}
+
 #[derive(Debug, Args, Clone)]
 struct DevArgs {
     /// Project directory or .stfl source file to watch. Defaults to source files from Stoffel.toml.
@@ -437,7 +467,8 @@ struct DevArgs {
     /// Load named function inputs from a .json, .csv, or .txt file.
     #[arg(long = "input-file", value_name = "FILE")]
     input_files: Vec<PathBuf>,
-    /// Local simulation input for a numeric client slot, written as SLOT=VALUE.
+    /// Semantic input for a numeric client slot, written as SLOT=VALUE.
+    /// Fixed-point values are scaled automatically from ordinary integers or decimals.
     #[arg(
         long = "client-input",
         visible_alias = "client-inputs",
@@ -638,7 +669,7 @@ impl std::str::FromStr for ClientInputArg {
         }
         if value.contains('=') {
             anyhow::bail!(
-                "client input '{raw}' has more than one '='. Write one client input per flag as --client-input {client_slot}=<value>; values must be integers, booleans, or 0x-prefixed hex bytes."
+                "client input '{raw}' has more than one '='. Write one client input per flag as --client-input {client_slot}=<value>; values may be integers, fixed-point decimals, booleans, or 0x-prefixed hex bytes."
             );
         }
         Ok(Self {
@@ -672,6 +703,8 @@ async fn main() -> Result<()> {
         Command::Build(args) => build("stoffel build", args.to_build_args()),
         Command::Run(args) => run(args).await,
         Command::Dev(args) => dev(args).await,
+        Command::StartMesh(args) => mesh::start_mesh(args).await,
+        Command::StopMesh(args) => mesh::stop_mesh(args).await,
         Command::Test(args) => test(args).await,
         Command::Status(args) => status(args),
         Command::Clean(args) => clean(args),
@@ -706,8 +739,25 @@ fn unknown_command(command: &str) -> Result<()> {
 
 fn closest_cli_command(command: &str) -> Option<&'static str> {
     const COMMANDS: &[&str] = &[
-        "init", "new", "check", "compile", "build", "run", "exec", "execute", "dev", "test",
-        "status", "doctor", "clean", "update", "upgrade", "doc", "docs",
+        "init",
+        "new",
+        "check",
+        "compile",
+        "build",
+        "run",
+        "exec",
+        "execute",
+        "dev",
+        "test",
+        "start-mesh",
+        "stop-mesh",
+        "status",
+        "doctor",
+        "clean",
+        "update",
+        "upgrade",
+        "doc",
+        "docs",
     ];
     COMMANDS
         .iter()
@@ -907,6 +957,15 @@ async fn run(args: RunArgs) -> Result<()> {
     for (slot, count) in &args.client_output_counts {
         builder = builder.client_output_count(*slot, *count);
     }
+    if let Some(name) = &args.mesh {
+        return mesh::run_on_mesh(
+            name,
+            builder,
+            &args.entry,
+            Duration::from_secs(args.timeout_secs),
+        )
+        .await;
+    }
     if let Some(path) = args.runner {
         builder = builder.local_runner_path(path);
     }
@@ -1022,6 +1081,27 @@ fn validate_run_args(args: &RunArgs) -> Result<()> {
     )?;
     if args.local && args.network {
         anyhow::bail!("--local and --network select different execution modes; remove one of them");
+    }
+    if args.mesh.is_some() {
+        let conflicts = [
+            ("--local", args.local),
+            ("--network", args.network),
+            ("--config", args.config.is_some()),
+            ("--runner", args.runner.is_some()),
+            ("--client-id", args.client_id.is_some()),
+            (
+                "--expected-output-clients",
+                args.expected_output_clients.is_some(),
+            ),
+        ];
+        if let Some((flag, _)) = conflicts.iter().find(|(_, present)| *present) {
+            anyhow::bail!("--mesh runs on a standing mesh; remove {flag}");
+        }
+        if !args.inputs.is_empty() || !args.input_files.is_empty() {
+            anyhow::bail!(
+                "--mesh runs programs exactly as the mesh loaded them, so it takes ClientStore inputs only; pass them with --client-input SLOT=VALUE instead of --input"
+            );
+        }
     }
     if args.local && args.config.is_some() {
         anyhow::bail!(
@@ -1625,6 +1705,7 @@ fn clean(args: CleanArgs) -> Result<()> {
     let mut removed = Vec::new();
     let mut skipped = Vec::new();
     remove_dir_if_exists(
+        project.root(),
         &project.target_dir(),
         args.dry_run,
         &mut removed,
@@ -1632,10 +1713,17 @@ fn clean(args: CleanArgs) -> Result<()> {
     )?;
     if args.all {
         for path in deep_clean_paths(&project) {
-            remove_dir_if_exists(&path, args.dry_run, &mut removed, &mut skipped)?;
+            remove_dir_if_exists(
+                project.root(),
+                &path,
+                args.dry_run,
+                &mut removed,
+                &mut skipped,
+            )?;
         }
     } else {
         remove_dir_if_exists(
+            project.root(),
             &project.cache_dir(),
             args.dry_run,
             &mut removed,
@@ -2120,6 +2208,7 @@ fn validate_bytecode_output_path(project: &Project, output: &Path) -> Result<()>
                 "--output must not write bytecode under src/; use a path under target/ instead"
             );
         }
+        validate_project_controlled_path(project.root(), output, false)?;
     }
     Ok(())
 }
@@ -3578,11 +3667,13 @@ fn print_build_stats(
 }
 
 fn remove_dir_if_exists(
+    root: &Path,
     path: &Path,
     dry_run: bool,
     removed: &mut Vec<PathBuf>,
     skipped: &mut Vec<PathBuf>,
 ) -> Result<()> {
+    validate_project_controlled_path(root, path, true)?;
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         skipped.push(path.to_path_buf());
         return Ok(());

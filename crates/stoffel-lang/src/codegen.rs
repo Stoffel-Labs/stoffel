@@ -30,8 +30,33 @@ fn int_literal_u64(node: Option<&AstNode>) -> Option<u64> {
 fn infer_single_share_type(node: &AstNode) -> Option<ShareType> {
     match node {
         AstNode::FunctionCall { function, .. } => match function.as_ref() {
+            AstNode::Identifier(name, _)
+                if matches!(
+                    name.as_str(),
+                    "Share.from_field"
+                        | "Share.random_field"
+                        | "Share.add_field"
+                        | "Share.mul_field"
+                        | "add_field"
+                        | "mul_field"
+                ) =>
+            {
+                Some(ShareType::SecretField)
+            }
             AstNode::Identifier(name, _) if name == "ClientStore.take_share_fixed" => {
                 Some(ShareType::default_secret_fixed_point())
+            }
+            AstNode::Identifier(name, _) if name == "ClientStore.take_share_bool" => {
+                Some(ShareType::boolean())
+            }
+            AstNode::Identifier(name, _) if name == "ClientStore.sum_shares_fixed" => {
+                Some(ShareType::default_secret_fixed_point())
+            }
+            AstNode::Identifier(name, _) if name == "ClientStore.sum_shares_bool" => {
+                Some(ShareType::boolean())
+            }
+            AstNode::Identifier(name, _) if name == "ClientStore.sum_shares" => {
+                Some(ShareType::default_secret_int())
             }
             AstNode::Identifier(name, _) if name == "ClientStore.take_share" => {
                 Some(ShareType::default_secret_int())
@@ -59,7 +84,7 @@ fn fixed_share_type(bits: u8) -> ShareType {
     )
 }
 
-fn share_type_for_secret_scalar_symbol_type(ty: &SymbolType) -> Option<ShareType> {
+pub(crate) fn share_type_for_secret_scalar_symbol_type(ty: &SymbolType) -> Option<ShareType> {
     if !ty.is_secret() {
         return None;
     }
@@ -146,6 +171,73 @@ fn is_share_random_call(function: &AstNode) -> bool {
     matches!(function, AstNode::Identifier(name, _) if name == "Share.random")
 }
 
+/// A lexical scope saves only overwritten bindings, not the whole environment.
+#[derive(Debug)]
+struct ScopeMap<V> {
+    values: HashMap<String, V>,
+    introduced: Vec<String>,
+    replaced: Vec<(String, V)>,
+    depth: usize,
+}
+
+impl<V> Default for ScopeMap<V> {
+    fn default() -> Self {
+        Self {
+            values: HashMap::new(),
+            introduced: Vec::new(),
+            replaced: Vec::new(),
+            depth: 0,
+        }
+    }
+}
+
+impl<V: Clone> Clone for ScopeMap<V> {
+    fn clone(&self) -> Self {
+        Self {
+            values: self.values.clone(),
+            ..Self::default()
+        }
+    }
+}
+
+impl<V> std::ops::Deref for ScopeMap<V> {
+    type Target = HashMap<String, V>;
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl<V> ScopeMap<V> {
+    fn insert(&mut self, name: String, value: V) {
+        if self.depth == 0 {
+            self.values.insert(name, value);
+        } else {
+            match self.values.insert(name.clone(), value) {
+                Some(old) => self.replaced.push((name, old)),
+                None => self.introduced.push(name),
+            }
+        }
+    }
+
+    fn enter(&mut self) -> (usize, usize) {
+        self.depth += 1;
+        (self.introduced.len(), self.replaced.len())
+    }
+
+    fn exit(&mut self, (introduced, replaced): (usize, usize)) {
+        // Bindings can only be inserted while a scope is active. Restore
+        // overwrites first, then remove names that did not exist at entry.
+        while self.replaced.len() > replaced {
+            let (name, old) = self.replaced.pop().unwrap();
+            self.values.insert(name, old);
+        }
+        for name in self.introduced.drain(introduced..) {
+            self.values.remove(&name);
+        }
+        self.depth -= 1;
+    }
+}
+
 #[derive(Debug)]
 struct CodeGenerator {
     // Holds instructions using VirtualRegisters during generation for a scope.
@@ -158,19 +250,22 @@ struct CodeGenerator {
     // (VRs are minted sequentially from 0). True = Secret.
     vr_secrecy: Vec<bool>,
     // Variable symbol table (maps name to VirtualRegister index). Local to the current scope.
-    symbol_table: HashMap<String, usize>,
+    symbol_table: ScopeMap<usize>,
     // Source-level types for variables in this scope.
-    symbol_types: HashMap<String, SymbolType>,
+    symbol_types: ScopeMap<SymbolType>,
     // User object fields available for default construction in this scope.
-    object_field_types: HashMap<String, Vec<(String, SymbolType)>>,
+    object_field_types: ScopeMap<Vec<(String, SymbolType)>>,
+    // `type Name = ...` aliases declared in this module, keyed by alias name.
+    // Annotations are resolved through these so an alias such as
+    // `type Amount = secret int64` keeps its `secret` qualifier in register
+    // secrecy and in emitted parameter metadata.
+    type_aliases: HashMap<String, SymbolType>,
     // Compiled functions.
     compiled_functions: HashMap<String, BytecodeChunk>,
     // If present, this chunk represents `def main(...)` promoted to the program entry.
     main_proc_chunk: Option<BytecodeChunk>,
     // If present, this chunk represents a pragma-marked entry function.
     entry_main_chunk: Option<BytecodeChunk>,
-    // Known built-in functions (names only, no bytecode generated).
-    known_builtins: HashSet<String>,
     // Pragma handlers: Maps pragma names to their handler functions.
     pragma_handlers: HashMap<String, PragmaHandler>,
     // Constants identified during code generation for this chunk.
@@ -314,22 +409,63 @@ fn pin_key(value: &crate::core_types::Value) -> Option<PinKey> {
 }
 
 impl CodeGenerator {
-    fn new() -> Self {
-        let known_builtins = crate::builtin_registry::builtin_registry().known_call_names();
+    /// Replaces references to `type` aliases declared in this module with their
+    /// targets, mirroring semantic analysis, so secrecy carried by an alias is
+    /// not lost when deciding register banks or emitting type metadata.
+    fn resolve_type_aliases(&self, sym_type: &SymbolType) -> SymbolType {
+        self.resolve_type_aliases_inner(sym_type, 0)
+    }
 
+    fn resolve_type_aliases_inner(&self, sym_type: &SymbolType, depth: usize) -> SymbolType {
+        if depth > 32 {
+            return sym_type.clone();
+        }
+        match sym_type {
+            SymbolType::TypeName(name) => match self.type_aliases.get(name) {
+                Some(target) => self.resolve_type_aliases_inner(target, depth + 1),
+                None => sym_type.clone(),
+            },
+            SymbolType::Secret(inner) => {
+                let resolved = self.resolve_type_aliases_inner(inner, depth + 1);
+                // `secret Amount` where `Amount` is already secret must not nest.
+                if resolved.is_secret() {
+                    resolved
+                } else {
+                    SymbolType::Secret(Box::new(resolved))
+                }
+            }
+            SymbolType::List(inner) => {
+                SymbolType::List(Box::new(self.resolve_type_aliases_inner(inner, depth + 1)))
+            }
+            SymbolType::Dict(key, value) => SymbolType::Dict(
+                Box::new(self.resolve_type_aliases_inner(key, depth + 1)),
+                Box::new(self.resolve_type_aliases_inner(value, depth + 1)),
+            ),
+            SymbolType::Generic(name, params) => SymbolType::Generic(
+                name.clone(),
+                params
+                    .iter()
+                    .map(|param| self.resolve_type_aliases_inner(param, depth + 1))
+                    .collect(),
+            ),
+            _ => sym_type.clone(),
+        }
+    }
+
+    fn new() -> Self {
         CodeGenerator {
             current_instructions: Vec::new(),
             current_labels: HashMap::new(),
             next_virtual_reg: 0, // Start virtual registers from 0
             vr_secrecy: Vec::new(),
             // Symbol table starts empty for each new generator instance (e.g., per function)
-            symbol_table: HashMap::new(),
-            symbol_types: HashMap::new(),
-            object_field_types: HashMap::new(),
+            symbol_table: ScopeMap::default(),
+            symbol_types: ScopeMap::default(),
+            object_field_types: ScopeMap::default(),
+            type_aliases: HashMap::new(),
             compiled_functions: HashMap::new(),
             main_proc_chunk: None,
             entry_main_chunk: None,
-            known_builtins,
             pragma_handlers: Self::register_pragma_handlers(),
             identified_constants: Vec::new(),
             client_inputs: HashMap::new(),
@@ -1279,9 +1415,10 @@ impl CodeGenerator {
             | "ClientStore.take_share_fixed"
             | "ClientStore.take_share_bool" => {
                 // The client slot may be a literal, a loop variable (records every
-                // client in the loop range), or a clear-int constant.
+                // client in the loop range), or a clear-int constant. Runtime
+                // client-count loops are recorded later by client_io_planner as
+                // dynamic input templates, so they are intentionally silent here.
                 let Some(client_slots) = self.input_ordinals_for_node(arguments.first()) else {
-                    Self::warn_unrecorded_client_io(function_name, "input");
                     return;
                 };
                 let Some(input_ordinals) = self.input_ordinals_for_node(arguments.get(1)) else {
@@ -1303,6 +1440,33 @@ impl CodeGenerator {
                             inputs.resize(ordinal + 1, None);
                         }
                         inputs[ordinal] = Some(share_type);
+                    }
+                }
+            }
+            "ClientStore.sum_shares"
+            | "ClientStore.sum_shares_bool"
+            | "ClientStore.sum_shares_fixed" => {
+                let Some(input_ordinals) = self.input_ordinals_for_node(arguments.first()) else {
+                    return;
+                };
+                let Some(client_counts) = self.input_ordinals_for_node(arguments.get(1)) else {
+                    return;
+                };
+                let share_type = match function_name {
+                    "ClientStore.sum_shares_bool" => ShareType::boolean(),
+                    "ClientStore.sum_shares_fixed" => ShareType::default_secret_fixed_point(),
+                    _ => ShareType::default_secret_int(),
+                };
+                for client_count in client_counts {
+                    for client_slot in 0..client_count.max(1) {
+                        let inputs = self.client_inputs.entry(client_slot).or_default();
+                        for input_ordinal in &input_ordinals {
+                            let ordinal = *input_ordinal as usize;
+                            if inputs.len() <= ordinal {
+                                inputs.resize(ordinal + 1, None);
+                            }
+                            inputs[ordinal] = Some(share_type);
+                        }
                     }
                 }
             }
@@ -1364,13 +1528,44 @@ impl CodeGenerator {
         // builtin's default: `secret bool`/`secret uintN` for take_share,
         // a concrete fixed-point layout for take_share_fixed.
         let annotation_applies = match function_name.as_str() {
-            "ClientStore.take_share" => !matches!(share_type, ShareType::SecretFixedPoint { .. }),
-            "ClientStore.take_share_fixed" => {
+            "ClientStore.take_share" | "ClientStore.sum_shares" => {
+                !matches!(share_type, ShareType::SecretFixedPoint { .. })
+            }
+            "ClientStore.take_share_bool" | "ClientStore.sum_shares_bool" => {
+                share_type.is_boolean()
+            }
+            "ClientStore.take_share_fixed" | "ClientStore.sum_shares_fixed" => {
                 matches!(share_type, ShareType::SecretFixedPoint { .. })
             }
             _ => false,
         };
         if !annotation_applies {
+            return;
+        }
+        if matches!(
+            function_name.as_str(),
+            "ClientStore.sum_shares"
+                | "ClientStore.sum_shares_bool"
+                | "ClientStore.sum_shares_fixed"
+        ) {
+            let Some(input_ordinals) = self.input_ordinals_for_node(arguments.first()) else {
+                return;
+            };
+            let Some(client_counts) = self.input_ordinals_for_node(arguments.get(1)) else {
+                return;
+            };
+            for client_count in client_counts {
+                for client_slot in 0..client_count.max(1) {
+                    let inputs = self.client_inputs.entry(client_slot).or_default();
+                    for input_ordinal in &input_ordinals {
+                        let ordinal = *input_ordinal as usize;
+                        if inputs.len() <= ordinal {
+                            inputs.resize(ordinal + 1, None);
+                        }
+                        inputs[ordinal] = Some(share_type);
+                    }
+                }
+            }
             return;
         }
         let Some(client_slot) = int_literal_u64(arguments.first()) else {
@@ -1396,12 +1591,16 @@ impl CodeGenerator {
         let Some(AstNode::Identifier(list_name, _)) = arguments.first() else {
             return;
         };
-        let Some(share_type) = arguments
+        let share_type = arguments
             .get(1)
             .and_then(|argument| self.share_type_for_node(argument))
-        else {
-            return;
-        };
+            // A user helper declared as returning the generic `Share` object
+            // does not carry a concrete bit layout through semantic typing.
+            // The VM treats such shares as the default secret integer unless a
+            // more precise annotation is available, so mirror that fallback in
+            // the client-IO manifest instead of leaving an appended output list
+            // empty (which would omit the client from output coordination).
+            .unwrap_or_else(ShareType::default_secret_int);
         let repeat = self.active_loop_iteration_count();
         self.variable_share_lists
             .entry(list_name.clone())
@@ -1482,7 +1681,15 @@ impl CodeGenerator {
                     _ => None,
                 }
             }
-            _ => None,
+            // Index and field access nodes carry their element type through the
+            // semantic symbol table even when no scalar value has been assigned
+            // to a named variable yet. Preserve that type for client-output
+            // manifests instead of degrading, for example, `secret bool` list
+            // elements to the default 64-bit secret integer.
+            _ => self
+                .type_hint_for_node(node)
+                .as_ref()
+                .and_then(share_type_for_secret_scalar_symbol_type),
         }
     }
 
@@ -1556,6 +1763,7 @@ impl CodeGenerator {
 
         let (clear_vr, _clear_is_secret) = self.compile_node(expr)?;
         match share_type {
+            ShareType::SecretField => return Ok(None),
             ShareType::SecretInt { bit_length } => {
                 let bit_length_vr = self.emit_i64_literal(bit_length as i64);
                 self.emit(Instruction::PUSHARG(clear_vr.0));
@@ -1627,6 +1835,7 @@ impl CodeGenerator {
             // program AST by `preprocessing_planner` and stamped into the
             // manifest in `generate_bytecode`; leave it at the default here.
             preprocessing_demand: PreprocessingDemand::default(),
+            dynamic_client_inputs: Vec::new(),
         }
     }
 
@@ -1864,7 +2073,9 @@ impl CodeGenerator {
                 // Determine if the initial value needs a secret register
                 // Secrecy comes from a `secret` type annotation.
                 // Semantic analysis should have ensured consistency if both are present.
-                let annotation_type = type_annotation.as_ref().map(|n| SymbolType::from_ast(n));
+                let annotation_type = type_annotation
+                    .as_ref()
+                    .map(|n| self.resolve_type_aliases(&SymbolType::from_ast(n)));
                 let value_type_hint = value
                     .as_deref()
                     .and_then(|expr| self.type_hint_for_node(expr));
@@ -2024,6 +2235,9 @@ impl CodeGenerator {
                     right_type_hint.as_ref().map(SymbolType::underlying_type),
                     Some(SymbolType::List(_))
                 );
+                // Semantic analysis guarantees a clear integer count. Hints are
+                // intentionally partial (e.g. conditional expressions), so do not
+                // require a count hint to lower an already checked repetition.
                 let is_list_repeat = op == "*" && (is_left_list || is_right_list);
                 let is_list_equality =
                     matches!(op.as_str(), "==" | "!=") && is_left_list && is_right_list;
@@ -2299,7 +2513,9 @@ impl CodeGenerator {
                             let bit_length = match share_type {
                                 ShareType::SecretInt { bit_length }
                                 | ShareType::SecretUInt { bit_length } => bit_length,
-                                ShareType::SecretFixedPoint { .. } => unreachable!(),
+                                ShareType::SecretFixedPoint { .. } | ShareType::SecretField => {
+                                    unreachable!()
+                                }
                             };
                             let bit_length_vr = self.allocate_virtual_register(false);
                             self.identified_constants
@@ -2645,6 +2861,9 @@ impl CodeGenerator {
                 body,
                 location,
             } => {
+                let outer_bindings = self.symbol_table.enter();
+                let outer_types = self.symbol_types.enter();
+                let outer_objects = self.object_field_types.enter();
                 // Support: single var over range a .. b (exclusive) or over a list/array
                 if variables.len() != 1 {
                     return Err(CompilerError::semantic_error(
@@ -2678,7 +2897,7 @@ impl CodeGenerator {
                         self.emit(Instruction::MOV(loop_vr.0, start_vr.0));
 
                         // Insert loop variable into symbol table, saving any previous binding
-                        let prev_binding = self.symbol_table.insert(var_name.clone(), loop_vr.0);
+                        self.symbol_table.insert(var_name.clone(), loop_vr.0);
 
                         // Labels
                         let loop_start_label =
@@ -2735,16 +2954,6 @@ impl CodeGenerator {
 
                         // End label
                         self.add_label(loop_end_label);
-
-                        // Restore/cleanup symbol table mapping
-                        match prev_binding {
-                            Some(old_idx) => {
-                                self.symbol_table.insert(var_name, old_idx);
-                            }
-                            None => {
-                                self.symbol_table.remove(&variables[0]);
-                            }
-                        }
                     }
                     _ => {
                         // Collection iteration: for item in list
@@ -2774,7 +2983,7 @@ impl CodeGenerator {
                         let elem_vr = self.allocate_virtual_register(collection_is_secret);
 
                         // Insert loop variable (element) into symbol table
-                        let prev_binding = self.symbol_table.insert(var_name.clone(), elem_vr.0);
+                        self.symbol_table.insert(var_name.clone(), elem_vr.0);
 
                         // Labels
                         let loop_start_label =
@@ -2827,20 +3036,15 @@ impl CodeGenerator {
 
                         // End label
                         self.add_label(loop_end_label);
-
-                        // Restore/cleanup symbol table mapping
-                        match prev_binding {
-                            Some(old_idx) => {
-                                self.symbol_table.insert(var_name, old_idx);
-                            }
-                            None => {
-                                self.symbol_table.remove(&variables[0]);
-                            }
-                        }
                     }
                 }
 
                 // For-loops evaluate to Unit
+                // For-loop declarations have lexical scope, while writes to
+                // existing outer registers retain their runtime effects.
+                self.symbol_table.exit(outer_bindings);
+                self.symbol_types.exit(outer_types);
+                self.object_field_types.exit(outer_objects);
                 let nil_vr = self.allocate_virtual_register(false);
                 self.identified_constants.push(Constant::Unit);
                 self.emit(Instruction::LDI(nil_vr.0, crate::core_types::Value::Unit));
@@ -2869,10 +3073,6 @@ impl CodeGenerator {
                         handler(self, node, pragma)?;
                         // Check if the handler indicates compilation should be skipped
                         if pragma_name == "builtin" {
-                            // Register the function name as a known built-in.
-                            if let Some(name) = name {
-                                self.known_builtins.insert(name.clone());
-                            }
                             skip_compilation = true;
                         }
                     }
@@ -2884,6 +3084,7 @@ impl CodeGenerator {
                 let mut function_generator = CodeGenerator::new();
                 function_generator.opt_level = self.opt_level;
                 function_generator.object_field_types = self.object_field_types.clone();
+                function_generator.type_aliases = self.type_aliases.clone();
                 // A variable that is reassigned anywhere in the body (e.g. a
                 // `while`-loop counter) is not a constant, so it must not be
                 // resolved to its initial value when statically determining
@@ -2897,7 +3098,12 @@ impl CodeGenerator {
                     let param_type = param
                         .type_annotation
                         .as_ref()
-                        .map(|n| SymbolType::from_ast_with_type_params(n, type_params))
+                        .map(|n| {
+                            self.resolve_type_aliases(&SymbolType::from_ast_with_type_params(
+                                n,
+                                type_params,
+                            ))
+                        })
                         .unwrap_or(SymbolType::Unknown);
                     let param_is_secret = param_type.uses_secret_register();
                     // Function arguments enter in the clear ABI parameter slots
@@ -2990,14 +3196,24 @@ impl CodeGenerator {
                         param
                             .type_annotation
                             .as_ref()
-                            .map(|n| SymbolType::from_ast_with_type_params(n, type_params))
+                            .map(|n| {
+                                self.resolve_type_aliases(&SymbolType::from_ast_with_type_params(
+                                    n,
+                                    type_params,
+                                ))
+                            })
                             .unwrap_or(SymbolType::Unknown)
                     })
                     .map(symbol_type_to_function_type)
                     .collect();
                 function_chunk.return_type = return_type
                     .as_ref()
-                    .map(|n| SymbolType::from_ast_with_type_params(n, type_params))
+                    .map(|n| {
+                        self.resolve_type_aliases(&SymbolType::from_ast_with_type_params(
+                            n,
+                            type_params,
+                        ))
+                    })
                     .map(symbol_type_to_function_type)
                     .unwrap_or(stoffel_vm_types::compiled_binary::FunctionType::Void);
                 function_chunk.upvalues = collect_upvalue_names(body);
@@ -3065,7 +3281,8 @@ impl CodeGenerator {
                 let field_types = fields
                     .iter()
                     .map(|field| {
-                        let mut field_type = SymbolType::from_ast(&field.type_annotation);
+                        let mut field_type = self
+                            .resolve_type_aliases(&SymbolType::from_ast(&field.type_annotation));
                         if field.is_secret && !field_type.is_secret() {
                             field_type = field_type.with_secret_modifier();
                         }
@@ -3409,6 +3626,33 @@ fn collect_upvalue_names(node: &AstNode) -> Vec<String> {
 /// `Assignment`) within `node`, not descending into nested function definitions
 /// (which have their own scope and are seeded separately). Used to exclude
 /// loop counters and other mutated variables from constant-slot resolution.
+/// Records every `type Name = ...` alias declared at the top level of `node`
+/// (aliases are declarations, so they only appear in module-level blocks).
+/// The stored target keeps the alias's `secret` qualifier; nested alias
+/// references are resolved lazily by [`CodeGenerator::resolve_type_aliases`].
+fn collect_type_aliases(node: &AstNode, out: &mut HashMap<String, SymbolType>) {
+    match node {
+        AstNode::Block(statements) => {
+            for statement in statements {
+                collect_type_aliases(statement, out);
+            }
+        }
+        AstNode::TypeAlias {
+            name,
+            target_type,
+            is_secret,
+            ..
+        } => {
+            let mut alias_type = SymbolType::from_ast(target_type);
+            if *is_secret && !alias_type.is_secret() {
+                alias_type = alias_type.with_secret_modifier();
+            }
+            out.insert(name.clone(), alias_type);
+        }
+        _ => {}
+    }
+}
+
 fn collect_reassigned_vars(node: &AstNode, out: &mut HashSet<String>) {
     match node {
         AstNode::Assignment { target, value, .. } => {
@@ -3511,16 +3755,30 @@ pub fn generate_bytecode_with_opt_level(
     node: &AstNode,
     opt_level: u8,
 ) -> CompilerResult<CompiledProgram> {
+    generate_bytecode_with_opt_level_and_backend(node, opt_level, MpcBackend::default())
+}
+
+pub fn generate_bytecode_with_opt_level_and_backend(
+    node: &AstNode,
+    opt_level: u8,
+    mpc_backend: MpcBackend,
+) -> CompilerResult<CompiledProgram> {
     let mut generator = CodeGenerator::new();
     generator.opt_level = opt_level;
+    collect_type_aliases(node, &mut generator.type_aliases);
     collect_reassigned_vars(node, &mut generator.reassigned_vars);
     let (_result_vr, _result_is_secret) = generator.compile_node(node)?;
     let mut program = generator.finalize_program()?;
+    // Codegen records direct ClientStore calls inside each function. Augment
+    // that data by following literal clear-integer arguments through helper
+    // calls so client slots and ordinals hidden behind helpers are not omitted.
+    crate::client_io_planner::merge_inferred_client_inputs(node, &mut program.client_io_manifest);
     // Compute the program's MPC preprocessing demand interprocedurally over the
     // whole AST (call-multiplicity- and list-length-aware) and stamp it into the
     // client-IO manifest, replacing the placeholder set during finalisation.
     program.client_io_manifest.preprocessing_demand =
-        crate::preprocessing_planner::plan_preprocessing_demand(node);
+        crate::preprocessing_planner::plan_preprocessing_demand_for_backend(node, mpc_backend);
+    program.client_io_manifest.mpc_backend = mpc_backend;
     if std::env::var("STOFFEL_DEBUG_DEMAND").is_ok() {
         eprintln!(
             "[stoffel-lang] preprocessing demand: {:?}",
@@ -3537,6 +3795,30 @@ mod tests {
     use crate::core_types::Value;
     use crate::register_allocator::{PhysicalRegister, VirtualRegister};
     use std::collections::HashMap;
+
+    #[test]
+    fn lexical_maps_restore_nested_overwrites_and_local_types() {
+        let mut map = super::ScopeMap::default();
+        map.insert("outer".into(), vec![1]);
+        let outer = map.enter();
+        map.insert("outer".into(), vec![2]);
+        map.insert("local".into(), vec![3]);
+        let inner = map.enter();
+        map.insert("outer".into(), vec![4]);
+        map.insert("local".into(), vec![5]);
+        map.insert("inner".into(), vec![6]);
+        let captured = map.clone();
+        map.exit(inner);
+        assert_eq!(map.get("outer"), Some(&vec![2]));
+        assert_eq!(map.get("local"), Some(&vec![3]));
+        assert!(!map.contains_key("inner"));
+        map.insert("local".into(), vec![7]);
+        map.exit(outer);
+        assert_eq!(map.get("outer"), Some(&vec![1]));
+        assert_eq!(map.len(), 1);
+        assert_eq!(captured.get("outer"), Some(&vec![4]));
+        assert!(map.introduced.is_empty() && map.replaced.is_empty());
+    }
 
     fn count_op(instructions: &[Instruction], f: impl Fn(&Instruction) -> bool) -> usize {
         instructions.iter().filter(|i| f(i)).count()

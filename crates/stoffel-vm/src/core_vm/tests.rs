@@ -47,9 +47,13 @@ fn callback_error(error: &VirtualMachineError) -> &ForeignFunctionCallbackError 
 }
 
 fn compile_vm_source(source: &str) -> VirtualMachine {
+    compile_vm_source_at_level(source, 0)
+}
+
+fn compile_vm_source_at_level(source: &str, level: u8) -> VirtualMachine {
     let options = stoffellang::CompilerOptions {
-        optimize: false,
-        optimization_level: 0,
+        optimize: level > 0,
+        optimization_level: level,
         print_ir: false,
         mpc_backend: MpcBackend::HoneyBadger,
         mpc_curve: MpcCurve::default(),
@@ -422,6 +426,145 @@ struct BarrierInputEngine {
     sync_input_calls: AtomicUsize,
 }
 
+struct ScheduledInputEngine {
+    input_calls: AtomicUsize,
+}
+
+struct WorkConservingInputEngine {
+    blocked_input: Option<i64>,
+    blocked_started: AtomicUsize,
+    blocked_release: tokio::sync::Notify,
+    runnable_calls: AtomicUsize,
+    schedule: Mutex<Vec<u8>>,
+}
+
+impl WorkConservingInputEngine {
+    fn new(blocked_input: Option<i64>) -> Self {
+        Self {
+            blocked_input,
+            blocked_started: AtomicUsize::new(0),
+            blocked_release: tokio::sync::Notify::new(),
+            runnable_calls: AtomicUsize::new(0),
+            schedule: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl MpcEngine for WorkConservingInputEngine {
+    fn protocol_name(&self) -> &'static str {
+        "work-conserving-input"
+    }
+
+    fn topology(&self) -> MpcSessionTopology {
+        MpcSessionTopology::try_new(14, 1, 3, 1).expect("test topology should be valid")
+    }
+
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    fn start(&self) -> MpcEngineResult<()> {
+        Ok(())
+    }
+
+    fn input_share(&self, _clear: ClearShareInput) -> MpcEngineResult<ShareData> {
+        Err(crate::net::mpc_engine::MpcEngineError::operation_failed(
+            "input_share",
+            "sync input_share should not be used by async builtin calls",
+        ))
+    }
+
+    fn open_share(&self, _ty: ShareType, _share_bytes: &[u8]) -> MpcEngineResult<ClearShareValue> {
+        Err(crate::net::mpc_engine::MpcEngineError::operation_failed(
+            "open_share",
+            "not used",
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncMpcEngine for WorkConservingInputEngine {
+    async fn input_share_async(&self, clear: ClearShareInput) -> MpcEngineResult<ShareData> {
+        let ClearShareValue::Integer(value) = clear.value() else {
+            return Err(crate::net::mpc_engine::MpcEngineError::operation_failed(
+                "input_share_async",
+                "work-conserving scheduler probe expects an integer",
+            ));
+        };
+        let lane = u8::from(value >= 10_000);
+        self.schedule.lock().push(lane);
+        if self.blocked_input == Some(value) {
+            self.blocked_started.fetch_add(1, Ordering::SeqCst);
+            self.blocked_release.notified().await;
+        } else if lane == 1 {
+            self.runnable_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(ShareData::Opaque(vec![value.to_le_bytes()[0]].into()))
+    }
+
+    async fn open_share_async(
+        &self,
+        _ty: ShareType,
+        _share_bytes: &[u8],
+    ) -> MpcEngineResult<ClearShareValue> {
+        Err(crate::net::mpc_engine::MpcEngineError::operation_failed(
+            "open_share_async",
+            "not used",
+        ))
+    }
+}
+
+impl MpcEngine for ScheduledInputEngine {
+    fn protocol_name(&self) -> &'static str {
+        "scheduled-input"
+    }
+
+    fn topology(&self) -> MpcSessionTopology {
+        MpcSessionTopology::try_new(13, 1, 3, 1).expect("test topology should be valid")
+    }
+
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    fn start(&self) -> MpcEngineResult<()> {
+        Ok(())
+    }
+
+    fn input_share(&self, _clear: ClearShareInput) -> MpcEngineResult<ShareData> {
+        Err(crate::net::mpc_engine::MpcEngineError::operation_failed(
+            "input_share",
+            "sync input_share should not be used by async builtin calls",
+        ))
+    }
+
+    fn open_share(&self, _ty: ShareType, _share_bytes: &[u8]) -> MpcEngineResult<ClearShareValue> {
+        Err(crate::net::mpc_engine::MpcEngineError::operation_failed(
+            "open_share",
+            "not used",
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncMpcEngine for ScheduledInputEngine {
+    async fn input_share_async(&self, _clear: ClearShareInput) -> MpcEngineResult<ShareData> {
+        self.input_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ShareData::Opaque(vec![1].into()))
+    }
+
+    async fn open_share_async(
+        &self,
+        _ty: ShareType,
+        _share_bytes: &[u8],
+    ) -> MpcEngineResult<ClearShareValue> {
+        Err(crate::net::mpc_engine::MpcEngineError::operation_failed(
+            "open_share_async",
+            "not used",
+        ))
+    }
+}
+
 impl BarrierInputEngine {
     fn new(expected_concurrent_inputs: usize) -> Self {
         Self {
@@ -585,6 +728,7 @@ impl AsyncMpcEngine for AsyncBatchOpenEngine {
 
 struct AsyncBatchMulEngine {
     sync_mul_calls: AtomicUsize,
+    sync_batch_calls: AtomicUsize,
     async_batch_calls: AtomicUsize,
 }
 
@@ -592,6 +736,7 @@ impl AsyncBatchMulEngine {
     fn new() -> Self {
         Self {
             sync_mul_calls: AtomicUsize::new(0),
+            sync_batch_calls: AtomicUsize::new(0),
             async_batch_calls: AtomicUsize::new(0),
         }
     }
@@ -643,6 +788,22 @@ impl MpcEngineMultiplication for AsyncBatchMulEngine {
             "multiply_share",
             "sync multiply_share should not be used by async batch builtin calls",
         ))
+    }
+
+    fn batch_multiply_shares(
+        &self,
+        _ty: ShareType,
+        pairs: &[(Vec<u8>, Vec<u8>)],
+    ) -> MpcEngineResult<Vec<ShareData>> {
+        self.sync_batch_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(pairs
+            .iter()
+            .map(|(left, right)| {
+                let left_byte = left.first().copied().unwrap_or_default();
+                let right_byte = right.first().copied().unwrap_or_default();
+                ShareData::Opaque(vec![left_byte.wrapping_mul(right_byte)].into())
+            })
+            .collect())
     }
 }
 
@@ -2951,6 +3112,37 @@ fn async_share_from_clear_open_call_function(name: &str, clear_value: i64) -> VM
     )
 }
 
+fn repeated_async_inputs_function(name: &str, input_count: usize) -> VMFunction {
+    repeated_async_inputs_function_with_offset(name, input_count, 0)
+}
+
+fn repeated_async_inputs_function_with_offset(
+    name: &str,
+    input_count: usize,
+    offset: i64,
+) -> VMFunction {
+    let mut instructions = Vec::with_capacity(input_count.saturating_mul(3).saturating_add(1));
+    for input in 0..input_count {
+        instructions.push(Instruction::LDI(
+            1,
+            Value::I64(offset.saturating_add(input as i64)),
+        ));
+        instructions.push(Instruction::PUSHARG(1));
+        instructions.push(Instruction::CALL("Share.from_clear".to_string()));
+    }
+    instructions.push(Instruction::RET(0));
+
+    VMFunction::new(
+        name.to_string(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        2,
+        instructions,
+        HashMap::new(),
+    )
+}
+
 fn async_rbc_receive_call_function(name: &str, from_party: usize) -> VMFunction {
     async_rbc_receive_call_function_with_timeout(name, from_party, 1_000)
 }
@@ -3049,6 +3241,61 @@ async fn execute_many_async_single_invocation_uses_async_entry_path() {
 }
 
 #[tokio::test]
+async fn execute_async_with_metrics_distinguishes_online_effect_from_explicit_yield() {
+    let engine = Arc::new(BarrierOpenEngine::new(1));
+    let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
+    let mut vm = VirtualMachine::builder()
+        .with_standard_library(false)
+        .with_mpc_builtins(false)
+        .with_register_layout(RegisterLayout::new(1))
+        .with_mpc_engine(runtime_engine)
+        .build();
+    vm.register_function(async_open_function("open_with_metrics", 41));
+
+    let (value, metrics) = vm
+        .execute_async_with_metrics("open_with_metrics", engine.as_ref())
+        .await
+        .expect("async execution with metrics should succeed");
+
+    assert_eq!(value, Value::I64(41));
+    assert_eq!(metrics.instruction_budget_yields, 0);
+    assert_eq!(metrics.online_effect_yields, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_async_with_metrics_reports_local_instruction_budget_yields() {
+    const LOCAL_INSTRUCTIONS: usize = super::effect_scheduler::DEFAULT_LOCAL_INSTRUCTION_BUDGET * 2;
+
+    let mut instructions = (0..LOCAL_INSTRUCTIONS)
+        .map(|value| Instruction::LDI(0, Value::I64(value as i64)))
+        .collect::<Vec<_>>();
+    instructions.push(Instruction::RET(0));
+
+    let mut vm = VirtualMachine::builder()
+        .with_standard_library(false)
+        .with_mpc_builtins(false)
+        .build();
+    vm.register_function(VMFunction::new(
+        "many_local_instructions".to_string(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        1,
+        instructions,
+        HashMap::new(),
+    ));
+
+    let (value, metrics) = vm
+        .execute_async_with_metrics("many_local_instructions", &ClonePreservedEngine)
+        .await
+        .expect("budgeted local execution should complete");
+
+    assert_eq!(value, Value::I64((LOCAL_INSTRUCTIONS - 1) as i64));
+    assert_eq!(metrics.instruction_budget_yields, 2);
+    assert_eq!(metrics.online_effect_yields, 0);
+}
+
+#[tokio::test]
 async fn execute_many_async_yields_on_share_from_clear_builtin_call() {
     let engine = Arc::new(BarrierInputEngine::new(2));
     let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
@@ -3080,7 +3327,7 @@ async fn execute_many_async_yields_on_share_from_clear_builtin_call() {
 }
 
 #[tokio::test]
-async fn execute_many_async_runs_independent_programs_across_online_effects() {
+async fn execute_many_async_runs_independent_vm_states_across_online_effects() {
     let engine = Arc::new(BarrierOpenEngine::new(2));
     let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
     let mut vm = VirtualMachine::builder()
@@ -3103,6 +3350,148 @@ async fn execute_many_async_runs_independent_programs_across_online_effects() {
     assert_eq!(result, vec![Value::I64(11), Value::I64(29)]);
     assert_eq!(engine.open_started.load(Ordering::SeqCst), 2);
     assert_eq!(engine.open_finished.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_scheduler_yields_during_long_runs_of_immediately_ready_effects() {
+    const INPUT_COUNT: usize = 256;
+
+    let engine = Arc::new(ScheduledInputEngine {
+        input_calls: AtomicUsize::new(0),
+    });
+    let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
+    let mut vm = VirtualMachine::builder()
+        .with_standard_library(false)
+        .with_mpc_engine(runtime_engine)
+        .build();
+    vm.register_function(repeated_async_inputs_function(
+        "many_immediate_inputs",
+        INPUT_COUNT,
+    ));
+
+    let heartbeat = Arc::new(AtomicUsize::new(0));
+    let heartbeat_task = {
+        let heartbeat = heartbeat.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            heartbeat.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+
+    let (_, metrics) = vm
+        .execute_async_with_metrics("many_immediate_inputs", engine.as_ref())
+        .await
+        .expect("immediately ready input effects should complete");
+
+    assert_eq!(engine.input_calls.load(Ordering::SeqCst), INPUT_COUNT);
+    assert_eq!(metrics.instruction_budget_yields, 0);
+    assert_eq!(metrics.online_effect_yields, INPUT_COUNT as u64);
+    assert_eq!(
+        heartbeat.load(Ordering::SeqCst),
+        1,
+        "the async VM must yield even when every MPC effect is immediately ready"
+    );
+    heartbeat_task
+        .await
+        .expect("heartbeat task should complete");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn blocked_online_effect_does_not_stall_a_runnable_sibling_execution() {
+    const RUNNABLE_INPUT_COUNT: usize = 192;
+
+    let engine = Arc::new(WorkConservingInputEngine::new(Some(0)));
+    let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
+    let mut vm = VirtualMachine::builder()
+        .with_standard_library(false)
+        .with_mpc_engine(runtime_engine)
+        .build();
+    vm.register_function(repeated_async_inputs_function_with_offset(
+        "blocked_execution",
+        1,
+        0,
+    ));
+    vm.register_function(repeated_async_inputs_function_with_offset(
+        "runnable_execution",
+        RUNNABLE_INPUT_COUNT,
+        10_000,
+    ));
+
+    let executions =
+        vm.execute_many_async(["blocked_execution", "runnable_execution"], engine.as_ref());
+    tokio::pin!(executions);
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if engine.runnable_calls.load(Ordering::SeqCst) == RUNNABLE_INPUT_COUNT {
+                break;
+            }
+            tokio::select! {
+                result = &mut executions => {
+                    panic!("blocked execution unexpectedly completed first: {result:?}")
+                }
+                _ = tokio::task::yield_now() => {}
+            }
+        }
+    })
+    .await
+    .expect("the runnable sibling should make progress while its peer waits forever");
+    assert_eq!(engine.blocked_started.load(Ordering::SeqCst), 1);
+
+    engine.blocked_release.notify_one();
+    let values = executions
+        .await
+        .expect("both executions should complete after releasing the blocked effect");
+    assert_eq!(values.len(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn repeated_immediately_ready_effects_are_fair_between_runnable_executions() {
+    const INPUTS_PER_EXECUTION: usize = 256;
+
+    let engine = Arc::new(WorkConservingInputEngine::new(None));
+    let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
+    let mut vm = VirtualMachine::builder()
+        .with_standard_library(false)
+        .with_mpc_engine(runtime_engine)
+        .build();
+    vm.register_function(repeated_async_inputs_function_with_offset(
+        "first_ready_execution",
+        INPUTS_PER_EXECUTION,
+        0,
+    ));
+    vm.register_function(repeated_async_inputs_function_with_offset(
+        "second_ready_execution",
+        INPUTS_PER_EXECUTION,
+        10_000,
+    ));
+
+    vm.execute_many_async(
+        ["first_ready_execution", "second_ready_execution"],
+        engine.as_ref(),
+    )
+    .await
+    .expect("both immediately-ready executions should complete");
+
+    let schedule = engine.schedule.lock();
+    assert_eq!(
+        schedule.iter().filter(|lane| **lane == 0).count(),
+        INPUTS_PER_EXECUTION
+    );
+    assert_eq!(
+        schedule.iter().filter(|lane| **lane == 1).count(),
+        INPUTS_PER_EXECUTION
+    );
+    let longest_single_lane_run = schedule
+        .chunk_by(|left, right| left == right)
+        .map(<[u8]>::len)
+        .max()
+        .unwrap_or_default();
+    assert!(
+        longest_single_lane_run <= super::effect_scheduler::DEFAULT_COMPLETED_EFFECT_BUDGET,
+        "one runnable execution monopolized {longest_single_lane_run} consecutive effects; budget is {}",
+        super::effect_scheduler::DEFAULT_COMPLETED_EFFECT_BUDGET,
+    );
 }
 
 #[tokio::test]
@@ -3481,6 +3870,7 @@ fn turmoil_async_mpc_builtins_cover_every_async_backend_operation() -> turmoil::
         );
 
         let random_share = vm.execute_async("turmoil_random", engine.as_ref()).await?;
+        assert!(matches!(random_share, Value::Object(_)));
         assert_eq!(
             vm.execute_async_with_args("turmoil_open_arg", &[random_share], engine.as_ref())
                 .await?,
@@ -4120,6 +4510,74 @@ async fn share_batch_mul_builtin_uses_async_batch_multiply() {
     );
     assert_eq!(engine.sync_mul_calls.load(Ordering::SeqCst), 0);
     assert_eq!(engine.async_batch_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn share_batch_mul_builtin_uses_sync_batch_multiply() {
+    let engine = Arc::new(AsyncBatchMulEngine::new());
+    let runtime_engine: Arc<dyn MpcEngine> = engine.clone();
+    let ty = ShareType::boolean();
+    let mut vm = VirtualMachine::builder()
+        .with_standard_library(false)
+        .with_mpc_engine(runtime_engine)
+        .build();
+    let lefts = vm.create_array_ref(2).expect("create left shares array");
+    vm.push_array_values(
+        lefts,
+        &[
+            Value::Share(ty, ShareData::Opaque(vec![1].into())),
+            Value::Share(ty, ShareData::Opaque(vec![0].into())),
+        ],
+    )
+    .expect("seed left shares array");
+    let rights = vm.create_array_ref(2).expect("create right shares array");
+    vm.push_array_values(
+        rights,
+        &[
+            Value::Share(ty, ShareData::Opaque(vec![1].into())),
+            Value::Share(ty, ShareData::Opaque(vec![1].into())),
+        ],
+    )
+    .expect("seed right shares array");
+    vm.register_function(VMFunction::new(
+        "sync_builtin_batch_mul".to_string(),
+        vec!["lefts".to_string(), "rights".to_string()],
+        Vec::new(),
+        None,
+        2,
+        vec![
+            Instruction::PUSHARG(0),
+            Instruction::PUSHARG(1),
+            Instruction::CALL("Share.batch_mul".to_string()),
+            Instruction::RET(0),
+        ],
+        HashMap::new(),
+    ));
+
+    let result = vm
+        .execute_with_args(
+            "sync_builtin_batch_mul",
+            &[Value::from(lefts), Value::from(rights)],
+        )
+        .expect("Share.batch_mul should execute through synchronous batch engine");
+    let Value::Array(result_ref) = result else {
+        panic!("Share.batch_mul should return an array");
+    };
+
+    assert_eq!(vm.read_array_len(result_ref).expect("result length"), 2);
+    assert_eq!(
+        vm.read_table_field(TableRef::from(result_ref), &Value::I64(0))
+            .expect("read first result"),
+        Some(Value::Share(ty, ShareData::Opaque(vec![1].into())))
+    );
+    assert_eq!(
+        vm.read_table_field(TableRef::from(result_ref), &Value::I64(1))
+            .expect("read second result"),
+        Some(Value::Share(ty, ShareData::Opaque(vec![0].into())))
+    );
+    assert_eq!(engine.sync_mul_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.sync_batch_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(engine.async_batch_calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -6531,4 +6989,168 @@ fn test_complex_program() {
 
     let result = vm.execute("test_complex").unwrap();
     assert_eq!(result, Value::I64(55)); // 1 + 4 + 9 + 16 + 25 = 55
+}
+
+#[test]
+fn compiled_list_repetition_preserves_expression_counts_and_operand_order() {
+    for (expr, expected) in [
+        ("xs * n", vec![1, 2, 1, 2]),
+        ("n * xs", vec![1, 2, 1, 2]),
+        ("xs * -n", vec![]),
+        ("xs * (n - 1)", vec![1, 2]),
+        ("(n - 1) * xs", vec![1, 2]),
+        ("xs * 0", vec![]),
+    ] {
+        let source = format!("def main() -> list[int64]:\n  var xs: list[int64] = [1, 2]\n  var n: int64 = 2\n  return {expr}\n");
+        let mut vm = compile_vm_source(&source);
+        let result = vm.execute("main").unwrap();
+        assert_eq!(
+            read_vm_array(&mut vm, result),
+            expected.into_iter().map(Value::I64).collect::<Vec<_>>(),
+            "{expr}"
+        );
+    }
+}
+
+#[test]
+fn compiled_definite_assignment_accepts_branch_and_loop_initialization() {
+    for flag in [false, true] {
+        let mut vm = compile_vm_source(
+            "def main(flag: bool) -> int64:\n  var x: int64\n  if flag:\n    return 7\n  else:\n    while True:\n      x = 9\n      break\n  return x\n",
+        );
+        assert_eq!(
+            vm.execute_with_args("main", &[Value::Bool(flag)]).unwrap(),
+            Value::I64(if flag { 7 } else { 9 })
+        );
+    }
+}
+
+#[test]
+fn compiled_definite_assignment_preserves_object_alias_initialization() {
+    let mut vm = compile_vm_source(
+        "object Pair:\n  x: int64\n  y: int64\ndef init(p: Pair):\n  p.x = 11\n  p.y = 13\ndef main() -> int64:\n  var p: Pair\n  var alias = p\n  init(alias)\n  return p.x + p.y\n",
+    );
+    assert_eq!(vm.execute_with_args("main", &[]).unwrap(), Value::I64(24));
+}
+
+#[test]
+fn compiled_definite_assignment_alias_and_inherited_list_defaults_execute() {
+    let mut vm = compile_vm_source(
+        "type Numbers = list[int64]\nobject Base:\n  values: Numbers\nobject Child(Base):\n  count: int64\ndef main() -> int64:\n  var c: Child\n  c.values.append(17)\n  c.count = 1\n  var values: Numbers\n  values.append(c.values[0])\n  return values[0] + c.count\n",
+    );
+    assert_eq!(vm.execute_with_args("main", &[]).unwrap(), Value::I64(18));
+}
+
+#[test]
+fn compiled_definite_assignment_keeps_loop_local_shadowing_local() {
+    let mut vm = compile_vm_source(
+        "def main() -> int64:\n  var x: int64 = 17\n  for i in 0..2:\n    var x: int64 = 5\n  return x\n",
+    );
+    assert_eq!(vm.execute_with_args("main", &[]).unwrap(), Value::I64(17));
+}
+
+#[test]
+fn compiled_definite_assignment_optimizer_runtime_matrix() {
+    let cases = [
+        ("def main() -> int64:\n  var x: int64\n  while True:\n    x = 19\n    break\n  return x\n", 19),
+        ("object P:\n  x: int64\ndef init(p: P):\n  p.x = 23\ndef main() -> int64:\n  var p: P\n  var alias = p\n  init(alias)\n  return p.x\n", 23),
+        ("def main() -> int64:\n  var x = 17\n  for i in 0..2:\n    var x = 5\n  return x\n", 17),
+        ("type Numbers = list[int64]\nobject Base:\n  values: Numbers\nobject Child(Base):\n  count: int64\ndef main() -> int64:\n  var c: Child\n  c.values.append(17)\n  c.count = 1\n  return c.values[0] + c.count\n", 18),
+    ];
+    for level in 0..=3 {
+        for (source, expected) in cases {
+            let mut vm = compile_vm_source_at_level(source, level);
+            assert_eq!(
+                vm.execute_with_args("main", &[]).unwrap(),
+                Value::I64(expected),
+                "O{level}: {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn compiled_definite_assignment_eager_boolean_initializer_effects_survive() {
+    let source = "object P:\n  x: int64\ndef init(p: P) -> bool:\n  p.x = 29\n  return True\ndef main() -> int64:\n  var p: P\n  if False and init(p):\n    return 0\n  return p.x\n";
+    for level in 0..=3 {
+        let mut vm = compile_vm_source_at_level(source, level);
+        assert_eq!(
+            vm.execute_with_args("main", &[]).unwrap(),
+            Value::I64(29),
+            "O{level}"
+        );
+    }
+}
+
+#[test]
+fn compiled_definite_assignment_loop_transfers_survive_optimization() {
+    let cases = [
+        ("def main(flag: bool) -> int64:\n  var x = 0\n  for i in 0..3:\n    if flag:\n      x += 7\n      break\n    x += 2\n  return x\n", 6, 7),
+        ("def main(flag: bool) -> int64:\n  var x = 0\n  for i in 0..3:\n    if flag:\n      x += 7\n      continue\n    x += 2\n  return x\n", 6, 21),
+    ];
+    for level in 0..=3 {
+        for (source, when_false, when_true) in cases {
+            for flag in [false, true] {
+                let mut vm = compile_vm_source_at_level(source, level);
+                assert_eq!(
+                    vm.execute_with_args("main", &[Value::Bool(flag)]).unwrap(),
+                    Value::I64(if flag { when_true } else { when_false }),
+                    "O{level}, flag={flag}: {source}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn compiled_multifile_member_aliases_execute_the_correct_functions() {
+    let cases: &[(&[(&str, &str)], i64)] = &[
+        (&[
+            ("math.stfl", "def helper(x: int64) -> int64:\n  return x + 2\ndef value(x: int64 = 5) -> int64:\n  return helper(x)\n"),
+            ("main.stfl", "import math.value as answer\nimport math.value as alternate\ndef main() -> int64:\n  var c = create_closure(\"alternate\")\n  var x: int64 = call_closure_with_arg(c, 3)\n  return answer() + answer(x: 9) + x\n"),
+        ], 23),
+        (&[
+            ("left/service.stfl", "import helpers.value as selected\ndef run() -> int64:\n  return selected()\n"),
+            ("left/helpers.stfl", "def value() -> int64:\n  return 3\n"),
+            ("right/service.stfl", "import helpers.value as selected\ndef run() -> int64:\n  return selected()\n"),
+            ("right/helpers.stfl", "def value() -> int64:\n  return 8\n"),
+            ("main.stfl", "import left.service as l\nimport right.service as r\ndef main() -> int64:\n  return l.run() + r.run()\n"),
+        ], 11),
+        (&[
+            ("pkg/tools.stfl", "def sum(*xs: int64) -> int64:\n  var result = 0\n  for x in xs:\n    result += x\n  return result\n"),
+            ("main.stfl", "import pkg.tools.sum as total\ndef main() -> int64:\n  return total(2, 3, 7) + total()\n"),
+        ], 12),
+    ];
+    for (files, expected) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, source) in *files {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, source).unwrap();
+        }
+        let path = dir.path().join("main.stfl");
+        let source = std::fs::read_to_string(&path).unwrap();
+        for level in 0..=3 {
+            let program = stoffellang::compile_file(
+                &path,
+                &source,
+                &stoffellang::CompilerOptions {
+                    optimize: level > 0,
+                    optimization_level: level,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("O{level}: {e:?}"));
+            let binary = stoffellang::convert_to_binary(&program);
+            let mut vm = VirtualMachine::try_new().unwrap();
+            for function in binary.try_to_vm_functions().unwrap() {
+                vm.try_register_function(function).unwrap();
+            }
+            assert_eq!(
+                vm.execute("main").unwrap(),
+                Value::I64(*expected),
+                "O{level}: {source}"
+            );
+        }
+    }
 }

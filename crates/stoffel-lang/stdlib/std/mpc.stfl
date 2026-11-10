@@ -156,6 +156,54 @@ builtin object ClientStore:
     Example:
       var weight: secret fix64 = ClientStore.take_share_fixed(0, 0)
     """
+  def sum_shares(share_id: int64, client_count: int64) -> Share {.builtin.}:
+    """Sum matching integer inputs across a prefix of the client roster.
+
+    Args:
+      share_id: Input position to read from each client.
+      client_count: Number of clients to include; values below one include client zero.
+
+    Returns:
+      This party's share of the sum.
+
+    Raises:
+      An error if an input is missing or its share type is incompatible.
+
+    MPC:
+      Local; adds already-received shares without communication or preprocessing.
+    """
+  def sum_shares_bool(share_id: int64, client_count: int64) -> Share {.builtin.}:
+    """Sum matching boolean inputs across a prefix of the client roster.
+
+    Args:
+      share_id: Input position to read from each client.
+      client_count: Number of clients to include; values below one include client zero.
+
+    Returns:
+      This party's share of the sum.
+
+    Raises:
+      An error if an input is missing or its share type is incompatible.
+
+    MPC:
+      Local; adds already-received shares without communication or preprocessing.
+    """
+  def sum_shares_fixed(share_id: int64, client_count: int64) -> Share {.builtin.}:
+    """Sum matching fixed-point inputs across a prefix of the client roster.
+
+    Args:
+      share_id: Input position to read from each client.
+      client_count: Number of clients to include; values below one include client zero.
+
+    Returns:
+      This party's share of the sum.
+
+    Raises:
+      An error if an input is missing or its share type is incompatible.
+
+    MPC:
+      Local; adds already-received shares without communication or preprocessing.
+    """
   def get_number_clients() -> int64 {.builtin.}:
     """Return the number of clients known to this computation.
 
@@ -232,7 +280,7 @@ builtin object Share:
   """This party's share of a secret value.
 
   A share carries its type: a signed or unsigned secret integer of a given
-  bit width (1 bit for `secret bool`), or a secret fixed-point number with
+  bit width (1 bit for `secret bool`), a field-domain SecretField value, or a secret fixed-point number with
   a total and a fractional bit count. Values of `secret` types are shares,
   so every method here also accepts them, and methods whose first
   parameter is a `Share` can be called with UFCS, as in `a.mul(b)` or
@@ -244,6 +292,19 @@ builtin object Share:
   messages with the other parties. Randomness draws from the preprocessing
   pool.
   """
+  # Locally share the same public field constant on every party.
+  def from_field(field_bytes: bytes) -> Share {.builtin.}:
+    """Create a field-domain share of a public field value.
+
+    Args:
+      field_bytes: Canonically encoded scalar field value, identical on every party.
+
+    Returns:
+      A SecretField share of the public value.
+
+    MPC:
+      Local; no communication or preprocessing. The input remains public.
+    """
   def from_clear(value: int64) -> Share {.builtin.}:
     """Create a share of a public value.
 
@@ -587,7 +648,7 @@ builtin object Share:
       share: The share to inspect.
 
     Returns:
-      `"SecretInt"`, `"SecretUInt"` or `"SecretFixedPoint"`. Booleans are
+      `"SecretInt"`, `"SecretUInt"`, `"SecretField"` or `"SecretFixedPoint"`. Booleans are
       1-bit secret integers, so they report `"SecretInt"`.
 
     MPC:
@@ -629,6 +690,45 @@ builtin object Share:
       Interactive: all values are opened in one batched opening, so the
       round cost does not grow with the list length. Every value becomes
       public.
+    """
+  def batch_open_field(shares: list[Share]) -> list[bytes] {.builtin.}:
+    """Open field-domain shares to every party in one batch.
+
+    Args:
+      shares: Shares with a homogeneous share type.
+
+    Returns:
+      Canonical field encodings in input order.
+
+    MPC:
+      Interactive; reveals every value to all parties without preprocessing.
+    """
+  def batch_open_exp(shares: list[Share], curve_name: string) -> list[bytes] {.builtin.}:
+    """Open group encodings of secret exponents in one batch.
+
+    Args:
+      shares: Shares with a homogeneous share type.
+      curve_name: Supported curve whose default generator is used.
+
+    Returns:
+      Encoded group elements in input order.
+
+    MPC:
+      Interactive; publishes group elements without revealing scalar exponents.
+    """
+  def batch_open_exp_custom(shares: list[Share], generators: list[bytes], curve_name: string) -> list[bytes] {.builtin.}:
+    """Open secret exponents against caller-supplied group generators.
+
+    Args:
+      shares: Shares with a homogeneous share type.
+      generators: Encoded generators, one for each share.
+      curve_name: Supported curve of the supplied generators.
+
+    Returns:
+      Encoded group elements in input order.
+
+    MPC:
+      Interactive; publishes group elements without revealing scalar exponents.
     """
   def batch_open_fixed[T](shares: list[Share]) -> list[T] {.builtin: "Share.batch_open".}:
     """Open a list of shares to every party, typed by context.

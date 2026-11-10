@@ -2,7 +2,45 @@
 
 All notable changes to the Stoffel crates are tracked here.
 
-## [Unreleased]
+## [0.2.0] - Unreleased
+
+#### Added
+
+- Added `stoffel start-mesh`, `stoffel stop-mesh` and `stoffel run --mesh`: start a named standing mesh of local MPC parties once and run any number of executions on it, including in parallel.
+- Added `StandingMesh`, `StandingAdmitter` and `run_on_standing_mesh` to `stoffel-vm-runner`, and `vm::execute_on_standing_mesh` to the SDK.
+- Standing nodes record each execution's VM return when `STOFFEL_STANDING_RESULT_DIR` is set, and report bootnode and node readiness through marker files.
+
+#### Changed
+
+- Updated `stoffelcrypto` to `0.1.2` and the coordinator to the published `0.2.1` crates, aligning the workspace's exact dependency pins (including `tokio` 1.46.1) with `stoffelcrypto`'s.
+- The standing leader waits for its bootnode to listen instead of sleeping before joining.
+
+#### Fixed
+
+- Serializing a program now writes function labels in a stable order, so the same program always gets the same content address.
+- Standing control commands published by several processes at once can no longer replace one another.
+
+
+#### Added
+
+- Added compiler and VM measurement coverage for AES/CTR/CBC MPC round counts, full-unroll correctness, and regression cases around batching, public-gate folding, and secret-multiplication preservation.
+
+#### Changed
+
+- Updated `stoffelcrypto` to `0.1.2` and retained `stoffelnet` `0.1.1`, with matching AVSS share verification and timestamped share-store support.
+- Reworked resolved bytecode handling with operand validation, compact resolved operands, resolved function headers, and improved constant/label/function metadata resolution.
+- Improved `-O3` MPC optimization substantially: batched independent `Share.batch_mul` calls, cross-block CTR scheduling, constant branch folding, public-gate folding, bounded multi-return inlining, loop vectorization, and faster dependency tracking.
+- Reduced AES-family MPC round counts in the tracked examples while preserving NIST/equivalence checks, including AES `-O3` from 3306 to 296 rounds, CTR `-O3` from 4774 to 418 rounds, and CBC `-O3` from 22876 to 1061 rounds across the optimizer and example updates.
+- Updated MPC examples to use `add_constant` in place of `add_scalar` for clearer API semantics.
+
+#### Fixed
+
+- Fixed non-hermetic compiler optimization budgets that could leak through process-global environment variables across tests or concurrent compiles.
+- Fixed full-unroll AES/CTR/CBC miscompiles caused by incomplete dependency modeling for in-place mutators, indexed writes, and field writes.
+- Fixed `Share.batch_mul` fusion cases that could pass nested arrays to runtime scalar-share extraction by flattening nested operands and restoring result shape safely.
+- Fixed public secret-multiplication batching edge cases by localizing provably public operands to local `mul_scalar` operations where appropriate.
+- Fixed AVSS runner preprocessing so it no longer depends on receiving a client input.
+- Fixed MPC runtime cloning so independent clones preserve client-store counts.
 
 ## [0.1.3] - 2026-10-08
 
@@ -62,28 +100,6 @@ All notable changes to the Stoffel crates are tracked here.
 - Changed the Rust SDK runner lookup to resolve `stoffel-run` from `PATH` instead of assuming Cargo's bin directory.
 - Updated runner release targets and prebuilt target listings to publish macOS `arm64` binaries only.
 
-### Dev - full branch changelog
-
-#### Added
-
-- Added compiler and VM measurement coverage for AES/CTR/CBC MPC round counts, full-unroll correctness, and regression cases around batching, public-gate folding, and secret-multiplication preservation.
-
-#### Changed
-
-- Reworked resolved bytecode handling with operand validation, compact resolved operands, resolved function headers, and improved constant/label/function metadata resolution.
-- Improved `-O3` MPC optimization substantially: batched independent `Share.batch_mul` calls, cross-block CTR scheduling, constant branch folding, public-gate folding, bounded multi-return inlining, loop vectorization, and faster dependency tracking.
-- Reduced AES-family MPC round counts in the tracked examples while preserving NIST/equivalence checks, including AES `-O3` from 3306 to 296 rounds, CTR `-O3` from 4774 to 418 rounds, and CBC `-O3` from 22876 to 1061 rounds across the optimizer and example updates.
-- Updated MPC examples to use `add_constant` in place of `add_scalar` for clearer API semantics.
-
-#### Fixed
-
-- Fixed non-hermetic compiler optimization budgets that could leak through process-global environment variables across tests or concurrent compiles.
-- Fixed full-unroll AES/CTR/CBC miscompiles caused by incomplete dependency modeling for in-place mutators, indexed writes, and field writes.
-- Fixed `Share.batch_mul` fusion cases that could pass nested arrays to runtime scalar-share extraction by flattening nested operands and restoring result shape safely.
-- Fixed public secret-multiplication batching edge cases by localizing provably public operands to local `mul_scalar` operations where appropriate.
-- Fixed AVSS runner preprocessing so it no longer depends on receiving a client input.
-- Fixed MPC runtime cloning so independent clones preserve client-store counts.
-
 ## [0.1.0] - 2026-06-22
 
 ### Added
@@ -93,5 +109,5 @@ All notable changes to the Stoffel crates are tracked here.
 
 ### Notes
 
-- `stoffel-bindgen` is currently marked `publish = false`; `stoffel-cli` is released as a GitHub binary artifact rather than a crates.io package.
-- Publish order for the initial crate release is `stoffel-vm-types`, `stoffellang`, `stoffel-vm`, `stoffel-vm-runner`, `stoffel-rust-sdk`, then downstream binary artifacts such as `stoffel-cli`.
+- `stoffel-bindgen` is currently marked `publish = false`; the `stoffel` CLI crate is published for `cargo install stoffel` and also released as a GitHub binary artifact.
+- Publish order for the initial crate release is `stoffel-vm-types`, `stoffellang`, `stoffel-vm`, `stoffel-vm-runner`, `stoffel-rust-sdk`, then downstream binary artifacts such as the `stoffel` CLI.

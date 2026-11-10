@@ -320,46 +320,41 @@ pub fn analyze_liveness_cfg_dense(
     }
 
     // 1) Determine basic block boundaries
-    let mut block_starts: HashSet<usize> = HashSet::new();
-    block_starts.insert(0);
+    let mut inst2block = vec![0usize; n];
     for &idx in labels.values() {
         if idx < n {
-            block_starts.insert(idx);
+            inst2block[idx] = 1;
         }
     }
     for (i, instruction) in instructions.iter().enumerate() {
-        match instruction {
+        if matches!(
+            instruction,
             Instruction::JMP(_)
-            | Instruction::JMPEQ(_)
-            | Instruction::JMPNEQ(_)
-            | Instruction::JMPLT(_)
-            | Instruction::JMPGT(_)
-            | Instruction::RET(_)
-                if i + 1 < n =>
-            {
-                block_starts.insert(i + 1);
-            }
-            _ => {}
+                | Instruction::JMPEQ(_)
+                | Instruction::JMPNEQ(_)
+                | Instruction::JMPLT(_)
+                | Instruction::JMPGT(_)
+                | Instruction::RET(_)
+        ) && i + 1 < n
+        {
+            inst2block[i + 1] = 1;
         }
     }
-    // Create sorted list of starts
-    let mut starts: Vec<usize> = block_starts.into_iter().collect();
-    starts.sort_unstable();
-    // Map: inst index -> block id
-    let mut inst2block: Vec<usize> = vec![0; n];
-    for (bi, &s) in starts.iter().enumerate() {
-        let end = starts.get(bi + 1).copied().unwrap_or(n);
-        for block_id in inst2block.iter_mut().take(end).skip(s) {
-            *block_id = bi;
+    let mut starts = vec![0];
+    for (i, block) in inst2block.iter_mut().enumerate() {
+        if i != 0 && *block != 0 {
+            starts.push(i);
         }
+        *block = starts.len() - 1;
     }
 
     struct BlockInfo {
         start: usize,
         end: usize, // exclusive
-        succs: Vec<usize>,
-        use_bits: Vec<u64>, // used before any in-block def
-        def_bits: Vec<u64>, // defined anywhere in the block
+        succs: [usize; 2],
+        successor_count: usize,
+        use_bits: std::ops::Range<usize>, // slice of shared nonzero use words
+        def_bits: std::ops::Range<usize>, // slice of shared nonzero def words
     }
 
     let mut blocks: Vec<BlockInfo> = Vec::with_capacity(starts.len());
@@ -368,9 +363,10 @@ pub fn analyze_liveness_cfg_dense(
         blocks.push(BlockInfo {
             start: s,
             end: e,
-            succs: Vec::new(),
-            use_bits: vec![0u64; words],
-            def_bits: vec![0u64; words],
+            succs: [0; 2],
+            successor_count: 0,
+            use_bits: 0..0,
+            def_bits: 0..0,
         });
     }
 
@@ -389,7 +385,8 @@ pub fn analyze_liveness_cfg_dense(
         match &instructions[last_i] {
             Instruction::JMP(lbl) => {
                 if let Some(t) = label_to_block(lbl) {
-                    block.succs.push(t);
+                    block.succs[block.successor_count] = t;
+                    block.successor_count += 1;
                 }
             }
             Instruction::JMPEQ(lbl)
@@ -397,12 +394,14 @@ pub fn analyze_liveness_cfg_dense(
             | Instruction::JMPLT(lbl)
             | Instruction::JMPGT(lbl) => {
                 if let Some(t) = label_to_block(lbl) {
-                    block.succs.push(t);
+                    block.succs[block.successor_count] = t;
+                    block.successor_count += 1;
                 }
                 // fallthrough
                 if let Some(next_start) = starts.get(bi + 1).copied() {
                     if next_start < n {
-                        block.succs.push(bi + 1);
+                        block.succs[block.successor_count] = bi + 1;
+                        block.successor_count += 1;
                     }
                 }
             }
@@ -410,82 +409,156 @@ pub fn analyze_liveness_cfg_dense(
             _ => {
                 // fallthrough
                 if let Some(_next) = starts.get(bi + 1) {
-                    block.succs.push(bi + 1);
+                    block.succs[block.successor_count] = bi + 1;
+                    block.successor_count += 1;
                 }
             }
         }
         // Dedup succs
-        let mut uniq = HashSet::new();
-        block.succs.retain(|s| uniq.insert(*s));
+        if block.successor_count == 2 && block.succs[0] == block.succs[1] {
+            block.successor_count = 1;
+        }
     }
 
-    // 3) Compute use/def per block (use = used before being defined within the block).
+    // Store only nonzero words per block. Dense scratch is shared across all
+    // blocks; clearing/extracting it visits only touched words.
+    fn add_words(input: &[(usize, u64)], bits: &mut [u64], touched: &mut Vec<usize>) {
+        for &(word, mask) in input {
+            if bits[word] == 0 {
+                touched.push(word);
+            }
+            bits[word] |= mask;
+        }
+    }
+    fn take_words(bits: &mut [u64], touched: &mut Vec<usize>, out: &mut Vec<(usize, u64)>) {
+        touched.sort_unstable();
+        touched.dedup(); // a kill followed by a use may touch the same word twice
+        out.clear();
+        for word in touched.drain(..) {
+            let mask = std::mem::take(&mut bits[word]);
+            if mask != 0 {
+                out.push((word, mask));
+            }
+        }
+    }
+    let mut new_out = vec![0u64; words];
+    let mut defs = vec![0u64; words];
+    let mut touched_words = Vec::new();
+    let mut def_words = Vec::new();
+    let mut block_uses = Vec::new();
+    let mut block_defs = Vec::new();
+    let mut extracted = Vec::new();
     for b in &mut blocks {
         for &ops in &inst_ops[b.start..b.end] {
             for &u in &ops.uses {
                 if u == NO_REG {
                     continue;
                 }
-                if (b.def_bits[(u >> 6) as usize] >> (u & 63)) & 1 == 0 {
-                    bit_set(&mut b.use_bits, u);
+                let word = (u >> 6) as usize;
+                if (defs[word] >> (u & 63)) & 1 == 0 {
+                    if new_out[word] == 0 {
+                        touched_words.push(word);
+                    }
+                    bit_set(&mut new_out, u);
                 }
             }
             if ops.def != NO_REG {
-                bit_set(&mut b.def_bits, ops.def);
+                let word = (ops.def >> 6) as usize;
+                if defs[word] == 0 {
+                    def_words.push(word);
+                }
+                bit_set(&mut defs, ops.def);
             }
         }
+        take_words(&mut new_out, &mut touched_words, &mut extracted);
+        let start = block_uses.len();
+        block_uses.extend_from_slice(&extracted);
+        b.use_bits = start..block_uses.len();
+        take_words(&mut defs, &mut def_words, &mut extracted);
+        let start = block_defs.len();
+        block_defs.extend_from_slice(&extracted);
+        b.def_bits = start..block_defs.len();
     }
+    drop(defs);
+    drop(def_words);
+    drop(extracted);
 
-    // 4) Iterative dataflow for live_in/live_out over bitsets (no per-block clones).
-    let mut live_in_b: Vec<Vec<u64>> = vec![vec![0u64; words]; blocks.len()];
-    let mut live_out_b: Vec<Vec<u64>> = vec![vec![0u64; words]; blocks.len()];
+    // 4) Only revisit predecessors whose successor live-in changed. The initial
+    // reverse-order pass settles ordinary forward control flow in one visit.
+    // Predecessors use a compact CSR index, not one allocation per block.
+    let mut pred_offsets = vec![0usize; blocks.len() + 1];
+    for block in &blocks {
+        for &successor in &block.succs[..block.successor_count] {
+            pred_offsets[successor + 1] += 1;
+        }
+    }
+    for i in 1..pred_offsets.len() {
+        pred_offsets[i] += pred_offsets[i - 1];
+    }
+    let mut predecessors = vec![0usize; *pred_offsets.last().unwrap()];
+    let mut cursor = pred_offsets.clone();
+    for (bi, block) in blocks.iter().enumerate() {
+        for &successor in &block.succs[..block.successor_count] {
+            predecessors[cursor[successor]] = bi;
+            cursor[successor] += 1;
+        }
+    }
+    drop(cursor);
 
-    // Seed entry live-ins.
     let entry_block = inst2block[0];
-    let mut entry_seed = vec![0u64; words];
     for &vr in live_in {
-        bit_set(&mut entry_seed, vr_index_by_id[vr.0]);
+        let index = vr_index_by_id[vr.0];
+        let word = (index >> 6) as usize;
+        if new_out[word] == 0 {
+            touched_words.push(word);
+        }
+        bit_set(&mut new_out, index);
     }
-    live_in_b[entry_block].copy_from_slice(&entry_seed);
-
-    let mut new_out = vec![0u64; words];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for bi in (0..blocks.len()).rev() {
-            // out[B] = union of in[S] over successors
-            new_out.fill(0);
-            for &s in &blocks[bi].succs {
-                let src = &live_in_b[s];
-                for (dst, src) in new_out.iter_mut().zip(src.iter()).take(words) {
-                    *dst |= *src;
-                }
-            }
-            {
-                let dst = &mut live_out_b[bi];
-                for (dst_word, new_word) in dst.iter_mut().zip(new_out.iter()).take(words) {
-                    if *dst_word != *new_word {
-                        *dst_word = *new_word;
-                        changed = true;
-                    }
-                }
-            }
-            // in[B] = use[B] ∪ (out[B] \ def[B]) (∪ seed at entry)
-            let block = &blocks[bi];
-            let out = &live_out_b[bi];
-            let dst = &mut live_in_b[bi];
-            for w in 0..words {
-                let mut v = block.use_bits[w] | (out[w] & !block.def_bits[w]);
-                if bi == entry_block {
-                    v |= entry_seed[w];
-                }
-                if dst[w] != v {
-                    dst[w] = v;
-                    changed = true;
+    let mut entry_seed = Vec::new();
+    take_words(&mut new_out, &mut touched_words, &mut entry_seed);
+    let mut live_in_b = vec![Vec::new(); blocks.len()];
+    live_in_b[entry_block] = entry_seed.clone();
+    let mut next = Vec::new();
+    let mut work: Vec<_> = (0..blocks.len()).collect();
+    let mut queued = vec![true; blocks.len()];
+    while let Some(bi) = work.pop() {
+        queued[bi] = false;
+        for &successor in &blocks[bi].succs[..blocks[bi].successor_count] {
+            add_words(&live_in_b[successor], &mut new_out, &mut touched_words);
+        }
+        for &(word, mask) in &block_defs[blocks[bi].def_bits.clone()] {
+            new_out[word] &= !mask;
+        }
+        add_words(
+            &block_uses[blocks[bi].use_bits.clone()],
+            &mut new_out,
+            &mut touched_words,
+        );
+        if bi == entry_block {
+            add_words(&entry_seed, &mut new_out, &mut touched_words);
+        }
+        take_words(&mut new_out, &mut touched_words, &mut next);
+        if next != live_in_b[bi] {
+            std::mem::swap(&mut next, &mut live_in_b[bi]);
+            for &pred in &predecessors[pred_offsets[bi]..pred_offsets[bi + 1]] {
+                if !queued[pred] {
+                    queued[pred] = true;
+                    work.push(pred);
                 }
             }
         }
     }
+    drop(block_uses);
+    drop(block_defs);
+    drop(new_out);
+    drop(next);
+    drop(touched_words);
+    // Live-out is a union of successor live-ins; reconstruct it on demand
+    // below instead of retaining another blocks × registers bit matrix.
+    drop(predecessors);
+    drop(pred_offsets);
+    drop(work);
+    drop(queued);
 
     // 5) + 6) Extract one interval per VR from a single SPARSE backward walk.
     //   def_first[v] = first instruction index defining v
@@ -523,7 +596,7 @@ pub fn analyze_liveness_cfg_dense(
     // during the current block so they can be reset in O(touched) before the next.
     let mut present = vec![false; num_vrs];
     let mut touched: Vec<usize> = Vec::new();
-    for (bi, block) in blocks.iter().enumerate() {
+    for block in &blocks {
         for &vi in &touched {
             present[vi] = false;
         }
@@ -531,16 +604,18 @@ pub fn analyze_liveness_cfg_dense(
         // Seed with the block's live-out. Its last instruction is at index
         // block.end-1, so the highest live-out index for these VRs is block.end-1
         // (→ end_idx = block.end), matching the dense walk's `i + 1` at that index.
-        for (w, word) in live_out_b[bi].iter().enumerate().take(words) {
-            let mut x = *word;
-            while x != 0 {
-                let vi = w * 64 + x.trailing_zeros() as usize;
-                x &= x - 1;
-                if !present[vi] {
-                    present[vi] = true;
-                    touched.push(vi);
-                    if block.end > end_idx[vi] {
-                        end_idx[vi] = block.end;
+        for &successor in &block.succs[..block.successor_count] {
+            for &(w, word) in &live_in_b[successor] {
+                let mut x = word;
+                while x != 0 {
+                    let vi = w * 64 + x.trailing_zeros() as usize;
+                    x &= x - 1;
+                    if !present[vi] {
+                        present[vi] = true;
+                        touched.push(vi);
+                        if block.end > end_idx[vi] {
+                            end_idx[vi] = block.end;
+                        }
                     }
                 }
             }
@@ -1281,5 +1356,129 @@ fn remap_instruction_with(inst: &Instruction, map_reg: &dyn Fn(usize) -> usize) 
         Instruction::JMPGT(ref label) => Instruction::JMPGT(label.clone()),
         Instruction::CALL(ref name) => Instruction::CALL(name.clone()),
         Instruction::NOP => Instruction::NOP,
+    }
+}
+
+#[cfg(test)]
+mod worklist_tests {
+    use super::*;
+
+    // Independent instruction-level fixed point, deliberately using sets and
+    // exhaustive sweeps. This checks the optimized block worklist and interval
+    // extraction on loops, disconnected code, joins, and duplicate successors.
+    fn reference(
+        code: &[Instruction],
+        labels: &HashMap<String, usize>,
+        seeds: &[VirtualRegister],
+    ) -> Vec<Option<LiveInterval>> {
+        let mut incoming = vec![HashSet::<usize>::new(); code.len()];
+        let mut outgoing = incoming.clone();
+        loop {
+            let mut changed = false;
+            for i in (0..code.len()).rev() {
+                let mut successors = Vec::new();
+                match &code[i] {
+                    Instruction::JMP(label) => successors.push(labels[label]),
+                    Instruction::JMPEQ(label)
+                    | Instruction::JMPNEQ(label)
+                    | Instruction::JMPLT(label)
+                    | Instruction::JMPGT(label) => {
+                        successors.push(labels[label]);
+                        if i + 1 < code.len() {
+                            successors.push(i + 1);
+                        }
+                    }
+                    Instruction::RET(_) => {}
+                    _ => {
+                        if i + 1 < code.len() {
+                            successors.push(i + 1);
+                        }
+                    }
+                }
+                let out: HashSet<_> = successors
+                    .iter()
+                    .flat_map(|&s| incoming[s].iter().copied())
+                    .collect();
+                let mut input = out.clone();
+                if let Some(def) = def_reg(&code[i]) {
+                    input.remove(&def);
+                }
+                input.extend(use_regs(&code[i]).into_iter().flatten());
+                if i == 0 {
+                    input.extend(seeds.iter().map(|r| r.0));
+                }
+                changed |= incoming[i] != input || outgoing[i] != out;
+                incoming[i] = input;
+                outgoing[i] = out;
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut regs: HashSet<_> = seeds.iter().map(|r| r.0).collect();
+        for inst in code {
+            regs.extend(use_regs(inst).into_iter().flatten());
+            regs.extend(def_reg(inst));
+        }
+        let mut result = vec![None; regs.iter().copied().max().map_or(0, |r| r + 1)];
+        for r in regs {
+            let defs: Vec<_> = code
+                .iter()
+                .enumerate()
+                .filter_map(|(i, inst)| (def_reg(inst) == Some(r)).then_some(i))
+                .collect();
+            let start = defs.first().copied().unwrap_or(0);
+            let end = outgoing
+                .iter()
+                .rposition(|out| out.contains(&r))
+                .map_or(0, |i| i + 1)
+                // Reads occur before the instruction's write. Include uses at
+                // disconnected block entries even without a live predecessor.
+                .max(
+                    code.iter()
+                        .rposition(|inst| use_regs(inst).contains(&Some(r)))
+                        .unwrap_or(0),
+                )
+                .max(defs.last().map_or(0, |i| i + 1))
+                .max(start + 1);
+            result[r] = Some(LiveInterval { start, end });
+        }
+        result
+    }
+
+    #[test]
+    fn worklist_intervals_match_instruction_fixed_point() {
+        for seed in 0..32 {
+            let mut code = Vec::new();
+            let mut labels = HashMap::new();
+            for i in 0..260 {
+                let a = (i * 7 + seed) % 193;
+                let b = (i * 3 + seed) % 193;
+                let target = if i % 2 == 0 {
+                    (i + 1) % 260
+                } else {
+                    (i * 13 + seed * 7) % 260
+                };
+                let label = format!("label_{target}");
+                let inst = if i % 7 == 0 {
+                    labels.insert(label.clone(), target);
+                    Instruction::JMPEQ(label)
+                } else if i % 11 == 0 {
+                    labels.insert(label.clone(), target);
+                    Instruction::JMP(label)
+                } else if i % 17 == 0 {
+                    Instruction::RET(a)
+                } else {
+                    Instruction::ADD(a, b, (b + 1) % 193)
+                };
+                code.push(inst);
+            }
+            let seeds = [VirtualRegister(1), VirtualRegister(320)];
+            assert_eq!(
+                analyze_liveness_cfg_dense(&code, &labels, &seeds),
+                reference(&code, &labels, &seeds),
+                "graph {seed}"
+            );
+        }
     }
 }

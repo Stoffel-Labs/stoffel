@@ -25,6 +25,9 @@ profiles/
 *.heaptrack.gz
 perf.data*
 callgrind.out.*
+docker/test-*.sh
+docker-compose*.yml
+docker/standing-concurrency/acceptance.py
 
 # Local development files
 .env
@@ -45,3 +48,11 @@ c_ffi_example/
 
 # Other unnecessary files
 dont\ look\ pls/
+
+# Host-only acceptance drivers and Python bytecode caches
+docker/standing-concurrency/all_examples.py
+**/__pycache__/
+crates/stoffel-lang/examples/dist/
+
+# Host-only catalog scheduler tests
+docker/standing-concurrency/test_*.py

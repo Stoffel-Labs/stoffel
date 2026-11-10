@@ -2,17 +2,18 @@
 //! Minimal public API kept to avoid cross-crate trait bound conflicts.
 //! Use the MpcEngine abstraction (net::mpc_engine) to attach an engine to VMState for VM usage.
 
+use super::backend::MpcBackendKind;
 use super::protocol_ids::derive_protocol_instance_id_u32;
 use serde::{Deserialize, Serialize};
 use stoffel_vm_types::core_types::DEFAULT_FIXED_POINT_FRACTIONAL_BITS;
 use stoffel_vm_types::core_types::DEFAULT_FIXED_POINT_TOTAL_BITS;
-use stoffelmpc_mpc::honeybadger::HoneyBadgerMPCNodeOpts;
+use stoffelmpc_mpc::common::types::fixed::FixedPointPrecision;
+use stoffelmpc_mpc::honeybadger::{HoneyBadgerMPCNodeOpts, MIN_STATISTICAL_SECURITY};
 const DEFAULT_MIN_PARTIES: usize = 5;
 const DEFAULT_THRESHOLD: usize = 1;
-const DEFAULT_SECURITY_PARAMETER_K: usize = 8;
 const DEFAULT_PROTOCOL_TIMEOUT_SECONDS: u64 = 600;
 #[allow(dead_code)]
-fn derive_prandbit_count(n_random_shares: usize) -> usize {
+fn derive_randbit_count(n_random_shares: usize) -> usize {
     std::cmp::max(n_random_shares, DEFAULT_FIXED_POINT_FRACTIONAL_BITS)
 }
 #[allow(dead_code)]
@@ -76,23 +77,28 @@ pub fn honeybadger_node_opts(
 }
 
 /// Build HoneyBadger node options with explicit truncation-preprocessing counts
-/// (`n_prandbit` random bits, `n_prandint` random integers) for fixed-point
-/// division/multiplication. Note: prandbit generation consumes one beaver triple
-/// and one random share per bit, so callers should already have folded that cost
-/// into `n_triples`/`n_random_shares`.
+/// (`n_randbit` random bits, `n_prandint` random integers) for fixed-point
+/// division/multiplication. Note: RandBit generation consumes one random share
+/// per bit, so callers should already have folded that cost into
+/// `n_random_shares`. The degree-`2t` zero shares it also consumes are sized
+/// from `n_randbit` by the protocol itself.
 pub fn honeybadger_node_opts_with_truncation(
     n_parties: usize,
     threshold: usize,
     n_triples: usize,
     n_random_shares: usize,
-    n_prandbit: usize,
+    n_randbit: usize,
     n_prandint: usize,
     instance_id: u64,
 ) -> Result<HoneyBadgerMPCNodeOpts, String> {
     validate_honeybadger_topology(n_parties, threshold)?;
 
-    let l = DEFAULT_FIXED_POINT_TOTAL_BITS;
-    let k = DEFAULT_SECURITY_PARAMETER_K;
+    // The PRandInt mask width is derived from this precision, so it must cover
+    // the widest fixed-point value the VM feeds into truncation.
+    let precision = FixedPointPrecision::new(
+        DEFAULT_FIXED_POINT_TOTAL_BITS,
+        DEFAULT_FIXED_POINT_FRACTIONAL_BITS,
+    );
 
     HoneyBadgerMPCNodeOpts::new(
         n_parties,
@@ -100,16 +106,19 @@ pub fn honeybadger_node_opts_with_truncation(
         n_triples,
         n_random_shares,
         honeybadger_protocol_instance_id(instance_id),
-        n_prandbit,
+        n_randbit,
         n_prandint,
-        l,
-        k,
+        precision,
+        MIN_STATISTICAL_SECURITY,
         honeybadger_protocol_timeout(),
     )
     .map_err(|e| format!("Failed to create HoneyBadger node options: {:?}", e))
 }
 
 fn validate_honeybadger_topology(n_parties: usize, threshold: usize) -> Result<(), String> {
+    MpcBackendKind::HoneyBadger
+        .validate_party_count(n_parties)
+        .map_err(|error| error.to_string())?;
     let required = threshold
         .checked_mul(3)
         .and_then(|value| value.checked_add(1))
@@ -157,15 +166,15 @@ mod tests {
 
     #[test]
     fn honeybadger_node_opts_requires_bft_topology() {
-        let err =
-            honeybadger_node_opts(3, 1, 0, 0, 1).expect_err("HoneyBadger must reject n < 3t + 1");
+        let err = honeybadger_node_opts(4, 1, 0, 0, 1)
+            .expect_err("HoneyBadger must reject fewer than five parties");
         assert!(
-            err.contains("HoneyBadger requires n_parties (3) >= 3 * threshold (1) + 1 (4)"),
+            err.contains("HoneyBadger requires at least 5 parties (got 4)"),
             "unexpected error: {err}"
         );
 
-        honeybadger_node_opts(4, 1, 0, 0, 1)
-            .expect("n = 3t + 1 should be accepted for HoneyBadger");
+        honeybadger_node_opts(5, 1, 0, 0, 1)
+            .expect("five parties should be accepted for HoneyBadger at threshold one");
     }
 
     #[test]
@@ -175,6 +184,21 @@ mod tests {
         assert_eq!(
             honeybadger_protocol_instance_id(instance_id),
             honeybadger_protocol_instance_id(instance_id)
+        );
+    }
+
+    #[test]
+    fn truncation_opts_mask_covers_fixed_point_width() {
+        let opts = honeybadger_node_opts_with_truncation(5, 1, 16, 18, 16, 1, 1).unwrap();
+
+        assert_eq!(opts.precision.k(), DEFAULT_FIXED_POINT_TOTAL_BITS);
+        assert_eq!(opts.precision.f(), DEFAULT_FIXED_POINT_FRACTIONAL_BITS);
+        assert_eq!(opts.statistical_security, MIN_STATISTICAL_SECURITY);
+        assert_eq!(opts.n_zero_shares, opts.n_randbit);
+        assert_eq!(
+            opts.mask_bits(),
+            2 * DEFAULT_FIXED_POINT_TOTAL_BITS - DEFAULT_FIXED_POINT_FRACTIONAL_BITS
+                + MIN_STATISTICAL_SECURITY
         );
     }
 }

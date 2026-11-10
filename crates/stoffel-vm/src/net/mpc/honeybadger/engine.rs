@@ -25,7 +25,7 @@ where
     }
 
     fn topology(&self) -> MpcSessionTopology {
-        self.topology
+        HoneyBadgerMpcEngine::topology(self)
     }
 
     fn local_identity(&self) -> DurableIdentityDigest {
@@ -103,6 +103,9 @@ where
     ) -> crate::net::mpc_engine::MpcEngineResult<ClearShareValue> {
         (|| -> Result<ClearShareValue, String> {
             let type_key = match ty {
+                ShareType::SecretField => {
+                    return Err("SecretField requires Share.open_field".to_owned())
+                }
                 ShareType::SecretInt { bit_length } => format!("hb-int-{bit_length}"),
                 ShareType::SecretUInt { bit_length } => format!("hb-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
@@ -110,13 +113,13 @@ where
                 }
             };
 
-            let seq = self.open_registry.insert_single_next(
+            let seq = self.open_registry().insert_single_next(
                 &type_key,
                 self.topology.party_id(),
                 share_bytes.to_vec(),
             )?;
             let wire_message = crate::net::open_registry::encode_single_share_wire_message(
-                self.topology.instance_id(),
+                self.current_instance_id(),
                 seq,
                 &type_key,
                 self.topology.party_id(),
@@ -128,7 +131,7 @@ where
             let n = self.topology.n_parties();
             let t = self.topology.threshold();
 
-            self.open_registry.open_share_at_wait(
+            self.open_registry().open_share_at_wait(
                 self.topology.party_id(),
                 &type_key,
                 seq,
@@ -163,6 +166,9 @@ where
     ) -> crate::net::mpc_engine::MpcEngineResult<Vec<ClearShareValue>> {
         (|| -> Result<Vec<ClearShareValue>, String> {
             let type_key = match ty {
+                ShareType::SecretField => {
+                    return Err("SecretField requires Share.open_field".to_owned())
+                }
                 ShareType::SecretInt { bit_length } => format!("hb-batch-int-{bit_length}"),
                 ShareType::SecretUInt { bit_length } => format!("hb-batch-uint-{bit_length}"),
                 ShareType::SecretFixedPoint { precision } => {
@@ -170,13 +176,13 @@ where
                 }
             };
 
-            let seq = self.open_registry.insert_batch_next(
+            let seq = self.open_registry().insert_batch_next(
                 &type_key,
                 self.topology.party_id(),
                 shares.to_vec(),
             )?;
             let wire_message = crate::net::open_registry::encode_batch_share_wire_message(
-                self.topology.instance_id(),
+                self.current_instance_id(),
                 seq,
                 &type_key,
                 self.topology.party_id(),
@@ -188,7 +194,7 @@ where
             let n = self.topology.n_parties();
             let t = self.topology.threshold();
 
-            self.open_registry.batch_open_at_wait(
+            self.open_registry().batch_open_at_wait(
                 self.topology.party_id(),
                 &type_key,
                 seq,
@@ -233,15 +239,20 @@ where
     }
 
     fn capabilities(&self) -> MpcCapabilities {
-        MpcCapabilities::MULTIPLICATION
-            | MpcCapabilities::OPEN_IN_EXP
+        let mut capabilities = MpcCapabilities::MULTIPLICATION
             | MpcCapabilities::CLIENT_INPUT
             | MpcCapabilities::CLIENT_OUTPUT
             | MpcCapabilities::CONSENSUS
             | MpcCapabilities::RESERVATION
             | MpcCapabilities::RANDOMNESS
             | MpcCapabilities::FIELD_OPEN
-            | MpcCapabilities::PREPROC_PERSISTENCE
+            | MpcCapabilities::PREPROC_PERSISTENCE;
+        // RobustShare has no authenticated polynomial commitments. The
+        // operation is supported only by the threshold-zero compatibility path.
+        if self.topology.threshold() == 0 {
+            capabilities |= MpcCapabilities::OPEN_IN_EXP;
+        }
+        capabilities
     }
 
     fn as_consensus(&self) -> Option<&dyn MpcEngineConsensus> {
@@ -261,7 +272,7 @@ where
     }
 
     fn as_open_in_exp(&self) -> Option<&dyn MpcEngineOpenInExponent> {
-        Some(self)
+        (self.topology.threshold() == 0).then_some(self)
     }
 
     fn as_randomness(&self) -> Option<&dyn MpcEngineRandomness> {

@@ -313,7 +313,7 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     );
 
     for idx in 0..client_count {
-        let client_id = idx as ClientId;
+        let client_id = (n_parties + idx) as ClientId;
         client_ids.push(client_id);
 
         let mut matrix_values: Vec<Fr> = Vec::new();
@@ -414,7 +414,15 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
         let open_message_router = open_message_router.clone();
         tokio::spawn(async move {
             while let Some((sender_id, raw_msg)) = rx.recv().await {
-                match open_message_router.try_handle_wire_message(sender_id, &raw_msg) {
+                let Some(raw_msg) =
+                    crate::tests::test_utils::decode_one_shot_party_message(instance_id, &raw_msg)
+                else {
+                    continue;
+                };
+                match open_message_router
+                    .handle_wire_message(sender_id, &raw_msg)
+                    .await
+                {
                     Ok(true) => continue,
                     Err(e) => {
                         tracing::warn!("Node {i} failed to handle open wire message: {e}");
@@ -462,10 +470,10 @@ async fn test_leader_bootnode_matrix_average_fixed_point() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assign_topological_client_ids(&mut clients)
+    assign_topological_client_ids(&mut clients, n_parties)
         .await
         .expect("Failed to assign topological client IDs");
-    register_topological_client_connections(&servers);
+    register_topological_client_connections(&servers, n_parties);
 
     // Step 5: Run preprocessing
     info!("Step 5: Running preprocessing...");

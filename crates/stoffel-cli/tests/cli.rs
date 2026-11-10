@@ -21,6 +21,62 @@ fn local_mpc_guard() -> MutexGuard<'static, ()> {
 
 const LOCAL_MPC_TEST_TIMEOUT_SECS: &str = "120";
 
+// Exercise the release candidate before its crates have been published.
+fn use_workspace_crates(project: &std::path::Path) {
+    let cli_manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk_path = cli_manifest_dir
+        .parent()
+        .expect("CLI crate lives under crates/")
+        .join("stoffel-rust-sdk");
+    let crates_dir = sdk_path.parent().expect("SDK crate lives under crates/");
+    let bindgen_path = crates_dir.join("stoffel-bindgen");
+    let cargo_toml_path = project.join("Cargo.toml");
+    let cargo_toml = fs::read_to_string(&cargo_toml_path)
+        .unwrap()
+        .replace(
+            "stoffel = { package = \"stoffel-rust-sdk\", version = \"=0.2.0\" }",
+            &format!(
+                "stoffel = {{ package = \"stoffel-rust-sdk\", path = \"{}\" }}",
+                sdk_path.display()
+            ),
+        )
+        .replace(
+            "stoffel-bindgen = \"=0.2.0\"",
+            &format!(
+                "stoffel-bindgen = {{ path = \"{}\" }}",
+                bindgen_path.display()
+            ),
+        );
+    // This fixture builds the in-tree SDK. Cargo does not inherit workspace
+    // patches or its lockfile when that SDK is used from a separate project.
+    // Carry both over so --offline also works on a fresh CI dependency cache,
+    // rather than depending on unrelated registry versions cached locally.
+    let workspace = crates_dir
+        .parent()
+        .expect("crates live under the workspace");
+    let workspace_manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(workspace.join("Cargo.toml")).unwrap()).unwrap();
+    let mut manifest: toml::Value = toml::from_str(&cargo_toml).unwrap();
+    if let Some(patches) = workspace_manifest.get("patch") {
+        let mut patches = patches.clone();
+        for (_, overrides) in patches.as_table_mut().unwrap().iter_mut() {
+            for (_, dependency) in overrides.as_table_mut().unwrap().iter_mut() {
+                if let Some(path) = dependency.get_mut("path") {
+                    *path = toml::Value::String(
+                        workspace.join(path.as_str().unwrap()).display().to_string(),
+                    );
+                }
+            }
+        }
+        manifest
+            .as_table_mut()
+            .unwrap()
+            .insert("patch".to_owned(), patches);
+    }
+    fs::write(&cargo_toml_path, toml::to_string(&manifest).unwrap()).unwrap();
+    fs::copy(workspace.join("Cargo.lock"), project.join("Cargo.lock")).unwrap();
+}
+
 /// Overwrites the scaffolded `src/main.stfl` with a deterministic two-argument
 /// addition program so named-input run flows have a stable, cleartext-safe
 /// `main(a, b)` to exercise. The default `init` template uses ClientStore IO,
@@ -193,7 +249,7 @@ fn init_creates_default_project() {
     assert!(temp.path().join("hello/scripts/run-local.sh").exists());
     let run_local = fs::read_to_string(temp.path().join("hello/scripts/run-local.sh")).unwrap();
     assert!(run_local.contains("command -v stoffel-run"));
-    assert!(run_local.contains("cargo install stoffel-vm-runner --version 0.1.3 --locked"));
+    assert!(run_local.contains("cargo install stoffel-vm-runner --version 0.2.0 --locked"));
     assert!(run_local.contains("export STOFFEL_RUN_BIN"));
     assert!(run_local.contains("STOFFEL_AUTO_ADDRESSES=1"));
     let prepare = run_local.find("stoffel-coordinator\" prepare").unwrap();
@@ -314,8 +370,38 @@ fn init_creates_default_project() {
         .contains("STOFFEL_RUN_BIN is not executable"));
 }
 
+#[cfg(unix)]
 #[test]
-#[ignore = "builds a generated Rust app and a separate Cargo target; run explicitly for scaffold verification"]
+fn init_force_rejects_symlink_project_root() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let outside = temp.path().join("outside");
+    let linked_project = temp.path().join("linked-project");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("keep.txt"), "keep").unwrap();
+    symlink(&outside, &linked_project).unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(&linked_project)
+        .arg("--force")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot initialize project through symlink",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(outside.join("keep.txt")).unwrap(),
+        "keep"
+    );
+    assert!(!outside.join("Stoffel.toml").exists());
+}
+
+#[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn init_default_project_builds_with_cargo_and_sdk_bindings() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -330,31 +416,7 @@ fn init_default_project_builds_with_cargo_and_sdk_bindings() {
         .assert()
         .success();
 
-    let cli_manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let sdk_path = cli_manifest_dir
-        .parent()
-        .expect("CLI crate lives under crates/")
-        .join("stoffel-rust-sdk");
-    let crates_dir = sdk_path.parent().expect("SDK crate lives under crates/");
-    let bindgen_path = crates_dir.join("stoffel-bindgen");
-    let cargo_toml_path = project.join("Cargo.toml");
-    let cargo_toml = fs::read_to_string(&cargo_toml_path)
-        .unwrap()
-        .replace(
-            "stoffel = { package = \"stoffel-rust-sdk\", version = \"=0.1.3\" }",
-            &format!(
-                "stoffel = {{ package = \"stoffel-rust-sdk\", path = \"{}\" }}",
-                sdk_path.display()
-            ),
-        )
-        .replace(
-            "stoffel-bindgen = \"=0.1.3\"",
-            &format!(
-                "stoffel-bindgen = {{ path = \"{}\" }}",
-                bindgen_path.display()
-            ),
-        );
-    fs::write(&cargo_toml_path, cargo_toml).unwrap();
+    use_workspace_crates(&project);
 
     let missing_bytecode = StdCommand::new("cargo")
         .arg("build")
@@ -565,7 +627,7 @@ fn init_force_preserves_ignore_rules_and_local_identities() {
     );
 }
 
-/// Public-dependency consumer test: no path patches or local-MPC SDK calls.
+/// Deploy the generated application against this release candidate as separate processes.
 /// Requires the matching stoffel-run binary. Local ports are selected dynamically.
 #[test]
 #[ignore = "builds a public-dependency app and starts coordinator + nodes; set STOFFEL_RUN_BIN"]
@@ -588,6 +650,7 @@ fn init_default_project_runs_with_separate_services() {
         .args(["build", "--output", "artifacts/program.stflb"])
         .assert()
         .success();
+    use_workspace_crates(&project);
     assert!(StdCommand::new("cargo")
         .args(["build", "--bins"])
         .arg("--offline")
@@ -660,6 +723,7 @@ fn init_default_project_runs_with_separate_services() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn common_command_aliases_work() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -729,37 +793,32 @@ fn run_executes_default_client_io_project() {
         .assert()
         .success();
 
-    let mut last_output = None;
-    for _ in 0..3 {
-        let output = Command::cargo_bin("stoffel")
-            .unwrap()
-            .current_dir(temp.path())
-            .args([
-                "run",
-                "--client-input",
-                "0=42",
-                "--timeout-secs",
-                LOCAL_MPC_TEST_TIMEOUT_SECS,
-            ])
-            .output()
-            .expect("stoffel run should execute");
-        if output.status.success() {
-            return;
-        }
-        last_output = Some(output);
-        thread::sleep(Duration::from_millis(250));
-    }
-
-    let output = last_output.expect("stoffel run should have been attempted");
-    panic!(
-        "default client IO program did not run successfully after retries\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
+    let output = Command::cargo_bin("stoffel")
+        .unwrap()
+        .current_dir(temp.path())
+        .args([
+            "run",
+            "--client-input",
+            "0=42",
+            "--timeout-secs",
+            LOCAL_MPC_TEST_TIMEOUT_SECS,
+        ])
+        .output()
+        .expect("stoffel run should execute");
+    assert!(
+        output.status.success(),
+        "default client IO failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim() == "true",
+        "expected successful output delivery, got stdout:\n{stdout}"
     );
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn run_accepts_numeric_bits_for_secret_bool_list_inputs() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -861,6 +920,7 @@ fn build_writes_bytecode_to_target() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn run_executes_bytecode_file() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -899,6 +959,7 @@ fn run_executes_bytecode_file() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn run_auto_discovers_built_bytecode() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -936,6 +997,7 @@ fn run_auto_discovers_built_bytecode() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn run_recompiles_when_project_source_is_newer_than_bytecode() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -985,6 +1047,7 @@ fn run_recompiles_when_project_source_is_newer_than_bytecode() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn run_ignores_stray_bytecode_when_project_source_is_newer() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -1036,6 +1099,7 @@ fn run_ignores_stray_bytecode_when_project_source_is_newer() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn run_recompiles_when_project_config_is_newer_than_bytecode() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -1083,6 +1147,7 @@ fn run_recompiles_when_project_config_is_newer_than_bytecode() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn run_folder_compiles_project_when_bytecode_is_missing() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -1116,6 +1181,7 @@ fn run_folder_compiles_project_when_bytecode_is_missing() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn run_rejects_non_project_directories_inside_a_project() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -1149,6 +1215,36 @@ fn run_rejects_non_project_directories_inside_a_project() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
+fn dev_once_executes_default_client_io_project() {
+    let _guard = local_mpc_guard();
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("app");
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(&project)
+        .assert()
+        .success();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("dev")
+        .arg(&project)
+        .args([
+            "--once",
+            "--client-input",
+            "0=42",
+            "--timeout-secs",
+            LOCAL_MPC_TEST_TIMEOUT_SECS,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("true"));
+}
+
+#[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn dev_once_explains_input_mistakes() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -1254,6 +1350,7 @@ fn dev_watch_explains_input_mistakes_before_starting() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn dev_once_uses_explicit_source_file() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -1382,6 +1479,9 @@ fn run_help_exposes_mpc_network_flags() {
         .stdout(predicate::str::contains("--network"))
         .stdout(predicate::str::contains("--local"))
         .stdout(predicate::str::contains("--client-input"))
+        .stdout(predicate::str::contains(
+            "Fixed-point values are scaled automatically",
+        ))
         .stdout(predicate::str::contains("--expected-output-clients"))
         .stdout(predicate::str::contains("--expected-clients").not())
         .stdout(predicate::str::contains("--connect-timeout-ms"))
@@ -1428,7 +1528,10 @@ fn summary_flag_is_not_part_of_general_build_help() {
             .stdout(predicate::str::contains(
                 "Write bytecode to this .stflb file",
             ))
-            .stdout(predicate::str::contains("aliases: --out"))
+            .stdout(
+                predicate::str::contains("alias: --out")
+                    .or(predicate::str::contains("aliases: --out")),
+            )
             .stdout(predicate::str::contains("aliases: --prod, --production"));
     }
     Command::cargo_bin("stoffel")
@@ -1464,8 +1567,14 @@ fn summary_flag_is_not_part_of_general_build_help() {
         .stdout(predicate::str::contains(
             "aliases: --entrypoint, --function",
         ))
-        .stdout(predicate::str::contains("aliases: --inputs"))
-        .stdout(predicate::str::contains("aliases: --client-inputs"));
+        .stdout(
+            predicate::str::contains("alias: --inputs")
+                .or(predicate::str::contains("aliases: --inputs")),
+        )
+        .stdout(
+            predicate::str::contains("alias: --client-inputs")
+                .or(predicate::str::contains("aliases: --client-inputs")),
+        );
 
     Command::cargo_bin("stoffel")
         .unwrap()
@@ -1632,6 +1741,7 @@ fn typoed_commands_suggest_only_available_commands() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn common_flag_aliases_work_or_explain_defaults() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -1867,6 +1977,7 @@ fn opt_level_help_matches_supported_spellings() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn run_rejects_build_only_flags_and_honors_program_info() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -1917,6 +2028,7 @@ fn run_rejects_build_only_flags_and_honors_program_info() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn run_validates_entry_and_inputs_before_timeout() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -2952,6 +3064,7 @@ fn build_compiles_all_project_sources() {
 }
 
 #[test]
+#[ignore = "heavy integration test; run with the serial heavy-test command"]
 fn source_and_bytecode_extensions_are_case_insensitive() {
     let _guard = local_mpc_guard();
     let temp = TempDir::new().unwrap();
@@ -3468,6 +3581,38 @@ fn build_rejects_unsafe_configured_target_dir() {
         .stderr(predicate::str::contains("parent-file"))
         .stderr(predicate::str::contains("is an existing file"))
         .stderr(predicate::str::contains("os error").not());
+}
+
+#[cfg(unix)]
+#[test]
+fn build_rejects_configured_target_through_intermediate_symlink() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(&project)
+        .assert()
+        .success();
+
+    std::os::unix::fs::symlink(&outside, project.join("escape")).unwrap();
+    let config = fs::read_to_string(project.join("Stoffel.toml")).unwrap();
+    fs::write(
+        project.join("Stoffel.toml"),
+        config.replace("target_dir = \"target\"", "target_dir = \"escape/target\""),
+    )
+    .unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("build")
+        .arg(&project)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("symlink"));
+    assert!(!outside.join("target").exists());
 }
 
 #[test]
@@ -5276,6 +5421,38 @@ fn clean_removes_stale_artifact_files_and_symlinks() {
 
     assert!(!temp.path().join("target").exists());
     assert!(outside.join("keep.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_rejects_configured_target_through_intermediate_symlink() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let outside = temp.path().join("outside");
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("init")
+        .arg(&project)
+        .assert()
+        .success();
+    fs::create_dir_all(outside.join("target")).unwrap();
+    fs::write(outside.join("target/keep.txt"), "keep").unwrap();
+    std::os::unix::fs::symlink(&outside, project.join("escape")).unwrap();
+    let config = fs::read_to_string(project.join("Stoffel.toml")).unwrap();
+    fs::write(
+        project.join("Stoffel.toml"),
+        config.replace("target_dir = \"target\"", "target_dir = \"escape/target\""),
+    )
+    .unwrap();
+
+    Command::cargo_bin("stoffel")
+        .unwrap()
+        .arg("clean")
+        .arg(&project)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("symlink"));
+    assert!(outside.join("target/keep.txt").exists());
 }
 
 #[test]

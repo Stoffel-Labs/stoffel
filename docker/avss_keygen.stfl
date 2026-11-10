@@ -1,0 +1,4 @@
+# A jointly generated AVSS key; every party returns the same public commitment.
+def main() -> bytes:
+  var key: Share = Share.random_field()
+  return key.get_commitment(0)

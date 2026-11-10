@@ -952,6 +952,7 @@ fn emit_program_client(
     writeln!(source, "    parties: usize,").expect("writing to String cannot fail");
     writeln!(source, "    threshold: usize,").expect("writing to String cannot fail");
     writeln!(source, "    timeout: std::time::Duration,").expect("writing to String cannot fail");
+    writeln!(source, "    optimization_level: u8,").expect("writing to String cannot fail");
     writeln!(source, "    local_runner_path: Option<std::path::PathBuf>,")
         .expect("writing to String cannot fail");
     writeln!(source, "}}").expect("writing to String cannot fail");
@@ -970,6 +971,7 @@ fn emit_program_client(
     .expect("writing to String cannot fail");
     writeln!(source, "            parties: 5,").expect("writing to String cannot fail");
     writeln!(source, "            threshold: 1,").expect("writing to String cannot fail");
+    writeln!(source, "            optimization_level: 0,").expect("writing to String cannot fail");
     writeln!(
         source,
         "            timeout: std::time::Duration::from_secs(900),"
@@ -978,6 +980,19 @@ fn emit_program_client(
     writeln!(source, "            local_runner_path: None,")
         .expect("writing to String cannot fail");
     writeln!(source, "        }}").expect("writing to String cannot fail");
+    writeln!(source, "    }}").expect("writing to String cannot fail");
+    writeln!(source).expect("writing to String cannot fail");
+    writeln!(
+        source,
+        "    pub fn optimization_level(mut self, optimization_level: u8) -> Self {{"
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        source,
+        "        self.optimization_level = optimization_level;"
+    )
+    .expect("writing to String cannot fail");
+    writeln!(source, "        self").expect("writing to String cannot fail");
     writeln!(source, "    }}").expect("writing to String cannot fail");
     writeln!(source).expect("writing to String cannot fail");
     writeln!(
@@ -1158,6 +1173,11 @@ fn emit_entrypoint_method(
         entrypoint.entrypoint
     )
     .expect("writing to String cannot fail");
+    writeln!(
+        source,
+        "            .optimization_level(self.optimization_level)"
+    )
+    .expect("writing to String cannot fail");
     writeln!(source, "            .manifest::<ProgramManifest>()")
         .expect("writing to String cannot fail");
     writeln!(source, "            .parties(self.parties)").expect("writing to String cannot fail");
@@ -1221,6 +1241,10 @@ fn emit_entrypoint_method(
 
 fn rust_type(share_type: ShareType) -> Result<&'static str> {
     match share_type {
+        ShareType::SecretField => Err(Error::Unsupported(
+            "field shares require raw field output; bounded scalar bindings are not supported"
+                .to_owned(),
+        )),
         ShareType::SecretInt { bit_length: 1 } => Ok("bool"),
         ShareType::SecretInt { bit_length: 2..=8 } => Ok("i8"),
         ShareType::SecretInt { bit_length: 9..=16 } => Ok("i16"),
@@ -1250,6 +1274,10 @@ fn rust_type(share_type: ShareType) -> Result<&'static str> {
 
 fn client_value_type_variant(share_type: ShareType) -> Result<&'static str> {
     match share_type {
+        ShareType::SecretField => Err(Error::Unsupported(
+            "field shares require raw field output; bounded scalar bindings are not supported"
+                .to_owned(),
+        )),
         ShareType::SecretInt { bit_length: 1 } => Ok("Boolean"),
         ShareType::SecretInt { bit_length } if bit_length > 1 => Ok("Integer"),
         ShareType::SecretUInt { .. } => Ok("Integer"),
@@ -1363,6 +1391,21 @@ mod tests {
             assert!(generated.contains(&format!("pub output_{ordinal}: {rust_type}")));
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn generated_client_forwards_selected_optimization_level() -> Result<()> {
+        let mut generated = String::new();
+        emit_entrypoint_method(
+            &mut generated,
+            "stoffel",
+            &EntrypointBinding::new("hash").output(0, "Digest", vec![ShareType::boolean()]),
+            &[],
+            1,
+        )?;
+
+        assert!(generated.contains(".optimization_level(self.optimization_level)"));
         Ok(())
     }
 }

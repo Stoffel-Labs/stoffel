@@ -47,6 +47,7 @@ pub use crate::mpc_values::{
 
 const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Share.from_clear",
+    "Share.from_field",
     "Share.from_clear_int",
     "Share.from_clear_uint",
     "Share.from_clear_fixed",
@@ -59,6 +60,9 @@ const MPC_BUILTIN_FUNCTIONS: &[&str] = &[
     "Share.mul",
     "Share.open",
     "Share.batch_open",
+    "Share.batch_open_field",
+    "Share.batch_open_exp",
+    "Share.batch_open_exp_custom",
     "Share.send_to_client",
     "Share.interpolate_local",
     "Share.get_type",

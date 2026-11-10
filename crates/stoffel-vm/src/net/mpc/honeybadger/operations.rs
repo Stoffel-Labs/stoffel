@@ -1,6 +1,6 @@
 use super::HoneyBadgerMpcEngine;
 use crate::net::curve::SupportedMpcField;
-use crate::net::mpc_engine::MpcEngine;
+use crate::net::mpc_engine::{MpcEngine, MpcExponentGroup};
 use crate::net::open_registry::{ExpOpenRegistryKind, ExpOpenRequest};
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
@@ -91,8 +91,8 @@ where
         // multiply (the raw integer multiply would leave the product with 2f
         // fractional bits) plus the same probabilistic-truncation preprocessing
         // the fixed-point division path provisions. Route it through `mul_fixed`
-        // and provision a pool of prandbit/prandint (and the triples/randoms
-        // their generation consumes) so it is self-sufficient without a protocol
+        // and provision a pool of randbit/prandint (and the randoms RandBit
+        // generation consumes) so it is self-sufficient without a protocol
         // change, mirroring `divide_fixed_by_constant_async`.
         if let ShareType::SecretFixedPoint { precision } = ty {
             let left_share = Self::decode_share(left)?;
@@ -103,23 +103,40 @@ where
             let y = SecretFixedPoint::new_with_precision(right_share, proto_precision);
 
             let mut node = self.clone_node().await;
-            const PRANDBIT_POOL_MULS: usize = 16;
             let f = precision.fractional_bits();
-            let pool = f.saturating_mul(PRANDBIT_POOL_MULS);
-            node.params.n_prandbit = node.params.n_prandbit.max(pool);
-            node.params.n_prandint = node.params.n_prandint.max(PRANDBIT_POOL_MULS);
-            node.params.n_triples = node.params.n_triples.saturating_add(pool);
-            node.params.n_random_shares = node.params.n_random_shares.saturating_add(pool);
+            if self.is_standing() {
+                let triples = self.reserve_beaver_triples(1).await?;
+                let randbits = self.reserve_randbit_shares(f).await?;
+                let prandints = self.reserve_prandint_shares(1).await?;
+                node.preprocessing_material.lock().await.add(
+                    Some(triples),
+                    None,
+                    Some(randbits),
+                    Some(prandints),
+                );
+            } else {
+                // Each multiply consumes one triple, `f` random bits and one
+                // random integer; each random bit consumes one random share
+                // and one degree-2t zero share during generation.
+                const RANDBIT_POOL_MULS: usize = 16;
+                let pool = f.saturating_mul(RANDBIT_POOL_MULS);
+                node.params.n_randbit = node.params.n_randbit.max(pool);
+                node.params.n_zero_shares = node.params.n_zero_shares.max(node.params.n_randbit);
+                node.params.n_prandint = node.params.n_prandint.max(RANDBIT_POOL_MULS);
+                node.params.n_triples = node.params.n_triples.saturating_add(RANDBIT_POOL_MULS);
+                node.params.n_random_shares = node.params.n_random_shares.saturating_add(pool);
+            }
 
             let result = node
-                .mul_fixed(x, y, self.net.clone())
+                .mul_fixed(x, y, self.protocol_net.clone())
                 .await
                 .map_err(|e| format!("MPC fixed-point multiply failed: {:?}", e))?;
             return Self::encode_share(result.value()).map(|v| ShareData::Opaque(v.into()));
         }
 
         match ty {
-            ShareType::SecretInt { .. }
+            ShareType::SecretField
+            | ShareType::SecretInt { .. }
             | ShareType::SecretUInt { .. }
             | ShareType::SecretFixedPoint { .. } => {
                 let left_share = Self::decode_share(left)?;
@@ -133,14 +150,22 @@ where
                 // regenerates from params on demand; `.max` never shrinks an
                 // already-sized estimate (e.g. AES/CBC). Triple generation pulls
                 // 2 randoms each, which run_preprocessing adds automatically.
-                const TRIPLE_POOL_MULS: usize = 64;
-                node.params.n_triples = node.params.n_triples.max(TRIPLE_POOL_MULS);
+                if self.is_standing() {
+                    let triples = self.reserve_beaver_triples(1).await?;
+                    node.preprocessing_material
+                        .lock()
+                        .await
+                        .add(Some(triples), None, None, None);
+                } else {
+                    const TRIPLE_POOL_MULS: usize = 64;
+                    node.params.n_triples = node.params.n_triples.max(TRIPLE_POOL_MULS);
+                }
                 let trace = Self::trace_multiply_enabled();
                 let started_at = Instant::now();
                 if trace {
                     let _m = node.preprocessing_material.lock().await.length();
                     let (triples, randoms, bits, exp_points) =
-                        (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
+                        (_m.beaver_triples, _m.random_shr, _m.randbit, _m.prandint);
                     eprintln!(
                         "[hb multiply start] party={} items=1 ty={:?} material=triples:{} randoms:{} bits:{} exp_points:{}",
                         self.topology.party_id(),
@@ -152,13 +177,17 @@ where
                     );
                 }
                 let result_shares = node
-                    .mul(vec![left_share], vec![right_share], self.net.clone())
+                    .mul(
+                        vec![left_share],
+                        vec![right_share],
+                        self.protocol_net.clone(),
+                    )
                     .await
                     .map_err(|e| format!("MPC multiplication failed: {:?}", e))?;
                 if trace {
                     let _m = node.preprocessing_material.lock().await.length();
                     let (triples, randoms, bits, exp_points) =
-                        (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
+                        (_m.beaver_triples, _m.random_shr, _m.randbit, _m.prandint);
                     eprintln!(
                         "[hb multiply done] party={} items=1 elapsed_ms={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                         self.topology.party_id(),
@@ -200,7 +229,7 @@ where
             _ => {
                 return Err(
                     "fixed-point division requires a secret fix64 (SecretFixedPoint) share".into(),
-                )
+                );
             }
         };
         if divisor_scaled <= 0 {
@@ -215,30 +244,31 @@ where
         let y = ClearFixedPoint::new_with_precision(divisor_field, proto_precision);
 
         let mut node = self.clone_node().await;
-        // Each division's truncation consumes `f` random bits and one random
-        // integer, which the VM's baseline preprocessing does not generate
-        // (`honeybadger_node_opts` requests zero prandbit/prandint). The
-        // protocol regenerates them on demand, but re-running that per division
-        // collides across parties; so on the first division (empty pool) we
-        // provision a pool covering several divisions in one preprocessing pass.
-        // The preprocessing-material store is shared across node clones, so
-        // later divisions consume from the pool and skip regeneration.
-        //
-        // Crucially, prandbit generation itself consumes one beaver triple and
-        // one random share per bit, and the protocol's preprocessing budget does
-        // NOT account for that. So we must also grow the triple/random targets
-        // by the pool size; otherwise prandbit generation exhausts the triples
-        // the computation needs (or fails outright). Configuring the demand here
-        // is what makes division self-sufficient without any protocol change.
-        const PRANDBIT_POOL_DIVS: usize = 16;
         let f = precision.fractional_bits();
-        let pool = f.saturating_mul(PRANDBIT_POOL_DIVS);
-        node.params.n_prandbit = node.params.n_prandbit.max(pool);
-        node.params.n_prandint = node.params.n_prandint.max(PRANDBIT_POOL_DIVS);
-        node.params.n_triples = node.params.n_triples.saturating_add(pool);
-        node.params.n_random_shares = node.params.n_random_shares.saturating_add(pool);
+        if self.is_standing() {
+            let randbits = self.reserve_randbit_shares(f).await?;
+            let prandints = self.reserve_prandint_shares(1).await?;
+            node.preprocessing_material.lock().await.add(
+                None,
+                None,
+                Some(randbits),
+                Some(prandints),
+            );
+        } else {
+            // Each division's truncation consumes `f` random bits and one random
+            // integer; each random bit consumes one random share and one
+            // degree-2t zero share during generation. One-shot mode preserves
+            // the legacy behavior of provisioning a local pool and letting the
+            // protocol regenerate it.
+            const RANDBIT_POOL_DIVS: usize = 16;
+            let pool = f.saturating_mul(RANDBIT_POOL_DIVS);
+            node.params.n_randbit = node.params.n_randbit.max(pool);
+            node.params.n_zero_shares = node.params.n_zero_shares.max(node.params.n_randbit);
+            node.params.n_prandint = node.params.n_prandint.max(RANDBIT_POOL_DIVS);
+            node.params.n_random_shares = node.params.n_random_shares.saturating_add(pool);
+        }
         let result = node
-            .div_with_const_fixed(x, y, self.net.clone())
+            .div_with_const_fixed(x, y, self.protocol_net.clone())
             .await
             .map_err(|e| format!("MPC fixed-point division failed: {:?}", e))?;
 
@@ -259,7 +289,8 @@ where
         }
 
         match ty {
-            ShareType::SecretInt { .. }
+            ShareType::SecretField
+            | ShareType::SecretInt { .. }
             | ShareType::SecretUInt { .. }
             | ShareType::SecretFixedPoint { .. } => {
                 let max_pairs_per_session =
@@ -277,7 +308,9 @@ where
 
                 let mut encoded_results = Vec::with_capacity(pairs.len());
                 let mut node = self.clone_node().await;
-                node.params.n_triples = node.params.n_triples.max(max_pairs_per_session);
+                if !self.is_standing() {
+                    node.params.n_triples = node.params.n_triples.max(max_pairs_per_session);
+                }
                 for (chunk_index, chunk) in pairs.chunks(max_pairs_per_session).enumerate() {
                     let mut left_shares = Vec::with_capacity(chunk.len());
                     let mut right_shares = Vec::with_capacity(chunk.len());
@@ -287,11 +320,21 @@ where
                         right_shares.push(Self::decode_share(right)?);
                     }
 
+                    if self.is_standing() {
+                        let triples = self.reserve_beaver_triples(chunk.len()).await?;
+                        node.preprocessing_material.lock().await.add(
+                            Some(triples),
+                            None,
+                            None,
+                            None,
+                        );
+                    }
+
                     let chunk_started_at = Instant::now();
                     if trace {
                         let _m = node.preprocessing_material.lock().await.length();
                         let (triples, randoms, bits, exp_points) =
-                            (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
+                            (_m.beaver_triples, _m.random_shr, _m.randbit, _m.prandint);
                         eprintln!(
                             "[hb batch_multiply chunk start] party={} chunk={} items={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                             self.topology.party_id(),
@@ -305,13 +348,13 @@ where
                     }
 
                     let result_shares = node
-                        .mul(left_shares, right_shares, self.net.clone())
+                        .mul(left_shares, right_shares, self.protocol_net.clone())
                         .await
                         .map_err(|e| format!("MPC batch multiplication failed: {:?}", e))?;
                     if trace {
                         let _m = node.preprocessing_material.lock().await.length();
                         let (triples, randoms, bits, exp_points) =
-                            (_m.beaver_triples, _m.random_shr, _m.prandbit, _m.prandint);
+                            (_m.beaver_triples, _m.random_shr, _m.randbit, _m.prandint);
                         eprintln!(
                             "[hb batch_multiply chunk done] party={} chunk={} items={} elapsed_ms={} material=triples:{} randoms:{} bits:{} exp_points:{}",
                             self.topology.party_id(),
@@ -359,6 +402,9 @@ where
         share_bytes: &[u8],
     ) -> Result<ClearShareValue, String> {
         let type_key = match ty {
+            ShareType::SecretField => {
+                return Err("SecretField requires Share.open_field".to_owned())
+            }
             ShareType::SecretInt { bit_length } => format!("hb-int-{bit_length}"),
             ShareType::SecretUInt { bit_length } => format!("hb-uint-{bit_length}"),
             ShareType::SecretFixedPoint { precision } => {
@@ -366,13 +412,13 @@ where
             }
         };
 
-        let seq = self.open_registry.insert_single_next(
+        let seq = self.open_registry().insert_single_next(
             &type_key,
             self.topology.party_id(),
             share_bytes.to_vec(),
         )?;
         let wire_message = crate::net::open_registry::encode_single_share_wire_message(
-            self.topology.instance_id(),
+            self.current_instance_id(),
             seq,
             &type_key,
             self.topology.party_id(),
@@ -384,7 +430,7 @@ where
         let n = self.topology.n_parties();
         let t = self.topology.threshold();
 
-        self.open_registry
+        self.open_registry()
             .open_share_at_async(
                 self.topology.party_id(),
                 type_key,
@@ -420,6 +466,7 @@ where
         share_bytes: &[u8],
     ) -> Result<Vec<u8>, String> {
         let type_key = match ty {
+            ShareType::SecretField => "hb-field-field".to_owned(),
             ShareType::SecretInt { bit_length } => format!("hb-field-int-{bit_length}"),
             ShareType::SecretUInt { bit_length } => format!("hb-field-uint-{bit_length}"),
             ShareType::SecretFixedPoint { precision } => {
@@ -427,13 +474,13 @@ where
             }
         };
 
-        let seq = self.open_registry.insert_single_next(
+        let seq = self.open_registry().insert_single_next(
             &type_key,
             self.topology.party_id(),
             share_bytes.to_vec(),
         )?;
         let wire_message = crate::net::open_registry::encode_single_share_wire_message(
-            self.topology.instance_id(),
+            self.current_instance_id(),
             seq,
             &type_key,
             self.topology.party_id(),
@@ -445,7 +492,7 @@ where
         let n = self.topology.n_parties();
         let t = self.topology.threshold();
 
-        self.open_registry
+        self.open_registry()
             .open_bytes_at_async(
                 self.topology.party_id(),
                 type_key,
@@ -480,6 +527,9 @@ where
         }
 
         let type_key = match ty {
+            ShareType::SecretField => {
+                return Err("SecretField requires Share.open_field".to_owned())
+            }
             ShareType::SecretInt { bit_length } => format!("hb-batch-int-{bit_length}"),
             ShareType::SecretUInt { bit_length } => format!("hb-batch-uint-{bit_length}"),
             ShareType::SecretFixedPoint { precision } => {
@@ -487,13 +537,13 @@ where
             }
         };
 
-        let seq = self.open_registry.insert_batch_next(
+        let seq = self.open_registry().insert_batch_next(
             &type_key,
             self.topology.party_id(),
             shares.to_vec(),
         )?;
         let wire_message = crate::net::open_registry::encode_batch_share_wire_message(
-            self.topology.instance_id(),
+            self.current_instance_id(),
             seq,
             &type_key,
             self.topology.party_id(),
@@ -505,12 +555,12 @@ where
         let n = self.topology.n_parties();
         let t = self.topology.threshold();
 
-        self.open_registry
+        self.open_registry()
             .batch_open_at_async(
                 self.topology.party_id(),
                 type_key,
                 Some(seq),
-                shares.to_vec(),
+                shares,
                 required,
                 |collected, pos| {
                     let mut decoded_shares: Vec<RobustShare<F>> =
@@ -527,9 +577,177 @@ where
             .await
     }
 
+    pub async fn batch_open_shares_as_fields_async_impl(
+        &self,
+        ty: ShareType,
+        shares: &[Vec<u8>],
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if shares.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let type_key = match ty {
+            ShareType::SecretField => "hb-batch-field-field".to_owned(),
+            ShareType::SecretInt { bit_length } => format!("hb-batch-field-int-{bit_length}"),
+            ShareType::SecretUInt { bit_length } => format!("hb-batch-field-uint-{bit_length}"),
+            ShareType::SecretFixedPoint { precision } => {
+                format!("hb-batch-field-fixed-{}-{}", precision.k(), precision.f())
+            }
+        };
+        let seq = self.open_registry().insert_batch_next(
+            &type_key,
+            self.topology.party_id(),
+            shares.to_vec(),
+        )?;
+        let wire_message = crate::net::open_registry::encode_batch_share_wire_message(
+            self.current_instance_id(),
+            seq,
+            &type_key,
+            self.topology.party_id(),
+            shares,
+        )?;
+        self.broadcast_open_registry_payload(wire_message).await?;
+
+        let required = Self::robust_open_required_contributions(self.topology.threshold());
+        let (_party_ids, collected) = self
+            .open_registry()
+            .batch_collect_at_async(
+                self.topology.party_id(),
+                type_key,
+                seq,
+                shares.to_vec(),
+                required,
+            )
+            .await?;
+        let n = self.topology.n_parties();
+        let t = self.topology.threshold();
+        collected
+            .iter()
+            .enumerate()
+            .map(|(position, contributions)| {
+                let decoded = contributions
+                    .iter()
+                    .map(|bytes| Self::decode_share(bytes))
+                    .collect::<Result<Vec<RobustShare<F>>, _>>()?;
+                let (_degree, secret) =
+                    RobustShare::recover_secret(&decoded, n, t).map_err(|error| {
+                        format!("batch field recover_secret pos {position}: {error:?}")
+                    })?;
+                let mut encoded = Vec::new();
+                secret
+                    .serialize_compressed(&mut encoded)
+                    .map_err(|error| format!("serialize batch field pos {position}: {error}"))?;
+                Ok(encoded)
+            })
+            .collect()
+    }
+
+    pub async fn batch_open_shares_in_exp_group_custom_async_impl(
+        &self,
+        group: MpcExponentGroup,
+        ty: ShareType,
+        shares: &[Vec<u8>],
+        generators: &[Vec<u8>],
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if shares.len() != generators.len() {
+            return Err(format!(
+                "batch exponent share/generator length mismatch: {} != {}",
+                shares.len(),
+                generators.len()
+            ));
+        }
+        if shares.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.require_verifiable_exponent_open()?;
+        if group != MpcExponentGroup::native_for_curve(self.curve_config()) {
+            return Err(group.unsupported_error(self.protocol_name()));
+        }
+
+        let mut partial_points = Vec::with_capacity(shares.len());
+        for (position, (share_bytes, generator_bytes)) in shares.iter().zip(generators).enumerate()
+        {
+            let share = Self::decode_share(share_bytes)?;
+            if share.id != self.topology.party_id() {
+                return Err(format!(
+                    "batch exponent share {position} has party id {}, expected {}",
+                    share.id,
+                    self.topology.party_id()
+                ));
+            }
+            let generator =
+                G::deserialize_compressed(generator_bytes.as_slice()).map_err(|error| {
+                    format!("deserialize batch exponent generator {position}: {error}")
+                })?;
+            let mut encoded = Vec::new();
+            (generator * share.share[0])
+                .into_affine()
+                .serialize_compressed(&mut encoded)
+                .map_err(|error| {
+                    format!("serialize batch exponent partial point {position}: {error}")
+                })?;
+            partial_points.push(encoded);
+        }
+
+        let share_type = match ty {
+            ShareType::SecretField => "field".to_owned(),
+            ShareType::SecretInt { bit_length } => format!("int-{bit_length}"),
+            ShareType::SecretUInt { bit_length } => format!("uint-{bit_length}"),
+            ShareType::SecretFixedPoint { precision } => {
+                format!("fixed-{}-{}", precision.k(), precision.f())
+            }
+        };
+        let type_key = format!("hb-batch-exp-{}-{share_type}", group.as_str());
+        let seq = self.open_registry().insert_batch_next(
+            &type_key,
+            self.topology.party_id(),
+            partial_points.clone(),
+        )?;
+        let wire_message = crate::net::open_registry::encode_batch_share_wire_message(
+            self.current_instance_id(),
+            seq,
+            &type_key,
+            self.topology.party_id(),
+            &partial_points,
+        )?;
+        self.broadcast_open_registry_payload(wire_message).await?;
+
+        let required = 2 * self.topology.threshold() + 1;
+        let (party_ids, collected) = self
+            .open_registry()
+            .batch_collect_at_async(
+                self.topology.party_id(),
+                type_key,
+                seq,
+                partial_points,
+                required,
+            )
+            .await?;
+        let domain = GeneralEvaluationDomain::<F>::new(self.topology.n_parties())
+            .ok_or_else(|| "No suitable FFT domain".to_string())?;
+        collected
+            .into_iter()
+            .enumerate()
+            .map(|(position, contributions)| {
+                let partials = party_ids
+                    .iter()
+                    .copied()
+                    .zip(contributions)
+                    .collect::<Vec<_>>();
+                crate::net::group_interpolation::interpolate_compressed_group_points::<F, G, _>(
+                    &partials,
+                    |id| Ok(domain.element(id)),
+                    &format!("deserialize batch exponent partial point {position}"),
+                    &format!("zero denominator in batch exponent position {position}"),
+                    &format!("serialize batch exponent result {position}"),
+                )
+            })
+            .collect()
+    }
+
     async fn broadcast_open_exp_payload(&self, payload: Vec<u8>) -> Result<(), String> {
         crate::net::broadcast::broadcast_to_other_parties(
-            self.net.as_ref(),
+            self.protocol_net.as_ref(),
             self.topology.n_parties(),
             self.topology.party_id(),
             &payload,
@@ -547,7 +765,7 @@ where
         payload: Vec<u8>,
     ) -> Result<(), String> {
         crate::net::broadcast::broadcast_to_other_parties(
-            self.net.as_ref(),
+            self.protocol_net.as_ref(),
             self.topology.n_parties(),
             self.topology.party_id(),
             &payload,
@@ -573,6 +791,7 @@ where
         share_bytes: &[u8],
         generator_bytes: &[u8],
     ) -> Result<Vec<u8>, String> {
+        self.require_verifiable_exponent_open()?;
         let share = Self::decode_share(share_bytes)?;
         let generator = G::deserialize_compressed(generator_bytes)
             .map_err(|e| format!("deserialize generator: {}", e))?;
@@ -584,14 +803,14 @@ where
             .serialize_compressed(&mut partial_bytes)
             .map_err(|e| format!("serialize partial point: {}", e))?;
 
-        let seq = self.open_registry.insert_exp_next(
+        let seq = self.open_registry().insert_exp_next(
             ExpOpenRegistryKind::G1,
             self.topology.party_id(),
             share.id,
             partial_bytes.clone(),
         )?;
         let wire_message = crate::net::open_registry::encode_hb_open_exp_wire_message(
-            self.topology.instance_id(),
+            self.current_instance_id(),
             seq,
             self.topology.party_id(),
             share.id,
@@ -604,7 +823,7 @@ where
         let domain = GeneralEvaluationDomain::<F>::new(n)
             .ok_or_else(|| "No suitable FFT domain".to_string())?;
 
-        self.open_registry.exp_open_wait(
+        self.open_registry().exp_open_wait(
             ExpOpenRequest {
                 kind: ExpOpenRegistryKind::G1,
                 sequence: Some(seq),
@@ -632,6 +851,7 @@ where
         share_bytes: &[u8],
         generator_bytes: &[u8],
     ) -> Result<Vec<u8>, String> {
+        self.require_verifiable_exponent_open()?;
         let share = Self::decode_share(share_bytes)?;
         let generator = G::deserialize_compressed(generator_bytes)
             .map_err(|e| format!("deserialize generator: {}", e))?;
@@ -643,14 +863,14 @@ where
             .serialize_compressed(&mut partial_bytes)
             .map_err(|e| format!("serialize partial point: {}", e))?;
 
-        let seq = self.open_registry.insert_exp_next(
+        let seq = self.open_registry().insert_exp_next(
             ExpOpenRegistryKind::G1,
             self.topology.party_id(),
             share.id,
             partial_bytes.clone(),
         )?;
         let wire_message = crate::net::open_registry::encode_hb_open_exp_wire_message(
-            self.topology.instance_id(),
+            self.current_instance_id(),
             seq,
             self.topology.party_id(),
             share.id,
@@ -663,7 +883,7 @@ where
         let domain = GeneralEvaluationDomain::<F>::new(n)
             .ok_or_else(|| "No suitable FFT domain".to_string())?;
 
-        self.open_registry
+        self.open_registry()
             .exp_open_async(
                 ExpOpenRequest {
                     kind: ExpOpenRegistryKind::G1,
@@ -692,6 +912,7 @@ where
         share_bytes: &[u8],
         generator_g2_bytes: &[u8],
     ) -> Result<Vec<u8>, String> {
+        self.require_verifiable_exponent_open()?;
         use ark_bls12_381::{Fr, G2Projective};
 
         if TypeId::of::<F>() != TypeId::of::<Fr>() {
@@ -720,14 +941,14 @@ where
             .serialize_compressed(&mut partial_bytes)
             .map_err(|e| format!("serialize G2 partial point: {}", e))?;
 
-        let seq = self.open_registry.insert_exp_next(
+        let seq = self.open_registry().insert_exp_next(
             ExpOpenRegistryKind::G1,
             self.topology.party_id(),
             share.id,
             partial_bytes.clone(),
         )?;
         let wire_message = crate::net::open_registry::encode_hb_open_exp_wire_message(
-            self.topology.instance_id(),
+            self.current_instance_id(),
             seq,
             self.topology.party_id(),
             share.id,
@@ -740,7 +961,7 @@ where
         let domain = GeneralEvaluationDomain::<Fr>::new(n)
             .ok_or_else(|| "No suitable FFT domain".to_string())?;
 
-        self.open_registry.exp_open_wait(
+        self.open_registry().exp_open_wait(
             ExpOpenRequest {
                 kind: ExpOpenRegistryKind::G1,
                 sequence: Some(seq),
@@ -771,6 +992,7 @@ where
         share_bytes: &[u8],
         generator_g2_bytes: &[u8],
     ) -> Result<Vec<u8>, String> {
+        self.require_verifiable_exponent_open()?;
         use ark_bls12_381::{Fr, G2Projective};
 
         if TypeId::of::<F>() != TypeId::of::<Fr>() {
@@ -799,14 +1021,14 @@ where
             .serialize_compressed(&mut partial_bytes)
             .map_err(|e| format!("serialize G2 partial point: {}", e))?;
 
-        let seq = self.open_registry.insert_exp_next(
+        let seq = self.open_registry().insert_exp_next(
             ExpOpenRegistryKind::G1,
             self.topology.party_id(),
             share.id,
             partial_bytes.clone(),
         )?;
         let wire_message = crate::net::open_registry::encode_hb_open_exp_wire_message(
-            self.topology.instance_id(),
+            self.current_instance_id(),
             seq,
             self.topology.party_id(),
             share.id,
@@ -819,7 +1041,7 @@ where
         let domain = GeneralEvaluationDomain::<Fr>::new(n)
             .ok_or_else(|| "No suitable FFT domain".to_string())?;
 
-        self.open_registry
+        self.open_registry()
             .exp_open_async(
                 ExpOpenRequest {
                     kind: ExpOpenRegistryKind::G1,
@@ -855,8 +1077,21 @@ where
         crate::net::curve::field_to_clear_share_value(ty, secret).map_err(Into::into)
     }
 
+    fn require_verifiable_exponent_open(&self) -> Result<(), String> {
+        if self.topology.threshold() > 0 {
+            return Err(
+                "HoneyBadger open-in-exponent is disabled for Byzantine-threshold sessions: \
+                 RobustShare carries no authenticated polynomial commitment, so peer partial \
+                 points cannot be verified without revealing the scalar; use the AVSS backend \
+                 for verifiable exponent openings"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn encode_share(share: &RobustShare<F>) -> Result<Vec<u8>, String> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(share.compressed_size());
         share
             .serialize_compressed(&mut out)
             .map_err(|e| format!("serialize share: {}", e))?;

@@ -12,6 +12,8 @@ use stoffelnet::network_utils::ClientId;
 /// Hydrating VM client inputs can wait on network input servers, so async VM
 /// orchestration routes through this trait instead of the synchronous
 /// `MpcEngineClientOps` bridge.
+// async-trait 0.1.88 emits a redundant must_use on its generated future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AsyncMpcEngineClientOps: MpcEngine {
     /// Get all client IDs that have submitted inputs without blocking the async runtime.
@@ -36,6 +38,8 @@ pub trait AsyncMpcEngineClientOps: MpcEngine {
 /// This trait provides async versions of the MPC operations that require
 /// network communication. The VM can use these methods to avoid blocking the
 /// async runtime during MPC operations.
+// async-trait 0.1.88 emits a redundant must_use on its generated future.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AsyncMpcEngine: MpcEngine {
     /// Build an error for core async operations that must be explicitly
@@ -103,6 +107,10 @@ pub trait AsyncMpcEngine: MpcEngine {
     /// Try to obtain async consensus operations, if supported.
     fn as_async_consensus_ops(&self) -> Option<&dyn AsyncMpcEngineConsensus> {
         None
+    }
+
+    async fn reset_for_next_run(&self, _new_instance_id: u64) -> MpcEngineResult<()> {
+        Ok(())
     }
 
     /// Obtain async consensus operations or return a capability-aware error.
@@ -203,12 +211,22 @@ pub trait AsyncMpcEngine: MpcEngine {
     }
 
     /// Generate random bytes as a secret-shared value asynchronously.
+    ///
+    /// Engines backed by preprocessed randomness can expose an immediately
+    /// available share through [`Self::try_random_share_cached`], avoiding an
+    /// allocated async-trait future on the VM's per-share hot path.
     async fn random_share_async(&self, _ty: ShareType) -> MpcEngineResult<ShareData> {
         Err(self.async_capability_unavailable(
             "async_random_share",
             MpcCapability::Randomness,
             "random_share_async",
         ))
+    }
+
+    /// Return a preprocessed random share without waiting, or `None` when the
+    /// engine must use its asynchronous generation/refill path.
+    fn try_random_share_cached(&self, _ty: ShareType) -> Option<MpcEngineResult<ShareData>> {
+        None
     }
 
     /// Generate an integer random secret share suitable for typed integer reveals.

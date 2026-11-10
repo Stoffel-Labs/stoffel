@@ -555,6 +555,7 @@ pub struct OffChainServerConfig {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
     pub timestamp: u64,
+    pub execution_id: crate::ExecutionId,
     pub expected_client_certs: Vec<PathBuf>,
 }
 
@@ -566,6 +567,11 @@ impl OffChainServerConfig {
     pub fn validate(&self, expected_clients: usize) -> Result<()> {
         validate_socket_address("off-chain coordinator address", &self.coordinator_address)?;
         validate_socket_address("off-chain node RPC bind address", &self.rpc_bind_address)?;
+        if self.execution_id.is_zero() {
+            return Err(Error::Configuration(
+                "off-chain execution ID must be nonzero".to_owned(),
+            ));
+        }
         if self.timestamp == 0 {
             return Err(Error::Configuration(
                 "off-chain coordinator timestamp must be greater than zero".to_owned(),
@@ -593,6 +599,7 @@ pub struct OffChainServerConfigBuilder {
     cert_path: Option<PathBuf>,
     key_path: Option<PathBuf>,
     timestamp: Option<u64>,
+    execution_id: Option<crate::ExecutionId>,
     expected_client_certs: Vec<PathBuf>,
 }
 
@@ -614,6 +621,11 @@ impl OffChainServerConfigBuilder {
     ) -> Self {
         self.cert_path = Some(cert_path.as_ref().to_path_buf());
         self.key_path = Some(key_path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn execution_id(mut self, execution_id: crate::ExecutionId) -> Self {
+        self.execution_id = Some(execution_id);
         self
     }
 
@@ -641,6 +653,9 @@ impl OffChainServerConfigBuilder {
 
     pub fn build(self) -> Result<OffChainServerConfig> {
         let config = OffChainServerConfig {
+            execution_id: self.execution_id.ok_or_else(|| {
+                Error::Configuration("off-chain execution ID is required".to_owned())
+            })?,
             coordinator_address: self.coordinator_address.ok_or_else(|| {
                 Error::Configuration("off-chain coordinator address is required".to_owned())
             })?,
@@ -808,6 +823,8 @@ impl StoffelServer {
         }
         if let Some(config) = &self.offchain_coordinator {
             config.validate(self.expected_clients)?;
+            args.push("--execution-id".into());
+            args.push(config.execution_id.to_string().into());
             args.push("--off-chain-coord".into());
             args.push((&config.coordinator_address).into());
             args.push("--rpc-bind".into());
@@ -1144,6 +1161,33 @@ mod tests {
             .filter(|(flag, _)| *flag == "--advertise")
             .map(|(_, value)| value)
             .collect()
+    }
+
+    #[test]
+    fn offchain_execution_id_is_required_and_forwarded() -> Result<()> {
+        let missing = OffChainServerConfig::builder().build().unwrap_err();
+        assert!(missing.to_string().contains("execution ID"));
+        let dir = tempfile::tempdir()?;
+        let cert = dir.path().join("cert.der");
+        let key = dir.path().join("key.der");
+        std::fs::write(&cert, "certificate")?;
+        std::fs::write(&key, "key")?;
+        let execution_id = crate::ExecutionId::from_bytes([0x39; 32]);
+        let config = OffChainServerConfig::builder()
+            .execution_id(execution_id)
+            .coordinator("127.0.0.1:19300")
+            .rpc_bind("127.0.0.1:19301")
+            .identity_files(&cert, &key)
+            .timestamp(1)
+            .build()?;
+        let mut invalid = config.clone();
+        invalid.execution_id = crate::ExecutionId::from_bytes([0; 32]);
+        assert!(invalid.validate(0).is_err());
+        let server = five_party_builder(0).offchain_coordinator(config).build()?;
+        let args = runner_args_for(&server)?;
+        let index = args.iter().position(|arg| arg == "--execution-id").unwrap();
+        assert_eq!(args[index + 1], execution_id.to_string().as_str());
+        Ok(())
     }
 
     #[test]

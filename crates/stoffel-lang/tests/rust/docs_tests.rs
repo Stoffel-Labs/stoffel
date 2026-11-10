@@ -201,6 +201,7 @@ fn stdlib_aliases_resolve_to_canonical_items() {
 
     let expected: BTreeMap<&str, Option<AliasOf>> = [
         ("reveal", item_alias("Share.open")),
+        ("list", Some(AliasOf::VmBuiltin("create_array".to_owned()))),
         ("Share.reveal", item_alias("Share.open")),
         ("Share.open_fixed", item_alias("Share.open")),
         ("Share.add_scalar", item_alias("Share.add_constant")),

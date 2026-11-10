@@ -38,6 +38,7 @@ struct DeploymentFile {
     coordinator_host: String,
     coordinator_port: u16,
     timestamp: u64,
+    execution_id: stoffel::ExecutionId,
     parties: usize,
     threshold: usize,
     node_bind_addresses: Vec<String>,
@@ -198,6 +199,7 @@ pub fn prepare_development() -> Result<(), Box<dyn std::error::Error>> {
         coordinator_host: "127.0.0.1".to_owned(),
         coordinator_port,
         timestamp,
+        execution_id: stoffel::ExecutionId::from_bytes(*blake3::hash(coordinator.cert.der()).as_bytes()),
         parties: config.parties,
         threshold: config.threshold,
         node_bind_addresses,
@@ -268,14 +270,16 @@ pub async fn start() -> Result<DevelopmentCoordinator, Box<dyn std::error::Error
         .map(|party| public_key(&dir.join(format!("node-{party}.cert.der"))))
         .collect::<Result<Vec<_>, _>>()?;
     let client_id = public_key(&dir.join("client-0.cert.der"))?;
-    let state = HoneyBadgerCoordinatorRPCServerSharedBase::new(
+    let state = HoneyBadgerCoordinatorRPCServerSharedBase::new_for_execution(
+        deployment.execution_id,
         program_id,
         config.parties as u64,
         config.threshold as u64,
         node_public_keys,
         1,
         vec![client_id],
-    );
+        stoffel_mpc_coordinator_off_chain::InputAssignment::default(),
+    )?;
     let host = std::env::var("STOFFEL_COORDINATOR_BIND")
         .unwrap_or_else(|_| deployment.coordinator_host.clone());
     let cert = std::fs::read(dir.join("coordinator.cert.der"))?;
@@ -334,12 +338,13 @@ async fn wait_ready() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
 
-        let client = match HoneyBadgerOffChainCoordinatorClient::start_rpc_client(
+        let client = match HoneyBadgerOffChainCoordinatorClient::start_rpc_client_for_execution(
             &host,
             port,
             deployment.threshold as u64,
             deployment.parties as u64,
             1,
+            deployment.execution_id,
             cert.clone(),
             key.clone(),
         )

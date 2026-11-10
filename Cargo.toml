@@ -7,9 +7,12 @@ members = [
     "crates/stoffel-vm",
     "crates/stoffel-vm-runner",
     "crates/stoffel-vm-types",
+    "crates/stoffel-wasm-client",
     "crates/stoffel-lang/examples/mpc_aes128_cbc_client_io",
+    "crates/stoffel-lang/examples/mpc_sha256_client_io",
 ]
 resolver = "2"
 exclude = [
     "vendor/mpc-protocols-limit-test",
+    "vendor/stoffel-mpc-coordinator-browser",
 ]

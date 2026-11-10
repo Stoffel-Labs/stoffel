@@ -27,6 +27,7 @@ struct Deployment {
     coordinator_host: String,
     coordinator_port: u16,
     timestamp: u64,
+    execution_id: stoffel::ExecutionId,
     parties: usize,
     threshold: usize,
     node_bind_addresses: Vec<String>,
@@ -85,6 +86,7 @@ pub fn client() -> Result<StoffelClient, Box<dyn std::error::Error>> {
     let offchain = runtime
         .offchain_client_config(0)?
         .coordinator(config.coordinator_host, config.coordinator_port)
+        .execution_id(config.execution_id)
         .timestamp(config.timestamp)
         .node_rpc_addresses(config.node_rpc_addresses)
         .identity_files(config.client_cert, config.client_key)
