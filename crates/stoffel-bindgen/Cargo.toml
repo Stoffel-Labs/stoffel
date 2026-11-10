@@ -13,3 +13,6 @@ publish = true
 [dependencies]
 stoffellang = { version = "=0.2.0", path = "../stoffel-lang" }
 thiserror = "=2.0.12"
+
+[dev-dependencies]
+syn = { version = "=2.0.118", features = ["full"] }

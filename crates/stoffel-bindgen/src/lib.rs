@@ -1301,10 +1301,68 @@ fn sanitize_identifier(value: &str) -> String {
         }
     }
     if identifier.is_empty() {
-        "_".to_owned()
-    } else {
-        identifier
+        identifier.push('_');
     }
+    // Strict and reserved keywords cannot be emitted as plain Rust identifiers.
+    // Some (such as `self`) cannot be used as raw identifiers either.
+    if matches!(
+        identifier.as_str(),
+        "_" | "as"
+            | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "gen"
+            | "macro"
+            | "override"
+            | "priv"
+            | "try"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+    ) {
+        identifier.push('_');
+    }
+    identifier
 }
 
 fn sanitize_type_name(value: &str) -> String {
@@ -1323,7 +1381,9 @@ fn sanitize_type_name(value: &str) -> String {
         }
     }
     if out.is_empty() {
-        "_".to_owned()
+        "GeneratedType".to_owned()
+    } else if out == "Self" {
+        "SelfType".to_owned()
     } else {
         out
     }
@@ -1349,6 +1409,100 @@ fn entrypoint_output_struct_name(method_name: &str) -> String {
 mod tests {
     use super::*;
     use stoffellang::stoffel_vm_types::compiled_binary::{ClientIoManifest, ClientIoSchema};
+
+    fn client_program() -> Program {
+        use stoffellang::stoffel_vm_types::functions::VMFunction;
+        let function = VMFunction::new(
+            "main".to_owned(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            0,
+            Vec::new(),
+            Default::default(),
+        );
+        let mut binary = CompiledBinary::from_vm_functions(&[function]);
+        binary.client_io_manifest.clients.push(ClientIoSchema {
+            client_slot: 0,
+            inputs: vec![ShareType::boolean()],
+            outputs: vec![ShareType::boolean()],
+        });
+        Program::new(binary)
+    }
+
+    fn generated_client(entrypoint: EntrypointBinding) -> String {
+        generate_bindings_source(
+            &client_program(),
+            &BindingsConfig {
+                entrypoints: vec![entrypoint],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn keyword_method_and_argument_names_generate_valid_rust() {
+        for name in [
+            "type", "match", "self", "Self", "super", "crate", "async", "await", "try", "yield",
+        ] {
+            let generated = generated_client(
+                EntrypointBinding::new("main")
+                    .method_name(name)
+                    .input(0, name, "Inputs")
+                    .output(0, "Outputs", vec![ShareType::boolean()]),
+            );
+            syn::parse_file(&generated)
+                .unwrap_or_else(|error| panic!("invalid Rust for {name:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn empty_and_underscore_names_generate_valid_rust() {
+        for name in ["", "_", "-", "é"] {
+            let generated = generated_client(
+                EntrypointBinding::new("main")
+                    .method_name(name)
+                    .input(0, name, "Inputs")
+                    .output(0, "Outputs", vec![ShareType::boolean()]),
+            );
+            syn::parse_file(&generated)
+                .unwrap_or_else(|error| panic!("invalid Rust for {name:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn reserved_type_names_generate_valid_rust() {
+        for name in ["self", "Self", "", "_", "--", "é"] {
+            let generated = generated_client(
+                EntrypointBinding::new("main")
+                    .input(0, "inputs", name)
+                    .output(0, name, vec![ShareType::boolean()]),
+            );
+            syn::parse_file(&generated)
+                .unwrap_or_else(|error| panic!("invalid Rust for type {name:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn rust_2024_gen_keyword_is_renamed_and_valid_names_are_preserved() {
+        // syn accepts `gen` as an identifier without an edition context.
+        assert_eq!(EntrypointBinding::new("gen").method_name, "gen_");
+        for name in [
+            "compute_total",
+            "match_",
+            "union",
+            "safe",
+            "raw",
+            "_inputs",
+            "value2",
+        ] {
+            let entrypoint = EntrypointBinding::new(name).input(0, name, "ClientInputs");
+            assert_eq!(entrypoint.method_name, name);
+            assert_eq!(entrypoint.inputs[0].argument_name, name);
+            assert_eq!(entrypoint.inputs[0].type_name, "ClientInputs");
+        }
+    }
 
     #[test]
     fn generated_bindings_preserve_secret_integer_widths() -> Result<()> {
