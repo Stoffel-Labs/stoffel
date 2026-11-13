@@ -12,8 +12,8 @@ mod router;
 mod wire;
 
 pub use accumulators::{
-    ExpOpenAccumulator, ExpOpenProgress, ExpOpenRegistryKind, ExpOpenRequest, RbcProgress,
-    RbcRelay, RbcRelayPhase, RbcState,
+    ExpOpenAccumulator, ExpOpenProgress, ExpOpenRegistryKind, ExpOpenRequest, RbcCandidateOwner,
+    RbcProgress, RbcRelay, RbcRelayPhase, RbcState,
 };
 pub use instance::InstanceRegistry;
 pub use router::OpenMessageRouter;

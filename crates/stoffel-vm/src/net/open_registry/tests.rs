@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use stoffel_vm_types::core_types::ClearShareValue;
 
+use super::consensus::{
+    MAX_ORPHAN_ECHO_KEYS_PER_SENDER, MAX_PENDING_RBC_CANDIDATES_PER_BROADCASTER,
+};
 use super::instance::MAX_PENDING_BATCH_ENTRIES_PER_SENDER;
 use super::wire::{
     AVSS_EXP_WIRE_PREFIX, AVSS_G2_EXP_WIRE_PREFIX, HB_EXP_OPEN_WIRE_PREFIX, MAX_BATCH_ELEMENTS,
@@ -508,29 +511,279 @@ fn rbc_candidate_payload_retention_is_bounded() {
     assert!(registry.rbc.lock().candidates.len() < 64);
 }
 
-#[test]
-fn rbc_candidate_quota_is_isolated_by_authenticated_sender() {
-    let router = OpenMessageRouter::new();
-    let registry = router.register_instance(21036);
-    for session_id in 0..1 {
-        let payload = vec![session_id as u8];
-        let digest = *blake3::hash(&payload).as_bytes();
+fn rbc_digest(payload: &[u8]) -> [u8; 32] {
+    *blake3::hash(payload).as_bytes()
+}
+
+fn rbc_owner(
+    registry: &InstanceRegistry,
+    key: (u64, usize, [u8; 32]),
+) -> Option<RbcCandidateOwner> {
+    registry.rbc.lock().candidate_owners.get(&key).copied()
+}
+
+/// Leaves `relay` holding a candidate that a VAL vouches for but that stays charged to the
+/// relay, because broadcaster 9's window is already full. That slot can be neither
+/// reassigned nor evicted, so the relay's next new payload finds no room.
+fn pin_rbc_relay_slot(registry: &InstanceRegistry, relay: usize) {
+    for session_id in 0..MAX_PENDING_RBC_CANDIDATES_PER_BROADCASTER as u64 {
         registry
-            .insert_rbc_relay(false, session_id, 0, 1, digest, Some(payload))
+            .insert_rbc_broadcast(session_id, 9, vec![session_id as u8])
             .unwrap();
     }
-    let rejected_payload = b"ninth-candidate".to_vec();
-    let rejected_digest = *blake3::hash(&rejected_payload).as_bytes();
+    let session_id = MAX_PENDING_RBC_CANDIDATES_PER_BROADCASTER as u64;
+    let payload = b"pinned".to_vec();
+    let digest = rbc_digest(&payload);
+    registry
+        .insert_rbc_relay(false, session_id, 9, relay, digest, Some(payload.clone()))
+        .unwrap();
+    registry
+        .insert_rbc_broadcast(session_id, 9, payload)
+        .unwrap();
+    assert_eq!(
+        rbc_owner(registry, (session_id, 9, digest)),
+        Some(RbcCandidateOwner::Relay(relay))
+    );
+}
+
+#[test]
+fn rbc_relay_quota_is_isolated_by_authenticated_sender() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21036);
+    pin_rbc_relay_slot(&registry, 1);
+
+    let rejected_payload = b"second-relayed-candidate".to_vec();
     let error = registry
-        .insert_rbc_relay(false, 1, 0, 1, rejected_digest, Some(rejected_payload))
-        .expect_err("one sender must not retain unlimited RBC candidates");
-    assert!(error.contains("sender 1 candidate quota"));
+        .insert_rbc_relay(
+            false,
+            0,
+            0,
+            1,
+            rbc_digest(&rejected_payload),
+            Some(rejected_payload),
+        )
+        .expect_err("one relay must not retain unlimited RBC candidates");
+    assert!(error.starts_with("RBC capacity:"), "{error}");
+    assert!(error.contains("relay 1 candidate quota"), "{error}");
 
     let honest_payload = b"honest-candidate".to_vec();
-    let honest_digest = *blake3::hash(&honest_payload).as_bytes();
     registry
-        .insert_rbc_relay(false, 9, 0, 2, honest_digest, Some(honest_payload))
-        .expect("one sender exhausting its quota must not block another sender");
+        .insert_rbc_relay(
+            false,
+            0,
+            0,
+            2,
+            rbc_digest(&honest_payload),
+            Some(honest_payload),
+        )
+        .expect("one relay exhausting its quota must not block another relay");
+}
+
+/// The Veria ordering: Byzantine P0 sends its VAL only to B (party 1), and B's ECHO for it
+/// reaches C (party 2) first, so C charges P0's payload to B's relay slot. B's own later
+/// broadcast must still be admitted at C and reach delivery.
+#[test]
+fn rbc_relayed_candidate_cannot_block_the_relays_own_broadcast() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21043);
+    let byzantine = b"p0-val-sent-only-to-b".to_vec();
+    registry
+        .insert_rbc_relay(false, 0, 0, 1, rbc_digest(&byzantine), Some(byzantine))
+        .unwrap();
+
+    let payload = b"b-broadcast".to_vec();
+    let digest = rbc_digest(&payload);
+    registry
+        .insert_rbc_broadcast(0, 1, payload.clone())
+        .expect("B's VAL must not be charged to the slot B used as a relay");
+    registry
+        .insert_rbc_relay(false, 0, 1, 1, digest, Some(payload.clone()))
+        .expect("B's own ECHO must be admitted");
+
+    for sender in [3, 4] {
+        registry
+            .insert_rbc_relay(false, 0, 1, sender, digest, Some(payload.clone()))
+            .unwrap();
+    }
+    for sender in [1, 3, 4] {
+        registry
+            .insert_rbc_relay(true, 0, 1, sender, digest, None)
+            .unwrap();
+    }
+    let delivery = registry.rbc_progress(2, Some(1), 5, 1).unwrap().delivery;
+    assert_eq!(delivery, Some((1, payload)));
+}
+
+#[test]
+fn rbc_broadcaster_window_admits_back_to_back_broadcasts() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21044);
+    for session_id in 0..MAX_PENDING_RBC_CANDIDATES_PER_BROADCASTER as u64 {
+        registry
+            .insert_rbc_broadcast(session_id, 1, vec![session_id as u8])
+            .expect("a broadcaster may run ahead of a peer by a full window");
+    }
+    let error = registry
+        .insert_rbc_broadcast(
+            MAX_PENDING_RBC_CANDIDATES_PER_BROADCASTER as u64,
+            1,
+            b"over-window".to_vec(),
+        )
+        .expect_err("the pending window must stay bounded");
+    assert!(error.starts_with("RBC capacity:"), "{error}");
+    assert!(error.contains("broadcaster 1 pending window"), "{error}");
+}
+
+#[test]
+fn rbc_junk_echoes_cannot_fill_a_broadcasters_window() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21045);
+    let window = MAX_PENDING_RBC_CANDIDATES_PER_BROADCASTER as u64;
+    for session_id in 0..window {
+        let junk = format!("junk-{session_id}").into_bytes();
+        registry
+            .insert_rbc_relay(false, session_id, 1, 0, rbc_digest(&junk), Some(junk))
+            .expect("each junk ECHO only replaces the attacker's own relay candidate");
+    }
+    let junk_retained = registry
+        .rbc
+        .lock()
+        .candidate_owners
+        .values()
+        .filter(|owner| **owner == RbcCandidateOwner::Relay(0))
+        .count();
+    assert_eq!(junk_retained, 1);
+
+    for session_id in 0..window {
+        registry
+            .insert_rbc_broadcast(session_id, 1, vec![session_id as u8])
+            .expect("junk ECHOs naming B must not consume B's window");
+    }
+}
+
+#[test]
+fn rbc_relay_slot_pinned_by_a_withheld_broadcast_is_evicted() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21046);
+    let withheld = b"p0-never-completes".to_vec();
+    let withheld_key = (0, 0, rbc_digest(&withheld));
+    registry
+        .insert_rbc_relay(false, 0, 0, 1, withheld_key.2, Some(withheld))
+        .unwrap();
+
+    let honest = b"h-broadcast".to_vec();
+    let honest_key = (0, 2, rbc_digest(&honest));
+    registry
+        .insert_rbc_relay(false, 0, 2, 1, honest_key.2, Some(honest))
+        .expect("a relay candidate without a VAL must not pin the relay's slot");
+
+    let state = registry.rbc.lock();
+    assert!(!state.candidates.contains_key(&withheld_key));
+    assert!(state.candidates.contains_key(&honest_key));
+    assert!(
+        state.echoes[&withheld_key].contains(&1),
+        "eviction drops the payload, not the vote"
+    );
+}
+
+#[test]
+fn rbc_relay_candidate_for_an_equivocated_digest_is_evictable() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21047);
+    registry
+        .insert_rbc_broadcast(0, 0, b"value-a".to_vec())
+        .unwrap();
+    let other = b"value-b".to_vec();
+    let other_key = (0, 0, rbc_digest(&other));
+    registry
+        .insert_rbc_relay(false, 0, 0, 1, other_key.2, Some(other))
+        .unwrap();
+    assert_eq!(
+        rbc_owner(&registry, other_key),
+        Some(RbcCandidateOwner::Relay(1))
+    );
+
+    let next = b"next".to_vec();
+    registry
+        .insert_rbc_relay(false, 0, 2, 1, rbc_digest(&next), Some(next))
+        .expect("a candidate the VAL contradicts must not pin the relay's slot");
+    assert!(!registry.rbc.lock().candidates.contains_key(&other_key));
+}
+
+#[test]
+fn rbc_val_moves_the_charge_from_relay_to_broadcaster() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21048);
+    let payload = b"h-broadcast".to_vec();
+    let key = (0, 2, rbc_digest(&payload));
+    registry
+        .insert_rbc_relay(false, 0, 2, 1, key.2, Some(payload.clone()))
+        .unwrap();
+    assert_eq!(rbc_owner(&registry, key), Some(RbcCandidateOwner::Relay(1)));
+
+    registry.insert_rbc_broadcast(0, 2, payload).unwrap();
+    assert_eq!(
+        rbc_owner(&registry, key),
+        Some(RbcCandidateOwner::Broadcaster(2))
+    );
+
+    let next = b"next".to_vec();
+    let next_key = (0, 3, rbc_digest(&next));
+    registry
+        .insert_rbc_relay(false, 0, 3, 1, next_key.2, Some(next))
+        .unwrap();
+    let state = registry.rbc.lock();
+    assert!(
+        state.candidates.contains_key(&key),
+        "the VAL-backed payload stays"
+    );
+    assert!(state.candidates.contains_key(&next_key));
+}
+
+#[test]
+fn rbc_echo_vote_is_kept_when_its_payload_has_no_room() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21049);
+    pin_rbc_relay_slot(&registry, 3);
+
+    let payload = b"b-broadcast".to_vec();
+    let key = (0, 1, rbc_digest(&payload));
+    let error = registry
+        .insert_rbc_relay(false, 0, 1, 3, key.2, Some(payload.clone()))
+        .expect_err("relay 3 has no room for another payload");
+    assert!(error.starts_with("RBC capacity:"), "{error}");
+    assert!(error.contains("ECHO vote kept"), "{error}");
+    assert!(!registry.rbc.lock().candidates.contains_key(&key));
+
+    registry.insert_rbc_broadcast(0, 1, payload).unwrap();
+    let state = registry.rbc.lock();
+    assert!(state.candidates.contains_key(&key));
+    assert!(
+        state.echoes[&key].contains(&3),
+        "the early ECHO must count once the VAL supplies the payload"
+    );
+}
+
+#[test]
+fn rbc_orphan_echo_votes_are_bounded_per_sender() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21050);
+    pin_rbc_relay_slot(&registry, 3);
+
+    for session_id in 0..MAX_ORPHAN_ECHO_KEYS_PER_SENDER as u64 {
+        let payload = vec![session_id as u8];
+        let error = registry
+            .insert_rbc_relay(false, session_id, 1, 3, rbc_digest(&payload), Some(payload))
+            .unwrap_err();
+        assert!(error.contains("ECHO vote kept"), "{error}");
+    }
+    let payload = b"one-too-many".to_vec();
+    let key = (99, 1, rbc_digest(&payload));
+    let error = registry
+        .insert_rbc_relay(false, key.0, key.1, 3, key.2, Some(payload))
+        .unwrap_err();
+    assert!(error.contains("orphan ECHO limit"), "{error}");
+    assert!(!registry.rbc.lock().echoes.contains_key(&key));
 }
 
 #[test]
@@ -1246,4 +1499,64 @@ async fn two_instances_are_isolated() {
         .len();
     assert_eq!(a_count, 1);
     assert_eq!(b_count, 1);
+}
+
+/// Gives `(session_id, broadcaster 1, payload)` a full ECHO and READY quorum from parties
+/// 0, 3 and 4, as seen by party 2 in an n = 5, t = 1 topology.
+fn give_rbc_quorum(registry: &InstanceRegistry, session_id: u64, payload: &[u8]) {
+    let digest = rbc_digest(payload);
+    for sender in [0, 3, 4] {
+        registry
+            .insert_rbc_relay(false, session_id, 1, sender, digest, Some(payload.to_vec()))
+            .unwrap();
+        registry
+            .insert_rbc_relay(true, session_id, 1, sender, digest, None)
+            .unwrap();
+    }
+}
+
+#[test]
+fn rbc_delivers_one_broadcasters_sessions_in_order() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21051);
+    registry
+        .insert_rbc_broadcast(0, 1, b"first".to_vec())
+        .unwrap();
+    registry
+        .insert_rbc_broadcast(1, 1, b"second".to_vec())
+        .unwrap();
+
+    give_rbc_quorum(&registry, 1, b"second");
+    let progress = registry.rbc_progress(2, Some(1), 5, 1).unwrap();
+    assert_eq!(
+        progress.delivery, None,
+        "session 1 must wait for session 0, which the broadcaster's VAL announced"
+    );
+    assert!(
+        !progress.relays.is_empty(),
+        "a held-back session still emits its ECHO and READY"
+    );
+
+    give_rbc_quorum(&registry, 0, b"first");
+    let first = registry.rbc_progress(2, Some(1), 5, 1).unwrap().delivery;
+    assert_eq!(first, Some((1, b"first".to_vec())));
+    let second = registry.rbc_progress(2, Some(1), 5, 1).unwrap().delivery;
+    assert_eq!(second, Some((1, b"second".to_vec())));
+}
+
+#[test]
+fn rbc_junk_echo_for_an_earlier_session_does_not_hold_back_delivery() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21052);
+    let junk = b"junk-for-session-0".to_vec();
+    registry
+        .insert_rbc_relay(false, 0, 1, 4, rbc_digest(&junk), Some(junk))
+        .unwrap();
+
+    registry
+        .insert_rbc_broadcast(1, 1, b"second".to_vec())
+        .unwrap();
+    give_rbc_quorum(&registry, 1, b"second");
+    let delivery = registry.rbc_progress(2, Some(1), 5, 1).unwrap().delivery;
+    assert_eq!(delivery, Some((1, b"second".to_vec())));
 }
