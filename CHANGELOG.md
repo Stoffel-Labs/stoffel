@@ -2,7 +2,7 @@
 
 All notable changes to the Stoffel crates are tracked here.
 
-## [0.2.0] - Unreleased
+## [0.2.0-alpha.1] - 2026-11-17
 
 #### Added
 

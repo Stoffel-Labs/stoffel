@@ -294,9 +294,8 @@ impl RevealBatcher {
         }
 
         let mut batch_index = RevealBatchIndex::default();
-        for pending_index in 0..self.pending.len() {
-            let destination = self.pending[pending_index].destination;
-            batch_index.insert(destination, pending_index);
+        for (pending_index, pending) in self.pending.iter().enumerate() {
+            batch_index.insert(pending.destination, pending_index);
         }
         self.index = Some(Box::new(batch_index));
     }
@@ -306,10 +305,10 @@ impl RevealBatcher {
             return;
         };
 
-        for pending_index in start..self.pending.len() {
+        for (offset, pending) in self.pending[start..].iter().enumerate() {
             batch_index
                 .by_destination
-                .insert(self.pending[pending_index].destination, pending_index);
+                .insert(pending.destination, start + offset);
         }
     }
 }
