@@ -157,7 +157,38 @@ impl LocalCoordinatorRunner {
             })?
     }
 
+    /// Retry the whole run when a spawned party loses the ephemeral-port
+    /// handoff race: the runner reserves each party port with `bind(0)`,
+    /// releases the reservation when the child requests its bind, and the
+    /// child then binds the freed port. Between release and bind the OS can
+    /// reassign the port (e.g. to the child's own QUIC client socket or a
+    /// still-shutting-down party from a previous run), which surfaces as a
+    /// party exiting with "Address already in use" during listener setup.
+    /// Every attempt allocates a fresh temp directory, ports and identities,
+    /// so retrying is safe; genuine configuration or execution failures are
+    /// returned unchanged.
     async fn run_owned(
+        self,
+        cancellation: CancellationToken,
+    ) -> LocalCoordinatorRunnerResult<LocalCoordinatorRunOutput> {
+        const MAX_BIND_CONTENTION_ATTEMPTS: usize = 3;
+        let mut remaining = MAX_BIND_CONTENTION_ATTEMPTS;
+        loop {
+            match self.clone().run_owned_once(cancellation.clone()).await {
+                Err(error) if remaining > 1 && is_port_contention(&error) => {
+                    eprintln!(
+                        "[local-runner] party bind lost an ephemeral-port race \
+                         (attempt {} of {MAX_BIND_CONTENTION_ATTEMPTS}); retrying with fresh ports",
+                        MAX_BIND_CONTENTION_ATTEMPTS + 1 - remaining,
+                    );
+                    remaining -= 1;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn run_owned_once(
         self,
         cancellation: CancellationToken,
     ) -> LocalCoordinatorRunnerResult<LocalCoordinatorRunOutput> {
@@ -1614,6 +1645,15 @@ fn coordinator_wrong_round(error: &stoffel_mpc_coordinator_shared::CoordinatorEr
     message.contains("WrongRound")
         || message.contains("Need round")
         || message.contains("current round is")
+}
+
+/// Whether a run failure is the ephemeral-port handoff race: a spawned party
+/// exited during listener setup because its runner-assigned port was grabbed
+/// between reservation release and bind. Match the OS error text (`Address
+/// already in use`, os error 48 on macOS / 98 on Linux) anywhere in the
+/// wrapped error chain; other failures must not be retried.
+fn is_port_contention(error: &LocalCoordinatorRunnerError) -> bool {
+    error.to_string().contains("Address already in use")
 }
 
 fn parse_input_as_field<F: PrimeField>(value: &str) -> LocalCoordinatorRunnerResult<F> {
