@@ -2,6 +2,19 @@
 
 All notable changes to the Stoffel crates are tracked here.
 
+## [stoffel-wasm-client 0.1.0-alpha.1] - 2026-11-17
+
+First published release of `stoffel-wasm-client`, the browser-side private
+client I/O crate. Clear client values stay in the browser; mask shares and
+encrypted output shares move through the coordinator's browser RPC. One
+long-lived `StoffelWasmClient` holds identity, topology, and execution
+lifecycle state; per-execution handles sign requests with fresh random
+nonces, mask typed inputs (booleans, signed/unsigned integers, fixed-point,
+full-width field scalars), and decrypt typed outputs.
+
+`stoffel-wasm-client` releases on its own schedule, independent of the other
+workspace crates.
+
 ## [0.2.0-alpha.1] - 2026-11-17
 
 #### Added
