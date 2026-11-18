@@ -4,8 +4,12 @@ version = "0.1.0-alpha.1"
 edition = "2021"
 description = "Browser-side private client I/O for the Stoffel coordinator"
 license = "Apache-2.0"
+repository = "https://github.com/Stoffel-Labs/stoffel"
+homepage = "https://stoffelmpc.com"
 readme = "README.md"
-publish = false
+keywords = ["mpc", "wasm", "client", "cryptography", "privacy"]
+categories = ["cryptography", "wasm"]
+publish = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]
