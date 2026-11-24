@@ -4,11 +4,12 @@ use std::time::SystemTime;
 use stoffel_vm_types::core_types::{ShareData, ShareType};
 use stoffelnet::network_utils::ClientId;
 
-/// Position of a client entry in the VM client-input store.
+/// Client number a program passes to `ClientStore` builtins.
 ///
-/// The store exposes client IDs in sorted order for VM builtins that address
-/// clients by ordinal position. Keeping that position typed prevents accidental
-/// reuse as a per-client share index.
+/// The store resolves it through the run's slot table when one is installed
+/// (a manifest slot, possibly sparse), and otherwise as a position in sorted
+/// client order. Keeping it typed prevents accidental reuse as a per-client
+/// share index or as a raw client ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ClientInputIndex(usize);
 

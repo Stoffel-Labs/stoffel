@@ -293,6 +293,8 @@ pub enum CoordinatorError {
     CannotTransitionToIdle,
     #[error("Calculating a share failed")]
     ShareError,
+    #[error("The index {0:?} occurs more than once.")]
+    DuplicateIndex(u64),
     #[error("Failed to bind to address {0}")]
     BindError(String),
     #[error("Failed to connect: {0}")]

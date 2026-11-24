@@ -264,7 +264,7 @@ participant configuration in Rust applications. The CLI itself is built on it.
 
 ```toml
 # Cargo.toml
-stoffel-rust-sdk = "=0.2.0"
+stoffel-rust-sdk = "=0.2.0-alpha.1"
 ```
 
 ```rust

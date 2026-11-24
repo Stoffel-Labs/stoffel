@@ -622,7 +622,15 @@ pub async fn spawn_receive_loops_split(
                             .await
                         {
                             Ok(true) => continue,
-                            Err(_) => continue,
+                            Err(error) => {
+                                tracing::warn!(
+                                    party_id = local_party_id,
+                                    sender_id,
+                                    %error,
+                                    "Failed to handle open wire message"
+                                );
+                                continue;
+                            }
                             Ok(false) => {}
                         }
                         match open_message_router

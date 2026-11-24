@@ -96,8 +96,10 @@ pub struct RbcState {
     pub messages: HashMap<(u64, usize), [u8; 32]>,
     /// Candidate payloads learned from VAL or ECHO, keyed by their digest.
     pub candidates: HashMap<(u64, usize, [u8; 32]), Vec<u8>>,
-    /// Authenticated peer whose quota was charged when each candidate was first retained.
-    pub candidate_sources: HashMap<(u64, usize, [u8; 32]), usize>,
+    /// Which quota pays for each retained candidate. A broadcaster's own VAL/ECHO and a
+    /// payload relayed by another peer draw on separate pools, so relaying cannot consume
+    /// the capacity a party needs for its own broadcasts.
+    pub candidate_owners: HashMap<(u64, usize, [u8; 32]), RbcCandidateOwner>,
     /// Tracks deliveries: (receiver_party, from_party, session_id)
     pub delivered: HashSet<(usize, usize, u64)>,
     /// Local receiver identities that share this registry (normally exactly one in production).
@@ -109,6 +111,16 @@ pub struct RbcState {
     /// Per-local-party protocol messages already emitted.
     pub sent_echoes: HashSet<(usize, usize, u64)>,
     pub sent_readies: HashSet<(usize, usize, u64)>,
+}
+
+/// The quota a retained RBC candidate is charged to. Both identities are authenticated:
+/// `Broadcaster(b)` is only used when `b` itself supplied the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RbcCandidateOwner {
+    /// The broadcaster's pending-broadcast window (its VAL, or its own ECHO).
+    Broadcaster(usize),
+    /// The relay slot of a peer whose ECHO supplied another party's payload first.
+    Relay(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

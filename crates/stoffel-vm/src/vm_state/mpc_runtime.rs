@@ -75,6 +75,12 @@ impl MpcRuntimeState {
         cloned
             .client_store
             .set_client_roster(self.client_store.snapshot_client_roster());
+        if let Some(slots) = self.client_store.snapshot_client_slots() {
+            cloned
+                .client_store
+                .set_client_slots(slots)
+                .expect("slot table was validated when it was installed");
+        }
         cloned
     }
 
@@ -169,6 +175,13 @@ impl MpcRuntimeState {
         I: IntoIterator<Item = ClientId>,
     {
         self.client_store.set_client_roster(clients);
+    }
+
+    pub(super) fn set_client_slots<I>(&self, slots: I) -> VmResult<()>
+    where
+        I: IntoIterator<Item = (usize, ClientId)>,
+    {
+        Ok(self.client_store.set_client_slots(slots)?)
     }
 
     pub(super) fn client_id_at_index(&self, index: ClientInputIndex) -> Option<ClientId> {

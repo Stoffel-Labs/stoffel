@@ -1141,6 +1141,43 @@ async fn rbc_receive_delivers_new_broadcast_each_call_in_order() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rbc_receive_delivers_back_to_back_broadcasts_in_order() {
+    let instance_id = next_instance_id();
+    let n = 5;
+    let t = 1;
+    let router = Arc::new(crate::net::open_registry::OpenMessageRouter::new());
+    let sender = test_engine(router.clone(), instance_id, 1, n, t);
+    let receivers = [0, 2, 3, 4].map(|party| test_engine(router.clone(), instance_id, party, n, t));
+
+    // The engines share one registry. Register every receiver first; otherwise the
+    // registry treats the sender as its only receiver and reclaims its own broadcasts.
+    for receiver in &receivers {
+        assert!(receiver
+            .rbc_receive_async(MpcPartyId::new(1), 0)
+            .await
+            .is_err());
+    }
+
+    // Both broadcasts are pending before any peer receives, so the second must fit in the
+    // broadcaster's window rather than being refused behind the first.
+    sender.rbc_broadcast(b"first").expect("broadcast first");
+    sender.rbc_broadcast(b"second").expect("broadcast second");
+
+    for expected in [b"first".as_slice(), b"second".as_slice()] {
+        let [r0, r2, r3, r4] = &receivers;
+        let results = tokio::join!(
+            r0.rbc_receive_async(MpcPartyId::new(1), 500),
+            r2.rbc_receive_async(MpcPartyId::new(1), 500),
+            r3.rbc_receive_async(MpcPartyId::new(1), 500),
+            r4.rbc_receive_async(MpcPartyId::new(1), 500),
+        );
+        for result in [results.0, results.1, results.2, results.3] {
+            assert_eq!(result.expect("receive"), expected);
+        }
+    }
+}
+
 #[test]
 fn open_exp_wire_rejects_mismatched_share_id() {
     let instance_id = next_instance_id();

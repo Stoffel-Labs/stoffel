@@ -2,7 +2,13 @@
 
 All notable changes to the Stoffel crates are tracked here.
 
-## [0.2.0] - Unreleased
+## [Unreleased]
+
+#### Fixed
+
+- Input shares from the coordinator that do not match a client's reservations now fail that run instead of exiting the whole `stoffel-run` process, so one bad client can no longer stop other runs on a standing node.
+
+## [0.2.0-alpha.1] - 2026-11-17
 
 #### Added
 
