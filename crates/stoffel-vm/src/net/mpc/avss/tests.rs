@@ -1314,6 +1314,106 @@ fn avss_open_in_exponent_filters_forged_partial_points() {
 }
 
 #[test]
+fn avss_open_in_exponent_skips_replayed_evaluation_ids() {
+    let n = 4;
+    let t = 1;
+    let secret = Fr::from(424242u64);
+    let shares = generate_feldman_shares(secret, n, t);
+    let generator = G1::generator() * Fr::from(5u64);
+    let expected = generator * secret;
+
+    let local_share =
+        Bls12381AvssMpcEngine::encode_feldman_share(&shares[0]).expect("encode local share");
+    let contribution_1 = Bls12381AvssMpcEngine::encode_verified_exp_contribution(
+        &shares[0],
+        generator,
+        generator * shares[0].feldmanshare.share[0],
+    )
+    .expect("encode contribution 1");
+    let contribution_3 = Bls12381AvssMpcEngine::encode_verified_exp_contribution(
+        &shares[2],
+        generator,
+        generator * shares[2].feldmanshare.share[0],
+    )
+    .expect("encode contribution 3");
+    // A second sender replays the valid evaluation-ID-1 contribution before
+    // the distinct honest contribution arrives.
+    let collected = vec![
+        (shares[0].feldmanshare.id, contribution_1.clone()),
+        (shares[0].feldmanshare.id, contribution_1),
+        (shares[2].feldmanshare.id, contribution_3),
+    ];
+
+    let verified = Bls12381AvssMpcEngine::filter_verified_exp_points(
+        &local_share,
+        generator,
+        &collected,
+        t + 1,
+        "test open-in-exp replay",
+    )
+    .expect("a replayed evaluation ID must not occupy a verified slot");
+    assert_eq!(
+        verified
+            .iter()
+            .map(|(share_id, _)| *share_id)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    let reconstructed =
+        crate::net::group_interpolation::interpolate_compressed_group_points::<Fr, G1, _>(
+            &verified,
+            |id| field_from_usize::<Fr>(id, "AVSS evaluation point"),
+            "deserialize partial point",
+            "zero denominator",
+            "serialize result",
+        )
+        .expect("distinct evaluation IDs interpolate");
+    assert_eq!(
+        G1::deserialize_compressed(&reconstructed[..]).expect("deserialize reconstructed"),
+        expected
+    );
+}
+
+#[test]
+fn avss_g2_open_in_exponent_skips_replayed_evaluation_ids() {
+    let n = 4;
+    let t = 1;
+    let shares = generate_feldman_shares(Fr::from(31337u64), n, t);
+    let generator = G2::generator() * Fr::from(13u64);
+    let local_share =
+        Bls12381AvssMpcEngine::encode_feldman_share(&shares[0]).expect("encode local share");
+    let contribution_1 = Bls12381AvssMpcEngine::encode_verified_g2_exp_contribution(
+        generator * shares[0].feldmanshare.share[0],
+    )
+    .expect("encode contribution 1");
+    let contribution_3 = Bls12381AvssMpcEngine::encode_verified_g2_exp_contribution(
+        generator * shares[2].feldmanshare.share[0],
+    )
+    .expect("encode contribution 3");
+    let collected = vec![
+        (shares[0].feldmanshare.id, contribution_1.clone()),
+        (shares[0].feldmanshare.id, contribution_1),
+        (shares[2].feldmanshare.id, contribution_3),
+    ];
+
+    let verified = Bls12381AvssMpcEngine::filter_verified_bls12381_g2_exp_points(
+        &local_share,
+        generator,
+        &collected,
+        t + 1,
+        "test G2 open-in-exp replay",
+    )
+    .expect("a replayed G2 evaluation ID must not occupy a verified slot");
+    assert_eq!(
+        verified
+            .iter()
+            .map(|(share_id, _)| *share_id)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+}
+
+#[test]
 fn avss_g2_open_in_exponent_filters_forged_partial_points() {
     let n = 4;
     let t = 1;
