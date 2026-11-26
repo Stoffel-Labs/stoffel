@@ -4681,6 +4681,66 @@ impl PartyPreprocessing {
     }
 }
 
+/// Bounds the open-registry frames a party receive loop keeps retrying.
+///
+/// A retried frame retains its execution-transport ingress lease, which is
+/// drawn from the standing mux's shared item and byte budget. Without a bound,
+/// one authenticated party can send copies of rejected (but retryable)
+/// open frames until every shared permit is held by a retry task, stalling
+/// every other execution and client on the node.
+#[derive(Default)]
+struct OpenRetryBudget {
+    tasks: tokio::task::JoinSet<()>,
+    task_senders: HashMap<tokio::task::Id, usize>,
+    per_sender: HashMap<usize, usize>,
+}
+
+impl OpenRetryBudget {
+    /// Per-sender cap: well above the registry's per-sender retention quota,
+    /// so honest parties running ahead are not dropped.
+    const MAX_PER_SENDER: usize = 64;
+    /// Per-execution cap, a small fraction of the shared mux budget.
+    const MAX_TOTAL: usize = 256;
+
+    fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    /// Spawn `retry` for `sender_id` unless that sender or this execution
+    /// already holds its share of retry slots. Returns `false` when the
+    /// caller must drop the frame (and with it, its ingress lease).
+    fn try_spawn<Fut>(&mut self, sender_id: usize, retry: Fut) -> bool
+    where
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let pending = self.per_sender.get(&sender_id).copied().unwrap_or(0);
+        if pending >= Self::MAX_PER_SENDER || self.tasks.len() >= Self::MAX_TOTAL {
+            return false;
+        }
+        self.per_sender.insert(sender_id, pending + 1);
+        let id = self.tasks.spawn(retry).id();
+        self.task_senders.insert(id, sender_id);
+        true
+    }
+
+    /// Wait for one retry task to finish and release its slot.
+    async fn join_next(&mut self) {
+        let id = match self.tasks.join_next_with_id().await {
+            Some(Ok((id, ()))) => id,
+            Some(Err(error)) => error.id(),
+            None => return,
+        };
+        if let Some(sender_id) = self.task_senders.remove(&id) {
+            if let Some(pending) = self.per_sender.get_mut(&sender_id) {
+                *pending -= 1;
+                if *pending == 0 {
+                    self.per_sender.remove(&sender_id);
+                }
+            }
+        }
+    }
+}
+
 struct PartySetup<'a> {
     net: Arc<QuicNetworkManager>,
     reply_mux: ExecutionTransportMux,
@@ -4902,7 +4962,7 @@ where
     let (processor_ready_tx, processor_ready_rx) = oneshot::channel();
     spawn_execution_task(execution_tasks, async move {
         let _ = processor_ready_tx.send(());
-        let mut pending_opens = tokio::task::JoinSet::new();
+        let mut pending_opens = OpenRetryBudget::default();
         let mut inbound = stoffel_vm::net::mpc::honeybadger::HoneyBadgerInboundQueue::default();
         let mut retry = tokio::time::interval(Duration::from_millis(2));
         retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -4915,7 +4975,7 @@ where
                 break;
             }
             tokio::select! {
-                Some(_) = pending_opens.join_next(), if !pending_opens.is_empty() => {}
+                _ = pending_opens.join_next(), if !pending_opens.is_empty() => {}
                 _ = retry.tick(), if !inbound.is_empty() => {}
                 Some(message) = server_rx.recv() => {
                     let sender_id = match message.source {
@@ -4929,13 +4989,16 @@ where
                         Ok(true) => continue,
                         Err(error) if stoffel_vm::net::OpenMessageRouter::is_retryable_capacity_error(&error) => {
                             let router = processing_router.clone();
-                            pending_opens.spawn(async move {
+                            let spawned = pending_opens.try_spawn(sender_id, async move {
                                 let retained = message;
                                 // Retain the complete message, including its byte/item lease.
                                 if let Err(error) = router.handle_wire_message(sender_id, &retained.payload).await {
                                     eprintln!("Failed to retry open message from {sender_id}: {error}");
                                 }
                             });
+                            if !spawned {
+                                eprintln!("[party {}] Dropping open message from {}: retry budget exhausted ({})", process_party_id, sender_id, error);
+                            }
                             continue;
                         }
                         Err(error) => {
@@ -5432,10 +5495,10 @@ where
     let (processor_ready_tx, processor_ready_rx) = oneshot::channel();
     spawn_execution_task(execution_tasks, async move {
         let _ = processor_ready_tx.send(());
-        let mut pending_opens = tokio::task::JoinSet::new();
+        let mut pending_opens = OpenRetryBudget::default();
         loop {
             tokio::select! {
-                Some(_) = pending_opens.join_next(), if !pending_opens.is_empty() => {}
+                _ = pending_opens.join_next(), if !pending_opens.is_empty() => {}
                 Some(message) = party_rx.recv() => {
                     let sender_id = match message.source {
                         ExecutionTransportSource::Party(sender_id) => sender_id,
@@ -5448,12 +5511,15 @@ where
                         Ok(true) => continue,
                         Err(error) if stoffel_vm::net::OpenMessageRouter::is_retryable_capacity_error(&error) => {
                             let router = open_message_router.clone();
-                            pending_opens.spawn(async move {
+                            let spawned = pending_opens.try_spawn(sender_id, async move {
                                 let retained = message;
                                 if let Err(error) = router.handle_wire_message(sender_id, &retained.payload).await {
                                     eprintln!("Failed to retry AVSS opening from {sender_id}: {error}");
                                 }
                             });
+                            if !spawned {
+                                eprintln!("[AVSS] Dropping opening from {sender_id}: retry budget exhausted ({error})");
+                            }
                             continue;
                         }
                         Err(error) => { eprintln!("Rejected AVSS opening from {sender_id}: {error}"); continue; }
@@ -10019,6 +10085,37 @@ Examples:
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn open_retry_budget_bounds_retained_retries_per_sender_and_execution() {
+        use super::OpenRetryBudget;
+        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let parked = |gate: std::sync::Arc<tokio::sync::Semaphore>| async move {
+            let _ = gate.acquire().await;
+        };
+        let mut budget = OpenRetryBudget::default();
+        // One flooding sender is capped before it can hold the shared budget.
+        for _ in 0..OpenRetryBudget::MAX_PER_SENDER {
+            assert!(budget.try_spawn(1, parked(gate.clone())));
+        }
+        assert!(!budget.try_spawn(1, parked(gate.clone())));
+        // Other senders keep their own retry slots ...
+        assert!(budget.try_spawn(2, parked(gate.clone())));
+        // ... up to the per-execution ceiling.
+        let mut sender = 3;
+        while budget.try_spawn(sender, parked(gate.clone())) {
+            sender += 1;
+        }
+        assert_eq!(budget.tasks.len(), OpenRetryBudget::MAX_TOTAL);
+
+        // Finished retries release their sender's slot.
+        gate.close();
+        while !budget.is_empty() {
+            budget.join_next().await;
+        }
+        assert!(budget.per_sender.is_empty());
+        assert!(budget.try_spawn(1, async {}));
+    }
+
     #[test]
     fn coordinator_output_slots_are_identity_bound() {
         let ids = vec![vec![11], vec![22]];
