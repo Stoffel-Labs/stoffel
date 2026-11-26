@@ -288,6 +288,8 @@ test "$(find /run/secrets -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 2
 test "$(sha256sum "$cert" | cut -d ' ' -f 1)" = "$EXPECTED_CERT"
 test "$(sha256sum "$key" | cut -d ' ' -f 1)" = "$EXPECTED_KEY"
 test -z "$(find /app /run/secrets -type f \( -name '*.der' -o -name '*.key' \) ! -path "$key" -print)"
+roster=/var/lib/stoffel/client-certs
+test ! -e "$roster" || test -z "$(find "$roster" -type f ! -name '*.crt' -print)"
 """
         credentials = [
             *[

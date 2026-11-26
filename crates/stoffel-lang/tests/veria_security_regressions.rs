@@ -64,3 +64,35 @@ fn assigning_secret_values_to_share_list_slots_keeps_boxed_values_supported() {
     let source = "def main(s: secret int64):\n  var keys: list[Share] = list(1)\n  keys[0] = s\n";
     compile(source, "share-list.stfl", &CompilerOptions::default()).unwrap();
 }
+
+#[test]
+fn arithmetic_with_an_unannotated_operand_keeps_the_secret_operand_secret() {
+    // An unannotated parameter has type Unknown. Arithmetic mixing it with a
+    // secret must still be secret, otherwise the result can be refined into
+    // a clear variable and opened by the VM's secret-to-clear move.
+    for expression in ["s + z", "z + s", "s - z", "s * z"] {
+        let source = format!(
+            "def leak(s: secret int64, z) -> int64:\n  var result: int64 = 0\n  result = {expression}\n  print(result)\n  return result\n"
+        );
+        let errors = compile(&source, "veria-321.stfl", &CompilerOptions::default()).expect_err(
+            "secret arithmetic with an unknown operand must require an explicit reveal",
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("implicitly reveal")),
+            "{expression}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn arithmetic_with_an_unannotated_operand_still_allows_explicit_reveal() {
+    let source = "def leak(s: secret int64, z) -> int64:\n  var result: int64 = 0\n  result = (s + z).reveal()\n  return result\n";
+    compile(
+        source,
+        "veria-321-control.stfl",
+        &CompilerOptions::default(),
+    )
+    .unwrap();
+}

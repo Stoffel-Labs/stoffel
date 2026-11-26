@@ -5700,7 +5700,14 @@ impl<'a> SemanticAnalyzer<'a> {
                     let unknown_involved = matches!(l_under, SymbolType::Unknown)
                         || matches!(r_under, SymbolType::Unknown);
                     if unknown_involved {
-                        return Ok((rebuild(checked_left, checked_right), SymbolType::Unknown));
+                        // Keep the secret wrapper: a bare Unknown result can be
+                        // refined into a clear assignment, bypassing the
+                        // explicit-reveal check while codegen still emits a
+                        // secret-to-clear move that the VM opens.
+                        return Ok((
+                            rebuild(checked_left, checked_right),
+                            wrap(SymbolType::Unknown),
+                        ));
                     }
 
                     // Opaque Share values support arithmetic via the MPC runtime;

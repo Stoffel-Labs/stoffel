@@ -151,7 +151,14 @@ impl InstanceRegistry {
         let candidate_key = (session_id, party_id, digest);
         admit_rbc_candidate(&mut registry, &candidate_key, party_id, message.len())?;
         registry.candidates.insert(candidate_key, message.clone());
-        registry.candidate_sources.insert(candidate_key, party_id);
+        // An ECHO may already have admitted this candidate under the relay's
+        // quota. Keep it charged there: reassigning ownership to the
+        // broadcaster would free the relay's quota without charging the
+        // broadcaster's, letting colluding parties retain unbounded candidates.
+        registry
+            .candidate_sources
+            .entry(candidate_key)
+            .or_insert(party_id);
         registry.messages.insert((session_id, party_id), digest);
         drop(registry);
         self.rbc_notify.notify_waiters();

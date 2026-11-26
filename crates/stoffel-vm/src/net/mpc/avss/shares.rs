@@ -566,8 +566,15 @@ where
             ));
         }
 
+        // The registry deduplicates senders, not evaluation IDs, so a party
+        // can replay another party's valid contribution under its own sender
+        // id. Counting it twice would hand interpolation duplicate x values.
         let mut verified = Vec::with_capacity(required_valid);
+        let mut seen_ids = HashSet::with_capacity(required_valid);
         for (share_id, contribution) in collected {
+            if seen_ids.contains(share_id) {
+                continue;
+            }
             let Ok(partial_point) = Self::verify_exp_contribution(
                 &expected_share.commitments,
                 generator,
@@ -576,6 +583,7 @@ where
             ) else {
                 continue;
             };
+            seen_ids.insert(*share_id);
             verified.push((*share_id, partial_point));
             if verified.len() == required_valid {
                 break;
@@ -658,8 +666,13 @@ where
             ));
         }
 
+        // See filter_verified_exp_points: reject replayed evaluation IDs.
         let mut verified = Vec::with_capacity(required_valid);
+        let mut seen_ids = HashSet::with_capacity(required_valid);
         for (share_id, contribution_bytes) in collected {
+            if seen_ids.contains(share_id) {
+                continue;
+            }
             let Ok(contribution) =
                 bincode::deserialize::<AvssG2ExpContribution>(contribution_bytes)
             else {
@@ -688,6 +701,7 @@ where
                 continue;
             }
 
+            seen_ids.insert(*share_id);
             verified.push((*share_id, contribution.partial_point));
             if verified.len() == required_valid {
                 break;
