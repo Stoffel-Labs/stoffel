@@ -534,6 +534,32 @@ fn rbc_candidate_quota_is_isolated_by_authenticated_sender() {
 }
 
 #[test]
+fn matching_broadcast_does_not_release_the_relay_candidate_quota() {
+    let router = OpenMessageRouter::new();
+    let registry = router.register_instance(21037);
+    // Party 1 relays an ECHO naming party 2 as broadcaster, then party 2
+    // sends the matching broadcast. The candidate must stay charged to the
+    // relay so that alternating this across fresh sessions stays bounded.
+    let payload = b"colluding candidate".to_vec();
+    let digest = *blake3::hash(&payload).as_bytes();
+    registry
+        .insert_rbc_relay(false, 0, 2, 1, digest, Some(payload.clone()))
+        .unwrap();
+    registry.insert_rbc_broadcast(0, 2, payload).unwrap();
+    assert_eq!(
+        registry.rbc.lock().candidate_sources.get(&(0, 2, digest)),
+        Some(&1)
+    );
+
+    let next_payload = b"next colluding candidate".to_vec();
+    let next_digest = *blake3::hash(&next_payload).as_bytes();
+    let error = registry
+        .insert_rbc_relay(false, 1, 2, 1, next_digest, Some(next_payload))
+        .expect_err("a matching broadcast must not free the relay's candidate quota");
+    assert!(error.contains("sender 1 candidate quota"));
+}
+
+#[test]
 fn rbc_candidate_registry_has_an_aggregate_ceiling() {
     let router = OpenMessageRouter::new();
     let registry = router.register_instance(21039);
